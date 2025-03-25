@@ -1,0 +1,5 @@
+// Update the selected count display
+const countElement = document.querySelector('.selected-count');
+if (countElement) {
+  countElement.textContent = `${selectedModels.size} model${selectedModels.size !== 1 ? 's' : ''} selected`;
+}
