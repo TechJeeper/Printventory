@@ -240,6 +240,9 @@ if (!gotTheLock) {
         return;
       }
 
+      // Reset the version check flag on startup
+      db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('false', 'versionCheckPerformedOnStartup');
+
       // Update the current version in the database
       try {
         db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(version, 'currentVersion');
@@ -251,9 +254,6 @@ if (!gotTheLock) {
       // Check for updates before creating window
       try {
         await checkForUpdates();
-        // Set a flag to indicate version check was performed on startup
-        db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('true', 'versionCheckPerformedOnStartup');
-        console.log('Version check completed on startup');
       } catch (updateError) {
         console.error('Error checking version on startup:', updateError);
         // Continue with app startup even if version check fails
@@ -2409,43 +2409,57 @@ ipcMain.handle('getThumbnail', async (event, filePath) => {
   }
 });
 
-// Update the checkForUpdates function
+// Update the checkForUpdates function to track user's response
 async function checkForUpdates(isBeta = false) {
-  return new Promise((resolve, reject) => {
-    const versionUrl = isBeta ? 
-      'https://printventory.com/beta.version' : 
-      'https://printventory.com/public.version';
+  try {
+    // First check if we've already shown update dialog this session
+    const versionCheckPerformed = db.prepare('SELECT value FROM settings WHERE key = ?').get('versionCheckPerformedOnStartup');
+    if (versionCheckPerformed && versionCheckPerformed.value === 'true') {
+      console.log('Version check already performed this session, skipping');
+      return null;
+    }
 
-    console.log('Main Process - Checking version URL:', versionUrl);
+    return new Promise((resolve, reject) => {
+      const versionUrl = isBeta ? 
+        'https://printventory.com/beta.version' : 
+        'https://printventory.com/public.version';
 
-    https.get(versionUrl, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        const version = data.trim();
-        console.log('Main Process - Version check response:', version);
-        // Validate version format (e.g., "0.6.0")
-        if (/^\d+\.\d+(\.\d+)?$/.test(version)) {
-          console.log('Main Process - Valid version format received:', version);
-          // Update the database with the latest version
-          try {
-            db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(version, 'latestVersion');
-            db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(new Date().toISOString(), 'lastUpdateCheck');
-            console.log('Database updated with latest version:', version);
-          } catch (dbError) {
-            console.error('Error updating version in database:', dbError);
+      console.log('Main Process - Checking version URL:', versionUrl);
+
+      https.get(versionUrl, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => {
+          const version = data.trim();
+          console.log('Main Process - Version check response:', version);
+          // Validate version format (e.g., "0.6.0")
+          if (/^\d+\.\d+(\.\d+)?$/.test(version)) {
+            console.log('Main Process - Valid version format received:', version);
+            // Update the database with the latest version
+            try {
+              db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(version, 'latestVersion');
+              db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(new Date().toISOString(), 'lastUpdateCheck');
+              // Mark that we've performed the version check
+              db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('true', 'versionCheckPerformedOnStartup');
+              console.log('Database updated with latest version:', version);
+            } catch (dbError) {
+              console.error('Error updating version in database:', dbError);
+            }
+            resolve(version);
+          } else {
+            console.error('Invalid version format received:', version);
+            reject(new Error('Invalid version format'));
           }
-          resolve(version);
-        } else {
-          console.error('Invalid version format received:', version);
-          reject(new Error('Invalid version format'));
-        }
+        });
+      }).on('error', (err) => {
+        console.error('Error checking for updates:', err);
+        reject(err);
       });
-    }).on('error', (err) => {
-      console.error('Error checking for updates:', err);
-      reject(err);
     });
-  });
+  } catch (error) {
+    console.error('Error in checkForUpdates:', error);
+    return null;
+  }
 }
 
 // Update the IPC handler
