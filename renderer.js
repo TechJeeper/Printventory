@@ -7123,17 +7123,31 @@ async function autoSaveModel(field, value, filePath) {
     await window.electron.saveModel(modelData);
     console.log(`Model saved successfully for field: ${field}`);
     
-    if (['designer', 'parentModel', 'license'].includes(field)) {
+    // Check if the updated model still matches the current filter criteria
+    const filteredModels = await window.getCombinedFilteredModels(0);
+    const stillMatchesFilter = filteredModels.some(model => model.filePath === filePath);
+    
+    if (!stillMatchesFilter) {
+      console.log(`Model ${filePath} no longer matches filter criteria, hiding element`);
+      // Hide the element in the grid
+      const fileItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(filePath)}"]`);
+      if (fileItem) {
+        fileItem.style.display = 'none';
+      }
+    } else {
+      // Update just this model's element instead of refreshing everything
+      await updateModelElement(filePath);
+    }
+    
+    if (['designer', 'parentModel', 'license', 'tags'].includes(field)) {
       debugLog('Refreshing dropdowns after saving');
       await Promise.all([
         populateDesignerDropdown(),
         populateParentModelFilter(),
-        populateLicenseFilter()
+        populateLicenseFilter(),
+        populateTagFilter()
       ]);
     }
-
-    // Update just this model's element instead of refreshing everything
-    await updateModelElement(filePath);
 
   } catch (error) {
     console.error('Error auto-saving model:', error);
