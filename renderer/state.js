@@ -39,3 +39,8 @@ let generatedThumbnailsCount = 0;
 let sharedScene = null;
 let sharedCamera = null;
 let contextUseCount = 0;
+
+let allTags = [];
+
+let fileMetadataCache = new Map();
+let modelCache = new Map();

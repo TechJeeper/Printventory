@@ -76,3 +76,19 @@ function setupMultiEditPanel() {
   });
 
 }
+
+
+
+function addContextMenuToTextInputs() {
+  const textInputs = document.querySelectorAll('input[type="text"], textarea');
+  textInputs.forEach(input => {
+    input.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const menu = new Menu();
+      menu.append(new MenuItem({ role: 'cut', label: 'Cut' }));
+      menu.append(new MenuItem({ role: 'copy', label: 'Copy' }));
+      menu.append(new MenuItem({ role: 'paste', label: 'Paste' }));
+      menu.popup({ window: remote.getCurrentWindow() });
+    });
+  });
+}

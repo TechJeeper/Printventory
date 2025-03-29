@@ -41,3 +41,221 @@ function debounce(func, wait = 300) {
     timeout = setTimeout(() => func.apply(this, args), wait);
   };
 }
+// Add window visibility change handler to clean up resources when tab is hidden
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    // Clean up WebGL resources when tab is hidden
+    cleanupWebGLResources();
+  }
+});
+
+// Add window unload handler to clean up resources when page is closed
+window.addEventListener('beforeunload', () => {
+  cleanupWebGLResources();
+});
+
+
+// Update the multi-license change handler to use autoSaveMultipleModels
+document.getElementById('multi-license').addEventListener('change', async (e) => {
+  await autoSaveMultipleModels('license', e.target.value);
+});
+
+document.getElementById('multi-designer').addEventListener('change', async (e) => {
+  await autoSaveMultipleModels('designer', e.target.value);
+});
+
+// Add event listener for multi-source input
+document.getElementById('multi-source').addEventListener('input', debounce(async (e) => {
+  await autoSaveMultipleModels('source', e.target.value);
+}), 500); // 500ms debounce
+
+// Add event listeners for notes fields
+document.getElementById('model-notes')?.addEventListener('change', async (e) => {
+  const filePath = document.getElementById('model-path').value;
+  await autoSaveModel('notes', e.target.value, filePath);
+});
+
+document.getElementById('multi-notes')?.addEventListener('input', debounce(async (e) => {
+  await autoSaveMultipleModels('notes', e.target.value);
+}), 500);
+
+
+// Add a focus event listener to repopulate all AI configuration fields
+window.addEventListener('focus', async () => {
+  // Repopulate API Key field
+  const apiKeyEl = document.getElementById('ai-api-key');
+  if (apiKeyEl) {
+    const storedApiKey = await window.electron.getSetting('apiKey');
+    apiKeyEl.value = storedApiKey || '';
+  }
+
+  // Repopulate API Endpoint field
+  const endpointEl = document.getElementById('ai-endpoint');
+  if (endpointEl) {
+    const storedEndpoint = await window.electron.getSetting('apiEndpoint');
+    endpointEl.value = storedEndpoint || 'https://api.openai.com/v1';
+  }
+
+  // Repopulate AI Model field
+  const modelEl = document.getElementById('ai-model');
+  if (modelEl) {
+    const storedModel = await window.electron.getSetting('aiModel');
+    modelEl.value = storedModel || 'gpt-4o-mini';
+  }
+
+  // Repopulate AI Service field
+  const serviceEl = document.getElementById('ai-service-select');
+  if (serviceEl) {
+    const storedService = await window.electron.getSetting('aiService');
+    serviceEl.value = storedService || 'openai';
+  }
+});
+
+
+// Keep only this single DOMContentLoaded event listener
+document.addEventListener('DOMContentLoaded', async () => {
+  const tosAccepted = await checkTermsOfService();
+  if (!tosAccepted) return; // Don't continue if TOS was declined
+
+  debugLog('DOM fully loaded and parsed');
+
+  // (update check and app initialization code already present)
+  try {
+    console.log('Checking for updates on startup...');
+    let currentVersion = await window.electron.getSetting('currentVersion');
+    const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
+    const latestVersion = await window.electron.checkForUpdates(isBeta);
+    const lastDeclinedVersion = await window.electron.getSetting('lastDeclinedVersion');
+
+    console.log('Version check results:', {
+      currentVersion,
+      latestVersion,
+      lastDeclinedVersion,
+      isBeta
+    });
+
+    if (
+      latestVersion &&
+      latestVersion !== currentVersion &&
+      latestVersion > currentVersion &&
+      latestVersion !== lastDeclinedVersion
+    ) {
+      const shouldUpdate = await window.electron.showMessage(
+        'Update Available',
+        `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
+        ['Yes', 'No']
+      );
+
+      if (shouldUpdate === 'Yes') {
+        await window.electron.openUpdatePage(isBeta);
+      } else {
+        console.log('User declined update, storing version:', latestVersion);
+        await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
+      }
+    }
+
+    await window.electron.saveSetting('latestVersion', latestVersion);
+    await window.electron.saveSetting('lastUpdateCheck', new Date().toISOString());
+
+  } catch (error) {
+    console.error('Error checking for updates:', error);
+  }
+
+  // Continue with normal initialization...
+  await initializeApp();
+
+  // NEW: Prompt the user to render pending thumbnails (if any)
+  await promptPendingThumbnails();
+
+  // (Any additional event listeners and UI initialization code below)
+});
+
+// Add event listeners for the multi-edit panel move and delete buttons
+document.getElementById('move-selected-button')?.addEventListener('click', async () => {
+  if (selectedModels.size === 0) {
+    await window.electron.showMessage('No Selection', 'Please select models to move.');
+    return;
+  }
+  const count = selectedModels.size;
+  const confirmation = await window.electron.showMessage(
+    'Confirm Move',
+    `Are you sure you want to move ${count} selected model${count !== 1 ? 's' : ''}?`,
+    ['Yes', 'No']
+  );
+  if (confirmation !== 'Yes') return;
+
+  // Open folder dialog via IPC
+  const result = await window.electron.openFolderDialog('Select Destination Folder');
+  if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+    const destinationFolder = result.filePaths[0];
+    try {
+      // Move files
+      for (const filePath of selectedModels) {
+        const newDestination = path.join(destinationFolder, path.basename(filePath));
+        await fs.promises.rename(filePath, newDestination);
+        db.prepare('UPDATE models SET filePath = ? WHERE filePath = ?').run(newDestination, filePath);
+      }
+      // Clear selected models after moving
+      selectedModels.clear();
+      updateSelectedCount(); // Update the UI to reflect the cleared selection
+      document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected')); // Clear visual selection
+    } catch (error) {
+      console.error('Error moving selected models:', error);
+    }
+  }
+});
+
+document.getElementById('delete-selected-button')?.addEventListener('click', async () => {
+  if (selectedModels.size === 0) {
+    await window.electron.showMessage('No Selection', 'Please select models to delete.');
+    return;
+  }
+  const count = selectedModels.size;
+  const confirmation = await window.electron.showMessage(
+    'Confirm Deletion',
+    `Are you sure you want to DELETE ${count} selected model${count !== 1 ? 's' : ''}? This cannot be undone!`,
+    ['Yes', 'No']
+  );
+  if (confirmation !== 'Yes') return;
+
+  // Delete selected models one-by-one.
+  for (const filePath of selectedModels) {
+    try {
+      await window.electron.deleteFile(filePath);
+    } catch (error) {
+      console.error(`Error deleting file ${filePath}:`, error);
+    }
+  }
+  // Clear selected models after deletion.
+  selectedModels.clear();
+  // Refresh the display (assuming 'refreshModelDisplay' exists).
+  await refreshModelDisplay();
+});
+
+// Add WebGL context loss handling
+window.addEventListener('webglcontextlost', (event) => {
+  event.preventDefault();
+  sharedRenderer = null;
+}, false);
+
+
+// Update the edit mode toggle handler
+document.getElementById('edit-mode-toggle')?.addEventListener('click', () => {
+  isMultiSelectMode = !isMultiSelectMode;
+  const button = document.getElementById('edit-mode-toggle');
+  const multiEditPanel = document.getElementById('multi-edit-panel');
+  const detailsPanel = document.getElementById('model-details');
+
+  if (isMultiSelectMode) {
+    button.textContent = 'Exit Multi-Edit Mode';
+    button.classList.add('active');
+    multiEditPanel.classList.remove('hidden');
+    detailsPanel.classList.add('hidden');
+    showMultiEditPanel();
+  } else {
+    exitMultiEditMode();
+  }
+});
+
+// Update the exit button handler
+document.getElementById('exit-multi-edit-button')?.addEventListener('click', exitMultiEditMode);
