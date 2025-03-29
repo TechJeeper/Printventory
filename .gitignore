@@ -1,0 +1,5 @@
+node_modules
+.idea
+test-files
+package-lock.json
+printventory.db

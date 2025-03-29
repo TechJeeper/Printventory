@@ -1,6 +1,6 @@
 // Add this at the very top of the file
 const DEBUG = false; // Enable debugging temporarily
-
+debugLog()
 // Add debug logging utility function
 function debugLog(...args) {
   if (DEBUG) {
@@ -10,8 +10,8 @@ function debugLog(...args) {
 
 let BATCH_SIZE = 50; // Default batch size for database operations
 let MAX_FILE_SIZE_MB = 50; // Default max file size in MB
-const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
-const MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
+let THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
+let MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
 
 const MAX_MODELS_IN_MEMORY = 500;
 // Add these constants at the top level of the file
@@ -334,55 +334,6 @@ async function showModelDetails(filePath) {
   }
 }
 
-// Create a function to initialize dialog handlers
-function initializeDialogHandlers() {
-
-
-  
-  // Designer dialog handler (existing code for reference)
-  document.querySelectorAll('.add-designer-button').forEach(button => {
-    button.addEventListener('click', () => {
-      const dialog = document.getElementById('new-designer-dialog');
-      const input = document.getElementById('new-designer-name');
-      
-      dialog.querySelector('form').reset();
-      input.value = '';
-      dialog.dataset.sourceDropdown = button.closest('.designer-input-container')?.querySelector('select')?.id || 'model-designer';
-      
-      dialog.showModal();
-      forceDialogRefresh(dialog, input);
-    });
-  });
-}
-
-// Helper function to force dialog refresh
-function forceDialogRefresh(dialog, input) {
-  // Force dialog refresh
-  dialog.style.display = 'none';
-  requestAnimationFrame(() => {
-    dialog.style.display = '';
-    
-    // Reset input state
-    input.disabled = false;
-    input.readOnly = false;
-    input.blur();
-    
-    // Force focus after a small delay
-    setTimeout(() => {
-      input.focus();
-      input.click();
-      
-      // Additional focus attempt after a longer delay
-      setTimeout(() => {
-        if (document.activeElement !== input) {
-          input.focus();
-          input.click();
-        }
-      }, 100);
-    }, 50);
-  });
-}
-
 // Add window focus handler
 window.addEventListener('focus', () => {
   // Find any open dialog and reset its input
@@ -395,168 +346,21 @@ window.addEventListener('focus', () => {
   }
 });
 
-// Add or update the loadDuplicateFiles function
-async function loadDuplicateFiles() {
-  try {
-    const duplicates = await window.electron.getDuplicates();
-    console.log('Loaded duplicates:', duplicates);
-    
-    const dialog = document.getElementById('dedup-dialog');
-    const duplicateGroups = dialog.querySelector('.duplicate-groups');
-    duplicateGroups.innerHTML = '';
-    
-    if (!duplicates || Object.keys(duplicates).length === 0) {
-      duplicateGroups.innerHTML = `
-        <div style="text-align: center; padding: 20px; color: #888;">
-          No duplicate models found
-        </div>
-      `;
-      const deleteButton = dialog.querySelector('#delete-selected');
-      if (deleteButton) {
-        deleteButton.style.display = 'none';
-      }
-    } else {
-      console.log(`Found ${Object.keys(duplicates).length} duplicate groups`);
-      
-      // Show and setup delete button
-      const deleteButton = dialog.querySelector('#delete-selected');
-      if (deleteButton) {
-        deleteButton.style.display = '';
-        // Remove any existing click listeners
-        deleteButton.replaceWith(deleteButton.cloneNode(true));
-        // Get the new button reference
-        const newDeleteButton = dialog.querySelector('#delete-selected');
-        // Add click handler
-        newDeleteButton.addEventListener('click', handleDeleteSelected);
-      }
-      
-      // Create groups for each set of duplicates
-      for (const [hash, files] of Object.entries(duplicates)) {
-        const group = document.createElement('div');
-        group.className = 'duplicate-group';
-        
-        // Add preview container
-        const preview = document.createElement('div');
-        preview.className = 'duplicate-preview';
-        
-        // Try to get thumbnail
-        try {
-          const thumbnail = await window.electron.getThumbnail(files[0].filePath);
-          if (thumbnail) {
-            const img = document.createElement('img');
-            img.src = thumbnail;
-            preview.appendChild(img);
-          } else {
-            preview.innerHTML = '<div class="error-message">No preview available</div>';
-          }
-  } catch (error) {
-          console.error('Error getting thumbnail:', error);
-          preview.innerHTML = '<div class="error-message">No preview available</div>';
-        }
-        
-        // Add files list
-        const filesList = document.createElement('div');
-        filesList.className = 'duplicate-files';
-        
-        // Add header with count
-        const header = document.createElement('div');
-        header.className = 'duplicate-header';
-        header.textContent = `${files.length} duplicate files found`;
-        filesList.appendChild(header);
-        
-        // Add each file
-        files.forEach(file => {
-          const fileDiv = document.createElement('div');
-          fileDiv.className = 'duplicate-file';
-          
-          const checkbox = document.createElement('input');
-          checkbox.type = 'checkbox';
-          checkbox.setAttribute('data-filepath', file.filePath);
-          
-          const filePath = document.createElement('span');
-          filePath.className = 'duplicate-file-path';
-          filePath.textContent = file.filePath;
-          
-          const fileSize = document.createElement('span');
-          fileSize.className = 'duplicate-file-size';
-          fileSize.textContent = formatFileSize(file.size);
-          
-          fileDiv.appendChild(checkbox);
-          fileDiv.appendChild(filePath);
-          fileDiv.appendChild(fileSize);
-          filesList.appendChild(fileDiv);
-        });
-        
-        group.appendChild(preview);
-        group.appendChild(filesList);
-        duplicateGroups.appendChild(group);
-      }
-    }
-    
-    // Show the dialog
-    dialog.showModal();
-    
-  } catch (error) {
-    console.error('Error loading duplicates:', error);
-    await window.electron.showMessage('Error', 'Failed to load duplicate files');
-  }
-}
-
-
-// Update the checkTermsOfService function to return a promise
-async function checkTermsOfService() {
-  try {
-    let tosAccepted = await window.electron.getSetting('tosAcceptedDate');
-    const termsDialog = document.getElementById('terms-of-service-dialog');
-    const acceptButton = document.getElementById('accept-terms');
-    const declineButton = document.getElementById('decline-terms');
-    const closeButton = document.querySelector('#terms-of-service-dialog .close');
-
-    if (!termsDialog || !acceptButton || !declineButton || !closeButton) {
-      console.error('Terms of Service dialog elements not found');
-      return false; // Return false if dialog elements are not found
-    }
-
-    if (!tosAccepted) {
-      termsDialog.showModal();
-      
-      return new Promise((resolve) => {
-        acceptButton.addEventListener('click', async () => {
-          await window.electron.saveSetting('tosAcceptedDate', new Date().toISOString());
-          termsDialog.close();
-          resolve(true); // Resolve promise when accepted
-        });
-
-        declineButton.addEventListener('click', () => {
-          window.electron.quitApp();
-          resolve(false); // Resolve promise when declined
-        });
-
-        closeButton.addEventListener('click', () => {
-          window.electron.quitApp();
-          resolve(false); // Resolve promise when closed
-        });
-      });
-    }
-    return true; // Return true if already accepted
-  } catch (error) {
-    console.error('Error checking Terms of Service:', error);
-    return false; // Return false on error
-  }
-}
 
 // Update the DOMContentLoaded event listener
 document.addEventListener('DOMContentLoaded', async () => {
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
 
-  // Show the welcome dialog if this is the first run
-  const hasRunBefore = await window.electron.getSetting('hasRunBefore');
-  if (!hasRunBefore) {
-    const welcomeDialog = document.getElementById('welcome-message');
-    welcomeDialog.showModal();
-    await window.electron.saveSetting('hasRunBefore', 'true');
-  }
+  await showWelcomeDialogIfFirstRun()
+  setupAboutDialogHandler();
+  setupThemeDialogHandler();
+  setupPurgeDialogHandler();
+  setupBackupRestoreDialog();
+  setupDedupDialogHandler();
+  setupTagManagerDialog();
+  initializeDialogHandlers();
+  setupMultiEditPanel();
 
   // Proceed to check for updates and initialize the application
   debugLog('DOM fully loaded and parsed');
@@ -693,38 +497,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   await populateParentModelFilter();
   await populateTagFilter();
 
-  // Update the edit mode toggle button listener
-  document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => {
-    isMultiSelectMode = !isMultiSelectMode;
-    const button = document.getElementById('edit-mode-toggle');
-    const multiEditPanel = document.getElementById('multi-edit-panel');
-    const detailsPanel = document.getElementById('model-details');
-    
-    // Clear selection when disabling multiselect
-    if (!isMultiSelectMode) {
-      selectedModels.clear();
-      document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
-      multiEditPanel.classList.add('hidden');
-      modelDetails.classList.remove('hidden');
-      button.textContent = 'Multi-Edit Mode';
-      button.classList.remove('active');
-    } else {
-      multiEditPanel.classList.remove('hidden');
-      modelDetails.classList.add('hidden');
-      button.textContent = 'Single-Edit Mode';
-      button.classList.add('active');
-      // Populate dropdowns
-      await populateModelDesignerDropdown(null, 'multi-designer');
-      await populateModelLicenseDropdown(null, 'multi-license');
-      await populateParentModelDropdown(null, 'multi-parent');
-      await populateTagSelect('multi-tag-select', 'multi-tags');
-      
-      // Scroll the multi-edit panel into view with smooth animation
-      multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    updateSelectedCount();
-  });
-
   // Initialize tag dialog handlers
   addTagButton.addEventListener('click', () => {
     // Reset the form and dialog state
@@ -783,73 +555,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Load background color setting
-  const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
-  if (backgroundColor) {
-    document.documentElement.style.setProperty('--model-background-color', backgroundColor);
-    document.getElementById('model-background-color').value = backgroundColor;
-  }
-
   // Settings dialog handlers
   window.electron.onOpenSettings(() => {
     settingsDialog.showModal();
-  });
-
-  document.getElementById('cancel-settings')?.addEventListener('click', () => {
-    settingsDialog.close();
-  });
-
-  document.getElementById('save-settings')?.addEventListener('click', async () => {
-    const color = document.getElementById('model-background-color').value;
-    // Update CSS variable
-    document.documentElement.style.setProperty('--model-background-color', color);
-    // Save to settings
-    await window.electron.saveSetting('modelBackgroundColor', color);
-    settingsDialog.close();
-  });
-
-  // Add dismiss button handler
-  document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
-    welcomeDialog.close();
-  });
-
-  // Update the save model button handler (single edit)
-  document.getElementById('save-model-button')?.addEventListener('click', async () => {
-    try {
-      const filePath = document.getElementById('model-path').value;
-      // Get all selected tags
-      const tagElements = document.getElementById('model-tags').querySelectorAll('.tag');
-      const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name'));
-
-      const modelData = {
-        filePath,
-        fileName: document.getElementById('model-name').value,
-        designer: document.getElementById('model-designer').value || 'Unknown',
-        source: document.getElementById('model-source').value || '',
-        notes: document.getElementById('model-notes').value || '',
-        printed: document.getElementById('model-printed').checked,
-        parentModel: document.getElementById('model-parent').value || '',
-        license: document.getElementById('model-license').value || '',
-        tags: tags
-      };
-
-      // Save the model with tags
-      await window.electron.saveModel(modelData);
-
-      // Refresh all filter dropdowns
-      await Promise.all([
-        populateDesignerDropdown(),
-        populateLicenseFilter(),
-        populateParentModelFilter(),
-        populateTagFilter()
-      ]);
-
-      // Reapply filters and refresh view
-      await refreshModelDisplay();
-
-    } catch (error) {
-      console.error('Error saving model:', error);
-    }
   });
 
   // Update the multi-save button handler
@@ -904,14 +612,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     } catch (error) {
       console.error('Error saving multiple models:', error);
-    }
-  });
-
-  // Add open file button handler
-  document.getElementById('open-file-button')?.addEventListener('click', async () => {
-    const filePath = document.getElementById('model-path').value;
-    if (filePath) {
-      await window.electron.showItemInFolder(filePath);
     }
   });
 
@@ -1140,113 +840,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Add fetch button event listeners
-  document.getElementById('fetch-source-button')?.addEventListener('click', async () => {
-    const sourceInput = document.getElementById('model-source');
-    const url = sourceInput.value.trim();
-    
-    if (!url) {
-      await window.electron.showMessage('Error', 'Please enter a source URL');
-      return;
-    }
-
-    try {
-      if (url.includes('thangs.com')) {
-        // Extract designer and model name from URL
-        const urlParts = url.split('/');
-        const designerIndex = urlParts.indexOf('designer');
-        
-        if (designerIndex !== -1 && designerIndex + 1 < urlParts.length) {
-          const designer = urlParts[designerIndex + 1];
-          
-          // Find the model name after "3d-model/"
-          const modelIndex = urlParts.indexOf('3d-model');
-          if (modelIndex !== -1 && modelIndex + 1 < urlParts.length) {
-            let modelName = urlParts[modelIndex + 1];
-            // Clean up the model name by replacing URL encoding
-            modelName = decodeURIComponent(modelName)
-              .replace(/-/g, ' ')  // Replace hyphens with spaces
-              .replace(/\.stl$|\.3mf$/i, ''); // Remove file extension if present
-            
-            // Update the designer field
-            const designerSelect = document.getElementById('model-designer');
-            if (!Array.from(designerSelect.options).some(opt => opt.value === designer)) {
-              const option = document.createElement('option');
-              option.value = designer;
-              option.textContent = designer;
-              designerSelect.appendChild(option);
-            }
-            designerSelect.value = designer;
-
-            // Update the parent model field
-            const parentSelect = document.getElementById('model-parent');
-            if (!Array.from(parentSelect.options).some(opt => opt.value === modelName)) {
-              const option = document.createElement('option');
-              option.value = modelName;
-              option.textContent = modelName;
-              parentSelect.appendChild(option);
-            }
-            parentSelect.value = modelName;
-
-            // Trigger auto-save for both fields
-            const filePath = document.getElementById('model-path').value;
-            await autoSaveModel('designer', designer, filePath);
-            await autoSaveModel('parentModel', modelName, filePath);
-          }
-        }
-      } else if (url.includes('makerworld.com')) {
-        try {
-          // Use window.electron to fetch the page content to avoid CORS issues
-          const pageData = await window.electron.fetchMakerWorldPage(url);
-          
-          if (pageData) {
-            let designer = pageData.designer;
-            let modelName = pageData.modelName;
-
-            // Update the designer field
-            const designerSelect = document.getElementById('model-designer');
-            if (designer && !Array.from(designerSelect.options).some(opt => opt.value === designer)) {
-              const option = document.createElement('option');
-              option.value = designer;
-              option.textContent = designer;
-              designerSelect.appendChild(option);
-            }
-            if (designer) {
-              designerSelect.value = designer;
-            }
-
-            // Update the parent model field
-            const parentSelect = document.getElementById('model-parent');
-            if (modelName && !Array.from(parentSelect.options).some(opt => opt.value === modelName)) {
-              const option = document.createElement('option');
-              option.value = modelName;
-              option.textContent = modelName;
-              parentSelect.appendChild(option);
-            }
-            if (modelName) {
-              parentSelect.value = modelName;
-            }
-
-            // Trigger auto-save for both fields
-            const filePath = document.getElementById('model-path').value;
-            if (designer) {
-              await autoSaveModel('designer', designer, filePath);
-            }
-            if (modelName) {
-              await autoSaveModel('parentModel', modelName, filePath);
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching MakerWorld page:', error);
-          await window.electron.showMessage('Error', 'Failed to fetch MakerWorld page details: ' + error.message);
-        }
-      } else {
-        await window.electron.showMessage('Error', 'Only Thangs.com and Makerworld.com URLs are currently supported');
-      }
-    } catch (error) {
-      console.error('Error fetching page:', error);
-      await window.electron.showMessage('Error', 'Failed to fetch page details: ' + error.message);
-    }
-  });
 
   document.getElementById('multi-fetch-source-button')?.addEventListener('click', async () => {
     const sourceUrl = document.getElementById('multi-source').value.trim();
@@ -1297,88 +890,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add scan directory button event listener
-  document.getElementById('scan-directory-button')?.addEventListener('click', async () => {
-    if (isScanning) return; // Prevent multiple scans
-    
-    const directoryPath = await window.electron.openFileDialog();
-    if (!directoryPath || directoryPath.length === 0) return;
 
-    await window.electron.saveDirectory(directoryPath[0]);
-    console.log('Scanning directory:', directoryPath[0]);
-    
-    // Disable the button and update its appearance
-    const scanButton = document.getElementById('scan-directory-button');
-    scanButton.disabled = true;
-    scanButton.style.opacity = '0.5';
-    scanButton.style.cursor = 'not-allowed';
-    isScanning = true;
-    
-    // Show progress section
-    showProgressBars();
-    
-    try {
-      // Update progress bars
-      const progressSection = document.getElementById('progress-section');
-      const progressContainer = document.getElementById('progress-container');
-      const progressBar = document.getElementById('progress-bar');
-      const progressText = document.getElementById('progress-text');
-      const renderProgressContainer = document.getElementById('render-progress-container');
-      const renderProgressBar = document.getElementById('render-progress-bar');
-      const renderProgressText = document.getElementById('render-progress-text');
-      
-      progressSection.classList.remove('hidden');
-      progressContainer.classList.remove('hidden');
-      renderProgressContainer.classList.remove('hidden');
-
-      // Listen for progress updates
-      window.electron.onScanProgress((progress) => {
-        const percent = (progress.processed / progress.total) * 100;
-        progressBar.style.width = `${percent}%`;
-        progressText.textContent = `Gathering files: ${progress.total}`;
-      });
-
-      window.electron.onDbProgress((progress) => {
-        const percent = (progress.processed / progress.total) * 100;
-        renderProgressBar.style.width = `${percent}%`;
-        renderProgressText.textContent = `Processing models: ${progress.processed} / ${progress.total}`;
-      });
-
-      // This function now handles both scanning and thumbnail generation
-      await scanAndRenderDirectory(directoryPath[0]);
-
-      // Update UI after scan completes
-      await populateDesignerDropdown();
-      await populateParentModelFilter();
-      await populateTagFilter();
-      await populateLicenseFilter();
-      
-      // Reset filters
-      document.getElementById('designer-select').value = '';
-      document.getElementById('parent-select').value = '';
-      document.getElementById('printed-select').value = 'all';
-      document.getElementById('tag-filter').value = '';
-
-      // Load and display models
-      const allModels = await window.electron.getAllModels();
-      await renderFiles(allModels);
-      
-      // Update counts
-      await updateModelCounts(allModels.length);
-
-    } catch (error) {
-      console.error('Error scanning directory:', error);
-      await window.electron.showMessage('Error', 'Failed to scan directory');
-    } finally {
-      hideProgressBars();
-      // Re-enable the button
-      scanButton.disabled = false;
-      scanButton.style.opacity = '1';
-      scanButton.style.cursor = 'pointer';
-      isScanning = false;
-    }
-  });
- 
 
   // About dialog handler
   window.electron.onOpenAbout(async () => {
@@ -1529,60 +1041,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize dialog handlers
   initializeDialogHandlers();
 
-  // Add inside your DOMContentLoaded event listener
-  window.electron.onOpenBackupRestore(() => {
-    const dialog = document.getElementById('backup-restore-dialog');
-    dialog.showModal();
-  });
-
-  document.getElementById('backup-button')?.addEventListener('click', async () => {
-    try {
-      const success = await window.electron.backupDatabase();
-      if (success) {
-        await window.electron.showMessage('Success', 'Database backup created successfully');
-      }
-    } catch (error) {
-      console.error('Backup error:', error);
-      await window.electron.showMessage('Error', 'Failed to create database backup');
-    }
-  });
-
-  document.getElementById('restore-button')?.addEventListener('click', async () => {
-    try {
-      const result = await window.electron.showMessage(
-        'Confirm Restore',
-        'Warning: Restoring from backup will replace all current data. This cannot be undone. Continue?',
-        ['Yes', 'No']
-      );
-      
-      if (result === 'Yes') {
-        const success = await window.electron.restoreDatabase();
-        if (success) {
-          await window.electron.showMessage('Success', 'Database restored successfully. The application will now reload.');
-          window.location.reload();
-        }
-      }
-    } catch (error) {
-      console.error('Restore error:', error);
-      await window.electron.showMessage('Error', 'Failed to restore database');
-    }
-  });
-
-  document.getElementById('save-backup-restore')?.addEventListener('click', () => {
-    document.getElementById('backup-restore-dialog').close();
-  });
-
-  document.getElementById('cancel-backup-restore')?.addEventListener('click', () => {
-    document.getElementById('backup-restore-dialog').close();
-  });
-
-  // Add after your existing event listeners in DOMContentLoaded
-  window.electron.onOpenDeDup(() => {
-    const dialog = document.getElementById('dedup-dialog');
-    loadDuplicateFiles();
-    dialog.showModal();
-  });
-
   // Add this with other event listeners in the DOMContentLoaded section
   document.getElementById('view-library-button')?.addEventListener('click', async () => {
     try {
@@ -1618,149 +1076,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add Tag Manager functionality
-  window.electron.onOpenTagManager(() => {
-    const tagManagerDialog = document.getElementById('tag-manager-dialog');
-    refreshTagManagerList();
-    tagManagerDialog.showModal();
-    
-    // Clear search when opening
-    document.getElementById('tag-manager-search').value = '';
-  });
-
-  let allTags = []; // Store all tags for filtering
-
-  async function refreshTagManagerList(searchTerm = '') {
-    const tagList = document.getElementById('tag-manager-list');
-    tagList.innerHTML = '';
-    
-    try {
-      // Get all tags if we don't have them yet or if no search term
-      if (allTags.length === 0 || !searchTerm) {
-        allTags = await window.electron.getAllTags();
-      }
-      
-      // Filter tags based on search term
-      const filteredTags = searchTerm 
-        ? allTags.filter(tag => tag.name.toLowerCase().includes(searchTerm.toLowerCase()))
-        : allTags;
-      
-      filteredTags.forEach(tag => {
-        const tagElement = document.createElement('div');
-        tagElement.className = 'tag';
-        tagElement.innerHTML = `
-          ${tag.name}
-          <span class="tag-count">${tag.model_count}</span>
-          <span class="tag-remove">×</span>
-        `;
-        
-        tagElement.querySelector('.tag-remove')?.addEventListener('click', async () => {
-          if (tag.model_count > 0) {
-            const response = await window.electron.showMessage(
-              'Delete Tag',
-              `This tag is used by ${tag.model_count} model(s). Are you sure you want to delete it?`,
-              ['Yes', 'No']
-            );
-            if (response !== 'Yes') return;
-          }
-          
-          try {
-            await window.electron.deleteTag(tag.id);
-            allTags = []; // Reset tags cache to force refresh
-            await refreshTagManagerList(searchTerm);
-            // Also refresh other tag-related UI elements
-            await populateTagSelect();
-            await populateTagFilter();
-          } catch (error) {
-            console.error('Error deleting tag:', error);
-            await window.electron.showMessage('Error', 'Failed to delete tag');
-          }
-        });
-        
-        tagList.appendChild(tagElement);
-      });
-    } catch (error) {
-      console.error('Error loading tags:', error);
-    }
-  }
-
-  // Add search functionality
-  document.getElementById('tag-manager-search').addEventListener('input', debounce(async (e) => {
-    await refreshTagManagerList(e.target.value.trim());
-  }, 300));
-
-  // Add clear search functionality
-  document.getElementById('clear-tag-search')?.addEventListener('click', async () => {
-    const searchInput = document.getElementById('tag-manager-search');
-    searchInput.value = '';
-    await refreshTagManagerList();
-  });
-
-  document.getElementById('add-tag-manager-button')?.addEventListener('click', async () => {
-    const input = document.getElementById('new-tag-manager-name');
-    const tagName = input.value.trim();
-    
-    if (tagName) {
-      try {
-        await window.electron.saveTag(tagName);
-        input.value = '';
-        allTags = []; // Reset tags cache to force refresh
-        const searchTerm = document.getElementById('tag-manager-search').value.trim();
-        await refreshTagManagerList(searchTerm);
-        // Also refresh other tag-related UI elements
-        await populateTagSelect();
-        await populateTagFilter();
-      } catch (error) {
-        console.error('Error saving tag:', error);
-        await window.electron.showMessage('Error', 'Failed to create tag');
-      }
-    }
-  });
-
-  // Add this event listener in your DOMContentLoaded section
-  window.electron.onOpenPurgeModels((_event) => {
-    const dialog = document.getElementById('purge-models-dialog');
-    dialog.showModal();
-  });
-
-  // Add purge confirmation handler
-  document.getElementById('confirm-purge-button')?.addEventListener('click', async () => {
-    try {
-      const success = await window.electron.purgeModels();
-      if (success) {
-        // Clear the grid
-        const container = document.querySelector('.file-grid');
-        container.innerHTML = '';
-        
-        // Update model counts
-        await updateModelCounts(0);
-        
-        // Close the dialog
-        document.getElementById('purge-models-dialog').close();
-        
-        // Show success message
-        await window.electron.showMessage('Success', 'All models have been purged from the database.');
-        
-        // Reset all filters and dropdowns
-        document.getElementById('designer-select').value = '';
-        document.getElementById('parent-select').value = '';
-        document.getElementById('printed-select').value = 'all';
-        document.getElementById('tag-filter').value = '';
-        
-        // Refresh all dropdowns
-        await Promise.all([
-          populateDesignerDropdown(),
-          populateParentModelFilter(),
-          populateTagFilter(),
-          populateLicenseFilter()
-        ]);
-      }
-    } catch (error) {
-      console.error('Error purging models:', error);
-      await window.electron.showMessage('Error', 'Failed to purge models from the database.');
-    }
-  });
-
   // Add this near the top where other event listeners are initialized
   document.getElementById('sort-select').addEventListener('change', async (e) => {
     const sortOption = e.target.value;
@@ -1786,14 +1101,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Actually refresh the grid with the new models
     await renderFiles(models);
   });
-
-  // Add this near other dialog event listeners
-  window.electron.onOpenThemeSettings(() => {
-    // Rename the existing settings dialog to theme-dialog
-    const themeDialog = document.getElementById('settings-dialog');
-    themeDialog.showModal();
-  });
-
 
   // Add this function near the top with other utility functions
   function resetInputState() {
@@ -2576,7 +1883,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const entriesToRemove = Array.from(thumbnailCache.keys()).slice(0, 500);
       entriesToRemove.forEach(key => thumbnailCache.delete(key));
     }
-    
+
     if (sharedRenderer) {
       sharedRenderer.state.reset();
     }
@@ -2590,7 +1897,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       console.log('loadModel: Starting for file:', filePath);
       const fileExtension = filePath.split('.').pop().toLowerCase();
-      
+
       // For 3MF files, try to extract embedded image first
       if (fileExtension === '3mf') {
         console.log('loadModel: Checking for embedded images in 3MF');
@@ -2604,7 +1911,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           console.error('loadModel: Error checking for embedded image:', imageError);
         }
       }
-      
+
       // If no embedded image found, proceed with 3D loading
       let loader;
       if (fileExtension === 'stl') {
@@ -2622,12 +1929,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 specular: 0x111111,
                 shininess: 200
               });
-              
+
               // Proper geometry centering instead of normalization
               geometry.computeBoundingBox();
               geometry.center();
               geometry.computeVertexNormals();
-              
+
               const mesh = new THREE.Mesh(geometry, material);
               mesh.rotation.x = -Math.PI / 2;
               resolve(mesh);
@@ -2683,7 +1990,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     throw new Error('THREE.Mesh not initialized');
                   }
                   mesh = new THREE.Mesh(object, material);
-                  
+
                   if (fileExtension === 'stl') {
                     mesh.rotation.x = -Math.PI / 2;
                   }
@@ -2752,7 +2059,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           viewLibMsg.style.display = "none";
         }
       }
-      
+
       // Update filter dropdowns without clearing selections
       await Promise.all([
         populateDesignerDropdown(),
@@ -2760,7 +2067,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         populateTagFilter(),
         populateLicenseFilter()
       ]);
-      
+
       // Restore filter selections
       document.getElementById('designer-select').value = designer;
       document.getElementById('license-select').value = license;
@@ -2774,7 +2081,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Add file type filter
       if (fileType) {
-        models = models.filter(model => 
+        models = models.filter(model =>
           model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
         );
       }
@@ -2842,7 +2149,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       // Single select mode
       const wasSelected = element.classList.contains('selected');
-      
+
       // Clear all selections first
       document.querySelectorAll('.file-item').forEach(item => {
         item.classList.remove('selected');
@@ -2865,7 +2172,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const fileElement = document.createElement('div');
     fileElement.className = 'file-item';
     fileElement.dataset.filepath = file.filePath;
- 
+
     // Maintain selection state if this file was previously selected
     if (selectedModels.has(file.filePath)) {
       fileElement.classList.add('selected');
@@ -2891,13 +2198,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Hide any welcome or view library message.
       const viewLibMsg = document.getElementById("view-library-message");
       if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-      
+
       // Set the global directory filter.
       window.currentDirectoryFilter = parentDir;
-      
+
       // Instead of filtering just by directory here, trigger the combined search which applies all filters.
       await performCombinedSearch();
-      
+
       // Update the filter indicator to show the active parent directory filter.
       const filterIndicator = document.getElementById('current-filter');
       filterIndicator.innerHTML = `
@@ -2905,7 +2212,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         <button class="clear-filter-button">Clear Filter</button>
       `;
       filterIndicator.classList.add('visible');
-      
+
       // Attach a click handler to clear the directory filter.
       filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
         window.currentDirectoryFilter = "";
@@ -3010,7 +2317,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.file-item').forEach(item => {
       item.classList.remove('selected');
     });
-    
+
     // Close details panel if open
     const detailsPanel = document.getElementById('model-details');
     if (detailsPanel) {
@@ -3046,15 +2353,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Final selection with scrolling.
     const finalItem = highlightRandom(true);
     const filePath = finalItem.getAttribute('data-filepath');
-    
+
     // Add winning animation class
     finalItem.classList.add('roulette-winner');
     setTimeout(() => finalItem.classList.remove('roulette-winner'), 3000);
-    
+
     // Show model details and update selection state
     selectedModels.add(filePath);
     await showModelDetails(filePath);
-    
+
     // Show celebration message
     await window.electron.showMessage(
       'Print Roulette',
@@ -3072,14 +2379,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const currentVersion = await window.electron.getSetting('currentVersion');
       const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
-      
+
       console.log('Checking for updates:', {
         currentVersion,
         isBeta,
         checkType: silent ? 'startup' : 'manual',
         endpoint: isBeta ? 'beta.version' : 'public.version'
       });
-      
+
       // Get latest version from web
       const latestVersion = await window.electron.checkForUpdates(isBeta);
       if (!latestVersion) return;
@@ -3135,13 +2442,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const currentVersion = await window.electron.getSetting('currentVersion');
       const latestVersion = await window.electron.getSetting('latestVersion');
       const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
-      
+
       console.log('Initializing about dialog:', {
         currentVersion,
         latestVersion,
         isBeta
       });
-      
+
       // Update version display
       const versionElement = document.getElementById('about-version');
       if (versionElement) {
@@ -3170,20 +2477,20 @@ document.addEventListener('DOMContentLoaded', async () => {
           checkForUpdates(false);
         });
       }
-      
+
       // Initialize analytics checkbox
       const collectUsageCheckbox = document.getElementById('collect-usage');
       if (collectUsageCheckbox) {
         // Get initial value
         const collectUsage = await window.electron.getSetting('CollectUsage');
         console.log('About dialog - Initial CollectUsage value:', collectUsage);
-        
+
         // Set checkbox state based on the actual value
         collectUsageCheckbox.checked = collectUsage === '1';
-        
+
         // Remove any existing event listeners
         collectUsageCheckbox.removeEventListener('change', collectUsageChangeHandler);
-        
+
         // Add new event listener
         collectUsageCheckbox.addEventListener('change', collectUsageChangeHandler);
       }
@@ -3191,22 +2498,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error initializing about dialog:', error);
     }
   }
-  
+
   // Define the collect usage change handler as a named function so we can remove it
   async function collectUsageChangeHandler(e) {
     const newValue = e.target.checked ? '1' : '0';
     console.log('About dialog - Saving CollectUsage value:', newValue);
-    
+
     // Save the setting
     await window.electron.saveSetting('CollectUsage', newValue);
-    
+
     // Verify the setting was saved correctly
     const verifiedValue = await window.electron.checkCollectUsage();
     console.log('Verified CollectUsage value from database:', verifiedValue);
-    
+
     // Update the checkbox state to match the database value
     e.target.checked = verifiedValue === '1';
-    
+
     // Toggle analytics based on the verified value
     toggleAnalytics(verifiedValue === '1');
   }
@@ -3216,26 +2523,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       // Initialize all settings first
       await initializeSettings();
-      
+
       // Initialize dialog handlers
       initializeDialogHandlers();
-      
+
       // Initialize performance settings handlers
-      initializePerformanceSettings();
-      
-      // Add about dialog handler
-      window.electron.onOpenAbout(async () => {
-        const dialog = document.getElementById('about-dialog');
-        if (dialog) {
-          dialog.showModal();
-          // Initialize after showing the dialog to ensure elements are in the DOM
-          await initializeAboutDialog();
-        }
-      });
+      await initializePerformanceSettings();
 
       // Check for updates on startup (silent)
       await checkForUpdates(true);
-      
+
     } catch (error) {
       console.error('Error during initialization:', error);
     }
@@ -3255,28 +2552,28 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update the grid initialization function
   async function initializeGrid(sortOption = 'name') {
     console.log('Initializing grid with sort option:', sortOption);
-    
+
     // Add event listener for sort dropdown
     const sortSelect = document.getElementById('sort-select');
     if (sortSelect) {
       // Remove any existing event listeners by cloning and replacing
       const newSortSelect = sortSelect.cloneNode(true);
       sortSelect.parentNode.replaceChild(newSortSelect, sortSelect);
-      
+
       newSortSelect.addEventListener('change', async (e) => {
         console.log('Sort option changed to:', e.target.value);
-        
+
         // Get all models with the new sort option
         const models = await window.electron.getAllModels(e.target.value);
-        
+
         // Completely refresh the grid with the new sort order
         await renderFiles(models, false, true);
-        
+
         // Update model counts
         await updateModelCounts();
       });
     }
-    
+
     // ... existing code ...
   }
 
@@ -3422,7 +2719,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const keyEl = document.getElementById('ai-api-key');
       if (keyEl) {
         keyEl.value = value || '';
-        
+
         // Add input event listener for real-time persistence
         keyEl.addEventListener('input', async () => {
           await window.electron.saveSetting('apiKey', keyEl.value);
@@ -3435,7 +2732,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const endpointEl = document.getElementById('ai-endpoint');
       if (endpointEl) {
         endpointEl.value = value || 'https://api.openai.com/v1';
-        
+
         // Add input event listener for real-time persistence
         endpointEl.addEventListener('input', async () => {
           await window.electron.saveSetting('apiEndpoint', endpointEl.value);
@@ -3448,7 +2745,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const modelEl = document.getElementById('ai-model');
       if (modelEl) {
         modelEl.value = value || 'gpt-4o-mini';
-        
+
         // Add input event listener for real-time persistence
         modelEl.addEventListener('input', async () => {
           await window.electron.saveSetting('aiModel', modelEl.value);
@@ -3461,7 +2758,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const serviceEl = document.getElementById('ai-service-select');
       if (serviceEl) {
         serviceEl.value = value || 'openai';
-        
+
         // Add change event listener for real-time persistence
         serviceEl.addEventListener('change', async () => {
           await window.electron.saveSetting('aiService', serviceEl.value);
@@ -3480,17 +2777,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     const endpointEl = document.getElementById('ai-endpoint');
     const modelEl = document.getElementById('ai-model');
     const serviceEl = document.getElementById('ai-service-select');
-    
+
     if (!apiKeyEl || !endpointEl || !modelEl || !serviceEl) {
       console.error('One or more AI Config input elements not found.');
       return;
     }
-    
+
     const apiKey = apiKeyEl.value;
     const endpoint = endpointEl.value;
     const model = modelEl.value;
     const service = serviceEl.value;
-    
+
     const result = await window.electron.testAIConfig(apiKey, endpoint, model, service);
     const resultDiv = document.getElementById('ai-config-result');
     if (resultDiv) {
@@ -3510,12 +2807,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     const endpoint = document.getElementById('ai-endpoint')?.value || 'https://api.openai.com/v1';
     const model = document.getElementById('ai-model')?.value || 'gpt-4o-mini';
     const service = document.getElementById('ai-service-select')?.value || 'openai';
-    
+
     await window.electron.saveSetting('apiKey', apiKey);
     await window.electron.saveSetting('apiEndpoint', endpoint);
     await window.electron.saveSetting('aiModel', model);
     await window.electron.saveSetting('aiService', service);
-    
+
     document.getElementById('ai-config-dialog').close();
   });
 
@@ -3537,7 +2834,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Also add the "AI Tagged" tag to indicate this model was tagged by AI
       const existingTags = model.tags || [];
       const newTags = Array.from(new Set([...existingTags, ...tags, "AI Tagged"]));
-      
+
       // Update the model data with the new tag list
       await window.electron.saveModel({ ...model, tags: newTags });
 
@@ -3548,14 +2845,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!document.getElementById('progress-dialog').open) {
         alert('Tags generated and added successfully!');
       }
-      
+
       // Optionally, provide feedback to the user (only once, not an alert per model in multi-select)
       console.log(`Tags updated for model: ${filePath}`);
     } catch (error) {
       console.error(`Error updating tags for model ${filePath}:`, error);
     }
   });
-  
+
   // Add handlers for progress dialog
   window.electron.on('show-progress-dialog', (data) => {
     const progressDialog = document.getElementById('progress-dialog');
@@ -3563,33 +2860,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progressMessage = document.getElementById('progress-message');
     const progressBar = document.getElementById('progress-bar');
     const progressStatus = document.getElementById('progress-status');
-    
+
     // Set initial values
     progressTitle.textContent = data.title || 'Processing...';
     progressMessage.textContent = data.message || 'Please wait...';
     progressBar.style.width = '0%';
     progressStatus.textContent = `0 / ${data.total}`;
-    
+
     // Show the dialog
     progressDialog.showModal();
   });
-  
+
   window.electron.on('update-progress', (data) => {
     const progressBar = document.getElementById('progress-bar');
     const progressMessage = document.getElementById('progress-message');
     const progressStatus = document.getElementById('progress-status');
-    
+
     // Update progress bar
     const percentage = (data.current / data.total) * 100;
     progressBar.style.width = `${percentage}%`;
-    
+
     // Update message and status
     if (data.message) {
       progressMessage.textContent = data.message;
     }
     progressStatus.textContent = `${data.current} / ${data.total}`;
   });
-  
+
   window.electron.on('close-progress-dialog', () => {
     const progressDialog = document.getElementById('progress-dialog');
     progressDialog.close();
@@ -3680,12 +2977,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       endpointEl.value = '';
       modelEl.value = '';
     }
-    
+
     // Clear the API key field
     if (apiKeyEl) {
       apiKeyEl.value = '';
     }
-    
+
     // Save the new values to the database
     await window.electron.saveSetting('apiEndpoint', endpointEl.value);
     await window.electron.saveSetting('aiModel', modelEl.value);
@@ -3717,7 +3014,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add ping/pong handler to keep the renderer process alive
   window.electron.on('ping', () => {
     window.electron.pong();
-    
+
     // Force a minimal UI update to prevent freezing
     requestAnimationFrame(() => {
       const dummyElement = document.createElement('div');
@@ -3753,7 +3050,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         50
       ).then(models => {
         renderFiles(models);
-        
+
       }).catch(console.error);
     }
   }
@@ -3780,16 +3077,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (modelsWithoutThumbs.length > 0) {
         totalThumbnailsToGenerate = modelsWithoutThumbs.length;
         generatedThumbnailsCount = 0;
-        
+
         // Update progress UI
         const progressDialog = document.getElementById('thumbnail-progress-dialog');
         const progressBar = document.getElementById('thumbnail-progress-bar');
         const progressText = document.getElementById('thumbnail-progress-text');
         progressDialog.showModal();
-        
+
         // Process in batches
         await generateThumbnailsForModels(modelsWithoutThumbs);
-        
+
         progressDialog.close();
       }
     } catch (error) {
@@ -3815,10 +3112,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Get initial value
       const collectUsage = await window.electron.getSetting('CollectUsage');
       console.log('Initial CollectUsage value:', collectUsage);
-      
+
       // Set checkbox state based on the actual value
       collectUsageCheckbox.checked = collectUsage === '1';
-      
+
       // Handle changes using the same handler as in the about dialog
       collectUsageCheckbox.addEventListener('change', collectUsageChangeHandler);
 
@@ -3830,7 +3127,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add this function to handle enabling/disabling analytics
   function toggleAnalytics(enable) {
     console.log('Toggling analytics:', enable);
-    
+
     const script1 = document.getElementById('analytics-script-1');
     const script2 = document.getElementById('analytics-script-2');
 
@@ -3844,7 +3141,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('Enabling analytics scripts');
       script1.removeAttribute('disabled');
       script2.removeAttribute('disabled');
-      
+
       // Initialize analytics if it wasn't already
       if (typeof gtag === 'undefined') {
         const newScript = document.createElement('script');
@@ -3864,7 +3161,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('Disabling analytics scripts');
       script1.setAttribute('disabled', '');
       script2.setAttribute('disabled', '');
-      
+
       // Clear any existing analytics data
       if (window.dataLayer) {
         window.dataLayer = [];
@@ -3889,13 +3186,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('printed-select').value = 'all';
       document.getElementById('tag-filter').value = '';
       document.getElementById('search-filter-input').value = '';
-      
+
       // Hide the "Showing 100 Newest Models" message
       const viewLibMsg = document.getElementById("view-library-message");
       if (viewLibMsg) {
         viewLibMsg.style.display = "none";
       }
-      
+
       // Get all model references (just IDs and paths, not full data)
       const modelRefs = await window.electron.getAllModelReferences();
       if (!modelRefs) { // Add this check
@@ -3906,7 +3203,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       allFilteredModels = modelRefs;
 
       // Initialize virtual scrolling with the first page
-    
+
     } catch (error) {
       console.error('Error loading library:', error);
       await window.electron.showMessage('Error', 'Failed to load library.'); // Show error to user
@@ -3919,73 +3216,73 @@ document.addEventListener('DOMContentLoaded', async () => {
       // First, clear any existing content
       const grid = document.getElementById('file-grid');
       grid.innerHTML = '';
-      
+
       // Show loading
       document.getElementById('spinner').classList.remove('hidden');
-      
+
       // Calculate total number of models
       const totalCount = modelRefs.length;
       console.log(`Setting up virtual grid with ${totalCount} models`);
-      
+
       // Update the model count display
       updateModelCounts(totalCount);
-      
+
       // Create placeholder items for all models
       let fragment = document.createDocumentFragment();
-      
+
       // Use the same file-item creation and styling as the regular view
       modelRefs.forEach(model => {
         const fileElement = document.createElement('div');
         fileElement.className = 'file-item';
         fileElement.setAttribute('data-filepath', model.filePath);
-        
+
         const thumbnailContainer = document.createElement('div');
         thumbnailContainer.className = 'thumbnail-container';
         thumbnailContainer.style.background = getComputedStyle(document.documentElement).getPropertyValue('--model-background-color');
-        
+
         // Create print status indicator
         const printStatus = document.createElement('div');
         printStatus.className = 'print-status';
         printStatus.textContent = 'Not Printed';
         thumbnailContainer.appendChild(printStatus);
-        
+
         fileElement.appendChild(thumbnailContainer);
-        
+
         // Create file info container
         const fileInfo = document.createElement('div');
         fileInfo.className = 'file-info';
-        
+
         // Add file name element
         const fileName = document.createElement('div');
         fileName.className = 'file-name';
         fileName.textContent = path.basename(model.filePath);
         fileInfo.appendChild(fileName);
-        
+
         // Add file details
         const fileDetails = document.createElement('div');
         fileDetails.className = 'file-details';
         fileDetails.textContent = 'Loading...';
         fileInfo.appendChild(fileDetails);
-        
+
         fileElement.appendChild(fileInfo);
-        
+
         // Add click handler
         fileElement.addEventListener('click', (e) => handleFileClick(e, model.filePath));
-        
+
         // Add context menu handler
         addContextMenuHandler(fileElement, model.filePath);
-        
+
         fragment.appendChild(fileElement);
       });
-      
+
       grid.appendChild(fragment);
-      
+
       // Start loading models and rendering thumbnails
       loadAndRenderModels(modelRefs);
-      
+
       // Hide spinner when initial rendering is done
       document.getElementById('spinner').classList.add('hidden');
-      
+
     } catch (error) {
       console.error('Error initializing virtual scrolling:', error);
       document.getElementById('spinner').classList.add('hidden');
@@ -3998,19 +3295,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.warn('Invalid model references provided to loadAndRenderModels');
       return;
     }
-    
+
     try {
       // Process in batches for better performance
       for (let i = 0; i < modelRefs.length; i += batchSize) {
         const batch = modelRefs.slice(i, i + batchSize);
-        
+
         // Load detailed model data for each model in the batch
         for (const modelRef of batch) {
           if (!modelRef || !modelRef.filePath) {
             console.warn('Invalid model reference:', modelRef);
             continue; // Skip this iteration
           }
-          
+
           try {
             // Get model data from electron
             const model = await window.electron.getModel(modelRef.filePath);
@@ -4018,14 +3315,14 @@ document.addEventListener('DOMContentLoaded', async () => {
               console.warn(`No model data returned for ${modelRef.filePath}`);
               continue; // Skip if no model data
             }
-            
+
             // Find the element for this model
             const fileElement = document.querySelector(`.file-item[data-filepath="${CSS.escape(modelRef.filePath)}"]`);
             if (!fileElement) {
               console.warn(`Element for model ${modelRef.filePath} not found in DOM`);
               continue; // Skip if element not found
             }
-            
+
             // Update print status
             const printStatus = fileElement.querySelector('.print-status');
             if (printStatus) {
@@ -4037,19 +3334,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 printStatus.classList.remove('printed');
               }
             }
-            
+
             // Update file details
             const fileDetails = fileElement.querySelector('.file-details');
             if (fileDetails) {
               // Use formatFileSize function if it exists
-              const sizeText = model.size ? 
-                (typeof formatFileSize === 'function' ? formatFileSize(model.size) : `${Math.round(model.size / 1024)} KB`) : 
+              const sizeText = model.size ?
+                (typeof formatFileSize === 'function' ? formatFileSize(model.size) : `${Math.round(model.size / 1024)} KB`) :
                 '';
-              
+
               const designerText = model.designer ? `Designer: ${model.designer}` : '';
               fileDetails.textContent = [sizeText, designerText].filter(Boolean).join(' • ');
             }
-            
+
             // Load thumbnail
             const thumbnailContainer = fileElement.querySelector('.thumbnail-container');
             if (thumbnailContainer) {
@@ -4072,7 +3369,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Continue with next model even if one fails
           }
         }
-        
+
         // Allow UI to update between batches
         await new Promise(resolve => setTimeout(resolve, 0));
       }
@@ -4100,7 +3397,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (printStatus === 'printed' && !model.printed) return false;
     if (printStatus === 'not-printed' && model.printed) return false;
     if (fileType && !model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
-    
+
     // Handle tag filter
     if (tagFilter) {
       const modelTags = await window.electron.getModelTags(model.id);
@@ -4118,38 +3415,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     return true;
   }
 
- 
 
   // Fix the renderVisibleItems function to maintain selection state
   function renderVisibleItems(startIndex) {
     const container = document.getElementById('visible-items-container');
     if (!container) return;
-    
+
     container.innerHTML = '';
-    
+
     // Calculate grid layout
     const containerWidth = container.parentElement.clientWidth;
     const itemWidth = 250; // Approximate width of each item
     const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
-    
+
     visibleModels.forEach((model, index) => {
       if (!model || !model.filePath) return; // Skip invalid models
-      
+
       const absoluteIndex = startIndex + index;
       const row = Math.floor(absoluteIndex / columns);
       const col = absoluteIndex % columns;
-      
+
       const item = createModelItem(model);
       item.style.position = 'absolute';
       item.style.top = `${row * 300}px`; // 300px height per item
       item.style.left = `${col * (containerWidth / columns)}px`;
       item.style.width = `${containerWidth / columns - 20}px`; // 20px for margins
-      
+
       // Set selection state from global Set
       if (selectedModels.has(model.filePath)) {
         item.classList.add('selected');
       }
-      
+
       container.appendChild(item);
     });
   }
@@ -4170,11 +3466,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('select-all-button')?.addEventListener('click', async () => {
     // Clear existing selections first
     selectedModels.clear();
-    
+
     try {
       // Get all filtered model references (not just visible ones)
       const filteredModels = await window.getCombinedFilteredModels(0); // 0 means no limit
-      
+
       // Add all filtered models to selection (ensuring no duplicates by file path)
       const uniqueFilePaths = new Set();
       filteredModels.forEach(model => {
@@ -4183,7 +3479,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           selectedModels.add(model.filePath);
         }
       });
-      
+
       // Update UI for all items with matching file paths that are rendered
       document.querySelectorAll('.file-item').forEach(item => {
         const itemPath = item.getAttribute('data-filepath');
@@ -4191,10 +3487,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           item.classList.add('selected');
         }
       });
-      
+
       // Update the selected count
       updateSelectedCount();
-      
+
       // Show multi-edit panel if there are selections
       if (selectedModels.size > 0) {
         showMultiEditPanel();
@@ -4216,24 +3512,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       const fileType = document.getElementById('filetype-select').value;
       const searchTerm = document.getElementById('search-filter-input').value.trim();
       const sortOption = document.getElementById('sort-select').value;
-      
+
       // Get all models with current sort option
       const allModels = await window.electron.getAllModels(sortOption, limit);
-      
+
       // Apply filters
       let filteredModels = allModels;
-      
+
       // Apply each filter sequentially
       if (designer) {
         if (designer === '__none__') {
           filteredModels = filteredModels.filter(model => !model.designer || model.designer.trim() === '');
         } else {
-          filteredModels = filteredModels.filter(model => 
+          filteredModels = filteredModels.filter(model =>
             model.designer && model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
           );
         }
       }
-      
+
       if (license) {
         if (license === '__none__') {
           filteredModels = filteredModels.filter(model => !model.license || model.license.trim() === '');
@@ -4241,7 +3537,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           filteredModels = filteredModels.filter(model => model.license === license);
         }
       }
-      
+
       if (parentModel) {
         if (parentModel === '__none__') {
           filteredModels = filteredModels.filter(model => !model.parentModel || model.parentModel.trim() === '');
@@ -4249,19 +3545,19 @@ document.addEventListener('DOMContentLoaded', async () => {
           filteredModels = filteredModels.filter(model => model.parentModel === parentModel);
         }
       }
-      
+
       if (printStatus === 'printed') {
         filteredModels = filteredModels.filter(model => model.printed);
       } else if (printStatus === 'not-printed') {
         filteredModels = filteredModels.filter(model => !model.printed);
       }
-      
+
       if (fileType) {
-        filteredModels = filteredModels.filter(model => 
+        filteredModels = filteredModels.filter(model =>
           model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
         );
       }
-      
+
       if (tagFilter) {
         // This requires async filtering
         const modelsWithTags = [];
@@ -4273,7 +3569,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         filteredModels = modelsWithTags;
       }
-      
+
       if (searchTerm) {
         // Use Fuse.js for fuzzy search
         const fuse = new Fuse(filteredModels, {
@@ -4281,11 +3577,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           threshold: 0.4,
           ignoreLocation: true
         });
-        
+
         const searchResults = fuse.search(searchTerm);
         filteredModels = searchResults.map(result => result.item);
       }
-      
+
       // Deduplicate models based on file paths
       const seenPaths = new Set();
       const uniqueModels = [];
@@ -4298,7 +3594,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
       filteredModels = uniqueModels;
-      
+
       return filteredModels;
     } catch (error) {
       console.error("Error in getCombinedFilteredModels:", error);
@@ -4313,7 +3609,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       // Initialize the application
       await initializeApp();
-      
+
       // Set up multi-edit button handler
       const multiEditBtn = document.getElementById('multi-edit-btn');
       if (multiEditBtn) {
@@ -4321,7 +3617,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           await showMultiEditPanel();
         });
       }
-      
+
       // Set up multi-edit close button
       const closeMultiEditBtn = document.getElementById('close-multi-edit');
       if (closeMultiEditBtn) {
@@ -4329,7 +3625,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           exitMultiEditMode();
         });
       }
-      
+
       // Initialize multi-edit tag handling
       const addMultiEditTagBtn = document.getElementById('add-multi-edit-tag');
       if (addMultiEditTagBtn) {
@@ -4341,10 +3637,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         });
       }
-      
+
       // Debug log for initialization
       debugLog('Multi-edit panel initialization complete');
-      
+
     } catch (error) {
       console.error('Error during application initialization:', error);
     }
@@ -4352,6 +3648,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ... existing code ...
 });
+
+setupFilterListeners();
+setupScanDirectoryButton();
 
 function updateSelectedCount() {
   const countElement = document.querySelector('.selected-count');
@@ -4364,13 +3663,13 @@ function updateSelectedCount() {
 function toggleModelSelection(fileElement, filePath) {
   if (!isMultiSelectMode) {
     const wasSelected = fileElement.classList.contains('selected');
-    
+
     // Clear previous selections
     selectedModels.clear();
     document.querySelectorAll('.file-item').forEach(item => {
       item.classList.remove('selected');
     });
-    
+
     if (wasSelected) {
       // If it was already selected, just deselect and close details
       const detailsPanel = document.getElementById('model-details');
@@ -4380,10 +3679,10 @@ function toggleModelSelection(fileElement, filePath) {
     } else {
       // Add selection to the clicked item
       selectedModels.add(filePath);
-      
+
       // Only select this specific element, not all elements with the same filePath
       fileElement.classList.add('selected');
-      
+
       // Show model details
       showModelDetails(filePath);
     }
@@ -4407,7 +3706,7 @@ async function loadModel(filePath) {
   return new Promise((resolve, reject) => {
     const fileExtension = filePath.split('.').pop().toLowerCase();
     let loader;
-    
+
     if (fileExtension === 'stl') {
       loader = new THREE.STLLoader();
       loader.load(
@@ -4419,12 +3718,12 @@ async function loadModel(filePath) {
               specular: 0x111111,
               shininess: 200
             });
-            
+
             // Proper geometry centering instead of normalization
             geometry.computeBoundingBox();
             geometry.center();
             geometry.computeVertexNormals();
-            
+
             const mesh = new THREE.Mesh(geometry, material);
             mesh.rotation.x = -Math.PI / 2;
             resolve(mesh);
@@ -4467,7 +3766,7 @@ async function loadModel(filePath) {
               throw new Error('THREE.Mesh not initialized');
             }
             mesh = new THREE.Mesh(object, material);
-            
+
             if (fileExtension === 'stl') {
               mesh.rotation.x = -Math.PI / 2;
             }
@@ -4522,14 +3821,14 @@ function fitCameraToObject(camera, object, scene, renderer) {
 
   // Rotate the model to correct orientation
   object.rotation.x = -Math.PI / 2; // Rotate 90 degrees around X axis
-  
+
   // Update the scene
   renderer.render(scene, camera);
 }
 
 function handleContextLost(event) {
   event.preventDefault();
-  
+
   // Properly clean up resources
   if (scene) {
     scene.traverse((object) => {
@@ -4544,7 +3843,7 @@ function handleContextLost(event) {
     });
     scene.clear();
   }
-  
+
   renderer = null;
   scene = null;
   camera = null;
@@ -4555,26 +3854,6 @@ function handleContextRestored() {
   // Renderer will be recreated on next render
 }
 
-// Update showSpinner function to show progress section instead
-function showProgressBars() {
-  const progressSection = document.getElementById('progress-section');
-  const progressBar = document.getElementById('progress-bar');
-  const renderProgressBar = document.getElementById('render-progress-bar');
-  const progressText = document.getElementById('progress-text');
-  const renderProgressText = document.getElementById('render-progress-text');
-  
-  progressSection.classList.remove('hidden');
-  progressBar.style.width = '0%';
-  renderProgressBar.style.width = '0%';
-  progressText.textContent = '0 / 0 files';
-  renderProgressText.textContent = '0 / 0 models';
-}
-
-// Update hideSpinner function
-function hideProgressBars() {
-  const progressSection = document.getElementById('progress-section');
-  progressSection.classList.add('hidden');
-}
 
 // Update function signature to include background parameter
 async function scanAndRenderDirectory(directoryPath, background = false) {
@@ -4587,17 +3866,17 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
   const renderProgressText = document.getElementById('render-progress-text');
   const stopButton = document.getElementById('stop-thumbnail-generation');
   const container = background ? document.createElement('div') : document.querySelector('.file-grid');
-  
+
   // Flag to track if the process has been cancelled
   let isCancelled = false;
-  
+
   // Function to handle stop button click
   const handleStopClick = () => {
     isCancelled = true;
     renderProgressText.textContent = 'Stopping...';
     console.log('Thumbnail generation cancelled by user');
   };
-  
+
   // Add event listener to stop button
   stopButton.addEventListener('click', handleStopClick);
 
@@ -4625,12 +3904,12 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     // Update the scan directory call to use the new validation and cancellation
     const scanResult = await window.electron.scanDirectory(directoryPath, isValidFile);
     const { files, totalFiles, cancelScan } = scanResult || { files: [], totalFiles: 0 };
-    
+
     if (isCancelled) {
       if (cancelScan) cancelScan(); // Cancel the scan if possible
       throw new Error('Operation cancelled by user.');
     }
-    
+
     if (!files || files.length === 0) {
       throw new Error('No files found in directory.');
     }
@@ -4647,7 +3926,7 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     }
 
     const newFiles = files.filter(file => !existingFiles.has(file.filePath));
-    
+
     // Use a more efficient approach for saving models
     if (newFiles.length > 0) {
       const fileProgressUpdate = (completed) => {
@@ -4664,7 +3943,7 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
         if (isCancelled) {
           throw new Error('Operation cancelled by user.');
         }
-        
+
         const batch = newFiles.slice(i, Math.min(i + saveBatchSize, newFiles.length));
         const modelDataBatch = batch.map(file => ({
           filePath: file.filePath,
@@ -4673,7 +3952,7 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
           size: file.size,
           modifiedDate: file.mtime
         }));
-        
+
         // Save models in batch for better performance
         await window.electron.saveModelBatch(modelDataBatch);
         fileProgressUpdate(Math.min(i + saveBatchSize, newFiles.length));
@@ -4706,19 +3985,19 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       const maxConcurrentThumbnails = 5; // Increased from 1 for better performance
       const thumbnailQueue = [...filesNeedingThumbnails];
       const activePromises = new Set();
-      
+
       while (thumbnailQueue.length > 0 && !isCancelled) {
         // Fill up to max concurrent thumbnails
         while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0) {
           const file = thumbnailQueue.shift();
-          
+
           const promise = (async () => {
             try {
               if (existingThumbnails.has(file.filePath)) {
                 console.log(`Thumbnail found for ${file.filePath} in database. Skipping render.`);
                 return;
               }
-              
+
               // Render the thumbnail; using the dummy container if in background
               const fileElement = await renderFile(file, container);
               if (!background && fileElement) {
@@ -4734,22 +4013,22 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
               activePromises.delete(promise);
             }
           })();
-          
+
           activePromises.add(promise);
         }
-        
+
         // Wait for at least one promise to complete before continuing
         if (activePromises.size > 0) {
           await Promise.race(Array.from(activePromises));
         }
-        
+
         // Check for cancellation after each batch
         if (isCancelled) {
           console.log('Thumbnail generation cancelled, stopping process');
           break;
         }
       }
-      
+
       // Wait for any remaining active promises to complete
       if (activePromises.size > 0) {
         await Promise.all(Array.from(activePromises));
@@ -4760,7 +4039,7 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
         renderProgressText.textContent = 'All thumbnails up to date';
       }
     }
-    
+
     // Update additional UI components only if not in background mode
     if (!background) {
       await Promise.all([
@@ -4785,7 +4064,7 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
   } finally {
     // Clean up event listener
     stopButton.removeEventListener('click', handleStopClick);
-    
+
     if (!background) {
       progressSection.classList.add('hidden');
     } else {
@@ -4809,7 +4088,7 @@ async function refreshModelDisplay() {
     const searchInput = document.getElementById("search-filter-input");
     const searchTerm = searchInput ? searchInput.value.trim() : "";
 
-    
+
     // Update filter dropdowns without clearing selections
     await Promise.all([
       populateDesignerDropdown(),
@@ -4817,7 +4096,7 @@ async function refreshModelDisplay() {
       populateTagFilter(),
       populateLicenseFilter()
     ]);
-    
+
     // Restore filter selections
     document.getElementById('designer-select').value = designer;
     document.getElementById('license-select').value = license;
@@ -4831,7 +4110,7 @@ async function refreshModelDisplay() {
 
     // Add file type filter
     if (fileType) {
-      models = models.filter(model => 
+      models = models.filter(model =>
         model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
       );
     }
@@ -5052,36 +4331,36 @@ async function renderFile(file, container, skipThumbnail = false) {
 
   const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1); // Keep this as an array for now
   const parentDir = parentDirArray[0]; // Get the string value from the array
-  
+
   const parentDirElement = document.createElement('div');
   parentDirElement.className = 'parent-directory';
   parentDirElement.innerHTML = `
       <span class="directory-label">Directory:</span> 
       <a href="#" class="directory-link">${parentDir}</a>
   `;
-  
+
   parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
       // Hide any welcome or view library message.
       const viewLibMsg = document.getElementById("view-library-message");
       if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-      
-      // Set the global directory filter.
+
+    // Set the global directory filter.
       window.currentDirectoryFilter = parentDir;
-      
-      // Instead of filtering just by directory here, trigger the combined search which applies all filters.
+
+    // Instead of filtering just by directory here, trigger the combined search which applies all filters.
       await performCombinedSearch();
-      
-      // Update the filter indicator to show the active parent directory filter.
+
+    // Update the filter indicator to show the active parent directory filter.
       const filterIndicator = document.getElementById('current-filter');
       filterIndicator.innerHTML = `
         Showing models in directory: ${parentDir}
         <button class="clear-filter-button">Clear Filter</button>
       `;
       filterIndicator.classList.add('visible');
-      
-      // Attach a click handler to clear the directory filter.
+
+    // Attach a click handler to clear the directory filter.
       filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
         window.currentDirectoryFilter = "";
         filterIndicator.innerHTML = "";
@@ -5092,7 +4371,6 @@ async function renderFile(file, container, skipThumbnail = false) {
 
   fileInfo.appendChild(parentDirElement);
 
- 
 
   const fileDetails = document.createElement('div');
   fileDetails.className = 'file-details';
@@ -5126,10 +4404,10 @@ async function renderFile(file, container, skipThumbnail = false) {
           thumbnailContainer.innerHTML = '';
           thumbnailContainer.appendChild(img);
           thumbnailContainer.classList.remove('loading');
-          
+
           await window.electron.saveThumbnail(file.filePath, images);
           file.thumbnail = images;
-          
+
           return fileElement;
         }
       } catch (imageError) {
@@ -5176,12 +4454,12 @@ async function processRenderQueue() {
   }
 
   isProcessingQueue = true;
-  
+
   try {
     while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
       const task = renderQueue.shift();
       activeRenders++;
-      
+
       try {
         const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
         task.resolve(result);
@@ -5360,24 +4638,6 @@ document.getElementById('model-designer').addEventListener('change', async (even
   }
 });
 
-async function populateDesignerDropdown() {
-  const designerSelect = document.getElementById('designer-select');
-  designerSelect.innerHTML = '<option value="">All Designers</option>';
-  // Add an option to filter for models with no designer set
-  designerSelect.innerHTML += '<option value="__none__">None</option>';
-  try {
-    const designers = await window.electron.getDesigners();
-    designers.forEach(designer => {
-      const option = document.createElement('option');
-      option.value = designer;
-      option.textContent = designer;
-      designerSelect.appendChild(option);
-    });
-  } catch (error) {
-    console.error('Error fetching designers:', error);
-  }
-}
-
 // Add these event listeners after your existing ones
 document.getElementById('add-new-designer-button')?.addEventListener('click', () => {
   const dialog = document.getElementById('new-designer-dialog');
@@ -5505,19 +4765,6 @@ document.getElementById('cancel-parent-button')?.addEventListener('click', () =>
 });
 
 
-
-// Add these new functions
-function debounce(func, wait) {
-  let timeout;
-  return function executedFunction(...args) {
-    const later = () => {
-      clearTimeout(timeout);
-      func(...args);
-    };
-    clearTimeout(timeout);
-    timeout = setTimeout(later, wait);
-  };
-}
 
 
 // Replace the existing tag handling functions with these
@@ -5648,29 +4895,6 @@ async function loadModelTags(modelId) {
     }
   } catch (error) {
     console.error('Error loading model tags:', error);
-  }
-}
-
-// Add this function to populate the tag filter dropdown
-async function populateTagFilter() {
-  const tagSelect = document.getElementById('tag-filter'); // Changed from 'tag-filter-select'
-  if (!tagSelect) {
-    console.error('Tag filter select element not found');
-    return;
-  }
-
-  tagSelect.innerHTML = '<option value="">All Tags</option>';
-
-  try {
-    const tags = await window.electron.getAllTags();
-    tags.forEach(tag => {
-      const option = document.createElement('option');
-      option.value = tag.name;
-      option.textContent = `${tag.name} (${tag.model_count})`;
-      tagSelect.appendChild(option);
-    });
-  } catch (error) {
-    console.error('Error populating tag filter:', error);
   }
 }
 
@@ -5899,16 +5123,6 @@ async function parseSourceUrl(url) {
   }
 }
 
-// Fix syntax error in formatFileSize function
-function formatFileSize(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-
 // Update the tag filter to support multiple tags
 function updateTagFilter() {
   const selectedTags = Array.from(document.querySelectorAll('#tag-filter .tag'))
@@ -5968,25 +5182,6 @@ document.getElementById('tag-filter-select')?.addEventListener('change', async (
     console.error('Error filtering by tag:', error);
   }
 });
-
-// Add license filter population with null checks
-async function populateLicenseFilter() {
-  const licenseSelect = document.getElementById('license-select');
-  licenseSelect.innerHTML = '<option value="">All Licenses</option>';
-  // Add an option to filter for models with no license set
-  licenseSelect.innerHTML += '<option value="__none__">None</option>';
-  try {
-    const rows = await window.electron.getLicenses();
-    rows.forEach(license => {
-      const option = document.createElement('option');
-      option.value = license;
-      option.textContent = license;
-      licenseSelect.appendChild(option);
-    });
-  } catch (error) {
-    console.error('Error fetching licenses:', error);
-  }
-}
 
 async function showDuplicateFiles(duplicates) {
   console.log('Showing duplicate files:', duplicates);
@@ -6080,63 +5275,6 @@ async function showDuplicateFiles(duplicates) {
     deleteButton.onclick = handleDeleteSelected;
   } else {
     console.error('Delete button not found!');
-  }
-}
-
-async function handleDeleteSelected() {
-  console.log('Delete button clicked!');
-
-  const selectedFiles = Array.from(
-    document.querySelectorAll('.duplicate-file input[type="checkbox"]:checked')
-  ).map(checkbox => checkbox.getAttribute('data-filepath'));
-
-  console.log('Selected files:', selectedFiles);
-
-  if (selectedFiles.length === 0) {
-    await window.electron.showMessage('No Selection', 'Please select files to delete');
-    return;
-  }
-
-  const confirm = await window.electron.showMessage(
-    'Confirm Delete',
-    `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${selectedFiles.join('\n')}`,
-    ['Yes', 'No']
-  );
-
-  if (confirm === 'Yes') {
-    try {
-      for (const filePath of selectedFiles) {
-        console.log('Attempting to delete:', filePath);
-        const success = await window.electron.deleteFile(filePath);
-        console.log('Delete result:', success);
-        if (!success) {
-          await window.electron.showMessage('Error', `Failed to delete file: ${filePath}`);
-        }
-      }
-
-      // Close the dedup dialog
-      const dialog = document.getElementById('dedup-dialog');
-      dialog.close();
-
-      // Clear selected models
-      selectedModels.clear();
-      
-      // Get current sort option and refresh the grid
-      const sortSelect = document.getElementById('sort-select');
-      
-      const models = await window.electron.getAllModels(sortSelect.value);
-      
-      // Use renderFiles instead of refreshModelDisplay
-      await renderFiles(models);
-
-      // Reload and reopen the dedup dialog with fresh data
-      await loadDuplicateFiles();
-      dialog.showModal();
-
-    } catch (error) {
-      console.error('Error deleting files:', error);
-      await window.electron.showMessage('Error', `An error occurred: ${error.message}`);
-    }
   }
 }
 
@@ -6235,27 +5373,6 @@ async function populateParentModelDropdown(selectedParent, elementId = 'model-pa
     });
   } catch (error) {
     console.error('Error fetching parent models:', error);
-  }
-}
-
-// Add back the populateParentModelFilter function
-async function populateParentModelFilter() {
-  const parentSelect = document.getElementById('parent-select');
-  parentSelect.innerHTML = '<option value="">All Parent Models</option>';
-  // Add an option to filter for models with no parent model set
-  parentSelect.innerHTML += '<option value="__none__">None</option>';
-  try {
-    const parents = await window.electron.getParentModels();
-    parents.forEach(parent => {
-      if (parent) { // Only add non-empty parent models
-        const option = document.createElement('option');
-        option.value = parent;
-        option.textContent = parent;
-        parentSelect.appendChild(option);
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching parent models for filter:', error);
   }
 }
 
@@ -6759,13 +5876,6 @@ async function generateThumbnailsForModels(models) {
       const metadata = await fetchFileMetadata(filePath); // Assume this function fetches metadata
       fileMetadataCache.set(filePath, metadata);
       return metadata;
-  }
-
-  // Added helper function to reset input state
-  function resetInputState(input) {
-    input.value = '';
-    input.disabled = false;
-    input.readOnly = false;
   }
 
   // Add a focus event listener to repopulate all AI configuration fields
