@@ -110,3 +110,27 @@ async function generateThumbnailsForModels(models) {
     }
   }
 }
+
+async function promptPendingThumbnails() {
+  try {
+    // Get models without thumbnails using the IPC handler
+    const modelsWithoutThumbs = await window.electron.getModelsWithoutThumbnails();
+    if (modelsWithoutThumbs && modelsWithoutThumbs.length > 0) {
+      // Prompt the user with a confirm dialog
+      const userChoice = await window.electron.showMessage(
+        'Generate Thumbnails',
+        `${modelsWithoutThumbs.length} models need thumbnails. Would you like to generate them now?`,
+        ['Yes', 'No']
+      );
+
+      if (userChoice === 'Yes') {
+        debugLog('User chose to generate pending thumbnails.');
+        await generateThumbnailsForModels(modelsWithoutThumbs);
+      } else {
+        debugLog('User skipped thumbnail generation.');
+      }
+    }
+  } catch (error) {
+    console.error('Error checking for pending thumbnails:', error);
+  }
+}
