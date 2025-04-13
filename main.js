@@ -498,6 +498,7 @@ function createWindow() {
       enableWebSQL: false
     }
   });
+  mainWindow.webContents.openDevTools()
 
   const template = [
     {

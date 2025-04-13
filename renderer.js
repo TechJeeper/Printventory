@@ -589,38 +589,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-
-
-  // Remove the nested DOMContentLoaded listener and keep only one at the root level
-  document.addEventListener('DOMContentLoaded', async () => {
-    const tosAccepted = await checkTermsOfService();
-    if (!tosAccepted) return;
-
-    // Initialize filters (without search)
-    const filterElements = [
-      'designer-select',
-      'license-select',
-      'parent-select',
-      'printed-select',
-      'tag-filter',
-      'sort-select',
-      'filetype-select'  // Add this line
-    ];
-
-    filterElements.forEach(elementId => {
-      const element = document.getElementById(elementId);
-      if (element) {
-        element.addEventListener('change', handleFilterChange);
-      }
-    });
-
-    // Rest of initialization...
-    await initializeTags();
-    await populateTagFilter();
-  });
-
-  // Remove the other DOMContentLoaded listener that's adding filter change handlers
-
   await initializeTags();
 
   // Update the tag filter event listener
@@ -1166,36 +1134,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Add this in your DOMContentLoaded event listener
-  document.addEventListener('DOMContentLoaded', async () => {
-    // ... existing code ...
-
-    // Add click handlers to all tag dropdowns
-    document.querySelectorAll('.tags-input-container select').forEach(dropdown => {
-      dropdown.addEventListener('mousedown', async (event) => {
-        // Prevent the default dropdown from showing immediately
-        event.preventDefault();
-        
-        // Refresh the dropdown content
-        await refreshTagDropdown(dropdown);
-        
-        // Show the dropdown
-        dropdown.click();
-      });
-    });
-
-    // Also add the handler for dynamically created dropdowns
-    document.body.addEventListener('mousedown', async (event) => {
-      if (event.target.matches('.tags-input-container select')) {
-        event.preventDefault();
-        await refreshTagDropdown(event.target);
-        event.target.click();
-      }
-    });
-
-    // ... rest of your existing code ...
-  });
-
   // Add this near your other event listeners
   document.querySelectorAll('.refresh-tags-button').forEach(button => {
     button.addEventListener('click', async (event) => {
@@ -1230,21 +1168,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
   });
-
-  // Add this to your DOMContentLoaded event listener
-  document.addEventListener('DOMContentLoaded', () => {
-    // Enable paste on source inputs
-    ['model-source', 'multi-source'].forEach(id => {
-      const input = document.getElementById(id);
-      if (input) {
-        input.addEventListener('paste', (e) => {
-          e.stopPropagation();
-        });
-      }
-    });
-  });
-
-
 
   // Add these event listeners for single-edit mode dropdowns
   document.getElementById('model-designer').addEventListener('change', async (e) => {
@@ -1318,70 +1241,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  async function savePerformanceSettings() {
-    try {
-      const input = document.getElementById('max-file-size');
-      if (!input) {
-        throw new Error('Could not find max file size input');
-      }
 
-      const maxFileSize = parseInt(input.value);
-      
-      // Validate input
-      if (isNaN(maxFileSize) || maxFileSize < 1 || maxFileSize > 1000) {
-        throw new Error('Invalid max file size. Must be between 1 and 1000 MB.');
-      }
-
-      // Save to database
-      await window.electron.saveSetting('maxFileSizeMB', maxFileSize.toString());
-      
-      // Update the global variable
-      MAX_FILE_SIZE_MB = maxFileSize;
-      
-      // Close dialog and show success message
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-      await window.electron.showMessage('Success', 'Performance settings saved successfully');
-    } catch (error) {
-      console.error('Error saving performance settings:', error);
-      await window.electron.showMessage('Error', error.message);
-    }
-  }
-
-  // Add performance settings event listeners
-  document.addEventListener('DOMContentLoaded', async () => {
-    // Initialize settings
-    await initializeSettings();
-    
-    // Add performance settings dialog handlers
-    window.electron.onOpenPerformanceSettings(() => {
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        initializePerformanceSettings();
-        dialog.showModal();
-      }
-    });
-
-    // Remove the form submit handler and only use the save button
-    const saveButton = document.getElementById('save-performance-settings');
-    if (saveButton) {
-      saveButton.addEventListener('click', async () => {
-        await savePerformanceSettings();
-      });
-    }
-
-    const cancelButton = document.getElementById('cancel-performance-settings');
-    if (cancelButton) {
-      cancelButton.addEventListener('click', () => {
-        const dialog = document.getElementById('performance-settings-dialog');
-        if (dialog) {
-          dialog.close();
-        }
-      });
-    }
-  });
 
   // Add performance settings dialog handler
   window.electron.onOpenPerformanceSettings(() => {
@@ -1465,12 +1325,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error initializing settings:', error);
     }
   }
-
-  // Call initializeSettings when the app starts
-  document.addEventListener('DOMContentLoaded', async () => {
-    await initializeSettings();
-    // Rest of your initialization code...
-  });
 
   // Performance settings handlers
   const savePerformanceButton = document.getElementById('save-performance-settings');
@@ -2271,67 +2125,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     startPrintRoulette();
   });
 
-  // Add these functions at an appropriate location
-  async function checkForUpdates(silent = false) {
-    try {
-      const currentVersion = await window.electron.getSetting('currentVersion');
-      const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
-
-      console.log('Checking for updates:', {
-        currentVersion,
-        isBeta,
-        checkType: silent ? 'startup' : 'manual',
-        endpoint: isBeta ? 'beta.version' : 'public.version'
-      });
-
-      // Get latest version from web
-      const latestVersion = await window.electron.checkForUpdates(isBeta);
-      if (!latestVersion) return;
-
-      console.log('Version check result:', {
-        currentVersion,
-        latestVersion,
-        isBeta,
-        needsUpdate: latestVersion !== currentVersion
-      });
-
-      // Store the latest version
-      await window.electron.saveSetting('latestVersion', latestVersion);
-      await window.electron.saveSetting('lastUpdateCheck', new Date().toISOString());
-
-      // Compare versions
-      if (latestVersion !== currentVersion && latestVersion > currentVersion) {
-        // Always show update prompt if there's an update, even on startup
-        const shouldUpdate = await window.electron.showMessage(
-          'Update Available',
-          `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
-          ['Yes', 'No']
-        );
-
-        if (shouldUpdate === 'Yes') {
-          await window.electron.openUpdatePage(isBeta);
-        } else {
-          // Store the declined version
-          console.log('User declined update, storing version:', latestVersion);
-          await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
-        }
-      } else if (!silent) {
-        await window.electron.showMessage(
-          'Up to Date',
-          'You are running the latest version.'
-        );
-      }
-    } catch (error) {
-      console.error('Error checking for updates:', error);
-      if (!silent) {
-        await window.electron.showMessage(
-          'Error',
-          'Failed to check for updates. Please try again later.'
-        );
-      }
-    }
-  }
-
   // Update the about dialog initialization
   async function initializeAboutDialog() {
     try {
@@ -2395,45 +2188,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error initializing about dialog:', error);
     }
   }
-
-  // Define the collect usage change handler as a named function so we can remove it
-  async function collectUsageChangeHandler(e) {
-    const newValue = e.target.checked ? '1' : '0';
-    console.log('About dialog - Saving CollectUsage value:', newValue);
-
-    // Save the setting
-    await window.electron.saveSetting('CollectUsage', newValue);
-
-    // Verify the setting was saved correctly
-    const verifiedValue = await window.electron.checkCollectUsage();
-    console.log('Verified CollectUsage value from database:', verifiedValue);
-
-    // Update the checkbox state to match the database value
-    e.target.checked = verifiedValue === '1';
-
-    // Toggle analytics based on the verified value
-    toggleAnalytics(verifiedValue === '1');
-  }
-
-  // Remove any nested DOMContentLoaded listeners and consolidate into one
-  document.addEventListener('DOMContentLoaded', async () => {
-    try {
-      // Initialize all settings first
-      await initializeSettings();
-
-      // Initialize dialog handlers
-      initializeDialogHandlers();
-
-      // Initialize performance settings handlers
-      await initializePerformanceSettings();
-
-      // Check for updates on startup (silent)
-      await checkForUpdates(true);
-
-    } catch (error) {
-      console.error('Error during initialization:', error);
-    }
-  });
 
   // Add at the top of renderer.js
   const DEBUG = true; // Enable debugging temporarily
@@ -2588,17 +2342,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Assuming this is where the menu item is defined
-  document.addEventListener('DOMContentLoaded', function() {
-    // Remove any old guide references
-    // const guideDialog = document.getElementById('guide-dialog'); // Remove this line if it exists
-
-    // Assuming this is where the menu item is defined
-    document.getElementById("guide-button").addEventListener("click", function() {
-      // Call the new guide function
-      window.electron.send('open-guide'); // Ensure this sends the correct event to show the new guide
-    });
-  });
 
   // Add this listener at the top of the file or within the DOMContentLoaded event
   window.electron.on('open-guide', () => {
@@ -2920,37 +2663,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Add near the top of your DOMContentLoaded event listener
-  document.addEventListener('DOMContentLoaded', async () => {
-    // ... existing code ...
 
-    // Add visibility change handler
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        // Force a refresh of the UI
-        requestAnimationFrame(() => {
-          // Refresh any dynamic content that might be stale
-          refreshUIContent();
-        });
-      }
-    });
-  });
-
-  // Add this new function
-  function refreshUIContent() {
-    // Refresh the file grid if it exists
-    const fileGrid = document.querySelector('.file-grid');
-    if (fileGrid) {
-      // Re-render the current view
-      window.electron.getAllModels(
-        document.getElementById('sort-select')?.value || 'name',
-        50
-      ).then(models => {
-        renderFiles(models);
-
-      }).catch(console.error);
-    }
-  }
 
   // Add this line to listen for the slicer settings event
   window.electron.onOpenSlicerSettings(() => {
@@ -2999,72 +2712,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     progressText.textContent = `${generatedThumbnailsCount}/${totalThumbnailsToGenerate} (${progress}%)`;
   }
 
-  // Add this to your existing DOMContentLoaded event listener
-  document.addEventListener('DOMContentLoaded', async () => {
-    // ... existing code ...
 
-    // Initialize analytics checkbox
-    const collectUsageCheckbox = document.getElementById('collect-usage');
-    if (collectUsageCheckbox) {
-      // Get initial value
-      const collectUsage = await window.electron.getSetting('CollectUsage');
-      console.log('Initial CollectUsage value:', collectUsage);
 
-      // Set checkbox state based on the actual value
-      collectUsageCheckbox.checked = collectUsage === '1';
-
-      // Handle changes using the same handler as in the about dialog
-      collectUsageCheckbox.addEventListener('change', collectUsageChangeHandler);
-
-      // Initialize analytics state with current setting
-      toggleAnalytics(collectUsage === '1');
-    }
-  });
-
-  // Add this function to handle enabling/disabling analytics
-  function toggleAnalytics(enable) {
-    console.log('Toggling analytics:', enable);
-
-    const script1 = document.getElementById('analytics-script-1');
-    const script2 = document.getElementById('analytics-script-2');
-
-    if (!script1 || !script2) {
-      console.log('Analytics scripts not found in the DOM');
-      return;
-    }
-
-    if (enable) {
-      // Enable analytics
-      console.log('Enabling analytics scripts');
-      script1.removeAttribute('disabled');
-      script2.removeAttribute('disabled');
-
-      // Initialize analytics if it wasn't already
-      if (typeof gtag === 'undefined') {
-        const newScript = document.createElement('script');
-        newScript.async = true;
-        newScript.src = "https://www.googletagmanager.com/gtag/js?id=G-N4766Y9R11";
-        document.head.appendChild(newScript);
-
-        newScript.onload = () => {
-          window.dataLayer = window.dataLayer || [];
-          function gtag(){dataLayer.push(arguments);}
-          gtag('js', new Date());
-          gtag('config', 'G-N4766Y9R11');
-        };
-      }
-    } else {
-      // Disable analytics
-      console.log('Disabling analytics scripts');
-      script1.setAttribute('disabled', '');
-      script2.setAttribute('disabled', '');
-
-      // Clear any existing analytics data
-      if (window.dataLayer) {
-        window.dataLayer = [];
-      }
-    }
-  }
 
   // Add these constants at the top of the file (if not already present)
   const PAGE_SIZE = 100; // Number of models to keep in memory
@@ -3499,49 +3148,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   };
 
-  // Add this IPC handler to preload.js
-  // getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references'),
-
-  document.addEventListener('DOMContentLoaded', async () => {
-    try {
-      // Initialize the application
-      await initializeApp();
-
-      // Set up multi-edit button handler
-      const multiEditBtn = document.getElementById('multi-edit-btn');
-      if (multiEditBtn) {
-        multiEditBtn.addEventListener('click', async () => {
-          await showMultiEditPanel();
-        });
-      }
-
-      // Set up multi-edit close button
-      const closeMultiEditBtn = document.getElementById('close-multi-edit');
-      if (closeMultiEditBtn) {
-        closeMultiEditBtn.addEventListener('click', () => {
-          exitMultiEditMode();
-        });
-      }
-
-      // Initialize multi-edit tag handling
-      const addMultiEditTagBtn = document.getElementById('add-multi-edit-tag');
-      if (addMultiEditTagBtn) {
-        addMultiEditTagBtn.addEventListener('click', async () => {
-          const tagSelect = document.getElementById('multi-edit-tag-select');
-          if (tagSelect && tagSelect.value) {
-            await autoSaveMultipleModels('tags', tagSelect.value);
-            tagSelect.value = ''; // Reset selection
-          }
-        });
-      }
-
-      // Debug log for initialization
-      debugLog('Multi-edit panel initialization complete');
-
-    } catch (error) {
-      console.error('Error during application initialization:', error);
-    }
-  });
 
   // ... existing code ...
 });
@@ -4068,25 +3674,6 @@ async function displayModels(files) {
 }
 
 
-// Add event listeners for all filter changes
-document.addEventListener('DOMContentLoaded', () => {
-  const filterElements = [
-    'designer-select',
-    'license-select',
-    'parent-select',
-    'printed-select',
-    'tag-filter',
-    'sort-select',
-    'filetype-select'  // Add this line
-  ];
-
-  filterElements.forEach(elementId => {
-    const element = document.getElementById(elementId);
-    if (element) {
-      element.addEventListener('change', handleFilterChange);
-    }
-  });
-});
 
 // Add this near the top with other constants
 const GC_INTERVAL = 100; // Number of models to process before garbage collection
