@@ -1,4 +1,3 @@
-
 // Add these functions near the top of the file
 async function updateModelCounts(viewCount) {
   try {
@@ -457,60 +456,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     settingsDialog.showModal();
   });
 
-  // Update the multi-save button handler
-  document.getElementById('multi-save-button')?.addEventListener('click', async () => {
-    try {
-      const designer = document.getElementById('multi-designer').value;
-      const source = document.getElementById('multi-source').value;
-      const parent = document.getElementById('multi-parent').value;
-      const license = document.getElementById('multi-license').value;
-      const printed = document.getElementById('multi-printed').checked;
-
-      // Get all selected tags
-      const tagElements = document.getElementById('multi-tags').querySelectorAll('.tag');
-      const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name'));
-
-      // Update each selected model
-      for (const filePath of selectedModels) {
-        const existingModel = await window.electron.getModel(filePath);
-        
-        const modelData = {
-          filePath,
-          ...(designer && { designer }),
-          ...(source && { source }),
-          ...(parent && { parentModel: parent }),
-          ...(license && { license }),
-          printed: printed,
-          tags: tags.length > 0 ? tags : (existingModel.tags || [])
-        };
-
-        await window.electron.saveModel(modelData);
-        await updateModelElement(filePath);
-      }
-
-      // Refresh all filter dropdowns
-      await Promise.all([
-        populateDesignerDropdown(),
-        populateLicenseFilter(),
-        populateParentModelFilter(),
-        populateTagFilter()
-      ]);
-
-      // Clear selection and hide multi-edit panel
-      selectedModels.clear();
-      isMultiSelectMode = false;
-      document.getElementById('multi-edit-panel').classList.add('hidden');
-      document.getElementById('model-details').classList.remove('hidden');
-      document.getElementById('edit-mode-toggle').textContent = 'Multi-Edit Mode';
-      document.getElementById('edit-mode-toggle').classList.remove('active');
-
-      // Reapply filters to refresh the view
-      await refreshModelDisplay();
-
-    } catch (error) {
-      console.error('Error saving multiple models:', error);
-    }
-  });
+  // Multi-save button is no longer needed since we auto-save changes
+  // The button can be removed from the UI or kept for potential future use
 
   await populateDesignerDropdown();
   await populateLicenseFilter();
@@ -624,57 +571,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await populateTagFilter();
 
-  // Add event listener for Update Selected Models button
-  document.getElementById('multi-save-button')?.addEventListener('click', async () => {
-    try {
-      const designer = document.getElementById('multi-designer').value;
-      const source = document.getElementById('multi-source').value;
-      const parent = document.getElementById('multi-parent').value;
-      const license = document.getElementById('multi-license').value;
-      const printed = document.getElementById('multi-printed').value;
-
-      // Get all selected tags
-      const tagElements = document.getElementById('multi-tags').querySelectorAll('.tag');
-      const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name'));
-
-      // Update each selected model
-      for (const filePath of selectedModels) {
-        const existingModel = await window.electron.getModel(filePath);
-        
-        const modelData = {
-          filePath,
-          ...(designer && { designer }),
-          ...(source && { source }),
-          ...(parent && { parentModel: parent }),
-          ...(license && { license }),
-          printed: printed,
-          tags: tags.length > 0 ? tags : (existingModel.tags || [])
-        };
-
-        await window.electron.saveModel(modelData);
-        await updateModelElement(filePath);
-      }
-
-      // Refresh all filter dropdowns
-      await Promise.all([
-        populateDesignerDropdown(),
-        populateLicenseFilter(),
-        populateParentModelFilter(),
-        populateTagFilter()
-      ]);
-
-      // Clear selection and hide multi-edit panel
-      selectedModels.clear();
-      isMultiSelectMode = false;
-      document.getElementById('multi-edit-panel').classList.add('hidden');
-      document.getElementById('model-details').classList.remove('hidden');
-      document.getElementById('edit-mode-toggle').textContent = 'Multi-Edit Mode';
-      document.getElementById('edit-mode-toggle').classList.remove('active');
-
-    } catch (error) {
-      console.error('Error saving multiple models:', error);
-    }
-  });
+  // Multi-save button is no longer needed since we auto-save changes
+  // The button can be removed from the UI or kept for potential future use
 
   // Update the add button event listeners to handle both panels
   document.querySelectorAll('.add-designer-button').forEach(button => {
@@ -703,6 +601,79 @@ document.addEventListener('DOMContentLoaded', async () => {
       dialog.showModal();
     });
   });
+
+  // Set up tag dropdown event listeners (only once)
+  if (!window.tagDropdownsInitialized) {
+    console.log('Setting up tag dropdown event listeners...');
+    
+    // Add event listener for single edit tag dropdown
+    const singleTagSelect = document.getElementById('tag-select');
+    if (singleTagSelect) {
+      singleTagSelect.addEventListener('change', async () => {
+        console.log('Single tag select changed:', singleTagSelect.value);
+        const selectedTag = singleTagSelect.value;
+        if (selectedTag) {
+          await addTagToModel(selectedTag, 'model-tags');
+          singleTagSelect.value = ''; // Reset selection
+        }
+      });
+      console.log('Added change listener to single tag select');
+    }
+    
+    // Add event listener for multi edit tag dropdown
+    const multiTagSelect = document.getElementById('multi-tag-select');
+    if (multiTagSelect) {
+      // Remove all existing event listeners by replacing the element
+      const newMultiTagSelect = multiTagSelect.cloneNode(true);
+      multiTagSelect.parentNode.replaceChild(newMultiTagSelect, multiTagSelect);
+
+      newMultiTagSelect.addEventListener('change', async (event) => {
+        const selectedTag = newMultiTagSelect.value;
+        if (selectedTag) {
+          const multiTagsContainer = document.getElementById('multi-tags');
+          if (multiTagsContainer) {
+            // Check if tag already exists
+            const existingTags = Array.from(multiTagsContainer.querySelectorAll('.tag')).map(tag => tag.textContent.trim().replace('×', '').trim());
+            if (!existingTags.includes(selectedTag)) {
+              // Create tag element
+              const tagElement = document.createElement('span');
+              tagElement.className = 'tag';
+              tagElement.setAttribute('data-tag-name', selectedTag);
+              tagElement.innerHTML = `
+                ${selectedTag}
+                <span class="tag-remove">×</span>
+              `;
+              
+              // Add proper event listener for tag removal
+              tagElement.querySelector('.tag-remove').addEventListener('click', async () => {
+                tagElement.remove();
+                // Auto-save the updated tags immediately
+                const updatedTags = Array.from(multiTagsContainer.querySelectorAll('.tag')).map(tag => tag.getAttribute('data-tag-name'));
+                await autoSaveMultipleModels('tags', updatedTags);
+                
+                // Refresh the dropdown to show updated list
+                await populateTagSelect('multi-tag-select', 'multi-tags');
+              });
+              
+              multiTagsContainer.appendChild(tagElement);
+
+              // Auto-save the updated tags immediately
+              const updatedTags = Array.from(multiTagsContainer.querySelectorAll('.tag')).map(tag => tag.getAttribute('data-tag-name'));
+              await autoSaveMultipleModels('tags', updatedTags);
+              
+              // Refresh the dropdown to show updated list
+              await populateTagSelect('multi-tag-select', 'multi-tags');
+            }
+          }
+          newMultiTagSelect.value = ''; // Reset selection
+        }
+      });
+      console.log('Added change listener to multi tag select (multi-edit mode only)');
+    }
+    
+    // Mark as initialized to prevent duplicate setup
+    window.tagDropdownsInitialized = true;
+  }
 
   // Add fetch button event listeners
 
@@ -909,17 +880,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add this with other event listeners in the DOMContentLoaded section
   document.getElementById('view-library-button')?.addEventListener('click', async () => {
     try {
-      // Get the current sort option from the dropdown
-      const sortOption = document.getElementById('sort-select').value;
-      
       // Reset all filters
       document.getElementById('designer-select').value = '';
       document.getElementById('license-select').value = '';
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
       document.getElementById('tag-filter').value = '';
+      document.getElementById('filetype-select').value = '';
       if (document.getElementById('search-filter-input')) {
         document.getElementById('search-filter-input').value = '';
+      }
+      
+      // Clear directory filter if it exists
+      window.currentDirectoryFilter = '';
+      
+      // Clear the global filtered models state
+      if (typeof allFilteredModels !== 'undefined') {
+        allFilteredModels = [];
       }
       
       // Explicitly hide the "Showing 100 Newest Models" message
@@ -928,14 +905,27 @@ document.addEventListener('DOMContentLoaded', async () => {
         viewLibMsg.style.display = "none";
       }
       
+      // Clear the filter indicator
+      const filterIndicator = document.getElementById("current-filter");
+      if (filterIndicator) {
+        filterIndicator.innerHTML = "";
+        filterIndicator.classList.remove('visible');
+      }
+      
       // Flag that we're viewing the entire library
       window.viewingEntireLibrary = true;
       
-      // Pass 0 as limit to indicate "no limit"
-      const models = await window.electron.getAllModels(sortOption, 0);
-      await renderFiles(models, false, true); // Add a parameter to indicate viewing entire library
+      // Use the new combined search system to refresh the display
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      } else {
+        // Fallback to old method if new system not available
+        const sortOption = document.getElementById('sort-select').value;
+        const models = await window.electron.getAllModels(sortOption, 0);
+        await renderFiles(models, false, true);
+      }
       
-      console.log("Viewing entire library with", models.length, "models");
+      console.log("Viewing entire library");
     } catch (error) {
       console.error("Error loading entire library:", error);
     }
@@ -1033,6 +1023,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const tags = await window.electron.getAllTags();
       const tagDropdowns = document.querySelectorAll('.tags-input-container select');
       
+      // Sort tags alphabetically by name
+      const sortedTags = tags.sort((a, b) => a.name.localeCompare(b.name));
+      
       tagDropdowns.forEach(dropdown => {
         // Save current selection
         const currentSelection = Array.from(dropdown.selectedOptions).map(opt => opt.value);
@@ -1047,7 +1040,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         dropdown.appendChild(placeholderOption);
         
         // Add tags
-        tags.forEach(tag => {
+        sortedTags.forEach(tag => {
           const option = document.createElement('option');
           option.value = tag.name;
           option.textContent = tag.name;
@@ -1121,8 +1114,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       placeholderOption.textContent = 'Select a tag...';
       dropdown.appendChild(placeholderOption);
       
+      // Sort tags alphabetically by name
+      const sortedTags = tags.sort((a, b) => a.name.localeCompare(b.name));
+      
       // Add tags
-      tags.forEach(tag => {
+      sortedTags.forEach(tag => {
         const option = document.createElement('option');
         option.value = tag.name;
         option.textContent = tag.name;
@@ -1151,6 +1147,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   });
+
+  // Make refreshTagDropdown available globally
+  window.refreshTagDropdown = refreshTagDropdown;
 
   // Also add handler for dynamically created refresh buttons
   document.body.addEventListener('click', async (event) => {
@@ -1999,7 +1998,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const images = await window.electron.get3MFImages(file.filePath);
           if (images && images.length > 0) {
             const img = document.createElement('img');
-            img.src = images[0];
+            img.src = encodeURI(images[0]);
             img.className = 'model-thumbnail';
             thumbnailContainer.innerHTML = '';
             thumbnailContainer.appendChild(img);
@@ -2030,7 +2029,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } else {
       const img = document.createElement('img');
-      img.src = file.thumbnail || '3d.png';
+      img.src = encodeURI(file.thumbnail || '3d.png');
       thumbnailContainer.innerHTML = '';
       thumbnailContainer.appendChild(img);
     }
@@ -2313,10 +2312,42 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (viewLibraryButton) {
     viewLibraryButton.addEventListener('click', async () => {
       try {
-        // Get the current sort option from the dropdown
-        const sortOption = document.getElementById('sort-select').value;
-        // Pass 0 as limit to indicate "no limit"
-        const models = await window.electron.getAllModels(sortOption, 0);
+        // Reset all filter dropdowns
+        document.getElementById('designer-select').value = '';
+        document.getElementById('license-select').value = '';
+        document.getElementById('parent-select').value = '';
+        document.getElementById('printed-select').value = 'all';
+        document.getElementById('tag-filter').value = '';
+        document.getElementById('filetype-select').value = '';
+        document.getElementById('search-filter-input').value = '';
+
+        // Clear directory filter if it exists
+        window.currentDirectoryFilter = '';
+
+        // Hide the "Showing 100 Newest Models" message
+        const viewLibMsg = document.getElementById("view-library-message");
+        if (viewLibMsg) {
+          viewLibMsg.style.display = "none";
+        }
+
+        // Clear the filter indicator
+        const filterIndicator = document.getElementById("current-filter");
+        if (filterIndicator) {
+          filterIndicator.innerHTML = "";
+          filterIndicator.classList.remove('visible');
+        }
+
+        // Use the new combined search system to refresh the display
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        } else {
+          // Fallback to old method if new system not available
+          const sortOption = document.getElementById('sort-select').value;
+          const models = await window.electron.getAllModels(sortOption, 0);
+          await renderFiles(models, false, true);
+        }
+
+        console.log("Viewing entire library");
       } catch (error) {
         console.error("Error loading entire library:", error);
       }
@@ -2731,7 +2762,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
       document.getElementById('tag-filter').value = '';
+      document.getElementById('filetype-select').value = '';
       document.getElementById('search-filter-input').value = '';
+
+      // Clear directory filter if it exists
+      window.currentDirectoryFilter = '';
+
+      // Clear the global filtered models state
+      if (typeof allFilteredModels !== 'undefined') {
+        allFilteredModels = [];
+      }
 
       // Hide the "Showing 100 Newest Models" message
       const viewLibMsg = document.getElementById("view-library-message");
@@ -2739,20 +2779,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         viewLibMsg.style.display = "none";
       }
 
-      // Get all model references (just IDs and paths, not full data)
-      const modelRefs = await window.electron.getAllModelReferences();
-      if (!modelRefs) { // Add this check
-        console.error('Failed to retrieve model references.');
-        await window.electron.showMessage('Error', 'Failed to load library.'); // Show error to user
-        return; // Stop execution
+      // Clear the filter indicator
+      const filterIndicator = document.getElementById("current-filter");
+      if (filterIndicator) {
+        filterIndicator.innerHTML = "";
+        filterIndicator.classList.remove('visible');
       }
-      allFilteredModels = modelRefs;
 
-      // Initialize virtual scrolling with the first page
+      // Use the new combined search system to refresh the display
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      } else {
+        // Fallback to old method if new system not available
+        const modelRefs = await window.electron.getAllModelReferences();
+        if (!modelRefs) {
+          console.error('Failed to retrieve model references.');
+          await window.electron.showMessage('Error', 'Failed to load library.');
+          return;
+        }
+        allFilteredModels = modelRefs;
+        // Initialize virtual scrolling with the first page
+      }
 
     } catch (error) {
       console.error('Error loading library:', error);
-      await window.electron.showMessage('Error', 'Failed to load library.'); // Show error to user
+      await window.electron.showMessage('Error', 'Failed to load library.');
     }
   });
 
@@ -3126,6 +3177,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const searchResults = fuse.search(searchTerm);
         filteredModels = searchResults.map(result => result.item);
+      }
+
+      // Apply directory filter
+      const directoryFilter = window.currentDirectoryFilter || "";
+      if (directoryFilter) {
+        filteredModels = filteredModels.filter(model => {
+          const modelDir = model.filePath.replace(/[/\\]+$/, '').split(/[/\\]/).slice(0, -1).join('/');
+          const modelParentDir = modelDir.split(/[/\\]/).pop();
+          return modelParentDir === directoryFilter;
+        });
       }
 
       // Deduplicate models based on file paths
@@ -3883,7 +3944,7 @@ async function renderFile(file, container, skipThumbnail = false) {
         const images = await window.electron.get3MFImages(file.filePath);
         if (images && images.length > 0) {
           const img = document.createElement('img');
-          img.src = images;
+          img.src = encodeURI(images);
           img.className = 'model-thumbnail';
           thumbnailContainer.innerHTML = '';
           thumbnailContainer.appendChild(img);
@@ -3920,7 +3981,7 @@ async function renderFile(file, container, skipThumbnail = false) {
     }
   } else if (file.thumbnail) { // Check if file.thumbnail exists before creating img element
     const img = document.createElement('img');
-    img.src = file.thumbnail || '3d.png'; // Provide a default image
+    img.src = encodeURI(file.thumbnail || '3d.png'); // Provide a default image
     img.className = 'model-thumbnail'; // Add class for styling
     thumbnailContainer.innerHTML = '';
     thumbnailContainer.appendChild(img);
@@ -4114,27 +4175,65 @@ async function populateModelDesignerDropdown(selectedDesigner, elementId = 'mode
 
 
 async function populateTagSelect(selectId = 'tag-select', containerId = 'model-tags') {
+  console.log(`populateTagSelect called with selectId: ${selectId}, containerId: ${containerId}`);
+  
+  // Prevent multiple simultaneous calls to the same dropdown
+  const cacheKey = `populateTagSelect_${selectId}`;
+  if (window[cacheKey]) {
+    console.log(`Skipping populateTagSelect for ${selectId} - already in progress`);
+    return;
+  }
+  window[cacheKey] = true;
+  
   const tagSelect = document.getElementById(selectId);
+  if (!tagSelect) {
+    console.error(`Tag select element with id '${selectId}' not found`);
+    window[cacheKey] = false;
+    return;
+  }
+  
   const currentTags = Array.from(document.querySelectorAll(`#${containerId} .tag`))
     .map(tag => tag.getAttribute('data-tag-name'));
   
+  console.log('Current tags:', currentTags);
+  
+  // Clear the dropdown completely
   tagSelect.innerHTML = '<option value="">Select a tag...</option>';
+  console.log('Cleared dropdown, added placeholder option');
 
   try {
     const tags = await window.electron.getAllTags();
-    tags.forEach(tag => {
+    console.log('Fetched tags from database:', tags);
+    
+    // Sort tags alphabetically by name
+    const sortedTags = tags.sort((a, b) => a.name.localeCompare(b.name));
+    
+    let addedCount = 0;
+    sortedTags.forEach(tag => {
       // Only add tags that aren't already selected
       if (!currentTags.includes(tag.name)) {
         const option = document.createElement('option');
         option.value = tag.name;
         option.textContent = tag.name;
         tagSelect.appendChild(option);
+        addedCount++;
+        console.log(`Added tag option: ${tag.name}`);
+      } else {
+        console.log(`Skipped tag ${tag.name} - already selected`);
       }
     });
+    
+    console.log(`Final dropdown options count: ${tagSelect.options.length} (added ${addedCount} new options)`);
   } catch (error) {
     console.error('Error fetching tags:', error);
+  } finally {
+    // Clear the cache flag
+    window[cacheKey] = false;
   }
 }
+
+// Make functions available globally
+window.populateTagSelect = populateTagSelect;
 
 // Update the addTagToModel function
 async function addTagToModel(tagName, containerId) {
@@ -4163,6 +4262,7 @@ async function addTagToModel(tagName, containerId) {
       .map(t => t.getAttribute('data-tag-name'));
     
     if (containerId === 'multi-tags') {
+      // Auto-save the updated tags immediately
       await autoSaveMultipleModels('tags', currentTags);
     } else {
       const filePath = document.getElementById('model-path').value;
@@ -4171,9 +4271,9 @@ async function addTagToModel(tagName, containerId) {
     
     // Refresh the tag select dropdown
     if (containerId === 'multi-tags') {
-      populateTagSelect('multi-tag-select', 'multi-tags');
+      await populateTagSelect('multi-tag-select', 'multi-tags');
     } else {
-      populateTagSelect('tag-select', 'model-tags');
+      await populateTagSelect('tag-select', 'model-tags');
     }
   });
 
@@ -4184,12 +4284,18 @@ async function addTagToModel(tagName, containerId) {
     .map(t => t.getAttribute('data-tag-name'));
   
   if (containerId === 'multi-tags') {
+    // Auto-save the updated tags immediately
     await autoSaveMultipleModels('tags', currentTags);
+    // Refresh the multi-edit tag dropdown to show updated list
+    await populateTagSelect('multi-tag-select', 'multi-tags');
   } else {
     const filePath = document.getElementById('model-path').value;
     await autoSaveModel('tags', currentTags, filePath);
   }
 }
+
+// Make addTagToModel available globally
+window.addTagToModel = addTagToModel;
 
 async function loadModelTags(modelId) {
   const tagsContainer = document.getElementById('model-tags');
@@ -4568,4 +4674,78 @@ function addContextMenuHandler(fileElement, filePath) {
     camera.position.set(cameraZ, cameraZ, cameraZ);
     camera.lookAt(center);
   }
+
+  // Tag dropdown event listeners are now set up in the main DOMContentLoaded event listener
+
+  // Utility to show/hide filter loading overlay
+function setFilterLoading(isLoading, message = 'Loading models...') {
+  const filterSection = document.querySelector('.filter-section');
+  if (!filterSection) return;
+  if (isLoading) {
+    filterSection.classList.add('loading');
+    let overlay = document.querySelector('.filter-loading-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'filter-loading-overlay';
+      overlay.innerHTML = `<div>${message}</div>`;
+      // Position the overlay relative to the filter section but append to body to avoid blur
+      const rect = filterSection.getBoundingClientRect();
+      overlay.style.position = 'fixed';
+      overlay.style.top = rect.top + 'px';
+      overlay.style.left = rect.left + 'px';
+      overlay.style.width = rect.width + 'px';
+      overlay.style.height = rect.height + 'px';
+      document.body.appendChild(overlay);
+    }
+  } else {
+    filterSection.classList.remove('loading');
+    const overlay = document.querySelector('.filter-loading-overlay');
+    if (overlay) overlay.remove();
+  }
+}
+
+  // Patch into renderFiles and displayModels
+  const origRenderFiles = window.renderFiles;
+  window.renderFiles = async function(...args) {
+    setFilterLoading(true);
+    try {
+      await origRenderFiles.apply(this, args);
+    } finally {
+      setFilterLoading(false);
+    }
+  };
+
+  const origDisplayModels = window.displayModels;
+  window.displayModels = async function(...args) {
+    setFilterLoading(true);
+    try {
+      await origDisplayModels.apply(this, args);
+    } finally {
+      setFilterLoading(false);
+    }
+  };
+
+  // ... existing code ...
+  window.electron.onRegenerateThumbnails(async () => {
+    try {
+      const modelsWithoutThumbs = await window.electron.getModelsWithoutThumbnails();
+      if (!modelsWithoutThumbs || modelsWithoutThumbs.length === 0) {
+        await window.electron.showMessage('Regenerate Thumbnails', 'All models already have thumbnails.');
+        return;
+      }
+      // Dynamically import the generator if not already loaded
+      if (typeof generateThumbnailsForModels !== 'function') {
+        const mod = await import('./renderer/models/generateThumbnailsForModels.js');
+        window.generateThumbnailsForModels = mod.generateThumbnailsForModels;
+      }
+      await window.generateThumbnailsForModels(modelsWithoutThumbs);
+      await window.electron.showMessage('Regenerate Thumbnails', 'Thumbnail regeneration complete.');
+      // Optionally refresh the UI
+      if (typeof refreshUIContent === 'function') refreshUIContent();
+    } catch (error) {
+      console.error('Error regenerating thumbnails:', error);
+      await window.electron.showMessage('Error', 'Failed to regenerate thumbnails.');
+    }
+  });
+  // ... existing code ...
 

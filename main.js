@@ -578,6 +578,10 @@ function createWindow() {
         },
         { type: 'separator' },
         {
+          label: 'Regenerate Thumbnails',
+          click: () => mainWindow.webContents.send('regenerate-thumbnails')
+        },
+        {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
         }
@@ -715,6 +719,10 @@ function createApplicationMenu() {
           click: () => mainWindow.webContents.send('open-tag-manager')
         },
         { type: 'separator' },
+        {
+          label: 'Regenerate Thumbnails',
+          click: () => mainWindow.webContents.send('regenerate-thumbnails')
+        },
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
@@ -907,6 +915,37 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         const path = require('path');
         const crypto = require('crypto');
 
+        async function calculateFileHash(filePath) {
+          return new Promise((resolve, reject) => {
+            const hash = crypto.createHash('sha256');
+            const stream = fs.createReadStream(filePath);
+            
+            stream.on('error', err => {
+              console.error(\`Error reading file for hashing: \${filePath}\`, err);
+              reject(err);
+            });
+
+            stream.on('data', chunk => {
+              try {
+                hash.update(chunk);
+              } catch (err) {
+                console.error(\`Error updating hash for file: \${filePath}\`, err);
+                reject(err);
+              }
+            });
+
+            stream.on('end', () => {
+              try {
+                const fileHash = hash.digest('hex');
+                resolve(fileHash);
+              } catch (err) {
+                console.error(\`Error generating final hash for file: \${filePath}\`, err);
+                reject(err);
+              }
+            });
+          });
+        }
+
         async function scanDirectory(directoryPath, maxFileSize) {
           const files = [];
           let totalFiles = 0;
@@ -945,11 +984,21 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                   try {
                     const stats = fs.statSync(fullPath);
                     if (stats.size <= maxFileSize) {
+                      // Calculate hash for the file
+                      let fileHash = null;
+                      try {
+                        fileHash = await calculateFileHash(fullPath);
+                      } catch (hashError) {
+                        console.error(\`Error calculating hash for \${fullPath}:\`, hashError);
+                        // Continue without hash if calculation fails
+                      }
+                      
                       files.push({
                         filePath: fullPath,
                         fileName: entry.name,
                         size: stats.size,
-                        mtime: stats.mtime
+                        mtime: stats.mtime,
+                        hash: fileHash
                       });
                     }
                   } catch (error) {
@@ -1853,8 +1902,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     console.error('Error getting slicers:', error);
   }
   
-  // Add "Open in Slicer" submenu if there are configured slicers
-  if (slicers.length > 0) {
+  // Add "Open in Slicer" submenu if there are configured slicers and only one file is selected
+  if (slicers.length > 0 && filePaths.length === 1) {
     const slicerSubmenu = {
       label: 'Open in Slicer',
       submenu: slicers.map(slicer => ({
@@ -2399,6 +2448,61 @@ ipcMain.handle('get-duplicates', async () => {
   }
 });
 
+// Add IPC handler to calculate missing hashes
+ipcMain.handle('calculate-missing-hashes', async (event) => {
+  try {
+    // Get all models with missing hashes
+    const modelsWithMissingHashes = db.prepare(`
+      SELECT filePath, fileName, size 
+      FROM models 
+      WHERE hash IS NULL OR hash = ''
+    `).all();
+
+    console.log(`Found ${modelsWithMissingHashes.length} models with missing hashes`);
+
+    if (modelsWithMissingHashes.length === 0) {
+      return { calculated: 0, total: 0 };
+    }
+
+    let calculatedCount = 0;
+    const updateHash = db.prepare('UPDATE models SET hash = ? WHERE filePath = ?');
+
+    // Calculate hashes in batches to avoid blocking
+    const batchSize = 10;
+    for (let i = 0; i < modelsWithMissingHashes.length; i += batchSize) {
+      const batch = modelsWithMissingHashes.slice(i, i + batchSize);
+      
+      for (const model of batch) {
+        try {
+          if (fs.existsSync(model.filePath)) {
+            const hash = await calculateFileHash(model.filePath);
+            updateHash.run(hash, model.filePath);
+            calculatedCount++;
+          } else {
+            console.warn(`File no longer exists: ${model.filePath}`);
+          }
+        } catch (error) {
+          console.error(`Error calculating hash for ${model.filePath}:`, error);
+        }
+      }
+
+      // Send progress update
+      event.sender.send('hash-calculation-progress', {
+        calculated: calculatedCount,
+        total: modelsWithMissingHashes.length
+      });
+
+      // Small delay to prevent blocking
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    return { calculated: calculatedCount, total: modelsWithMissingHashes.length };
+  } catch (error) {
+    console.error('Error calculating missing hashes:', error);
+    throw error;
+  }
+});
+
 // Add this IPC handler for thumbnails
 ipcMain.handle('getThumbnail', async (event, filePath) => {
   try {
@@ -2666,7 +2770,7 @@ function getSettings() {
 ipcMain.handle('get-models-without-thumbnails', async () => {
   try {
     const modelsWithoutThumbnails = db.prepare(`
-      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = ''
+      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
     `).all();
     return modelsWithoutThumbnails;
   } catch (error) {

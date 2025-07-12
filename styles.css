@@ -533,8 +533,7 @@ header {
 .tags-container,
 .tags-input-container,
 .tags-list,
-.tag,
-.tag-remove {
+.tag {
   display: none;
 }
 
@@ -697,6 +696,7 @@ header {
 #multi-save-button {
   background-color: #28a745;
   margin-top: 20px;
+  display: none; /* Hidden since we auto-save changes now */
 }
 
 #multi-save-button:hover {
@@ -2222,3 +2222,59 @@ header {
 .filter-remove:hover {
   background-color: rgba(255, 255, 255, 0.3);
 }
+
+/* Ensure tag dropdowns work properly */
+#tag-select,
+#multi-tag-select {
+  /* Ensure proper appearance */
+  -webkit-appearance: menulist;
+  -moz-appearance: menulist;
+  appearance: menulist;
+  /* Ensure proper sizing */
+  width: calc(100% - 45px);
+  height: auto;
+  min-height: 36px;
+  /* Ensure it's clickable */
+  pointer-events: auto;
+  /* Ensure proper z-index */
+  z-index: 1000;
+  position: relative;
+}
+
+/* Ensure the container doesn't hide the select */
+.tags-input-container {
+  position: relative;
+  z-index: 1000;
+  overflow: visible;
+}
+
+.tags-input-container select {
+  position: relative;
+  z-index: 1001;
+  overflow: visible;
+}
+
+.filter-section.loading {
+  filter: blur(2.5px) grayscale(0.3) brightness(0.8);
+  pointer-events: none;
+  position: relative;
+}
+
+.filter-loading-overlay {
+  background: rgba(30, 30, 30, 0.8);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  color: #fff;
+  font-size: 1.2em;
+  font-weight: bold;
+  pointer-events: all;
+  text-align: center;
+  /* Ensure the overlay itself is not blurred */
+  filter: none !important;
+  backdrop-filter: none;
+  transform: translateZ(0);
+}
+

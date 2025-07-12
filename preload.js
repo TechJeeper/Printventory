@@ -74,6 +74,10 @@ contextBridge.exposeInMainWorld('electron', {
   },
   getDuplicates: () => ipcRenderer.invoke('get-duplicates'),
   getThumbnail: (filePath) => ipcRenderer.invoke('getThumbnail', filePath),
+  calculateMissingHashes: () => ipcRenderer.invoke('calculate-missing-hashes'),
+  onHashCalculationProgress: (callback) => {
+    ipcRenderer.on('hash-calculation-progress', (_, progress) => callback(progress));
+  },
   onStartPrintRoulette: (callback) => {
     ipcRenderer.on('start-print-roulette', callback);
   },
@@ -119,7 +123,8 @@ contextBridge.exposeInMainWorld('electron', {
   startTransaction: () => ipcRenderer.invoke('database:start-transaction'),
   commitTransaction: () => ipcRenderer.invoke('database:commit-transaction'),
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),
-  getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references')
+  getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references'),
+  onRegenerateThumbnails: (callback) => ipcRenderer.on('regenerate-thumbnails', callback)
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {
