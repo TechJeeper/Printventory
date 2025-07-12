@@ -232,6 +232,43 @@ document.getElementById('delete-selected-button')?.addEventListener('click', asy
   await refreshModelDisplay();
 });
 
+// Add a function to clean up WebGL resources
+function cleanupWebGLResources() {
+  if (typeof sharedRenderer !== 'undefined' && sharedRenderer) {
+    sharedRenderer.dispose();
+    sharedRenderer = null;
+  }
+
+  if (typeof sharedScene !== 'undefined' && sharedScene) {
+    sharedScene.traverse((object) => {
+      if (object.geometry) {
+        object.geometry.dispose();
+      }
+      if (object.material) {
+        if (Array.isArray(object.material)) {
+          object.material.forEach(material => material.dispose());
+        } else {
+          object.material.dispose();
+        }
+      }
+    });
+    sharedScene = null;
+  }
+
+  if (typeof sharedCamera !== 'undefined') {
+    sharedCamera = null;
+  }
+  
+  if (typeof contextUseCount !== 'undefined') {
+    contextUseCount = 0;
+  }
+
+  // Force garbage collection if available
+  if (typeof window.gc === 'function') {
+    window.gc();
+  }
+}
+
 // Add WebGL context loss handling
 window.addEventListener('webglcontextlost', (event) => {
   event.preventDefault();
@@ -271,14 +308,7 @@ document.getElementById('multi-parent').addEventListener('change', async (e) => 
 });
 
 // Update tag handling for multi-edit panel
-document.getElementById('multi-tag-select').addEventListener('change', async () => {
-  const selectedTag = document.getElementById('multi-tag-select').value;
-  if (selectedTag) {
-    // Use the same addTagToModel function as single mode
-    addTagToModel(selectedTag, 'multi-tags');
-    document.getElementById('multi-tag-select').value = ''; // Reset selection
-  }
-});
+// Note: This is now handled in showMultiEditPanel to ensure it works when the panel is shown
 
 // Cancel Button Handler
 document.getElementById('cancel-parent-button')?.addEventListener('click', () => {
@@ -461,14 +491,9 @@ document.getElementById('new-parent-dialog').addEventListener('submit', async (e
   }
 });
 
-// Update the multi-tag-select change handler
-document.getElementById('multi-tag-select').addEventListener('change', async () => {
-  const tagSelect = document.getElementById('multi-tag-select');
-  const selectedTag = tagSelect.value;
-  if (selectedTag) {
-    // Use the same addTagToModel function as single mode
-    addTagToModel(selectedTag, 'multi-tags');
-    document.getElementById('multi-tag-select').value = ''; // Reset selection
-  }
-});
+// Add event listener for single edit tag dropdown - moved to after DOM is loaded
+// This will be handled in the main initialization to ensure proper timing
+
+// Update the multi-tag-select change handler (remove duplicate)
+// Note: This is now handled in showMultiEditPanel to ensure it works when the panel is shown
 

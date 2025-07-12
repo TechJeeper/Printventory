@@ -65,7 +65,11 @@ async function populateTagFilter(selected = null) {
   try {
     const tags = await window.electron.getAllTags();
     dropdown.innerHTML = `<option value="">All Tags</option>`;
-    tags.forEach(tag => {
+    
+    // Sort tags alphabetically by name
+    const sortedTags = tags.sort((a, b) => a.name.localeCompare(b.name));
+    
+    sortedTags.forEach(tag => {
       const option = document.createElement('option');
       option.value = tag.name;
       option.textContent = tag.name;
@@ -76,3 +80,9 @@ async function populateTagFilter(selected = null) {
     console.error('Failed to populate tag filter:', error);
   }
 }
+
+// Make functions available globally
+window.populateTagFilter = populateTagFilter;
+window.populateDesignerDropdown = populateDesignerDropdown;
+window.populateLicenseFilter = populateLicenseFilter;
+window.populateParentModelFilter = populateParentModelFilter;

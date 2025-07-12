@@ -37,6 +37,8 @@ async function showMultiEditPanel() {
       return;
     }
 
+    // Multi-edit changes are now auto-saved immediately
+
     // Hide single edit panel
     detailsPanel.classList.add('hidden');
 
@@ -121,13 +123,65 @@ async function showMultiEditPanel() {
           e.target.indeterminate = false;
         }
 
-        // Save the new value to all selected models
         await autoSaveMultipleModels('printed', e.target.checked);
       });
     }
 
     // Show the multi-edit panel
     multiEditPanel.classList.remove('hidden');
+
+    // --- FIX: Re-attach event listeners for tag actions in multi-edit panel ---
+    // Add Tag button
+    multiEditPanel.querySelectorAll('.add-tag-button').forEach(button => {
+      button.onclick = () => {
+        const dialog = document.getElementById('new-tag-dialog');
+        // Store which container triggered the dialog
+        dialog.dataset.sourceContainer = button.closest('.tags-container').querySelector('.tags-list').id;
+        dialog.showModal();
+      };
+    });
+    // Refresh tags button
+    multiEditPanel.querySelectorAll('.refresh-tags-button').forEach(button => {
+      button.onclick = async (event) => {
+        const dropdown = event.target.closest('.tags-input-container').querySelector('select');
+        if (dropdown && window.refreshTagDropdown) {
+          await window.refreshTagDropdown(dropdown);
+        }
+      };
+    });
+    // Tag dropdown (add tag to list) - REMOVED: This is now handled in renderer.js
+    // The multi-edit tag dropdown event listener is set up in renderer.js
+    // and should not call addTagToModel or autoSaveModel
+    // --- END FIX ---
+
+    // Ensure the new tag dialog submit handler updates the correct tag list and dropdown
+    const newTagDialog = document.getElementById('new-tag-dialog');
+    if (newTagDialog && !newTagDialog._multiEditHandlerAttached) {
+      newTagDialog._multiEditHandlerAttached = true;
+      newTagDialog.querySelector('form').onsubmit = async (event) => {
+        event.preventDefault();
+        const newTagName = document.getElementById('new-tag-name').value.trim();
+        const sourceContainer = newTagDialog.dataset.sourceContainer;
+        if (newTagName && window.electron && window.addTagToModel) {
+          try {
+            await window.electron.saveTag(newTagName);
+            // Refresh the tag select dropdown
+            if (window.populateTagSelect) {
+              window.populateTagSelect('multi-tag-select', 'multi-tags');
+            }
+            // Optionally refresh the tag filter dropdown
+            if (window.populateTagFilter) {
+              window.populateTagFilter();
+            }
+            // Reset and close dialog
+            document.getElementById('new-tag-name').value = '';
+            newTagDialog.close();
+          } catch (error) {
+            console.error('Error saving new tag:', error);
+          }
+        }
+      };
+    }
 
     console.log('Multi-edit panel shown with', selectedModels.size, 'models selected');
   } catch (error) {

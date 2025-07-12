@@ -163,7 +163,7 @@ function createModelItem(model) {
   thumbnailContainer.className = 'thumbnail-container';
   const img = document.createElement('img');
   // Use model.thumbnail if available, otherwise use fallback image
-  img.src = model.thumbnail || '3d.png';
+  img.src = encodeURI(model.thumbnail || '3d.png');
   img.style.width = '250px';
   img.style.height = '250px';
   thumbnailContainer.appendChild(img);

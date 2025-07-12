@@ -162,7 +162,8 @@ async function initializeTags() {
   multiTagSelect.addEventListener('change', () => {
     const selectedTag = multiTagSelect.value;
     if (selectedTag) {
-      addTagToModel(selectedTag, 'multi-tags');
+      // Remove this line:
+      // addTagToModel(selectedTag, 'multi-tags');
       multiTagSelect.value = ''; // Reset selection
     }
   });

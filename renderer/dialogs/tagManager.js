@@ -53,7 +53,10 @@ async function refreshTagManagerList(searchTerm = '') {
       ? allTags.filter(tag => tag.name.toLowerCase().includes(searchTerm.toLowerCase()))
       : allTags;
 
-    filtered.forEach(tag => {
+    // Sort tags alphabetically by name
+    const sortedTags = filtered.sort((a, b) => a.name.localeCompare(b.name));
+
+    sortedTags.forEach(tag => {
       const el = document.createElement('div');
       el.className = 'tag';
       el.innerHTML = `

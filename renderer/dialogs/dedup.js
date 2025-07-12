@@ -10,6 +10,47 @@ function setupDedupDialogHandler() {
 
   async function loadDuplicateFiles() {
     try {
+      // First check if there are any models with missing hashes
+      const missingHashesResult = await window.electron.calculateMissingHashes();
+      
+      if (missingHashesResult.total > 0) {
+        // Show message about hash calculation
+        const duplicateGroups = dialog.querySelector('.duplicate-groups');
+        duplicateGroups.innerHTML = `
+          <div style="text-align: center; padding: 20px; color: #ffa500; background: rgba(255, 165, 0, 0.1); border-radius: 8px; margin-bottom: 20px;">
+            <strong>Calculating file hashes...</strong><br>
+            De-duplication may be inconsistent while file hashes are being calculated.<br>
+            Progress: ${missingHashesResult.calculated} / ${missingHashesResult.total} files
+          </div>
+        `;
+
+        // Set up progress listener
+        let progressHandler = null;
+        progressHandler = (progress) => {
+          const progressDiv = duplicateGroups.querySelector('div');
+          if (progressDiv) {
+            progressDiv.innerHTML = `
+              <strong>Calculating file hashes...</strong><br>
+              De-duplication may be inconsistent while file hashes are being calculated.<br>
+              Progress: ${progress.calculated} / ${progress.total} files
+            `;
+          }
+        };
+        window.electron.onHashCalculationProgress(progressHandler);
+
+        // Wait for hash calculation to complete
+        await new Promise((resolve) => {
+          const checkProgress = () => {
+            if (missingHashesResult.calculated >= missingHashesResult.total) {
+              resolve();
+            } else {
+              setTimeout(checkProgress, 100);
+            }
+          };
+          checkProgress();
+        });
+      }
+
       const duplicates = await window.electron.getDuplicates();
       console.log('Loaded duplicates:', duplicates);
 
@@ -43,7 +84,7 @@ function setupDedupDialogHandler() {
           const thumbnail = await window.electron.getThumbnail(files[0].filePath);
           if (thumbnail) {
             const img = document.createElement('img');
-            img.src = thumbnail;
+            img.src = encodeURI(thumbnail);
             preview.appendChild(img);
           } else {
             preview.innerHTML = '<div class="error-message">No preview available</div>';
@@ -121,4 +162,4 @@ function setupDedupDialogHandler() {
     }
   }
 
-}
+} 

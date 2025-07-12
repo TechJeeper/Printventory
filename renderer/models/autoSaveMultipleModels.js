@@ -69,4 +69,13 @@ async function autoSaveMultipleModels(field, value) {
       populateTagFilter()
     ]);
   }
+
+  // If tags were updated, also refresh the multi-edit tag dropdown
+  if (field === 'tags') {
+    await populateTagSelect('multi-tag-select', 'multi-tags');
+  }
+
+  // Show a brief success message for better UX
+  const message = `Updated ${selectedModels.size} model${selectedModels.size !== 1 ? 's' : ''}`;
+  console.log(message);
 }

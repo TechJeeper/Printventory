@@ -47,4 +47,9 @@ function exitMultiEditMode() {
   document.getElementById('model-parent').value = '';
   document.getElementById('model-license').value = '';
   document.getElementById('model-tags').innerHTML = '';
+  
+  // Clear any stored multi-edit changes (no longer used but good practice)
+  if (window.multiEditChanges) {
+    delete window.multiEditChanges;
+  }
 }
