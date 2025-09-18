@@ -2423,11 +2423,15 @@ ipcMain.handle('saveSetting', async (event, key, value) => {
 // Update the database path handling
 function getDatabasePath() {
   try {
-    if (isDev) {
+    // Check if we're in a packaged app by looking for app.asar in the path
+    const isPackaged = process.mainModule && process.mainModule.filename.indexOf('app.asar') !== -1;
+    const isDevelopment = isDev && !isPackaged;
+    
+    if (isDevelopment) {
       return path.join(__dirname, 'printventory.db');
     }
     
-    // Handle different OS paths
+    // For packaged apps, always use userData directory
     let userDataPath;
     if (process.platform === 'darwin') { // macOS
       userDataPath = path.join(app.getPath('userData'), 'data');
