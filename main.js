@@ -957,7 +957,19 @@ async function removeNonExistentFiles(scanDirectoryPath) {
         const normalizedScanPath = normalizePath(scanDirectoryPath);
         const normalizedFilePath = normalizePath(model.filePath);
         if (normalizedFilePath.startsWith(normalizedScanPath)) {
-          if (!fs.existsSync(model.filePath)) {
+          let fileExists = false;
+          
+          // Check if this is a zip entry path (contains ':')
+          if (model.filePath.includes(':')) {
+            // Extract the zip file path (everything before the ':')
+            const zipPath = model.filePath.split(':')[0];
+            fileExists = fs.existsSync(zipPath);
+          } else {
+            // Regular file path
+            fileExists = fs.existsSync(model.filePath);
+          }
+          
+          if (!fileExists) {
             // First delete from model_tags (child table)
             db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
             
