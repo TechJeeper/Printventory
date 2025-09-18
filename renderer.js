@@ -2622,6 +2622,105 @@ document.addEventListener('DOMContentLoaded', async () => {
       return existingThumbnail;
     }
 
+    // Check if we already have a thumbnail for this file or a duplicate
+    try {
+      console.log(`🔍 [RENDER MODEL TO PNG] Starting deduplication check for ${filePath}`);
+      const allModels = await window.electron.getAllModels();
+      const fileName = filePath.split(/[/\\]/).pop();
+      console.log(`🔍 [RENDER MODEL TO PNG] Found ${allModels.length} models in database, looking for fileName: ${fileName}`);
+      
+      // Check for exact path match
+      const exactMatch = allModels.find(model => 
+        canonicalPath(model.filePath) === canonicalPath(filePath) &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (exactMatch) {
+        console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - exact path match found for ${filePath}`);
+        const img = document.createElement('img');
+        img.src = exactMatch.thumbnail;
+        img.style.width = '250px';
+        img.style.height = '250px';
+        container.innerHTML = '';
+        container.appendChild(img);
+        return exactMatch.thumbnail;
+      }
+      
+      // Check for content hash match
+      const fileStats = await window.electron.getFileStats(filePath);
+      const hashMatch = allModels.find(model => 
+        model.hash && 
+        model.hash === fileStats.hash &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (hashMatch) {
+        console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - content hash match found for ${filePath} (matches ${hashMatch.filePath})`);
+        const img = document.createElement('img');
+        img.src = hashMatch.thumbnail;
+        img.style.width = '250px';
+        img.style.height = '250px';
+        container.innerHTML = '';
+        container.appendChild(img);
+        return hashMatch.thumbnail;
+      }
+      
+      // Check for name and size match (fallback)
+      const nameSizeMatch = allModels.find(model => 
+        model.fileName === fileName && 
+        model.size === fileStats.size &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (nameSizeMatch) {
+        console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - name and size match found for ${filePath} (matches ${nameSizeMatch.filePath})`);
+        const img = document.createElement('img');
+        img.src = nameSizeMatch.thumbnail;
+        img.style.width = '250px';
+        img.style.height = '250px';
+        container.innerHTML = '';
+        container.appendChild(img);
+        return nameSizeMatch.thumbnail;
+      }
+      
+      // Special case: If this is a directory file, check if we have the same file from a zip archive
+      if (!filePath.includes('.zip:')) {
+        console.log(`[RENDER MODEL TO PNG] Checking for zip file match for directory file: ${filePath} (${fileName}, size: ${fileStats.size})`);
+        const zipFileWithSameName = allModels.find(model => 
+          model.fileName === fileName && 
+          model.size === fileStats.size &&
+          model.filePath.includes('.zip:') &&
+          model.thumbnail && 
+          model.thumbnail !== null && 
+          model.thumbnail !== ''
+        );
+        
+        if (zipFileWithSameName) {
+          console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - zip file match found for ${filePath} (matches ${zipFileWithSameName.filePath})`);
+          const img = document.createElement('img');
+          img.src = zipFileWithSameName.thumbnail;
+          img.style.width = '250px';
+          img.style.height = '250px';
+          container.innerHTML = '';
+          container.appendChild(img);
+          return zipFileWithSameName.thumbnail;
+        } else {
+          console.log(`❌ [RENDER MODEL TO PNG] No zip file match found for ${filePath}`);
+        }
+      }
+
+      console.log(`🔄 [RENDER MODEL TO PNG] No duplicates found, generating thumbnail for ${filePath}`);
+    } catch (deduplicationError) {
+      console.error(`❌ [RENDER MODEL TO PNG] Error in deduplication logic:`, deduplicationError);
+      console.log(`🔄 [RENDER MODEL TO PNG] Continuing with thumbnail generation despite deduplication error`);
+    }
+
     let renderer, scene, camera, canvas;
     let model = null; // Declare model in outer scope
 
@@ -4337,6 +4436,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           // Generate thumbnail
           try {
+            console.log(`🔥🔥🔥 [GENERATE THUMBNAILS FOR MODELS] About to call generateThumbnail for: ${model.filePath}`);
             const thumbnail = await generateThumbnail(model.filePath);
             
             // Validate thumbnail before saving
@@ -5058,6 +5158,31 @@ function hideProgressBars() {
   progressSection.classList.add('hidden');
 }
 
+// Create a canonical path function that handles special characters consistently
+function canonicalPath(filepath) {
+  if (!filepath) return filepath;
+  
+  // Normalize path separators
+  let canonical = filepath.replace(/\\/g, '/');
+  
+  // Handle special characters that might cause issues
+  // Convert to a consistent format for database storage and comparison
+  canonical = canonical
+    .replace(/\s+/g, ' ')  // Normalize multiple spaces to single space
+    .replace(/#/g, '#')    // Keep hash as-is (don't encode for database storage)
+    .replace(/\$/g, '$')   // Keep dollar sign as-is
+    .replace(/\+/g, '+')   // Keep plus as-is
+    .replace(/\[/g, '[')   // Keep brackets as-is
+    .replace(/\]/g, ']')   // Keep brackets as-is
+    .replace(/\(/g, '(')   // Keep parentheses as-is
+    .replace(/\)/g, ')')   // Keep parentheses as-is
+    .replace(/'/g, "'")    // Keep single quote as-is
+    .replace(/"/g, '"')    // Keep double quote as-is
+    .trim();               // Remove leading/trailing whitespace
+  
+  return canonical;
+}
+
 // Update function signature to include background parameter
 async function scanAndRenderDirectory(directoryPath, background = false) {
   const progressSection = document.getElementById('progress-section');
@@ -5127,21 +5252,30 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     console.log('Scanned files:', totalFiles);
 
     const allModels = await window.electron.getAllModels();
-    const existingFiles = new Set(allModels.map(model => model.filePath));
-    const existingThumbnails = new Map(
+    const existingFiles = new Set(allModels.map(model => canonicalPath(model.filePath)));
+    
+    // Create maps for both path-based and hash-based thumbnail checking
+    const existingThumbnailsByPath = new Map(
       allModels
         .filter(model => model.thumbnail && model.thumbnail !== null && model.thumbnail !== '')
-        .map(model => [model.filePath, model.thumbnail])
+        .map(model => [canonicalPath(model.filePath), model.thumbnail])
     );
     
-    console.log(`Found ${existingThumbnails.size} models with existing thumbnails out of ${allModels.length} total models`);
+    // Create a map of hashes to thumbnails for duplicate content detection
+    const existingThumbnailsByHash = new Map(
+      allModels
+        .filter(model => model.thumbnail && model.thumbnail !== null && model.thumbnail !== '' && model.hash)
+        .map(model => [model.hash, model.thumbnail])
+    );
+    
+    console.log(`Found ${existingThumbnailsByPath.size} models with existing thumbnails out of ${allModels.length} total models`);
 
     if (!background) {
       progressBar.style.width = '0%';
       progressText.textContent = `Processing ${files.length} files...`;
     }
 
-    const newFiles = files.filter(file => !existingFiles.has(file.filePath));
+    const newFiles = files.filter(file => !existingFiles.has(canonicalPath(file.filePath)));
     
     // Use a more efficient approach for saving models
     if (newFiles.length > 0) {
@@ -5181,11 +5315,80 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
 
     const filesNeedingThumbnails = files.filter(file => {
       // Check if file has a valid thumbnail in the database
-      const hasValidThumbnail = existingThumbnails.has(file.filePath);
-      if (hasValidThumbnail) {
-        console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail`);
+      const canonicalFilePath = canonicalPath(file.filePath);
+      
+      // First check by exact path
+      if (existingThumbnailsByPath.has(canonicalFilePath)) {
+        console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail (exact path match)`);
         return false;
       }
+      
+      // If file has a hash, check if we already have a thumbnail for this content
+      if (file.hash && existingThumbnailsByHash.has(file.hash)) {
+        console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail (content hash match)`);
+        return false;
+      }
+      
+      // For files without hashes, check if we have any file with the same name and size
+      // This is a fallback for when hashes aren't available yet
+      if (!file.hash) {
+        const sameNameSize = allModels.find(model => 
+          model.fileName === file.fileName && 
+          model.size === file.size &&
+          model.thumbnail && 
+          model.thumbnail !== null && 
+          model.thumbnail !== ''
+        );
+        
+        if (sameNameSize) {
+          console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail (name and size match)`);
+          return false;
+        }
+        
+        // Special case: If this is a directory file, check if we have the same file from a zip archive
+        // This handles the case where files exist in both directories and zip files
+        if (!file.filePath.includes('.zip:')) {
+          console.log(`Checking for zip file match for directory file: ${file.filePath} (${file.fileName}, size: ${file.size})`);
+          const zipFileWithSameName = allModels.find(model => 
+            model.fileName === file.fileName && 
+            model.size === file.size &&
+            model.filePath.includes('.zip:') &&
+            model.thumbnail && 
+            model.thumbnail !== null && 
+            model.thumbnail !== ''
+          );
+          
+          if (zipFileWithSameName) {
+            console.log(`✅ SKIPPING thumbnail generation for ${file.filePath} - already has thumbnail in zip file (${zipFileWithSameName.filePath})`);
+            return false;
+          } else {
+            console.log(`❌ No zip file match found for ${file.filePath}`);
+          }
+        }
+      }
+      
+      // Special handling for zip files: if we have a zip file with the same name and size,
+      // assume the files inside are the same and skip processing
+      if (file.filePath.includes('.zip:')) {
+        const zipPath = file.filePath.substring(0, file.filePath.lastIndexOf(':'));
+        const zipFileName = zipPath.split(/[/\\]/).pop();
+        
+        // Check if we have any file with the same zip filename and size
+        const sameZipFile = allModels.find(model => {
+          if (model.filePath.includes('.zip:')) {
+            const modelZipPath = model.filePath.substring(0, model.filePath.lastIndexOf(':'));
+            const modelZipFileName = modelZipPath.split(/[/\\]/).pop();
+            return modelZipFileName === zipFileName && model.size === file.size;
+          }
+          return false;
+        });
+        
+        if (sameZipFile) {
+          console.log(`Skipping thumbnail generation for ${file.filePath} - zip file already processed (${zipFileName})`);
+          return false;
+        }
+      }
+      
       return true;
     });
     
@@ -5220,9 +5423,77 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
           
           const promise = (async () => {
             try {
-              if (existingThumbnails.has(file.filePath)) {
-                console.log(`Thumbnail found for ${file.filePath} in database. Skipping render.`);
+              const canonicalFilePath = canonicalPath(file.filePath);
+              
+              // Check by exact path first
+              if (existingThumbnailsByPath.has(canonicalFilePath)) {
+                console.log(`Thumbnail found for ${file.filePath} in database (exact path match). Skipping render.`);
                 return;
+              }
+              
+              // Check by content hash if available
+              if (file.hash && existingThumbnailsByHash.has(file.hash)) {
+                console.log(`Thumbnail found for ${file.filePath} in database (content hash match). Skipping render.`);
+                return;
+              }
+              
+              // For files without hashes, check if we have any file with the same name and size
+              if (!file.hash) {
+                const sameNameSize = allModels.find(model => 
+                  model.fileName === file.fileName && 
+                  model.size === file.size &&
+                  model.thumbnail && 
+                  model.thumbnail !== null && 
+                  model.thumbnail !== ''
+                );
+                
+                if (sameNameSize) {
+                  console.log(`Thumbnail found for ${file.filePath} in database (name and size match). Skipping render.`);
+                  return;
+                }
+                
+                // Special case: If this is a directory file, check if we have the same file from a zip archive
+                // This handles the case where files exist in both directories and zip files
+                if (!file.filePath.includes('.zip:')) {
+                  console.log(`[THUMBNAIL GENERATION] Checking for zip file match for directory file: ${file.filePath} (${file.fileName}, size: ${file.size})`);
+                  const zipFileWithSameName = allModels.find(model => 
+                    model.fileName === file.fileName && 
+                    model.size === file.size &&
+                    model.filePath.includes('.zip:') &&
+                    model.thumbnail && 
+                    model.thumbnail !== null && 
+                    model.thumbnail !== ''
+                  );
+                  
+                  if (zipFileWithSameName) {
+                    console.log(`✅ [THUMBNAIL GENERATION] SKIPPING render for ${file.filePath} - already has thumbnail in zip file (${zipFileWithSameName.filePath})`);
+                    return;
+                  } else {
+                    console.log(`❌ [THUMBNAIL GENERATION] No zip file match found for ${file.filePath}`);
+                  }
+                }
+              }
+              
+              // Special handling for zip files: if we have a zip file with the same name and size,
+              // assume the files inside are the same and skip processing
+              if (file.filePath.includes('.zip:')) {
+                const zipPath = file.filePath.substring(0, file.filePath.lastIndexOf(':'));
+                const zipFileName = zipPath.split(/[/\\]/).pop();
+                
+                // Check if we have any file with the same zip filename and size
+                const sameZipFile = allModels.find(model => {
+                  if (model.filePath.includes('.zip:')) {
+                    const modelZipPath = model.filePath.substring(0, model.filePath.lastIndexOf(':'));
+                    const modelZipFileName = modelZipPath.split(/[/\\]/).pop();
+                    return modelZipFileName === zipFileName && model.size === file.size;
+                  }
+                  return false;
+                });
+                
+                if (sameZipFile) {
+                  console.log(`Thumbnail found for ${file.filePath} in database (zip file already processed: ${zipFileName}). Skipping render.`);
+                  return;
+                }
               }
               
               // Add code to actually render the thumbnail
@@ -5646,6 +5917,55 @@ async function renderFile(file, container, skipThumbnail = false) {
 }
 
   if (!file.thumbnail &&!skipThumbnail) {
+    // Check for duplicates before processing
+    try {
+      const allModels = await window.electron.getAllModels();
+      const fileName = file.filePath.split(/[/\\]/).pop();
+      
+      // Check for exact path match
+      const exactMatch = allModels.find(model => 
+        canonicalPath(model.filePath) === canonicalPath(file.filePath) &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (exactMatch) {
+        console.log(`✅ [RENDER FILE] Using existing thumbnail for exact path match: ${file.filePath}`);
+        const img = document.createElement('img');
+        img.src = exactMatch.thumbnail;
+        img.className = 'model-thumbnail';
+        thumbnailContainer.innerHTML = '';
+        thumbnailContainer.appendChild(img);
+        thumbnailContainer.classList.remove('loading');
+        file.thumbnail = exactMatch.thumbnail;
+        return fileElement;
+      }
+      
+      // Check for name and size match (fallback)
+      const nameSizeMatch = allModels.find(model => 
+        model.fileName === fileName && 
+        model.size === file.size &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (nameSizeMatch) {
+        console.log(`✅ [RENDER FILE] Using existing thumbnail for name/size match: ${file.filePath} (matches ${nameSizeMatch.filePath})`);
+        const img = document.createElement('img');
+        img.src = nameSizeMatch.thumbnail;
+        img.className = 'model-thumbnail';
+        thumbnailContainer.innerHTML = '';
+        thumbnailContainer.appendChild(img);
+        thumbnailContainer.classList.remove('loading');
+        file.thumbnail = nameSizeMatch.thumbnail;
+        return fileElement;
+      }
+    } catch (duplicateCheckError) {
+      console.error(`❌ [RENDER FILE] Error checking for duplicates:`, duplicateCheckError);
+    }
+
     const fileExtension = file.filePath.split('.').pop().toLowerCase();
     if (fileExtension === '3mf') {
       try {
@@ -5742,6 +6062,105 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     container.innerHTML = '';
     container.appendChild(img);
     return existingThumbnail;
+  }
+
+  // Check if we already have a thumbnail for this file or a duplicate
+  try {
+    console.log(`🔍 [RENDER MODEL TO PNG #2] Starting deduplication check for ${filePath}`);
+    const allModels = await window.electron.getAllModels();
+    const fileName = filePath.split(/[/\\]/).pop();
+    console.log(`🔍 [RENDER MODEL TO PNG #2] Found ${allModels.length} models in database, looking for fileName: ${fileName}`);
+    
+    // Check for exact path match
+    const exactMatch = allModels.find(model => 
+      canonicalPath(model.filePath) === canonicalPath(filePath) &&
+      model.thumbnail && 
+      model.thumbnail !== null && 
+      model.thumbnail !== ''
+    );
+    
+    if (exactMatch) {
+      console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - exact path match found for ${filePath}`);
+      const img = document.createElement('img');
+      img.src = exactMatch.thumbnail;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return exactMatch.thumbnail;
+    }
+    
+    // Check for content hash match
+    const fileStats = await window.electron.getFileStats(filePath);
+    const hashMatch = allModels.find(model => 
+      model.hash && 
+      model.hash === fileStats.hash &&
+      model.thumbnail && 
+      model.thumbnail !== null && 
+      model.thumbnail !== ''
+    );
+    
+    if (hashMatch) {
+      console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - content hash match found for ${filePath} (matches ${hashMatch.filePath})`);
+      const img = document.createElement('img');
+      img.src = hashMatch.thumbnail;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return hashMatch.thumbnail;
+    }
+    
+    // Check for name and size match (fallback)
+    const nameSizeMatch = allModels.find(model => 
+      model.fileName === fileName && 
+      model.size === fileStats.size &&
+      model.thumbnail && 
+      model.thumbnail !== null && 
+      model.thumbnail !== ''
+    );
+    
+    if (nameSizeMatch) {
+      console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - name and size match found for ${filePath} (matches ${nameSizeMatch.filePath})`);
+      const img = document.createElement('img');
+      img.src = nameSizeMatch.thumbnail;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return nameSizeMatch.thumbnail;
+    }
+    
+    // Special case: If this is a directory file, check if we have the same file from a zip archive
+    if (!filePath.includes('.zip:')) {
+      console.log(`[RENDER MODEL TO PNG #2] Checking for zip file match for directory file: ${filePath} (${fileName}, size: ${fileStats.size})`);
+      const zipFileWithSameName = allModels.find(model => 
+        model.fileName === fileName && 
+        model.size === fileStats.size &&
+        model.filePath.includes('.zip:') &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (zipFileWithSameName) {
+        console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - zip file match found for ${filePath} (matches ${zipFileWithSameName.filePath})`);
+        const img = document.createElement('img');
+        img.src = zipFileWithSameName.thumbnail;
+        img.style.width = '250px';
+        img.style.height = '250px';
+        container.innerHTML = '';
+        container.appendChild(img);
+        return zipFileWithSameName.thumbnail;
+      } else {
+        console.log(`❌ [RENDER MODEL TO PNG #2] No zip file match found for ${filePath}`);
+      }
+    }
+
+    console.log(`🔄 [RENDER MODEL TO PNG #2] No duplicates found, generating thumbnail for ${filePath}`);
+  } catch (deduplicationError) {
+    console.error(`❌ [RENDER MODEL TO PNG #2] Error in deduplication logic:`, deduplicationError);
+    console.log(`🔄 [RENDER MODEL TO PNG #2] Continuing with thumbnail generation despite deduplication error`);
   }
 
   let renderer, scene, camera, canvas;
@@ -6740,9 +7159,86 @@ async function renderFilteredFiles(files) {
 // Add a separate function for generating thumbnails
 async function generateThumbnail(file) {
   try {
+    console.log(`🚀🚀🚀 [GENERATE THUMBNAIL] Function called with:`, file);
     const filePath = (typeof file === 'string') ? file : file.filePath;
     if (!filePath) {
       throw new Error("generateThumbnail: filePath is undefined");
+    }
+    console.log(`🚀🚀🚀 [GENERATE THUMBNAIL] Processing filePath: ${filePath}`);
+
+    // Check if we already have a thumbnail for this file or a duplicate
+    try {
+      console.log(`🔍 [GENERATE THUMBNAIL] Starting deduplication check for ${filePath}`);
+      const allModels = await window.electron.getAllModels();
+      const fileName = filePath.split(/[/\\]/).pop();
+      console.log(`🔍 [GENERATE THUMBNAIL] Found ${allModels.length} models in database, looking for fileName: ${fileName}`);
+      
+      // Check for exact path match
+      const exactMatch = allModels.find(model => 
+        canonicalPath(model.filePath) === canonicalPath(filePath) &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (exactMatch) {
+        console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - exact path match found for ${filePath}`);
+        return exactMatch.thumbnail;
+      }
+      
+      // Check for content hash match
+      const fileStats = await window.electron.getFileStats(filePath);
+      const hashMatch = allModels.find(model => 
+        model.hash && 
+        model.hash === fileStats.hash &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (hashMatch) {
+        console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - content hash match found for ${filePath} (matches ${hashMatch.filePath})`);
+        return hashMatch.thumbnail;
+      }
+      
+      // Check for name and size match (fallback)
+      const nameSizeMatch = allModels.find(model => 
+        model.fileName === fileName && 
+        model.size === fileStats.size &&
+        model.thumbnail && 
+        model.thumbnail !== null && 
+        model.thumbnail !== ''
+      );
+      
+      if (nameSizeMatch) {
+        console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - name and size match found for ${filePath} (matches ${nameSizeMatch.filePath})`);
+        return nameSizeMatch.thumbnail;
+      }
+      
+      // Special case: If this is a directory file, check if we have the same file from a zip archive
+      if (!filePath.includes('.zip:')) {
+        console.log(`[GENERATE THUMBNAIL] Checking for zip file match for directory file: ${filePath} (${fileName}, size: ${fileStats.size})`);
+        const zipFileWithSameName = allModels.find(model => 
+          model.fileName === fileName && 
+          model.size === fileStats.size &&
+          model.filePath.includes('.zip:') &&
+          model.thumbnail && 
+          model.thumbnail !== null && 
+          model.thumbnail !== ''
+        );
+        
+        if (zipFileWithSameName) {
+          console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - zip file match found for ${filePath} (matches ${zipFileWithSameName.filePath})`);
+          return zipFileWithSameName.thumbnail;
+        } else {
+          console.log(`❌ [GENERATE THUMBNAIL] No zip file match found for ${filePath}`);
+        }
+      }
+
+      console.log(`🔄 [GENERATE THUMBNAIL] No duplicates found, generating thumbnail for ${filePath}`);
+    } catch (deduplicationError) {
+      console.error(`❌ [GENERATE THUMBNAIL] Error in deduplication logic:`, deduplicationError);
+      console.log(`🔄 [GENERATE THUMBNAIL] Continuing with thumbnail generation despite deduplication error`);
     }
 
     // Use the exposed function to get file stats

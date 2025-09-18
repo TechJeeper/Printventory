@@ -820,34 +820,72 @@ ipcMain.handle('open-file-dialog', async () => {
 
 // Update the calculateFileHash function to be more robust
 async function calculateFileHash(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
-    
-    stream.on('error', err => {
-      console.error(`Error reading file for hashing: ${filePath}`, err);
-      reject(err);
-    });
+  return new Promise(async (resolve, reject) => {
+    try {
+      const hash = crypto.createHash('sha256');
+      
+      // Check if this is a ZIP file entry
+      if (filePath.includes(':') && filePath.split(':').length > 2) {
+        // For ZIP file entries, extract and hash the content
+        const lastColonIndex = filePath.lastIndexOf(':');
+        const zipPath = filePath.substring(0, lastColonIndex);
+        const entryName = filePath.substring(lastColonIndex + 1);
+        
+        // Check if the ZIP file exists
+        if (!fs.existsSync(zipPath)) {
+          reject(new Error(`ZIP file does not exist: ${zipPath}`));
+          return;
+        }
+        
+        // Extract the file temporarily and hash it
+        const tempPath = await extractZipFileToTemp(zipPath, entryName);
+        try {
+          const data = await fs.promises.readFile(tempPath);
+          hash.update(data);
+          const fileHash = hash.digest('hex');
+          debugLog(`Generated hash for ZIP entry ${filePath}: ${fileHash}`);
+          resolve(fileHash);
+        } finally {
+          // Clean up temporary file
+          try {
+            await fs.promises.unlink(tempPath);
+          } catch (cleanupErr) {
+            console.warn(`Failed to clean up temp file ${tempPath}:`, cleanupErr);
+          }
+        }
+      } else {
+        // For regular files, use stream
+        const stream = fs.createReadStream(filePath);
+        
+        stream.on('error', err => {
+          console.error(`Error reading file for hashing: ${filePath}`, err);
+          reject(err);
+        });
 
-    stream.on('data', chunk => {
-      try {
-        hash.update(chunk);
-      } catch (err) {
-        console.error(`Error updating hash for file: ${filePath}`, err);
-        reject(err);
-      }
-    });
+        stream.on('data', chunk => {
+          try {
+            hash.update(chunk);
+          } catch (err) {
+            console.error(`Error updating hash for file: ${filePath}`, err);
+            reject(err);
+          }
+        });
 
-    stream.on('end', () => {
-      try {
-        const fileHash = hash.digest('hex');
-        debugLog(`Generated hash for ${filePath}: ${fileHash}`);
-        resolve(fileHash);
-      } catch (err) {
-        console.error(`Error generating final hash for file: ${filePath}`, err);
-        reject(err);
+        stream.on('end', () => {
+          try {
+            const fileHash = hash.digest('hex');
+            debugLog(`Generated hash for ${filePath}: ${fileHash}`);
+            resolve(fileHash);
+          } catch (err) {
+            console.error(`Error generating final hash for file: ${filePath}`, err);
+            reject(err);
+          }
+        });
       }
-    });
+    } catch (error) {
+      console.error(`Error calculating hash for ${filePath}:`, error);
+      reject(error);
+    }
   });
 }
 
@@ -945,6 +983,31 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
+// Create a canonical path function that handles special characters consistently
+function canonicalPath(filepath) {
+  if (!filepath) return filepath;
+  
+  // Normalize path separators
+  let canonical = filepath.replace(/\\/g, '/');
+  
+  // Handle special characters that might cause issues
+  // Convert to a consistent format for database storage and comparison
+  canonical = canonical
+    .replace(/\s+/g, ' ')  // Normalize multiple spaces to single space
+    .replace(/#/g, '#')    // Keep hash as-is (don't encode for database storage)
+    .replace(/\$/g, '$')   // Keep dollar sign as-is
+    .replace(/\+/g, '+')   // Keep plus as-is
+    .replace(/\[/g, '[')   // Keep brackets as-is
+    .replace(/\]/g, ']')   // Keep brackets as-is
+    .replace(/\(/g, '(')   // Keep parentheses as-is
+    .replace(/\)/g, ')')   // Keep parentheses as-is
+    .replace(/'/g, "'")    // Keep single quote as-is
+    .replace(/"/g, '"')    // Keep double quote as-is
+    .trim();               // Remove leading/trailing whitespace
+  
+  return canonical;
+}
+
 // Update the removeNonExistentFiles function
 async function removeNonExistentFiles(scanDirectoryPath) {
   try {
@@ -959,13 +1022,15 @@ async function removeNonExistentFiles(scanDirectoryPath) {
         if (normalizedFilePath.startsWith(normalizedScanPath)) {
           let fileExists = false;
           
-          // Check if this is a zip entry path (contains ':')
+          // Check if this is an archived model (contains ':')
           if (model.filePath.includes(':')) {
-            // Extract the zip file path (everything before the ':')
-            const zipPath = model.filePath.split(':')[0];
+            // For archived models, only check if the zip file exists
+            // Use lastIndexOf to handle Windows drive letters (C:)
+            const lastColonIndex = model.filePath.lastIndexOf(':');
+            const zipPath = model.filePath.substring(0, lastColonIndex);
             fileExists = fs.existsSync(zipPath);
           } else {
-            // Regular file path
+            // For regular files, check the full path
             fileExists = fs.existsSync(model.filePath);
           }
           
@@ -1147,15 +1212,16 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
               
               // Process each file in the batch
               for (const file of batch) {
-                const existing = db.prepare('SELECT filePath FROM models WHERE filePath = ?').get(file.filePath);
+                const canonicalFilePath = canonicalPath(file.filePath);
+                const existing = db.prepare('SELECT filePath FROM models WHERE filePath = ?').get(canonicalFilePath);
                 
                 if (existing) {
                   // Update existing file
-                  updateExisting.run(file.size, file.mtime.toISOString(), file.filePath);
+                  updateExisting.run(file.size, file.mtime.toISOString(), canonicalFilePath);
                 } else {
                   // Insert new file
                   insertNew.run(
-                    file.filePath,
+                    canonicalFilePath,
                     file.fileName,
                     file.size,
                     file.mtime.toISOString()
@@ -1575,7 +1641,8 @@ async function scanDirectory(directoryPath, isValidFile) {
 
 async function saveThumbnail(filePath, thumbnail) {
   try {
-    db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(thumbnail, filePath);
+    const canonicalFilePath = canonicalPath(filePath);
+    db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(thumbnail, canonicalFilePath);
     return true;
   } catch (error) {
     console.error('Error saving thumbnail:', error);
@@ -1955,7 +2022,9 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           const filePath = filePaths[0];
           if (filePath.includes(':')) {
             // This is a zip file, extract it temporarily
-            const [zipPath, entryName] = filePath.split(':');
+            const lastColonIndex = filePath.lastIndexOf(':');
+            const zipPath = filePath.substring(0, lastColonIndex);
+            const entryName = filePath.substring(lastColonIndex + 1);
             const tempPath = await extractZipFileToTemp(zipPath, entryName);
             
             // Open the temporary file
@@ -2003,7 +2072,9 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         try {
           const filePath = filePaths[0];
           if (filePath.includes(':')) {
-            const [zipPath, entryName] = filePath.split(':');
+            const lastColonIndex = filePath.lastIndexOf(':');
+            const zipPath = filePath.substring(0, lastColonIndex);
+            const entryName = filePath.substring(lastColonIndex + 1);
             const tempPath = await extractZipFileToTemp(zipPath, entryName);
             
             // Show the extracted file in the file manager
@@ -2057,7 +2128,9 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             
             // If it's a zip file, extract it temporarily
             if (modelPath.includes(':')) {
-              const [zipPath, entryName] = modelPath.split(':');
+              const lastColonIndex = modelPath.lastIndexOf(':');
+              const zipPath = modelPath.substring(0, lastColonIndex);
+              const entryName = modelPath.substring(lastColonIndex + 1);
               tempPath = await extractZipFileToTemp(zipPath, entryName);
               modelPath = tempPath;
             }
@@ -2724,7 +2797,19 @@ ipcMain.handle('generateMissingHashes', async (event) => {
     for (const model of models) {
       try {
         // Check if file exists
-        if (!fs.existsSync(model.filePath)) {
+        let fileExists = false;
+        if (model.filePath.includes(':')) {
+          // For archived models, only check if the zip file exists
+          // Use lastIndexOf to handle Windows drive letters (C:)
+          const lastColonIndex = model.filePath.lastIndexOf(':');
+          const zipPath = model.filePath.substring(0, lastColonIndex);
+          fileExists = fs.existsSync(zipPath);
+        } else {
+          // For regular files, check the full path
+          fileExists = fs.existsSync(model.filePath);
+        }
+        
+        if (!fileExists) {
           console.warn(`File not found for hash generation: ${model.filePath}`);
           processed++;
           continue;
@@ -3790,7 +3875,19 @@ async function checkAndCalculateMissingHashes() {
       await Promise.all(batch.map(async (file) => {
         try {
           // Check if file still exists
-          if (!fs.existsSync(file.filePath)) {
+          let fileExists = false;
+          if (file.filePath.includes(':')) {
+            // For archived models, only check if the zip file exists
+            // Use lastIndexOf to handle Windows drive letters (C:)
+            const lastColonIndex = file.filePath.lastIndexOf(':');
+            const zipPath = file.filePath.substring(0, lastColonIndex);
+            fileExists = fs.existsSync(zipPath);
+          } else {
+            // For regular files, check the full path
+            fileExists = fs.existsSync(file.filePath);
+          }
+          
+          if (!fileExists) {
             // Remove from database if file no longer exists
             db.prepare('DELETE FROM models WHERE filePath = ?').run(file.filePath);
             return;
