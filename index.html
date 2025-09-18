@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Printventory - 3D Model Manager</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
+
+
+</head>
+
+
+<body>
+  <div class="sidebar">
+    <img src="logo.png" alt="Printventory Logo" id="logo">
+    <div class="model-stats">
+      <div id="view-count" class="model-count">0 models in view</div>
+      <div id="total-count" class="model-count">0 models total</div>
+    </div>
+    <div class="icon-buttons-container">
+      <button id="dup-button" class="icon-button" title="De-Dup">
+        <img src="dup.png" alt="De-Dup">
+      </button>
+      <button id="tag-button" class="icon-button" title="Tag - Tag Manager">
+        <img src="tag.png" alt="Tag Manager">
+      </button>
+      <button id="roulette-button" class="icon-button" title="Roulette - Print Roulette">
+        <img src="roulette.png" alt="Print Roulette">
+      </button>
+    </div>
+    <button id="scan-directory-button">Scan Directory</button>
+    <button id="view-library-button">View Entire Library</button>
+    <div id="view-library-message" style="display: none; text-align: center; font-size: 14px; color: #000; margin-top: 5px; background-color: #FFD700; padding: 5px; border-radius: 4px; font-weight: bold;">
+      <!-- Updated text will appear here -->
+    </div>
+    <div class="progress-section hidden" id="progress-section">
+      <div class="progress-container" id="progress-container">
+        <div class="progress-bar" id="progress-bar"></div>
+        <div class="progress-text" id="progress-text"></div>
+      </div>
+      <div class="progress-container" id="render-progress-container">
+        <div class="progress-bar" id="render-progress-bar"></div>
+        <div class="progress-text" id="render-progress-text"></div>
+      </div>
+      <button id="stop-thumbnail-generation" class="stop-button" title="Stop thumbnail generation">Stop Processing</button>
+      <div class="performance-notice">Scanning may impact performance.</div>
+    </div>
+    <div id="current-filter"></div>
+    <div class="filter-section">
+      <div class="form-group">
+        <label for="search-filter-input">Search Models:</label>
+        <div class="input-with-icon">
+          <input type="text" id="search-filter-input" placeholder="Enter search term...">
+          <button id="filter-search-button" class="icon-button" title="Search models">🔍</button>
+          <button id="clear-filter-search-button" class="icon-button" title="Clear search">×</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="sort-select">Sort By:</label>
+        <select id="sort-select">
+          <option value="name-asc">Name (A-Z)</option>
+          <option value="name-desc">Name (Z-A)</option>
+          <option value="size-asc">Size (Smallest First)</option>
+          <option value="size-desc">Size (Largest First)</option>
+          <option value="date-asc">Modified (Oldest First)</option>
+          <option value="date-desc" selected>Modified (Newest First)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="designer-select">Select Designer:</label>
+        <select id="designer-select">
+          <option value="">All Designers</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="parent-select">Select Parent Model:</label>
+        <select id="parent-select">
+          <option value="">All Parent Models</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="license-select">Select License:</label>
+        <select id="license-select">
+          <option value="">All Licenses</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="printed-select">Print Status:</label>
+        <select id="printed-select">
+          <option value="all">All Models</option>
+          <option value="printed">Printed</option>
+          <option value="not-printed">Not Printed</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="filetype-select">File Type:</label>
+        <select id="filetype-select">
+          <option value="">All Types</option>
+          <option value="stl">STL</option>
+          <option value="3mf">3MF</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="tag-filter">Filter by Tag:</label>
+        <div class="tags-input-container">
+          <select id="tag-filter">
+            <option value="">All Tags</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <button id="edit-mode-toggle">Multi-Edit Mode</button>
+      </div>
+    </div>
+
+    <div id="model-details" class="model-details hidden">
+      <h3>Model Details</h3>
+      <div class="form-group checkbox-container">
+        <label for="model-printed">Printed:</label>
+        <input type="checkbox" id="model-printed">
+      </div>
+      <div class="form-group">
+        <label for="model-name">Name:</label>
+        <input type="text" id="model-name" readonly>
+      </div>
+      <div class="form-group">
+        <label for="model-path">Path:</label>
+        <div class="input-with-icon">
+          <input type="text" id="model-path" readonly>
+          <button id="open-file-button" class="icon-button">
+            <img src="file-icon.png" alt="Open File">
+          </button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="model-source">Source:</label>
+        <div class="input-with-icon">
+          <input type="text" id="model-source" placeholder="Enter source..." spellcheck="false">
+          <button id="fetch-source-button" class="icon-button" title="Fetch details from URL">↓</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="model-designer">Designer:</label>
+        <div class="designer-input-container">
+          <select id="model-designer">
+            <option value="Unknown">Unknown</option>
+          </select>
+          <button type="button" id="add-new-designer-button" class="icon-button">+</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="model-parent">Parent Model:</label>
+        <div class="designer-input-container">
+          <select id="model-parent">
+            <option value="">None</option>
+          </select>
+          <button type="button" id="add-new-parent-button" class="icon-button">+</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="model-license">License:</label>
+        <div class="designer-input-container">
+          <select id="model-license" class="form-control"></select>
+          <button type="button" id="add-new-license-button" class="icon-button">+</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Tags:</label>
+        <div class="tags-container">
+          <div class="tags-input-container">
+            <select id="tag-select">
+              <option value="">Select a tag...</option>
+            </select>
+            <button type="button" class="icon-button refresh-tags-button" title="Refresh tags">↻</button>
+            <button type="button" id="add-tag-button" class="icon-button">+</button>
+          </div>
+          <div id="model-tags" class="tags-list"></div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="model-notes">Notes:</label>
+        <textarea id="model-notes"></textarea>
+      </div>
+      <button id="save-model-button"></button>
+    </div>
+    <dialog id="new-designer-dialog" class="modal">
+      <form method="dialog">
+        <h3>Add New Designer</h3>
+        <div class="form-group">
+          <label for="new-designer-name">Designer Name:</label>
+          <input type="text" id="new-designer-name" required>
+        </div>
+        <div class="dialog-buttons">
+          <button type="submit" id="add-designer-button">Add</button>
+          <button type="button" id="cancel-designer-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="new-parent-dialog" class="modal">
+      <form method="dialog">
+        <h3>Add New Parent Model</h3>
+        <div class="form-group">
+          <label for="new-parent-name">Parent Model Name:</label>
+          <input type="text" id="new-parent-name" required>
+        </div>
+        <div class="dialog-buttons">
+          <button type="submit" id="add-parent-button">Add</button>
+          <button type="button" id="cancel-parent-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="new-tag-dialog" class="modal">
+      <form>
+        <h3>Add New Tag</h3>
+        <div class="form-group">
+          <label for="new-tag-name">Tag Name:</label>
+          <div class="input-with-icon">
+            <input type="text" id="new-tag-name">
+            <button type="button" id="refresh-tag-input" class="icon-button refresh-button" title="Reset input field (click if field is not editable)" onclick="return resetTagInputField();">↻</button>
+          </div>
+          <small style="display: block; margin-top: 5px; color: #aaa; font-style: italic;">If field is not editable, click the refresh button or refocus the window.</small>
+        </div>
+        <div class="dialog-buttons">
+          <button type="submit" id="add-tag-submit">Add</button>
+          <button type="button" id="cancel-tag-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="bulk-edit-dialog" class="modal">
+      <form method="dialog">
+        <h3>Edit Selected Models</h3>
+        <div class="form-group">
+          <label for="bulk-designer">Designer:</label>
+          <div class="designer-input-container">
+            <select id="bulk-designer">
+              <option value="">No Change</option>
+              <option value="Unknown">Unknown</option>
+            </select>
+            <button type="button" id="bulk-add-designer-button" class="icon-button">+</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="bulk-parent">Parent Model:</label>
+          <div class="designer-input-container">
+            <select id="bulk-parent">
+              <option value="">No Change</option>
+              <option value="none">None</option>
+            </select>
+            <button type="button" id="bulk-add-parent-button" class="icon-button">+</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="bulk-source">Source:</label>
+          <input type="text" id="bulk-source" placeholder="No Change">
+        </div>
+        <div class="form-group checkbox-container">
+          <label for="bulk-printed">Printed:</label>
+          <select id="bulk-printed">
+            <option value="">No Change</option>
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div class="dialog-buttons">
+          <button type="submit" id="bulk-save-button">Save Changes</button>
+          <button type="button" id="bulk-cancel-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="multi-edit-panel" class="model-details hidden">
+      <h3>Multi-Edit Panel</h3>
+      <button id="exit-multi-edit-button" class="full-width-button">Exit Multi-Edit Mode</button>
+      <button id="select-all-button" class="full-width-button">Select All Visible</button>
+      <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
+      <p class="selected-count">0 models selected</p>
+      <div class="form-group checkbox-container">
+        <label for="multi-printed">Printed:</label>
+        <input type="checkbox" id="multi-printed">
+      </div>
+      <div class="form-group">
+        <label for="multi-source">Source:</label>
+        <div class="input-with-icon">
+          <input type="text" id="multi-source" placeholder="Enter source..." spellcheck="false">
+          <button id="multi-fetch-source-button" class="icon-button" title="Fetch details from URL">↓</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="multi-designer">Designer:</label>
+        <div class="designer-input-container">
+          <select id="multi-designer">
+            <option value="">Select Designer...</option>
+            <option value="Unknown">Unknown</option>
+          </select>
+          <button type="button" class="icon-button add-designer-button">+</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="multi-parent">Parent Model:</label>
+        <div class="designer-input-container">
+          <select id="multi-parent">
+            <option value="">Select Parent...</option>
+            <option value="none">None</option>
+          </select>
+          <button type="button" class="icon-button add-parent-button">+</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="multi-license">License:</label>
+        <div class="designer-input-container">
+          <select id="multi-license" class="form-control"></select>
+          <button type="button" class="icon-button add-license-button">+</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Tags:</label>
+        <div class="tags-container">
+          <div class="tags-input-container">
+            <select id="multi-tag-select">
+              <option value="">Select a tag...</option>
+            </select>
+            <button type="button" class="icon-button refresh-tags-button" title="Refresh tags">↻</button>
+            <button type="button" class="icon-button add-tag-button">+</button>
+          </div>
+          <div id="multi-tags" class="tags-list"></div>
+        </div>
+      </div>
+      <button id="multi-save-button"></button>
+    </div>
+    <dialog id="new-license-dialog" class="modal">
+      <form method="dialog">
+        <h3>Add New License</h3>
+        <div class="form-group">
+          <label for="new-license-name">License Name:</label>
+          <input type="text" id="new-license-name" required>
+        </div>
+        <div class="dialog-buttons">
+          <button type="submit" id="add-license-button">Add</button>
+          <button type="button" id="cancel-license-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="dedup-dialog" class="modal dedup-dialog">
+      <form method="dialog">
+        <div class="dedup-header" style="position: sticky; top: 0; background: inherit; z-index: 1; padding: 0.5rem;">
+          <h3>Duplicate Files</h3>
+          <p style="font-size: 0.9rem; margin: 0.2rem 0; color: #555;">
+            De-duplication is performed using the file hash to ensure that only identical files are considered duplicates.
+          </p>
+          <div id="zip-disclaimer" class="zip-disclaimer" style="display: none; background: #ffa500; color: #000; padding: 8px; border-radius: 4px; margin: 8px 0; font-size: 0.9rem;">
+            <strong>⚠️ Archive Files Notice:</strong> Files within zip archives are shown for reference but cannot be deleted. Only standalone files can be removed.
+          </div>
+          <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+            <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
+            <button type="submit" id="close-dedup">Close</button>
+          </div>
+        </div>
+        <div class="duplicate-groups" style="max-height: 300px; overflow-y: auto; margin-top: 0.5rem;">
+          <!-- Duplicate groups will be added here dynamically -->
+        </div>
+      </form>
+    </dialog>
+    <dialog id="purge-models-dialog" class="modal">
+      <form method="dialog">
+        <h3>Purge Models</h3>
+        <p class="setting-description">This will remove all model data from the database. This action cannot be undone.</p>
+        <div class="dialog-buttons">
+          <button type="button" id="confirm-purge-button" class="danger-button">Purge All Models</button>
+          <button type="submit">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="terms-of-service-dialog" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <span class="close">&times;</span>
+          <h2>Terms of Service</h2>
+        </div>
+        <div class="modal-body">
+          <h3>MIT License</h3>
+          <p>Copyright (c) 2025 Printventory</p>
+          <p>
+            Permission is hereby granted, free of charge, to any person obtaining a copy
+            of this software and associated documentation files (the "Software"), to deal
+            in the Software without restriction, including without limitation the rights
+            to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+            copies of the Software, and to permit persons to whom the Software is
+            furnished to do so, subject to the following conditions:
+          </p>
+          <p>
+            The above copyright notice and this permission notice shall be included in all
+            copies or substantial portions of the Software.
+          </p>
+          <p>
+            THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+            IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+            FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+            AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+            LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+            OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+            SOFTWARE.
+          </p>
+          <p>
+            By using this software, you agree to abide by the terms of this license.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button id="accept-terms">I Accept</button>
+          <button id="decline-terms">I Decline</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="performance-settings-dialog" class="modal">
+      <div>
+        <h3>Performance Settings</h3>
+        <p class="warning-text">Warning: These settings can impact application performance and stability. Change with caution.</p>
+        
+        <div class="settings-group">
+          <h4>File Processing</h4>
+          <div class="form-group">
+            <label for="max-file-size">Max File Size (MB):</label>
+            <input type="number" id="max-file-size" min="1" max="1000" value="50">
+            <p class="setting-description">Maximum file size to process. Files larger than this will be skipped during scanning.</p>
+          </div>
+        </div>
+
+        <div class="dialog-buttons">
+          <button type="button" id="save-performance-settings">Save</button>
+          <button type="button" id="cancel-performance-settings">Cancel</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="stl-home-dialog" class="modal">
+      <form method="dialog">
+        <h3>STL Home</h3>
+        <p class="warning-text">
+          Warning: Scanning large directories may impact performance.<p>
+            Setting an STL Home will cause the app to scan the selected directory on startup.
+          </p>
+        </p>
+        <div class="form-group" style="display: flex; gap: 0.5rem; align-items: center;">
+          <input type="text" id="stl-home-directory" placeholder="No directory selected" readonly>
+          <button type="button" id="choose-stl-home-button" class="primary-button">Choose Directory</button>
+          <button type="button" id="clear-stl-home-button" class="secondary-button">Clear Directory</button>
+        </div>
+        <div class="dialog-buttons">
+          <button type="submit" id="save-stl-home-button">Save</button>
+          <button type="button" id="cancel-stl-home-button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="slicer-dialog" class="modal">
+      <form method="dialog">
+        <h3>Slicer Settings</h3>
+        <div id="slicer-list">
+          <!-- Slicer entries will be added here dynamically -->
+        </div>
+        <button type="button" id="add-slicer-button" class="full-width-button">Add New Slicer</button>
+        <div class="dialog-buttons">
+          <button type="button" id="save-slicer-settings">Save</button>
+          <button type="button" id="cancel-slicer-settings">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="ai-config-dialog" class="modal">
+      <form method="dialog">
+        <h3>AI Configuration</h3>
+        <p class="setting-description">
+          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Deepseek, Gemini, etc. The selected model must support image analysis (e.g., gpt-4-o). You can use the Test button to check that your AI is properly configured. 
+        </p>
+        <div class="form-group">
+          <label for="ai-service-select">AI Service:</label>
+          <select id="ai-service-select">
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Gemini</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="ai-api-key">API Key:</label>
+          <input type="password" id="ai-api-key" required>
+        </div>
+        <div class="form-group">
+          <label for="ai-endpoint">API Endpoint:</label>
+          <input type="text" id="ai-endpoint" required>
+        </div>
+        <div class="form-group">
+          <label for="ai-model">AI Model:</label>
+          <input type="text" id="ai-model" value="gpt-4o-mini" required>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="test-ai-config">Test</button>
+          <button type="button" id="save-ai-config">Save</button>
+          <button type="button" id="cancel-ai-config">Cancel</button>
+        </div>
+        <div id="ai-config-result" class="result-message"></div>
+      </form>
+    </dialog>
+    <dialog id="file-types-dialog" class="modal">
+      <form method="dialog">
+        <h3>File Types</h3>
+        <p class="setting-description">
+          Configure which file types to scan for 3D models. Enabling ZIP file scanning will look within archive files for .3mf and .stl files, which may impact scan performance and time.
+        </p>
+        <div class="form-group checkbox-container">
+          <label for="zip-support-enabled">Enable ZIP File Support:</label>
+          <input type="checkbox" id="zip-support-enabled">
+        </div>
+        <p class="warning-text">
+          <strong>Warning:</strong> ZIP file scanning will examine the contents of archive files during directory scans. This feature may significantly increase scan time and impact performance, especially with large archives or many ZIP files.
+        </p>
+        <div class="dialog-buttons">
+          <button type="button" id="save-file-types-settings">Save</button>
+          <button type="button" id="cancel-file-types-settings">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Add progress dialog for tag generation -->
+    <dialog id="progress-dialog" class="modal">
+      <div class="progress-container">
+        <h3 id="progress-title">Processing...</h3>
+        <p id="progress-message">Please wait...</p>
+        <div class="progress-bar-container">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+        <p id="progress-status">0 / 0</p>
+      </div>
+    </dialog>
+    
+    <!-- Add progress dialog for thumbnail generation -->
+    <dialog id="thumbnail-progress-dialog" class="modal">
+      <div class="progress-container">
+        <h3>Generating Thumbnails</h3>
+        <p>Please wait while thumbnails are being generated...</p>
+        <div class="progress-bar-container">
+          <div id="thumbnail-progress-bar" class="progress-bar"></div>
+        </div>
+        <p id="thumbnail-progress-text">0 / 0</p>
+      </div>
+    </dialog>
+  </div>
+  <div class="main-content">
+    <main>
+      <div class="file-grid"></div>
+      <dialog id="welcome-message" class="welcome-dialog">
+        <div class="welcome-content">
+          <h2>Welcome to Printventory!</h2>
+          <button id="dismiss-welcome">Get Started!</button>
+        </div>
+      </dialog>
+      <dialog id="quickstart-guide" class="modal" style="width: 80%; max-width: 1000px;">
+        <div class="guide-content" style="text-align: center; padding: 1rem;">
+          <h2>Quick Start Guide</h2>
+          <div class="guide-scroll-container">
+            <img id="guide-image" src="" alt="Guide Image" style="max-width: 100%; display: none; margin-bottom: 1rem;">
+            <div id="guide-text" style="font-size: 16px; color: #fff;"></div>
+          </div>
+          <div class="dialog-buttons" style="justify-content: space-between;">
+            <button id="guide-back-button">Back</button>
+            <button id="guide-next-button">Next</button>
+            <button id="guide-close-button">Close</button>
+          </div>
+        </div>
+      </dialog>
+      <dialog id="settings-dialog" class="modal">
+        <form method="dialog">
+          <h3>Theme Settings</h3>
+          <div class="form-group">
+            <label for="model-background-color">Model Background Color:</label>
+            <select id="model-background-color">
+              <option value="#070147">Dark Blue</option>
+              <option value="#1a1a1a">Dark Gray</option>
+              <option value="#000000">Black</option>
+              <option value="#1a0f3c">Navy Purple</option>
+              <option value="#0a0a23">Midnight Blue</option>
+            </select>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit" id="save-settings">Save</button>
+            <button type="button" id="cancel-settings">Cancel</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="guide-dialog" class="modal guide-dialog">
+        <form method="dialog">
+          <h2>Printventory Guide</h2>
+          
+          <h3>Getting Started</h3>
+          <p>Click the "Scan Directory" button to select a folder containing your 3D model files (.stl and .3mf). Printventory will scan and catalog your models.</p>
+
+          <h3>Managing Models</h3>
+          <ul>
+            <li><strong>View Models:</strong> Browse your models in the grid view. Each model shows a 3D preview thumbnail.</li>
+            <li><strong>Edit Details:</strong> Click a model to open its details panel where you can edit:
+              <ul>
+                <li>Designer name</li>
+                <li>Source URL</li>
+                <li>Parent model</li>
+                <li>Tags</li>
+                <li>Print status</li>
+                <li>Notes</li>
+              </ul>
+            </li>
+            <li><strong>Bulk Edit:</strong> Select multiple models using checkboxes to edit their details simultaneously.</li>
+          </ul>
+
+          <h3>Features</h3>
+          <ul>
+            <li><strong>Filtering:</strong> Use the dropdown menus to filter models by Designer, Parent model, or Tags.</li>
+            <li><strong>Tags:</strong> Create and assign tags to organize your models. Click the (+) button to add new tags.</li>
+            <li><strong>Thumbnails:</strong> Use Settings > Purge Thumbnails to regenerate model previews if needed.</li>
+          </ul>
+
+          <h3>Tips</h3>
+          <ul>
+            <li>Use the Reload option in the File menu if the application needs refreshing.</li>
+            <li>Join our Discord community for support and updates!</li>
+          </ul>
+
+          <div class="dialog-buttons">
+            <button type="submit">Close</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="about-dialog" class="modal">
+        <form method="dialog">
+          <h2>About Printventory</h2>
+          <div class="about-content">
+            <div class="version-row">
+              <p><strong><span id="about-version">Version: Loading...</span></strong></p>
+              <div class="checkbox-container">
+                <label for="beta-opt-in">Beta Updates</label>
+                <input type="checkbox" id="beta-opt-in">
+              </div>
+            </div>
+            <button type="button" id="check-updates-button" class="full-width-button">Check for Updates</button>
+            <p><strong>Website:</strong> <a href="#" id="website-link" class="white-link">https://printventory.com</a></p>
+            
+            <!-- Analytics section -->
+            <div class="analytics-section" style="margin: 1.5rem 0; padding: 1rem; background: rgba(0,0,0,0.1); border-radius: 8px;">
+              <div class="checkbox-container" style="display: flex; align-items: center; margin-bottom: 0.5rem; white-space: nowrap;">
+                <input type="checkbox" id="collect-usage" style="margin-right: 10px; flex-shrink: 0;" checked>
+                <label for="collect-usage" style="font-weight: bold; flex-shrink: 0;">Enable Usage Reporting</label>
+              </div>
+              <p class="setting-description" style="margin: 0.5rem 0 0 0; font-size: 0.9rem; color: #888; line-height: 1.4;">
+                Help improve Printventory by allowing collection of basic usage data. No personal information is collected.  Reload the application to apply this setting.
+              </p>
+            </div>
+
+            <div class="about-tos">
+              <h3>Terms of Service</h3>
+              <div class="about-tos-content">
+                <p>By using Printventory, you agree to these terms:</p>
+                <ul>
+                  <li>You may not modify, copy, or redistribute the software.</li>
+                  <li>You may not reverse engineer or decompile the software.</li>
+                  <li>This license may be terminated if you violate any terms.</li>
+                  <li>The software is provided "as is", without warranty.</li>
+                  <li>The developers assume no liability for any data loss or damage.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit">Close</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="backup-restore-dialog" class="modal">
+        <form method="dialog">
+          <h3>Backup/Restore</h3>
+          <div class="form-group">
+            <label>Database Backup</label>
+            <p class="setting-description">Create a backup of your database to save your model information and settings.</p>
+            <button type="button" id="backup-button" class="full-width-button">Create Backup</button>
+          </div>
+          <div class="form-group">
+            <label>Database Restore</label>
+            <p class="setting-description">Restore your database from a previous backup. This will replace all current data.</p>
+            <button type="button" id="restore-button" class="full-width-button">Restore from Backup</button>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit" id="save-backup-restore">Close</button>
+            <button type="button" id="cancel-backup-restore">Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="tag-manager-dialog" class="modal">
+        <form method="dialog">
+          <h3>Tag Manager</h3>
+          <div class="form-group">
+            <label>Create New Tag</label>
+            <div class="input-with-icon">
+              <input type="text" id="new-tag-manager-name" placeholder="Enter tag name...">
+              <button type="button" id="add-tag-manager-button" class="icon-button">+</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Existing Tags</label>
+            <div class="input-with-icon">
+              <input type="text" id="tag-manager-search" placeholder="Search tags...">
+              <button type="button" id="clear-tag-search" class="icon-button" title="Clear search">×</button>
+            </div>
+            <div id="tag-manager-list" class="tags-list">
+              <!-- Tags will be added here dynamically -->
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit">Close</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+  </div>
+  <div id="loading-overlay">
+    <div class="spinner">
+      <div class="loader"></div>
+      <p>Loading model database...</p>
+      <button id="continue-anyways" onclick="document.getElementById('loading-overlay').style.display='none'"><strong>CONTINUE ANYWAYS</strong><br><i>MAY IMPACT PERFORMANCE</i></button>
+    </div>
+  </div>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      document.getElementById("dup-button").addEventListener("click", function() {
+        window.electron.send('open-dedup');
+      });
+      document.getElementById("tag-button").addEventListener("click", function() {
+        window.electron.send('open-tag-manager');
+      });
+      document.getElementById("roulette-button").addEventListener("click", function() {
+        window.electron.send('start-print-roulette');
+      });
+    });
+  </script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function() {
+      const loadingMessageElem = document.querySelector("#loading-overlay .spinner p");
+      const messages = [
+        "Layering up your models...",
+        "Slicing through the data...",
+        "Extruding models for you...",
+        "Assembling your assets...",
+        "Loading model database...",
+        "Rendering your repositories...",
+        "Constructing your creations...",
+        "Manifesting your models...",
+        "Loading your models...",
+        "Preparing your prints...",
+        "Optimizing your assets...",
+        "Compiling your collections..."
+      ];
+
+      const intervalId = setInterval(() => {
+        // If the loading overlay is hidden, stop cycling messages
+        if (!loadingMessageElem || loadingMessageElem.offsetParent === null) {
+          clearInterval(intervalId);
+          return;
+        }
+        const randomIndex = Math.floor(Math.random() * messages.length);
+        loadingMessageElem.textContent = messages[randomIndex];
+      }, 5000);
+    });
+  </script>
+  <script>
+    document.getElementById('website-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      window.electron.openExternal('https://printventory.com');
+    });
+  </script>
+  <script type="module" src="search.js"></script>
+  <script src="renderer.js"></script>
+  <script type="module" src="slicer.js"></script>
+  <script src="guide.js"></script>
+
+  <!-- Add this template for slicer entries -->
+  <template id="slicer-entry-template">
+    <div class="slicer-entry">
+      <div class="form-group">
+        <input type="text" class="slicer-name" placeholder="Slicer Name" required>
+        <div class="input-with-icon">
+          <input type="text" class="slicer-path" placeholder="Select slicer path..." readonly>
+          <button type="button" class="browse-slicer-button icon-button">
+            <img src="file-icon.png" alt="Browse">
+          </button>
+          <button type="button" class="remove-slicer-button icon-button">×</button>
+        </div>
+      </div>
+    </div>
+  </template>
+  <script>
+    document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
+      const welcomeDialog = document.getElementById('welcome-message');
+      welcomeDialog.close();
+      setTimeout(() => {
+        showGuide();
+      }, 500);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+{
+  "name": "printventory",
+  "version": "1.0.6",
+  "description": "Printventory",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder -mw",
+    "build:mac": "electron-builder --mac --universal",
+    "build:win": "electron-builder -w",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "author": "TechJeeper Designs",
+  "license": "ISC",
+  "build": {
+    "appId": "com.printventory.app",
+    "mac": {
+      "category": "public.app-category.utilities",
+      "icon": "logo.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "logo.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Printventory",
+      "uninstallDisplayName": "Printventory",
+      "installerIcon": "logo.ico",
+      "uninstallerIcon": "logo.ico",
+      "installerHeaderIcon": "logo.ico",
+      "installerSidebar": "installer-sidebar.bmp",
+      "uninstallerSidebar": "installer-sidebar.bmp",
+      "allowElevation": true,
+      "runAfterFinish": true,
+      "perMachine": true,
+      "include": "installer.nsh",
+      "differentialPackage": true,
+      "displayLanguageSelector": true,
+      "artifactName": "Printventory-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "logo.png",
+      "dup.png",
+      "roulette.png",
+      "tag.png",
+      "aitagging.js",
+      "slicer.js",
+      "guide.js",
+      "3d.png",
+      "file-icon.png",
+      "sidebar-bg.jpg",
+      "guide/*",
+      "bg.png",
+      "search.js",
+      "installer.nsh",
+      "node_modules/**/*"
+    ],
+    "directories": {
+      "buildResources": ".",
+      "output": "dist"
+    },
+    "asar": true
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.1",
+    "electron": "^38.1.2",
+    "electron-builder": "^26.0.12"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "electron-google-analytics": "^1.0.2",
+    "electron-is-dev": "^3.0.1",
+    "fs": "^0.0.1-security",
+    "fuse.js": "^7.1.0",
+    "jszip": "^3.10.1",
+    "node-fetch": "^3.3.2",
+    "node-stream-zip": "^1.15.0",
+    "openai": "4.85.3",
+    "puppeteer": "^24.22.0",
+    "three": "^0.180.0",
+    "threejs-webworker-3mf-loader": "github:manyfold3d/threejs-webworker-3mf-loader",
+    "trash": "^10.0.0",
+    "universal-analytics": "^0.5.3"
+  }
+}

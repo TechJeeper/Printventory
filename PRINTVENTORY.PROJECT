@@ -1,0 +1,110 @@
+# Printventory - 3D Model Manager
+
+Printventory is a desktop application for managing 3D printing model collections. It provides a comprehensive set of features for organizing, viewing, and managing 3D model files.
+
+## Core Features
+
+### File Management
+- Scan directories for STL and 3MF files (up to 50MB per file)
+- View thumbnails of 3D models in a responsive grid layout
+- Sort models by name, size, or date
+- Quick access to file location
+- Delete files with database cleanup
+- Backup and restore database
+- Virtual grid rendering for performance optimization
+
+### Model Organization
+- Tag models for easy categorization
+- Assign designers to models
+- Track print status (printed/not printed)
+- Add source URLs and notes
+- Link related models (parent/child relationships)
+- Assign licenses to models
+
+### Multi-Edit Features
+- Select multiple models for batch editing
+- Bulk update designer, source, print status, and parent model
+- Select all visible models with one click
+- Filter models by various attributes
+
+### Duplicate Management
+- Find duplicate files based on content hash
+- Compare duplicates with thumbnails
+- Easily remove duplicate files
+
+### Interface Features
+- Customizable model background color
+- Context menu for quick actions
+- Responsive grid layout
+- Real-time search and filtering
+- Tag management system
+- Auto-save changes
+
+### Data Management
+- Database backup and restore
+- Purge all model data option
+- Automatic thumbnail generation
+- Preserve metadata during rescans
+
+### AI Integration
+- AI-powered automatic tagging of models
+- Integration with OpenAI and other AI services
+- Configurable AI settings
+
+### Slicer Integration
+- Open models directly in configured slicers
+- Support for multiple slicer applications
+- Customizable slicer paths
+
+## Technical Architecture
+
+### Frontend
+- Electron-based desktop application
+- HTML/CSS/JavaScript UI
+- Three.js for 3D model rendering
+- Virtual scrolling for performance optimization
+
+### Backend
+- Node.js
+- SQLite database (better-sqlite3)
+- File system operations for model management
+- Thumbnail generation
+
+### Database Schema
+- models: Stores model metadata (filepath, filename, size, etc.)
+- tags: Stores available tags
+- model_tags: Maps tags to models
+- settings: Application settings
+- slicers: Configured slicer applications
+
+## Planned Features (TODO)
+
+1. **Fix search** - Improve search functionality for better model discovery
+2. **Pull from source** - Implement ability to download models from source URLs
+3. **Open in slicer** - Complete integration with 3D printing slicer applications
+4. **Grid optimization** - Improve performance of the model grid display
+5. **3D/Larger View** - Add enhanced 3D viewing capabilities for models
+
+## Development Information
+
+- Version: 0.8.9
+- Author: TechJeeper Designs
+- License: ISC
+- Platform: Windows, macOS
+- Build System: electron-builder
+
+## Dependencies
+
+- Electron
+- better-sqlite3
+- OpenAI API
+- Three.js
+- JSZip
+- Puppeteer
+
+## Data Storage
+
+- User data stored in local application data folder
+- Database and thumbnails preserved during updates
+- Automatic backups created before updates
+- Manual backup/restore functionality
