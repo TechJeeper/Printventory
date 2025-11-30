@@ -1243,7 +1243,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     button.addEventListener('click', () => {
       const dialog = document.getElementById('new-parent-dialog');
       // Store which dropdown triggered the dialog
-      dialog.dataset.sourceDropdown = button.closest('.designer-input-container').querySelector('select').id;
+      const container = button.closest('.designer-input-container');
+      dialog.dataset.sourceDropdown = container ? container.querySelector('select')?.id : 'model-parent';
+
+      // Reset form
+      dialog.querySelector('form').reset();
+      const input = document.getElementById('new-parent-name');
+      if (input) {
+        input.value = '';
+        requestAnimationFrame(() => {
+          input.focus();
+        });
+      }
+
       dialog.showModal();
     });
   });
@@ -1629,6 +1641,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (newDesignerDialog) {
         const sourceDropdownId = button.closest('.designer-input-container')?.querySelector('select')?.id;
         newDesignerDialog.dataset.sourceDropdown = sourceDropdownId;
+
+        // Reset the form
+        newDesignerDialog.querySelector('form').reset();
+        const input = document.getElementById('new-designer-name');
+        if (input) {
+          input.value = '';
+          // Ensure input is focused after dialog opens
+          requestAnimationFrame(() => {
+            input.focus();
+          });
+        }
+
         newDesignerDialog.showModal();
       }
     });
@@ -1650,7 +1674,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       input.value = '';
       
       // Store which dropdown triggered the dialog
-      dialog.dataset.sourceDropdown = button.closest('.designer-input-container')?.querySelector('select')?.id || 'model-license';
+      const container = button.closest('.designer-input-container');
+      dialog.dataset.sourceDropdown = container ? container.querySelector('select')?.id : 'model-license';
       
       // Show dialog and focus input
       dialog.showModal();
@@ -5452,80 +5477,19 @@ async function refreshModelDisplay() {
     document.getElementById('tag-filter').value = tagFilter;
     document.getElementById('filetype-select').value = fileType; // Add this line
 
-    // Get all models with current sort option
-    let models = await window.electron.getAllModels(sortOption, 0);
+    // Prepare filters object
+    const filters = {
+      designer,
+      license,
+      parentModel,
+      printStatus,
+      tagFilter,
+      fileType,
+      searchTerm
+    };
 
-    // Add file type filter
-    if (fileType) {
-      if (fileType === 'zip') {
-        // For ZIP files, check the isZipArchive property
-        models = models.filter(model => model.isZipArchive);
-      } else {
-        // For regular files, check the file extension (works for both regular and zip entries)
-        models = models.filter(model => 
-          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-        );
-      }
-    }
-
-    // Apply search term filter
-    if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      models = models.filter(model => {
-        const searchFields = [
-          model.fileName, 
-          model.designer, 
-          model.parentModel, 
-          model.notes,
-          model.zipEntryPath || model.zip_path || '', // Include zip entry path for searching
-          model.source || ''
-        ]
-          .filter(Boolean)
-          .map(field => field.toLowerCase());
-        return searchFields.some(field => field.includes(searchLower));
-      });
-    }
-
-    // Apply filters
-    if (designer) {
-      if (designer === '__none__') {
-        models = models.filter(model => !model.designer || model.designer.trim() === '');
-      } else {
-        models = models.filter(model =>
-          model.designer &&
-          model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
-        );
-      }
-    }
-    if (license) {
-      if (license === '__none__') {
-        models = models.filter(model => !model.license || model.license.trim() === '');
-      } else {
-        models = models.filter(model => model.license === license);
-      }
-    }
-    if (parentModel) {
-      if (parentModel === '__none__') {
-        models = models.filter(model => !model.parentModel || model.parentModel.trim() === '');
-      } else {
-        models = models.filter(model => model.parentModel === parentModel);
-      }
-    }
-    if (printStatus === 'printed') {
-      models = models.filter(model => model.printed);
-    } else if (printStatus === 'not-printed') {
-      models = models.filter(model => !model.printed);
-    }
-    if (tagFilter) {
-      models = await Promise.all(models.map(async (model) => {
-        const modelTags = await window.electron.getModelTags(model.id);
-        if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
-          return model;
-        }
-        return null;
-      }));
-      models = models.filter(model => model !== null);
-    }
+    // Get filtered models directly from backend
+    const models = await window.electron.getAllModels(sortOption, 0, filters);
 
     // Display filtered models
     await displayModels(models);
@@ -5667,8 +5631,7 @@ async function handleFilterChange() {
     updateSelectedCount();
 
     // Get and display filtered models
-    const models = await window.getCombinedFilteredModels();
-    await displayModels(models);
+    await refreshModelDisplay();
   } catch (error) {
     console.error("Error applying filters:", error);
   }
@@ -6278,9 +6241,10 @@ async function addTagToModel(tagName, containerId) {
       .map(t => t.getAttribute('data-tag-name'));
     
     if (containerId === 'multi-tags') {
-      // When removing, we DO want to save the resulting list for all selected models
-      // Note: This sets all selected models to have exactly the tags remaining in the UI.
-      await autoSaveMultipleModels('tags', currentTags); 
+      // When removing a tag in multi-edit, we want to remove this specific tag from ALL selected models
+      // regardless of what other tags they might have.
+      console.log(`Multi-edit: Removing tag '${tagName}' from selected models.`);
+      await autoSaveMultipleModels('tags-remove', tagName);
     } else {
       // Single edit mode save
       const filePath = getModelFilePath();
@@ -7524,6 +7488,13 @@ async function autoSaveMultipleModels(field, value) {
           const newTags = Array.isArray(value) ? value : []; 
           // Combine, filter out duplicates, and sort
           const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
+          model.tags = allTags;
+        } else if (field === 'tags-remove') {
+          // Special handling for removing specific tag
+          const existingTags = Array.isArray(model.tags) ? model.tags : [];
+          const tagToRemove = value;
+          // Filter out the tag to remove
+          const allTags = existingTags.filter(tag => tag !== tagToRemove).sort();
           model.tags = allTags;
         } else {
           // Handle other fields
