@@ -194,14 +194,7 @@ const analytics = {
 // Near the top of the file, add this line
 const { version } = require('./package.json');
 
-let isDev = false;
-try {
-  const electronIsDev = require('electron-is-dev');
-  isDev = electronIsDev;
-} catch (error) {
-  // If electron-is-dev is not available, determine dev mode through other means
-  isDev = process.env.NODE_ENV === 'development' || /[\\/]electron/i.test(process.execPath);
-}
+let isDev = !app.isPackaged;
 
 const DEBUG = false; // Set to true for development/debugging
 const PING_INTERVAL = 30000; // 30 seconds
