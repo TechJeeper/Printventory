@@ -1369,7 +1369,7 @@ ipcMain.handle('get-models-by-designer', async (event, designer) => {
   }
 });
 
-ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
+ipcMain.handle('get-all-models', async (event, sortOption, limit = 0, filters = {}) => {
   try {
     // Determine the ORDER BY clause based on sortOption.
     let orderClause = "";
@@ -1395,13 +1395,100 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
         break;
     }
 
-    let models;
-    if (limit === 0) {
-      // When limit is 0, load all models without a limit
-      models = db.prepare(`SELECT * FROM models ${orderClause}`).all();
-    } else {
-      models = db.prepare(`SELECT * FROM models ${orderClause} LIMIT ?`).all(limit);
+    // Build WHERE clause based on filters
+    const whereConditions = [];
+    const params = [];
+
+    // Filter by designer
+    if (filters.designer) {
+      if (filters.designer === '__none__') {
+        whereConditions.push("(designer IS NULL OR designer = '')");
+      } else {
+        whereConditions.push("designer = ?");
+        params.push(filters.designer);
+      }
     }
+
+    // Filter by license
+    if (filters.license) {
+      if (filters.license === '__none__') {
+        whereConditions.push("(license IS NULL OR license = '')");
+      } else {
+        whereConditions.push("license = ?");
+        params.push(filters.license);
+      }
+    }
+
+    // Filter by parent model
+    if (filters.parentModel) {
+      if (filters.parentModel === '__none__') {
+        whereConditions.push("(parentModel IS NULL OR parentModel = '')");
+      } else {
+        whereConditions.push("parentModel = ?");
+        params.push(filters.parentModel);
+      }
+    }
+
+    // Filter by print status
+    if (filters.printStatus === 'printed') {
+      whereConditions.push("printed = 1");
+    } else if (filters.printStatus === 'not-printed') {
+      whereConditions.push("(printed = 0 OR printed IS NULL)");
+    }
+
+    // Filter by file type
+    if (filters.fileType) {
+      if (filters.fileType === 'zip') {
+        whereConditions.push("isZipArchive = 1");
+      } else {
+        // Simple file extension check
+        whereConditions.push("fileName LIKE ?");
+        params.push(`%.${filters.fileType}`);
+      }
+    }
+
+    // Filter by search term
+    if (filters.searchTerm) {
+      const term = `%${filters.searchTerm}%`;
+      whereConditions.push(`(
+        fileName LIKE ? OR
+        designer LIKE ? OR
+        parentModel LIKE ? OR
+        notes LIKE ? OR
+        zipEntryPath LIKE ? OR
+        source LIKE ?
+      )`);
+      params.push(term, term, term, term, term, term);
+    }
+
+    // Filter by tags (requires join)
+    let joinClause = "";
+    if (filters.tagFilter) {
+      // Find models that have a tag with the given name
+      joinClause = "INNER JOIN model_tags mt ON models.id = mt.model_id INNER JOIN tags t ON mt.tag_id = t.id";
+      whereConditions.push("t.name = ?");
+      params.push(filters.tagFilter);
+    }
+
+    // Combine all WHERE conditions
+    let whereClause = "";
+    if (whereConditions.length > 0) {
+      whereClause = "WHERE " + whereConditions.join(" AND ");
+    }
+
+    let sql = `SELECT models.* FROM models ${joinClause} ${whereClause} ${orderClause}`;
+
+    // Add DISTINCT if joining
+    if (joinClause) {
+      sql = `SELECT DISTINCT models.* FROM models ${joinClause} ${whereClause} ${orderClause}`;
+    }
+
+    if (limit > 0) {
+      sql += " LIMIT ?";
+      params.push(limit);
+    }
+
+    const models = db.prepare(sql).all(...params);
     return models;
   } catch (error) {
     console.error("Error in getAllModels IPC:", error);
