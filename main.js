@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { Worker } = require('worker_threads');
 const JSZip = require('jszip');
+const StreamZip = require('node-stream-zip');
 const os = require('os');
 const https = require('https');
 const ua = require('universal-analytics');
@@ -326,12 +327,108 @@ function initializeDatabase() {
     // Enable foreign keys
     db.pragma('foreign_keys = ON');
     
-    // Create tables in sequence
-    db.transaction(() => {
-      // Create models table
-      db.prepare(`CREATE TABLE IF NOT EXISTS models (
+    // Create tables in sequence (better-sqlite3 is synchronous)
+    // Create models table
+    // Note: filePath is not UNIQUE here - uniqueness is enforced via composite index (filePath, zip_path)
+    // to support multiple files in the same zip archive
+    db.exec(`CREATE TABLE IF NOT EXISTS models (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filePath TEXT,
+        fileName TEXT,
+        designer TEXT,
+        source TEXT,
+        notes TEXT,
+        printed INTEGER,
+        thumbnail TEXT,
+        parentModel TEXT,
+        hash TEXT,
+        size INTEGER,
+        license TEXT,
+        modifiedDate DATETIME,
+        isZipArchive INTEGER DEFAULT 0,
+        zipEntryPath TEXT,
+        zip_path TEXT
+    )`);
+
+    // Create tags table
+    db.exec(`CREATE TABLE IF NOT EXISTS tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE
+    )`);
+
+    // Create model_tags table
+    db.exec(`CREATE TABLE IF NOT EXISTS model_tags (
+        model_id INTEGER,
+        tag_id INTEGER,
+        FOREIGN KEY(model_id) REFERENCES models(id),
+        FOREIGN KEY(tag_id) REFERENCES tags(id),
+        PRIMARY KEY(model_id, tag_id)
+    )`);
+
+    // Add ZIP archive columns to existing models table if they don't exist
+    try {
+      db.exec(`ALTER TABLE models ADD COLUMN isZipArchive INTEGER DEFAULT 0`);
+    } catch (error) {
+      // Column already exists, ignore error
+    }
+    
+    try {
+      db.exec(`ALTER TABLE models ADD COLUMN zipEntryPath TEXT`);
+    } catch (error) {
+      // Column already exists, ignore error
+    }
+    
+    try {
+      db.exec(`ALTER TABLE models ADD COLUMN zip_path TEXT`);
+    } catch (error) {
+      // Column already exists, ignore error
+    }
+    
+    // Migrate data from zipEntryPath to zip_path if zip_path is null
+    try {
+      db.exec(`UPDATE models SET zip_path = zipEntryPath WHERE zipEntryPath IS NOT NULL AND zip_path IS NULL`);
+    } catch (error) {
+      // Migration failed, continue anyway
+      console.error('Error migrating zipEntryPath to zip_path:', error);
+    }
+    
+    // Migrate schema to support multiple files in same zip
+    // Remove UNIQUE constraint from filePath and add composite index
+    try {
+      // Check if the zip_path column exists first
+      let zipPathColumnExists = false;
+      try {
+        const columnInfo = db.prepare(`PRAGMA table_info(models)`).all();
+        zipPathColumnExists = columnInfo.some(col => col.name === 'zip_path');
+      } catch (e) {
+        // Table might not exist yet, that's okay
+      }
+      
+      // Only proceed if zip_path column exists
+      if (!zipPathColumnExists) {
+        console.log('zip_path column does not exist yet, skipping index creation');
+      } else {
+        // Check if the new composite index exists
+        const newIndexExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_models_filepath_zip_path'`).get();
+        
+        // Check if table was created with UNIQUE constraint on filePath by checking table definition
+        const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='models'`).get();
+        const hasUniqueConstraint = tableInfo && tableInfo.sql && tableInfo.sql.includes('filePath TEXT UNIQUE');
+        
+        if (hasUniqueConstraint && !newIndexExists) {
+        console.log('Migrating schema to support multiple files in same zip...');
+        
+        // Create a backup of the models table
+        db.exec(`CREATE TABLE IF NOT EXISTS models_backup AS SELECT * FROM models`);
+        
+        // Drop the old table
+        db.exec(`DROP TABLE IF EXISTS models_old`);
+        db.exec(`ALTER TABLE models RENAME TO models_old`);
+        
+        // Create new table without UNIQUE constraint on filePath
+        db.exec(`CREATE TABLE models (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          filePath TEXT UNIQUE,
+          filePath TEXT,
           fileName TEXT,
           designer TEXT,
           source TEXT,
@@ -342,45 +439,69 @@ function initializeDatabase() {
           hash TEXT,
           size INTEGER,
           license TEXT,
-          modifiedDate DATETIME
-      )`).run();
-
-      // Create tags table
-      db.prepare(`CREATE TABLE IF NOT EXISTS tags (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT UNIQUE
-      )`).run();
-
-      // Create model_tags table
-      db.prepare(`CREATE TABLE IF NOT EXISTS model_tags (
-          model_id INTEGER,
-          tag_id INTEGER,
-          FOREIGN KEY(model_id) REFERENCES models(id),
-          FOREIGN KEY(tag_id) REFERENCES tags(id),
-          PRIMARY KEY(model_id, tag_id)
-      )`).run();
-      
-      // Create settings table
-      db.prepare(`CREATE TABLE IF NOT EXISTS settings (
-          key TEXT PRIMARY KEY,
-          value TEXT
-      )`).run();
-      
-      // Create slicers table
-      db.prepare(`CREATE TABLE IF NOT EXISTS slicers (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL,
-          path TEXT NOT NULL
-      )`).run();
-      
-      // Create indexes for better performance
-      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_filepath ON models(filePath)').run();
-      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_filename ON models(fileName)').run();
-      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_designer ON models(designer)').run();
-      db.prepare('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)').run();
-      db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)').run();
-      db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)').run();
-    })();
+          modifiedDate DATETIME,
+          isZipArchive INTEGER DEFAULT 0,
+          zipEntryPath TEXT,
+          zip_path TEXT
+        )`);
+        
+        // Copy data back
+        db.exec(`INSERT INTO models SELECT * FROM models_old`);
+        
+        // Create composite unique index on (filePath, zip_path)
+        // This allows multiple rows with same filePath if zip_path is different
+        // For non-zip files (zip_path IS NULL), filePath must be unique
+        // Note: SQLite treats NULL as distinct in unique indexes, so we need to handle this in application logic
+        // For now, we'll create a non-unique index and handle uniqueness in the application
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_models_filepath_zip_path 
+                 ON models(filePath, zip_path)`);
+        
+        // Drop old table
+        db.exec(`DROP TABLE IF EXISTS models_old`);
+        db.exec(`DROP TABLE IF EXISTS models_backup`);
+        
+        console.log('Schema migration completed successfully');
+        } else if (!newIndexExists) {
+          // Just create the index if it doesn't exist (non-unique, we handle uniqueness in app logic)
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_models_filepath_zip_path 
+                   ON models(filePath, zip_path)`);
+        }
+      }
+    } catch (error) {
+      console.error('Error migrating schema for zip_path support:', error);
+      // Try to restore from backup if migration failed
+      try {
+        const backupExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='models_backup'`).get();
+        if (backupExists) {
+          db.exec(`DROP TABLE IF EXISTS models`);
+          db.exec(`ALTER TABLE models_backup RENAME TO models`);
+          console.log('Restored from backup after migration failure');
+        }
+      } catch (restoreError) {
+        console.error('Error restoring from backup:', restoreError);
+      }
+    }
+    
+    // Create settings table
+    db.exec(`CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )`);
+    
+    // Create slicers table
+    db.exec(`CREATE TABLE IF NOT EXISTS slicers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL
+    )`);
+    
+    // Create indexes for better performance
+    db.exec('CREATE INDEX IF NOT EXISTS idx_models_filepath ON models(filePath)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_models_filename ON models(fileName)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_models_designer ON models(designer)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)');
     
     // Repair model_tags table to fix any foreign key issues
     repairModelTagsTable();
@@ -453,7 +574,7 @@ function initializeDefaultSettings() {
     // Check if settings table exists
     const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get();
     if (!tableExists) {
-      db.prepare('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)').run();
+      db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)');
     }
 
     // Define default settings
@@ -469,6 +590,7 @@ function initializeDefaultSettings() {
       { key: 'ClientId', value: crypto.randomUUID() }, // Generate a unique client ID
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
+      { key: 'enableZipArchives', value: '0' }, // ZIP Archives disabled by default
     ];
     
     // Insert default settings if they don't exist
@@ -548,16 +670,16 @@ function createWindow() {
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
         {
+          label: 'File Types',
+          click: () => mainWindow.webContents.send('open-file-types-settings')
+        },
+        {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
         },
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        },
-        {
-          label: 'File Types',
-          click: () => mainWindow.webContents.send('open-file-types-settings')
         }
       ]
     },
@@ -694,16 +816,16 @@ function createApplicationMenu() {
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
         {
+          label: 'File Types',
+          click: () => mainWindow.webContents.send('open-file-types-settings')
+        },
+        {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
         },
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        },
-        {
-          label: 'File Types',
-          click: () => mainWindow.webContents.send('open-file-types-settings')
         }
       ]
     },
@@ -820,72 +942,34 @@ ipcMain.handle('open-file-dialog', async () => {
 
 // Update the calculateFileHash function to be more robust
 async function calculateFileHash(filePath) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const hash = crypto.createHash('sha256');
-      
-      // Check if this is a ZIP file entry
-      if (filePath.includes(':') && filePath.split(':').length > 2) {
-        // For ZIP file entries, extract and hash the content
-        const lastColonIndex = filePath.lastIndexOf(':');
-        const zipPath = filePath.substring(0, lastColonIndex);
-        const entryName = filePath.substring(lastColonIndex + 1);
-        
-        // Check if the ZIP file exists
-        if (!fs.existsSync(zipPath)) {
-          reject(new Error(`ZIP file does not exist: ${zipPath}`));
-          return;
-        }
-        
-        // Extract the file temporarily and hash it
-        const tempPath = await extractZipFileToTemp(zipPath, entryName);
-        try {
-          const data = await fs.promises.readFile(tempPath);
-          hash.update(data);
-          const fileHash = hash.digest('hex');
-          debugLog(`Generated hash for ZIP entry ${filePath}: ${fileHash}`);
-          resolve(fileHash);
-        } finally {
-          // Clean up temporary file
-          try {
-            await fs.promises.unlink(tempPath);
-          } catch (cleanupErr) {
-            console.warn(`Failed to clean up temp file ${tempPath}:`, cleanupErr);
-          }
-        }
-      } else {
-        // For regular files, use stream
-        const stream = fs.createReadStream(filePath);
-        
-        stream.on('error', err => {
-          console.error(`Error reading file for hashing: ${filePath}`, err);
-          reject(err);
-        });
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    
+    stream.on('error', err => {
+      console.error(`Error reading file for hashing: ${filePath}`, err);
+      reject(err);
+    });
 
-        stream.on('data', chunk => {
-          try {
-            hash.update(chunk);
-          } catch (err) {
-            console.error(`Error updating hash for file: ${filePath}`, err);
-            reject(err);
-          }
-        });
-
-        stream.on('end', () => {
-          try {
-            const fileHash = hash.digest('hex');
-            debugLog(`Generated hash for ${filePath}: ${fileHash}`);
-            resolve(fileHash);
-          } catch (err) {
-            console.error(`Error generating final hash for file: ${filePath}`, err);
-            reject(err);
-          }
-        });
+    stream.on('data', chunk => {
+      try {
+        hash.update(chunk);
+      } catch (err) {
+        console.error(`Error updating hash for file: ${filePath}`, err);
+        reject(err);
       }
-    } catch (error) {
-      console.error(`Error calculating hash for ${filePath}:`, error);
-      reject(error);
-    }
+    });
+
+    stream.on('end', () => {
+      try {
+        const fileHash = hash.digest('hex');
+        debugLog(`Generated hash for ${filePath}: ${fileHash}`);
+        resolve(fileHash);
+      } catch (err) {
+        console.error(`Error generating final hash for file: ${filePath}`, err);
+        reject(err);
+      }
+    });
   });
 }
 
@@ -900,112 +984,9 @@ async function getMaxFileSize() {
   }
 }
 
-// Check if zip support is enabled
-async function isZipSupportEnabled() {
-  try {
-    const zipSupport = await db.prepare('SELECT value FROM settings WHERE key = ?').get('zipSupportEnabled');
-    return zipSupport && zipSupport.value === 'true';
-  } catch (error) {
-    console.error('Error checking zip support:', error);
-    return false; // Default to disabled
-  }
-}
-
-// Scan zip file for 3D models
-async function scanZipFile(zipPath) {
-  const StreamZip = require('node-stream-zip');
-  const models = [];
-  
-  try {
-    const zip = new StreamZip.async({ file: zipPath });
-    const entries = await zip.entries();
-    
-    for (const entry of Object.values(entries)) {
-      const fileName = entry.name.toLowerCase();
-      const ext = path.extname(fileName).toLowerCase();
-      
-      // Check if it's a 3D model file
-      if ((ext === '.stl' || ext === '.3mf') && !entry.isDirectory) {
-        models.push({
-          name: path.basename(entry.name),
-          path: `${zipPath}:${entry.name}`,
-          size: entry.size,
-          isInZip: true,
-          zipPath: zipPath,
-          zipEntryName: entry.name
-        });
-      }
-    }
-    
-    await zip.close();
-    return models;
-  } catch (error) {
-    console.error(`Error scanning zip file ${zipPath}:`, error);
-    return [];
-  }
-}
-
-// Extract file from zip to temporary location
-async function extractZipFileToTemp(zipPath, entryName) {
-  const StreamZip = require('node-stream-zip');
-  const os = require('os');
-  const fs = require('fs').promises;
-  
-  try {
-    const zip = new StreamZip.async({ file: zipPath });
-    const tempDir = os.tmpdir();
-    const tempFileName = `printventory_${Date.now()}_${path.basename(entryName)}`;
-    const tempPath = path.join(tempDir, tempFileName);
-    
-    // Extract the file
-    await zip.extract(entryName, tempPath);
-    await zip.close();
-    
-    return tempPath;
-  } catch (error) {
-    console.error(`Error extracting file from zip ${zipPath}:${entryName}:`, error);
-    throw error;
-  }
-}
-
-// Clean up temporary file
-async function cleanupTempFile(tempPath) {
-  try {
-    const fs = require('fs').promises;
-    await fs.unlink(tempPath);
-  } catch (error) {
-    console.error(`Error cleaning up temp file ${tempPath}:`, error);
-  }
-}
-
 // Add this helper function
 function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
-}
-
-// Create a canonical path function that handles special characters consistently
-function canonicalPath(filepath) {
-  if (!filepath) return filepath;
-  
-  // Normalize path separators
-  let canonical = filepath.replace(/\\/g, '/');
-  
-  // Handle special characters that might cause issues
-  // Convert to a consistent format for database storage and comparison
-  canonical = canonical
-    .replace(/\s+/g, ' ')  // Normalize multiple spaces to single space
-    .replace(/#/g, '#')    // Keep hash as-is (don't encode for database storage)
-    .replace(/\$/g, '$')   // Keep dollar sign as-is
-    .replace(/\+/g, '+')   // Keep plus as-is
-    .replace(/\[/g, '[')   // Keep brackets as-is
-    .replace(/\]/g, ']')   // Keep brackets as-is
-    .replace(/\(/g, '(')   // Keep parentheses as-is
-    .replace(/\)/g, ')')   // Keep parentheses as-is
-    .replace(/'/g, "'")    // Keep single quote as-is
-    .replace(/"/g, '"')    // Keep double quote as-is
-    .trim();               // Remove leading/trailing whitespace
-  
-  return canonical;
 }
 
 // Update the removeNonExistentFiles function
@@ -1020,21 +1001,7 @@ async function removeNonExistentFiles(scanDirectoryPath) {
         const normalizedScanPath = normalizePath(scanDirectoryPath);
         const normalizedFilePath = normalizePath(model.filePath);
         if (normalizedFilePath.startsWith(normalizedScanPath)) {
-          let fileExists = false;
-          
-          // Check if this is an archived model (contains ':')
-          if (model.filePath.includes(':')) {
-            // For archived models, only check if the zip file exists
-            // Use lastIndexOf to handle Windows drive letters (C:)
-            const lastColonIndex = model.filePath.lastIndexOf(':');
-            const zipPath = model.filePath.substring(0, lastColonIndex);
-            fileExists = fs.existsSync(zipPath);
-          } else {
-            // For regular files, check the full path
-            fileExists = fs.existsSync(model.filePath);
-          }
-          
-          if (!fileExists) {
+          if (!fs.existsSync(model.filePath)) {
             // First delete from model_tags (child table)
             db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
             
@@ -1063,6 +1030,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
   try {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
+    const enableZipArchives = await getSetting('enableZipArchives') === '1';
     
     // First, remove any non-existent files from the scanned directory
     const removedCount = await removeNonExistentFiles(directoryPath);
@@ -1072,114 +1040,10 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
       });
     }
 
-    return new Promise(async (resolve, reject) => {
+    return new Promise((resolve, reject) => {
       // Create a worker for scanning
-      const worker = new Worker(`
-        const { parentPort, workerData } = require('worker_threads');
-        const fs = require('fs');
-        const path = require('path');
-        const crypto = require('crypto');
-
-        async function scanDirectory(directoryPath, maxFileSize, zipSupportEnabled) {
-          const files = [];
-          let totalFiles = 0;
-          let processedFiles = 0;
-
-          // Use a stack instead of recursion for better performance
-          const directoryStack = [directoryPath];
-          const seenDirs = new Set();
-
-          while (directoryStack.length > 0) {
-            const currentDir = directoryStack.pop();
-            if (seenDirs.has(currentDir)) continue;
-            seenDirs.add(currentDir);
-
-            let entries;
-            try {
-              entries = fs.readdirSync(currentDir, { withFileTypes: true });
-            } catch (err) {
-              console.error(\`Skipping directory \${currentDir} due to error: \${err.message}\`);
-              continue;
-            }
-
-            for (const entry of entries) {
-              const fullPath = path.join(currentDir, entry.name);
-              
-              if (entry.isDirectory()) {
-                // Skip system directories and __MACOSX
-                if (entry.name.toLowerCase() === '__macosx' || 
-                    /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
-                  continue;
-                }
-                directoryStack.push(fullPath);
-              } else {
-                const ext = path.extname(entry.name).toLowerCase();
-                if (ext === '.stl' || ext === '.3mf') {
-                  try {
-                    const stats = fs.statSync(fullPath);
-                    if (stats.size <= maxFileSize) {
-                      files.push({
-                        filePath: fullPath,
-                        fileName: entry.name,
-                        size: stats.size,
-                        mtime: stats.mtime
-                      });
-                    }
-                  } catch (error) {
-                    console.error(\`Error processing file \${fullPath}:\`, error);
-                  }
-                } else if (zipSupportEnabled && ext === '.zip') {
-                  // Scan zip file for 3D models
-                  try {
-                    const StreamZip = require('node-stream-zip');
-                    const zip = new StreamZip.async({ file: fullPath });
-                    const entries = await zip.entries();
-                    
-                    for (const zipEntry of Object.values(entries)) {
-                      const zipFileName = zipEntry.name.toLowerCase();
-                      const zipExt = path.extname(zipFileName).toLowerCase();
-                      
-                      if ((zipExt === '.stl' || zipExt === '.3mf') && !zipEntry.isDirectory) {
-                        files.push({
-                          filePath: \`\${fullPath}:\${zipEntry.name}\`,
-                          fileName: path.basename(zipEntry.name),
-                          size: zipEntry.size,
-                          mtime: zipEntry.time ? new Date(zipEntry.time) : new Date(),
-                          isInZip: true,
-                          zipPath: fullPath,
-                          zipEntryName: zipEntry.name
-                        });
-                      }
-                    }
-                    
-                    await zip.close();
-                  } catch (error) {
-                    console.error(\`Error scanning zip file \${fullPath}:\`, error);
-                  }
-                }
-                processedFiles++;
-                if (processedFiles % 100 === 0) {
-                  parentPort.postMessage({ 
-                    type: 'progress', 
-                    processed: processedFiles 
-                  });
-                }
-              }
-            }
-          }
-
-          return { files, totalFiles: processedFiles };
-        }
-
-        parentPort.on('message', async ({ directoryPath, maxFileSize, zipSupportEnabled }) => {
-          try {
-            const result = await scanDirectory(directoryPath, maxFileSize, zipSupportEnabled);
-            parentPort.postMessage({ type: 'done', result });
-          } catch (error) {
-            parentPort.postMessage({ type: 'error', error: error.message });
-          }
-        });
-      `, { eval: true });
+      const workerPath = path.join(__dirname, 'scan-worker.js');
+      const worker = new Worker(workerPath);
 
       // Set up worker message handling
       worker.on('message', async (message) => {
@@ -1192,19 +1056,60 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
           const { files, totalFiles } = message.result;
           
           try {
+            // Check if zip_path column exists
+            let zipPathColumnExists = false;
+            try {
+              const columnInfo = db.prepare(`PRAGMA table_info(models)`).all();
+              zipPathColumnExists = columnInfo.some(col => col.name === 'zip_path');
+            } catch (e) {
+              console.error('Error checking for zip_path column:', e);
+            }
+            
             // Process files in larger batches for better performance
             const batchSize = 100;
-            const updateExisting = db.prepare(`
-              UPDATE models 
-              SET size = ?, modifiedDate = ?
-              WHERE filePath = ?
-            `);
             
-            const insertNew = db.prepare(`
-              INSERT INTO models (
-                filePath, fileName, size, modifiedDate
-              ) VALUES (?, ?, ?, ?)
-            `);
+            // Prepare statements for updates - need separate ones for NULL and non-NULL zip_path
+            // Only include zip_path in queries if the column exists
+            let updateExistingWithZipPath, updateExistingWithoutZipPath, insertNew;
+            
+            if (zipPathColumnExists) {
+              updateExistingWithZipPath = db.prepare(`
+                UPDATE models 
+                SET size = ?, modifiedDate = ?, zip_path = ?
+                WHERE filePath = ? AND zip_path = ?
+              `);
+              
+              updateExistingWithoutZipPath = db.prepare(`
+                UPDATE models 
+                SET size = ?, modifiedDate = ?, zip_path = ?
+                WHERE filePath = ? AND (zip_path IS NULL OR zip_path = '')
+              `);
+              
+              insertNew = db.prepare(`
+                INSERT INTO models (
+                  filePath, fileName, size, modifiedDate, isZipArchive, zipEntryPath, zip_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              `);
+            } else {
+              // Fallback for databases without zip_path column
+              updateExistingWithZipPath = db.prepare(`
+                UPDATE models 
+                SET size = ?, modifiedDate = ?
+                WHERE filePath = ?
+              `);
+              
+              updateExistingWithoutZipPath = db.prepare(`
+                UPDATE models 
+                SET size = ?, modifiedDate = ?
+                WHERE filePath = ?
+              `);
+              
+              insertNew = db.prepare(`
+                INSERT INTO models (
+                  filePath, fileName, size, modifiedDate, isZipArchive, zipEntryPath
+                ) VALUES (?, ?, ?, ?, ?, ?)
+              `);
+            }
 
             // Process files in batches
             for (let i = 0; i < files.length; i += batchSize) {
@@ -1212,20 +1117,124 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
               
               // Process each file in the batch
               for (const file of batch) {
-                const canonicalFilePath = canonicalPath(file.filePath);
-                const existing = db.prepare('SELECT filePath FROM models WHERE filePath = ?').get(canonicalFilePath);
+                const zipPath = file.zip_path || file.zipEntryPath || null;
+                
+                // For zip files, check using both filePath and zip_path (if column exists)
+                let existing;
+                if (zipPathColumnExists) {
+                  if (file.isZipArchive && zipPath) {
+                    existing = db.prepare('SELECT filePath FROM models WHERE filePath = ? AND zip_path = ?').get(file.filePath, zipPath);
+                  } else {
+                    existing = db.prepare('SELECT filePath FROM models WHERE filePath = ? AND (zip_path IS NULL OR zip_path = \'\')').get(file.filePath);
+                  }
+                } else {
+                  // Fallback: just check by filePath
+                  existing = db.prepare('SELECT filePath FROM models WHERE filePath = ?').get(file.filePath);
+                }
                 
                 if (existing) {
-                  // Update existing file
-                  updateExisting.run(file.size, file.mtime.toISOString(), canonicalFilePath);
+                  // Update existing file - use appropriate statement based on zipPath
+                  if (zipPathColumnExists) {
+                    if (zipPath) {
+                      updateExistingWithZipPath.run(file.size, file.mtime.toISOString(), zipPath, file.filePath, zipPath);
+                    } else {
+                      updateExistingWithoutZipPath.run(file.size, file.mtime.toISOString(), zipPath, file.filePath);
+                    }
+                  } else {
+                    // Fallback: update without zip_path
+                    updateExistingWithZipPath.run(file.size, file.mtime.toISOString(), file.filePath);
+                  }
                 } else {
-                  // Insert new file
-                  insertNew.run(
-                    canonicalFilePath,
-                    file.fileName,
-                    file.size,
-                    file.mtime.toISOString()
-                  );
+                  // Insert new file - handle UNIQUE constraint violations for zip files
+                  try {
+                    let insertResult;
+                    if (zipPathColumnExists) {
+                      insertResult = insertNew.run(
+                        file.filePath,
+                        file.fileName,
+                        file.size,
+                        file.mtime.toISOString(),
+                        file.isZipArchive ? 1 : 0,
+                        file.zipEntryPath || null,
+                        zipPath
+                      );
+                    } else {
+                      insertResult = insertNew.run(
+                        file.filePath,
+                        file.fileName,
+                        file.size,
+                        file.mtime.toISOString(),
+                        file.isZipArchive ? 1 : 0,
+                        file.zipEntryPath || null
+                      );
+                    }
+                    
+                    // Verify the ID was assigned - if not, query ROWID and update
+                    const insertedId = insertResult.lastInsertRowid;
+                    if (!insertedId || insertedId === 0) {
+                      console.warn(`INSERT did not return lastInsertRowid for ${file.filePath}, querying ROWID...`);
+                      // Query the model we just inserted
+                      let insertedModel;
+                      if (zipPathColumnExists && zipPath) {
+                        insertedModel = db.prepare('SELECT id, ROWID FROM models WHERE filePath = ? AND zip_path = ?').get(file.filePath, zipPath);
+                      } else if (zipPathColumnExists) {
+                        insertedModel = db.prepare('SELECT id, ROWID FROM models WHERE filePath = ? AND (zip_path IS NULL OR zip_path = \'\')').get(file.filePath);
+                      } else {
+                        insertedModel = db.prepare('SELECT id, ROWID FROM models WHERE filePath = ?').get(file.filePath);
+                      }
+                      
+                      if (insertedModel) {
+                        if (!insertedModel.id && insertedModel.ROWID) {
+                          // Update the id column with ROWID
+                          console.log(`Model has NULL id but ROWID=${insertedModel.ROWID}, updating id column...`);
+                          db.prepare('UPDATE models SET id = ? WHERE ROWID = ?').run(insertedModel.ROWID, insertedModel.ROWID);
+                          console.log(`Updated model id to ${insertedModel.ROWID} for ${file.filePath}`);
+                        }
+                      }
+                    }
+                  } catch (insertError) {
+                    // If UNIQUE constraint violation, try to update instead
+                    // This can happen if filePath has a UNIQUE constraint and we're inserting multiple files from same zip
+                    if (insertError.message && insertError.message.includes('UNIQUE constraint')) {
+                      // Try to find and update the existing record
+                      const existingByPath = db.prepare('SELECT filePath FROM models WHERE filePath = ?').get(file.filePath);
+                      if (existingByPath && zipPathColumnExists) {
+                        // Update the existing record with zip_path if it's different
+                        // Use appropriate query based on whether zipPath is null
+                        if (zipPath) {
+                          const updateWithZipPath = db.prepare(`
+                            UPDATE models 
+                            SET size = ?, modifiedDate = ?, zip_path = ?, isZipArchive = ?, zipEntryPath = ?
+                            WHERE filePath = ? AND (zip_path IS NULL OR zip_path = '')
+                          `);
+                          updateWithZipPath.run(
+                            file.size,
+                            file.mtime.toISOString(),
+                            zipPath,
+                            file.isZipArchive ? 1 : 0,
+                            file.zipEntryPath || null,
+                            file.filePath
+                          );
+                        } else {
+                          const updateWithoutZipPath = db.prepare(`
+                            UPDATE models 
+                            SET size = ?, modifiedDate = ?, zip_path = ?, isZipArchive = ?, zipEntryPath = ?
+                            WHERE filePath = ? AND (zip_path IS NULL OR zip_path = '')
+                          `);
+                          updateWithoutZipPath.run(
+                            file.size,
+                            file.mtime.toISOString(),
+                            zipPath,
+                            file.isZipArchive ? 1 : 0,
+                            file.zipEntryPath || null,
+                            file.filePath
+                          );
+                        }
+                      }
+                    } else {
+                      throw insertError;
+                    }
+                  }
                 }
               }
             }
@@ -1243,11 +1252,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         }
       });
 
-      // Check if zip support is enabled
-      const zipSupportEnabled = await isZipSupportEnabled();
-      
       // Start the worker
-      worker.postMessage({ directoryPath, maxFileSize, zipSupportEnabled });
+      worker.postMessage({ directoryPath, maxFileSize, enableZipArchives });
     });
   } catch (error) {
     console.error('Error in scan-directory handler:', error);
@@ -1255,10 +1261,45 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
   }
 });
 
-ipcMain.handle('get-model', async (event, filePath) => {
+ipcMain.handle('get-model', async (event, filePath, zipEntryPath = null) => {
   try {
-    const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
-    if (!model) return null;
+    let model;
+    if (zipEntryPath) {
+      // For archive files, query by both filePath and zip_path
+      // Check both zip_path and zipEntryPath columns
+      // Explicitly select id and ROWID to ensure we get both
+      console.log(`Looking for model: filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
+      model = db.prepare('SELECT id, ROWID, * FROM models WHERE filePath = ? AND (zip_path = ? OR zipEntryPath = ?)').get(filePath, zipEntryPath, zipEntryPath);
+      
+      if (!model) {
+        // Try to see what models exist with this filePath for debugging
+        const allWithPath = db.prepare('SELECT filePath, zip_path, zipEntryPath, fileName FROM models WHERE filePath = ?').all(filePath);
+        console.log(`Found ${allWithPath.length} models with filePath=${filePath}:`, allWithPath);
+      }
+    } else {
+      // For regular files, query by filePath and ensure it's not an archive file
+      // Explicitly select id and ROWID to ensure we get both
+      model = db.prepare('SELECT id, ROWID, * FROM models WHERE filePath = ? AND (zip_path IS NULL OR zip_path = \'\') AND (zipEntryPath IS NULL OR zipEntryPath = \'\')').get(filePath);
+    }
+    
+    if (!model) {
+      console.log(`Model not found: filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
+      return null;
+    }
+
+    // If model has NULL id but has ROWID, update the id column
+    if (!model.id && model.ROWID) {
+      console.warn(`Model has NULL id but ROWID=${model.ROWID}, updating id column...`);
+      db.prepare('UPDATE models SET id = ? WHERE ROWID = ?').run(model.ROWID, model.ROWID);
+      model.id = model.ROWID;
+      console.log(`Updated model id to ${model.id} for filePath=${filePath}`);
+    }
+    
+    // Ensure we have an id before proceeding
+    if (!model.id) {
+      console.error(`Model has no id and no ROWID! filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
+      throw new Error(`Cannot find ROWID for model with NULL id. filePath: ${filePath}, zipPath: ${zipEntryPath}`);
+    }
 
     // Get tags for this model
     const tags = db.prepare(`
@@ -1454,39 +1495,12 @@ ipcMain.handle('save-setting', async (event, key, value) => {
       // Force a sync to disk to ensure the change is persisted
       db.pragma('synchronous = FULL');
       db.pragma('journal_mode = WAL');
-      db.prepare('PRAGMA wal_checkpoint(FULL)').run();
+      db.pragma('wal_checkpoint(FULL)');
     }
     
     return true;
   } catch (error) {
     console.error('Error saving setting:', error);
-    return false;
-  }
-});
-
-// Add File Types settings handler
-ipcMain.handle('open-file-types-settings', async () => {
-  // This handler is just for triggering the dialog, the actual settings are handled by get-setting and save-setting
-  return true;
-});
-
-// Add IPC handler for extracting files from zip archives
-ipcMain.handle('extract-zip-file', async (event, zipPath, entryName) => {
-  try {
-    return await extractZipFileToTemp(zipPath, entryName);
-  } catch (error) {
-    console.error('Error extracting zip file:', error);
-    throw error;
-  }
-});
-
-// Add IPC handler for cleaning up temporary files
-ipcMain.handle('cleanup-temp-file', async (event, tempPath) => {
-  try {
-    await cleanupTempFile(tempPath);
-    return true;
-  } catch (error) {
-    console.error('Error cleaning up temp file:', error);
     return false;
   }
 });
@@ -1641,8 +1655,7 @@ async function scanDirectory(directoryPath, isValidFile) {
 
 async function saveThumbnail(filePath, thumbnail) {
   try {
-    const canonicalFilePath = canonicalPath(filePath);
-    db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(thumbnail, canonicalFilePath);
+    db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(thumbnail, filePath);
     return true;
   } catch (error) {
     console.error('Error saving thumbnail:', error);
@@ -1739,6 +1752,15 @@ ipcMain.handle('restore-database', async () => {
       db = new Database(dbPath, { 
         verbose: DEBUG ? console.log : null 
       });
+
+      // Update the current version in the database to match the current app version
+      // This ensures the restored backup shows the correct version
+      try {
+        db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(version, 'currentVersion');
+        console.log('Updated currentVersion in database to:', version, 'after restore');
+      } catch (versionError) {
+        console.error('Error updating currentVersion in database after restore:', versionError);
+      }
 
       // Notify renderer to refresh the view
       mainWindow.webContents.send('refresh-grid');
@@ -2005,100 +2027,7 @@ ipcMain.handle('purge-models', async () => {
 ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   const filePaths = Array.isArray(fileIdentifier) ? fileIdentifier : [fileIdentifier];
 
-  // In single edit mode, if exactly one file is right-clicked, instruct the renderer to select it.
-  if (filePaths.length === 1) {
-    event.sender.send('select-model-by-filepath', filePaths[0]);
-  }
-  
-  // Check if any of the files are in zip archives
-  const isZipFile = filePaths.some(filePath => filePath.includes(':'));
-  
-  let menuItems = [
-    {
-      label: 'Open File',
-      enabled: filePaths.length === 1,
-      click: async () => {
-        try {
-          const filePath = filePaths[0];
-          if (filePath.includes(':')) {
-            // This is a zip file, extract it temporarily
-            const lastColonIndex = filePath.lastIndexOf(':');
-            const zipPath = filePath.substring(0, lastColonIndex);
-            const entryName = filePath.substring(lastColonIndex + 1);
-            const tempPath = await extractZipFileToTemp(zipPath, entryName);
-            
-            // Open the temporary file
-            await shell.openPath(tempPath);
-            
-            // Clean up after a delay to allow the application to open the file
-            setTimeout(() => {
-              cleanupTempFile(tempPath).catch(console.error);
-            }, 5000);
-          } else {
-            await shell.openPath(filePath);
-          }
-        } catch (error) {
-          console.error('Error opening file:', error);
-          dialog.showMessageBox({
-            type: 'error',
-            title: 'Error',
-            message: 'Could not open file',
-            detail: error.message
-          });
-        }
-      }
-    },
-    {
-      label: 'Open Directory',
-      enabled: filePaths.length === 1 && !isZipFile,
-      click: async () => {
-        try {
-          await shell.showItemInFolder(filePaths[0]);
-        } catch (error) {
-          console.error('Error opening directory:', error);
-          dialog.showMessageBox({
-            type: 'error',
-            title: 'Error',
-            message: 'Could not open directory',
-            detail: error.message
-          });
-        }
-      }
-    },
-    {
-      label: 'Extract',
-      enabled: filePaths.length === 1 && isZipFile,
-      click: async () => {
-        try {
-          const filePath = filePaths[0];
-          if (filePath.includes(':')) {
-            const lastColonIndex = filePath.lastIndexOf(':');
-            const zipPath = filePath.substring(0, lastColonIndex);
-            const entryName = filePath.substring(lastColonIndex + 1);
-            const tempPath = await extractZipFileToTemp(zipPath, entryName);
-            
-            // Show the extracted file in the file manager
-            await shell.showItemInFolder(tempPath);
-            
-            // Clean up after a delay
-            setTimeout(() => {
-              cleanupTempFile(tempPath).catch(console.error);
-            }, 10000);
-          }
-        } catch (error) {
-          console.error('Error extracting file:', error);
-          dialog.showMessageBox({
-            type: 'error',
-            title: 'Error',
-            message: 'Could not extract file',
-            detail: error.message
-          });
-        }
-      }
-    }
-  ];
-
-  // Get all configured slicers from the database
+  // Get all configured slicers from the database first
   let slicers = [];
   try {
     // Ensure the slicers table exists before querying it
@@ -2112,9 +2041,251 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   } catch (error) {
     console.error('Error getting slicers:', error);
   }
+
+  // In single edit mode, if exactly one file is right-clicked, instruct the renderer to select it.
+  if (filePaths.length === 1) {
+    event.sender.send('select-model-by-filepath', filePaths[0]);
+  }
   
-  // Add "Open in Slicer" submenu if there are configured slicers
-  if (slicers.length > 0) {
+  // Check if the file is from a ZIP archive
+  let isZipArchive = false;
+  let zipEntryPath = null;
+  let zip_path = null;
+  if (filePaths.length === 1) {
+    const model = db.prepare('SELECT isZipArchive, zipEntryPath, zip_path FROM models WHERE filePath = ?').get(filePaths[0]);
+    if (model) {
+      isZipArchive = model.isZipArchive === 1;
+      zip_path = model.zip_path || model.zipEntryPath;
+      zipEntryPath = zip_path; // Keep for backward compatibility
+    }
+  }
+  
+  let menuItems = [];
+  
+  if (isZipArchive) {
+    // Limited menu for ZIP archive files
+    menuItems = [
+      {
+        label: 'Open Directory',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            await shell.showItemInFolder(filePaths[0]);
+          } catch (error) {
+            console.error('Error opening directory:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open directory',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Extract',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            const { dialog } = require('electron');
+            const result = await dialog.showSaveDialog({
+              title: 'Extract File',
+              defaultPath: zipEntryPath,
+              filters: [
+                { name: 'All Files', extensions: ['*'] }
+              ]
+            });
+            
+            if (!result.canceled && result.filePath) {
+              console.log('Extracting ZIP file:', filePaths[0], 'entry:', zipEntryPath, 'to:', result.filePath);
+              const tempFilePath = await extractZipFile(filePaths[0], zipEntryPath);
+              console.log('Extracted to temp file:', tempFilePath);
+              fs.copyFileSync(tempFilePath, result.filePath);
+              console.log('Copied to final location:', result.filePath);
+              await cleanupTempFile(tempFilePath);
+              console.log('Cleaned up temp file:', tempFilePath);
+              
+              dialog.showMessageBox({
+                type: 'info',
+                title: 'Extract Complete',
+                message: 'File extracted successfully',
+                detail: `File extracted to: ${result.filePath}`
+              });
+            }
+          } catch (error) {
+            console.error('Error extracting file:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not extract file',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Open',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            console.log('Opening ZIP file:', filePaths[0], 'entry:', zipEntryPath);
+            // Extract file from ZIP and open it
+            const tempFilePath = await extractZipFile(filePaths[0], zipEntryPath);
+            console.log('Extracted to temp file:', tempFilePath);
+            console.log('Opening file with shell.openPath:', tempFilePath);
+            await shell.openPath(tempFilePath);
+            // Clean up temp file after a delay
+            setTimeout(async () => {
+              console.log('Cleaning up temp file:', tempFilePath);
+              await cleanupTempFile(tempFilePath);
+            }, 60000); // 60 seconds
+          } catch (error) {
+            console.error('Error opening file:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open file',
+              detail: error.message
+            });
+          }
+        }
+      }
+    ];
+    
+    // Add "Open in Slicer" submenu for ZIP files if there are configured slicers
+    if (slicers.length > 0) {
+      const slicerSubmenu = {
+        label: 'Open in Slicer',
+        enabled: filePaths.length === 1,
+        submenu: slicers.map(slicer => ({
+          label: slicer.name,
+          click: async () => {
+            try {
+              const { exec } = require('child_process');
+              let modelPath = filePaths[0];
+              let tempFilePath = null;
+              
+              // Extract file from ZIP first
+              if (isZipArchive && zipEntryPath) {
+                console.log('Extracting ZIP file for slicer:', filePaths[0], 'entry:', zipEntryPath);
+                tempFilePath = await extractZipFile(filePaths[0], zipEntryPath);
+                modelPath = tempFilePath;
+                console.log('Extracted to temp file:', tempFilePath);
+              } else {
+                console.log('Not a ZIP file or missing zipEntryPath. isZipArchive:', isZipArchive, 'zipEntryPath:', zipEntryPath);
+              }
+              
+              let command;
+              if (process.platform === 'darwin' && slicer.path.toLowerCase().endsWith('.app')) {
+                command = `open -a "${slicer.path}" --args "${modelPath}"`;
+              } else {
+                command = `"${slicer.path}" "${modelPath}"`;
+              }
+              
+              console.log('Executing slicer command:', command);
+              exec(command, (error, stdout, stderr) => {
+                if (error) {
+                  console.error('Error executing slicer command:', error);
+                  dialog.showErrorBox('Slice Model Error', error.message);
+                }
+                
+              // Clean up temp file if it was created
+              if (tempFilePath) {
+                setTimeout(async () => {
+                  await cleanupTempFile(tempFilePath);
+                }, 60000); // 60 seconds
+              }
+              });
+            } catch (error) {
+              console.error('Error slicing model:', error);
+              dialog.showMessageBox({
+                type: 'error',
+                title: 'Error',
+                message: 'Could not slice model',
+                detail: error.message
+              });
+            }
+          }
+        }))
+      };
+      menuItems.push(slicerSubmenu);
+    }
+    
+    // Add "Remove from Library" option for ZIP files
+    menuItems.push({
+      label: 'Remove from Library',
+      enabled: filePaths.length === 1,
+      click: async () => {
+        try {
+          const result = await dialog.showMessageBox({
+            type: 'warning',
+            title: 'Remove from Library',
+            message: 'Are you sure you want to remove this model from the library?',
+            detail: 'This will remove the model from your library but will not delete the original file.',
+            buttons: ['Cancel', 'Remove'],
+            defaultId: 0,
+            cancelId: 0
+          });
+          
+          if (result.response === 1) {
+            db.prepare('DELETE FROM models WHERE filePath = ?').run(filePaths[0]);
+            event.sender.send('refresh-grid');
+          }
+        } catch (error) {
+          console.error('Error removing model:', error);
+          dialog.showMessageBox({
+            type: 'error',
+            title: 'Error',
+            message: 'Could not remove model',
+            detail: error.message
+          });
+        }
+      }
+    });
+  } else {
+    // Full menu for regular files
+    menuItems = [
+      {
+        label: 'Open File',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            await shell.openPath(filePaths[0]);
+          } catch (error) {
+            console.error('Error opening file:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open file',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Open Directory',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            await shell.showItemInFolder(filePaths[0]);
+          } catch (error) {
+            console.error('Error opening directory:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open directory',
+              detail: error.message
+            });
+          }
+        }
+      }
+    ];
+  }
+
+  // Add slicer submenu and other menu items only for regular files (not ZIP files)
+  if (!isZipArchive) {
+    // Add "Open in Slicer" submenu if there are configured slicers
+    if (slicers.length > 0) {
     const slicerSubmenu = {
       label: 'Open in Slicer',
       enabled: filePaths.length === 1, // Add this line to disable when multiple files are selected
@@ -2124,15 +2295,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           try {
             const { exec } = require('child_process');
             let modelPath = filePaths[0]; // Use the first file selected
-            let tempPath = null;
+            let tempFilePath = null;
             
-            // If it's a zip file, extract it temporarily
-            if (modelPath.includes(':')) {
-              const lastColonIndex = modelPath.lastIndexOf(':');
-              const zipPath = modelPath.substring(0, lastColonIndex);
-              const entryName = modelPath.substring(lastColonIndex + 1);
-              tempPath = await extractZipFileToTemp(zipPath, entryName);
-              modelPath = tempPath;
+            // If it's a ZIP file, extract it first
+            if (isZipArchive && zipEntryPath) {
+              tempFilePath = await extractZipFile(filePaths[0], zipEntryPath);
+              modelPath = tempFilePath;
             }
             
             let command;
@@ -2148,11 +2316,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                 dialog.showErrorBox('Slice Model Error', error.message);
               }
               
-              // Clean up temporary file after slicer opens
-              if (tempPath) {
-                setTimeout(() => {
-                  cleanupTempFile(tempPath).catch(console.error);
-                }, 10000);
+              // Clean up temp file if it was created
+              if (tempFilePath) {
+                setTimeout(async () => {
+                  await cleanupTempFile(tempFilePath);
+                }, 60000); // 60 seconds
               }
             });
           } catch (error) {
@@ -2315,8 +2483,35 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   // Add separator before file operations
   menuItems.push({ type: 'separator' });
 
-  // Add Move and new file operations (exclude Move and Delete from Disk for archived files)
-  const fileOperations = [
+  // Add Move and new file operations
+  menuItems.push(
+    {
+      label: 'Move',
+      click: async () => {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const result = await dialog.showOpenDialog(win, {
+          title: 'Select Destination Folder',
+          properties: ['openDirectory']
+        });
+        if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+          const destinationFolder = result.filePaths[0];
+          for (const fp of filePaths) {
+            const newDestination = path.join(destinationFolder, path.basename(fp));
+            try {
+              await fs.promises.rename(fp, newDestination);
+              db.prepare('UPDATE models SET filePath = ? WHERE filePath = ?').run(newDestination, fp);
+            } catch (error) {
+              await dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'Error Moving File',
+                message: `Failed to move file ${fp}: ${error.message}`
+              });
+            }
+          }
+          event.sender.send('refresh-grid');
+        }
+      }
+    },
     {
       label: 'Remove from Library',
       click: async () => {
@@ -2354,40 +2549,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           }
         }
       }
-    }
-  ];
-
-  // Only add Move and Delete from Disk options for non-archived files
-  if (!isZipFile) {
-    fileOperations.unshift({
-      label: 'Move',
-      click: async () => {
-        const win = BrowserWindow.fromWebContents(event.sender);
-        const result = await dialog.showOpenDialog(win, {
-          title: 'Select Destination Folder',
-          properties: ['openDirectory']
-        });
-        if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
-          const destinationFolder = result.filePaths[0];
-          for (const fp of filePaths) {
-            const newDestination = path.join(destinationFolder, path.basename(fp));
-            try {
-              await fs.promises.rename(fp, newDestination);
-              db.prepare('UPDATE models SET filePath = ? WHERE filePath = ?').run(newDestination, fp);
-            } catch (error) {
-              await dialog.showMessageBox(win, {
-                type: 'error',
-                title: 'Error Moving File',
-                message: `Failed to move file ${fp}: ${error.message}`
-              });
-            }
-          }
-          event.sender.send('refresh-grid');
-        }
-      }
-    });
-
-    fileOperations.push({
+    },
+    {
       label: 'Delete from Disk',  // Renamed from just "Delete"
       click: async () => {
         const confirm = await dialog.showMessageBox({
@@ -2421,10 +2584,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           event.sender.send('refresh-grid');
         }
       }
-    });
-  }
+    }
+  );
 
-  menuItems.push(...fileOperations);
+  } // End of if (!isZipArchive) block
 
   const menu = Menu.buildFromTemplate(menuItems);
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
@@ -2508,15 +2671,11 @@ ipcMain.handle('saveSetting', async (event, key, value) => {
 // Update the database path handling
 function getDatabasePath() {
   try {
-    // Check if we're in a packaged app by looking for app.asar in the path
-    const isPackaged = process.mainModule && process.mainModule.filename.indexOf('app.asar') !== -1;
-    const isDevelopment = isDev && !isPackaged;
-    
-    if (isDevelopment) {
+    if (isDev) {
       return path.join(__dirname, 'printventory.db');
     }
     
-    // For packaged apps, always use userData directory
+    // Handle different OS paths
     let userDataPath;
     if (process.platform === 'darwin') { // macOS
       userDataPath = path.join(app.getPath('userData'), 'data');
@@ -2548,30 +2707,10 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   try {
     console.log('Starting to process 3MF file:', filePath);
     
-    let actualFilePath = filePath;
-    let tempPath = null;
-    
-    // Check if this is a ZIP file (contains colon after the drive letter)
-    if (filePath.includes(':') && filePath.split(':').length > 2) {
-      const lastColonIndex = filePath.lastIndexOf(':');
-      const zipPath = filePath.substring(0, lastColonIndex);
-      const entryName = filePath.substring(lastColonIndex + 1);
-      
-      // Check if the ZIP file exists
-      if (!fs.existsSync(zipPath)) {
-        console.error('ZIP file does not exist:', zipPath);
-        return null;
-      }
-      
-      // Extract the file temporarily
-      tempPath = await extractZipFileToTemp(zipPath, entryName);
-      actualFilePath = tempPath;
-    } else {
-      // Check if file exists
-      if (!fs.existsSync(filePath)) {
-        console.error('File does not exist:', filePath);
-        return null;
-      }
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      console.error('File does not exist:', filePath);
+      return null;
     }
     
     // Use JSZip to extract the 3MF file (which is a zip file)
@@ -2579,7 +2718,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     const zip = new JSZip();
     
     console.log('Reading file data...');
-    const data = await fs.promises.readFile(actualFilePath);
+    const data = await fs.promises.readFile(filePath);
     console.log('File read successfully, size:', data.length, 'bytes');
     
     console.log('Loading zip contents...');
@@ -2641,89 +2780,34 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     }
     
     console.log('\nFound total images:', imageFiles.length);
-    
-    // Clean up temporary file if it was created
-    if (tempPath) {
-      await cleanupTempFile(tempPath);
-    }
-    
     return imageFiles;
   } catch (error) {
     console.error('Error reading 3MF images:', error);
     console.error('Error details:', error.message);
     console.error('Error stack:', error.stack);
-    
-    // Clean up temporary file if it was created
-    if (tempPath) {
-      await cleanupTempFile(tempPath);
-    }
-    
     return null;
   }
 });
 
 ipcMain.handle('get3MFSTL', async (event, filePath) => {
   try {
-    let actualFilePath = filePath;
-    let tempPath = null;
-    
-    // Check if this is a ZIP file (contains colon after the drive letter)
-    if (filePath.includes(':') && filePath.split(':').length > 2) {
-      const lastColonIndex = filePath.lastIndexOf(':');
-      const zipPath = filePath.substring(0, lastColonIndex);
-      const entryName = filePath.substring(lastColonIndex + 1);
-      
-      // Check if the ZIP file exists
-      if (!fs.existsSync(zipPath)) {
-        console.error('ZIP file does not exist:', zipPath);
-        return null;
-      }
-      
-      // Extract the file temporarily
-      tempPath = await extractZipFileToTemp(zipPath, entryName);
-      actualFilePath = tempPath;
-    } else {
-      // Check if file exists
-      if (!fs.existsSync(filePath)) {
-        console.error('File does not exist:', filePath);
-        return null;
-      }
-    }
-    
     const zip = new JSZip();
-    const data = await fs.promises.readFile(actualFilePath);
+    const data = await fs.promises.readFile(filePath);
     const contents = await zip.loadAsync(data);
     
     // Look for STL files in the 3MF
     for (const [path, file] of Object.entries(contents.files)) {
       if (path.endsWith('.stl')) {
         // Extract to temp directory
-        const stlTempPath = path.join(os.tmpdir(), `temp_${Date.now()}.stl`);
-        await fs.promises.writeFile(stlTempPath, await file.async('nodebuffer'));
-        
-        // Clean up the original temp file if it was created
-        if (tempPath) {
-          await cleanupTempFile(tempPath);
-        }
-        
-        return stlTempPath;
+        const tempPath = path.join(os.tmpdir(), `temp_${Date.now()}.stl`);
+        await fs.promises.writeFile(tempPath, await file.async('nodebuffer'));
+        return tempPath;
       }
-    }
-    
-    // Clean up temporary file if it was created
-    if (tempPath) {
-      await cleanupTempFile(tempPath);
     }
     
     return null;
   } catch (error) {
     console.error('Error extracting STL from 3MF:', error);
-    
-    // Clean up temporary file if it was created
-    if (tempPath) {
-      await cleanupTempFile(tempPath);
-    }
-    
     return null;
   }
 });
@@ -2797,19 +2881,7 @@ ipcMain.handle('generateMissingHashes', async (event) => {
     for (const model of models) {
       try {
         // Check if file exists
-        let fileExists = false;
-        if (model.filePath.includes(':')) {
-          // For archived models, only check if the zip file exists
-          // Use lastIndexOf to handle Windows drive letters (C:)
-          const lastColonIndex = model.filePath.lastIndexOf(':');
-          const zipPath = model.filePath.substring(0, lastColonIndex);
-          fileExists = fs.existsSync(zipPath);
-        } else {
-          // For regular files, check the full path
-          fileExists = fs.existsSync(model.filePath);
-        }
-        
-        if (!fileExists) {
+        if (!fs.existsSync(model.filePath)) {
           console.warn(`File not found for hash generation: ${model.filePath}`);
           processed++;
           continue;
@@ -3123,6 +3195,16 @@ function getSettings() {
   };
 }
 
+function getSetting(key) {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row ? row.value : null;
+  } catch (error) {
+    console.error('Error getting setting:', error);
+    return null;
+  }
+}
+
 // Add or update this function to get models without thumbnails
 ipcMain.handle('get-models-without-thumbnails', async () => {
   try {
@@ -3238,6 +3320,48 @@ function createViewerWindow(filePath) {
 // Add this IPC handler
 ipcMain.handle('open-model-viewer', async (event, filePath) => {
   createViewerWindow(filePath);
+});
+
+// ZIP extraction handlers
+// Helper function to extract ZIP files
+async function extractZipFile(zipPath, zipEntryPath) {
+  try {
+    console.log('extractZipFile called with:', zipPath, zipEntryPath);
+    const tempDir = os.tmpdir();
+    const tempFileName = `printventory_${crypto.randomUUID()}_${path.basename(zipEntryPath)}`;
+    const tempFilePath = path.join(tempDir, tempFileName);
+    console.log('Temp file path:', tempFilePath);
+    
+    const zip = new StreamZip.async({ file: zipPath });
+    console.log('ZIP file opened, extracting entry:', zipEntryPath);
+    await zip.extract(zipEntryPath, tempFilePath);
+    await zip.close();
+    console.log('ZIP extraction completed successfully');
+    
+    return tempFilePath;
+  } catch (error) {
+    console.error('Error extracting ZIP file:', error);
+    throw error;
+  }
+}
+
+ipcMain.handle('extract-zip-file', async (event, zipPath, zipEntryPath) => {
+  return await extractZipFile(zipPath, zipEntryPath);
+});
+
+// Helper function to cleanup temp files
+async function cleanupTempFile(tempFilePath) {
+  try {
+    if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
+  } catch (error) {
+    console.error('Error cleaning up temp file:', error);
+  }
+}
+
+ipcMain.handle('cleanup-temp-file', async (event, tempFilePath) => {
+  return await cleanupTempFile(tempFilePath);
 });
 
 // Add this near the top after other imports
@@ -3572,13 +3696,20 @@ async function saveModel(modelData) {
       printed,
       parentModel,
       license,
-      tags: rawTags
+      tags: rawTags,
+      zipEntryPath,
+      zip_path,
+      isZipArchive
     } = modelData;
+
+    // Get zipEntryPath from either zipEntryPath or zip_path field
+    const zipPath = zipEntryPath || zip_path || null;
 
     // Ensure tags is always an array, even if a single string was passed
     const tags = rawTags ? (Array.isArray(rawTags) ? rawTags : [rawTags]) : [];
 
     console.log(`Processing notes field: "${notes}"`);
+    console.log(`Saving model: filePath=${filePath}, zipPath=${zipPath}`);
 
     // Verify database integrity before proceeding
     try {
@@ -3594,8 +3725,15 @@ async function saveModel(modelData) {
     // First, handle the model data without tags
     let modelId;
     try {
-      // Check if the model exists first
-      const existingModel = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePath);
+      // Check if the model exists first - use both filePath and zipPath for archive files
+      let existingModel;
+      if (zipPath) {
+        // For archive files, query by both filePath and zip_path
+        existingModel = db.prepare('SELECT id FROM models WHERE filePath = ? AND (zip_path = ? OR zipEntryPath = ?)').get(filePath, zipPath, zipPath);
+      } else {
+        // For regular files, query by filePath and ensure it's not an archive file
+        existingModel = db.prepare('SELECT id FROM models WHERE filePath = ? AND (zip_path IS NULL OR zip_path = \'\') AND (zipEntryPath IS NULL OR zipEntryPath = \'\')').get(filePath);
+      }
       
       if (existingModel) {
         // Update existing model
@@ -3614,14 +3752,26 @@ async function saveModel(modelData) {
           WHERE id = ?
         `);
         
+        // Handle empty strings - convert to null
+        const cleanParentModel = (parentModel && parentModel.trim() !== '') ? parentModel : null;
+        const cleanLicense = (license && license.trim() !== '') ? license : null;
+        
+        console.log(`Updating model ID ${existingModel.id} with:`, {
+          fileName,
+          designer,
+          parentModel: cleanParentModel,
+          license: cleanLicense,
+          printed: printed ? 1 : 0
+        });
+        
         updateStmt.run(
           fileName,
           designer || null,
           source || null,
           notes || null,
           printed ? 1 : 0,
-          parentModel || null,
-          license || null,
+          cleanParentModel,
+          cleanLicense,
           existingModel.id
         );
         
@@ -3630,24 +3780,84 @@ async function saveModel(modelData) {
         // Insert new model
         console.log('Inserting new model');
         
-        const insertStmt = db.prepare(`
-          INSERT INTO models (
-            filePath, fileName, designer, source, notes, printed, parentModel, license
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `);
+        // Check if zip_path column exists
+        const columnInfo = db.prepare(`PRAGMA table_info(models)`).all();
+        const hasZipPathColumn = columnInfo.some(col => col.name === 'zip_path');
         
-        const result = insertStmt.run(
-          filePath,
-          fileName,
-          designer || null,
-          source || null,
-          notes || null,
-          printed ? 1 : 0,
-          parentModel || null,
-          license || null
-        );
+        let insertStmt, insertParams;
+        if (hasZipPathColumn) {
+          insertStmt = db.prepare(`
+            INSERT INTO models (
+              filePath, fileName, designer, source, notes, printed, parentModel, license, isZipArchive, zipEntryPath, zip_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          insertParams = [
+            filePath,
+            fileName,
+            designer || null,
+            source || null,
+            notes || null,
+            printed ? 1 : 0,
+            parentModel || null,
+            license || null,
+            isZipArchive ? 1 : 0,
+            zipPath,
+            zipPath
+          ];
+        } else {
+          insertStmt = db.prepare(`
+            INSERT INTO models (
+              filePath, fileName, designer, source, notes, printed, parentModel, license, isZipArchive, zipEntryPath
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          insertParams = [
+            filePath,
+            fileName,
+            designer || null,
+            source || null,
+            notes || null,
+            printed ? 1 : 0,
+            parentModel || null,
+            license || null,
+            isZipArchive ? 1 : 0,
+            zipPath
+          ];
+        }
+        
+        const result = insertStmt.run(...insertParams);
         
         modelId = result.lastInsertRowid;
+        
+        // Verify the ID was assigned - if not, query ROWID and update
+        if (!modelId || modelId === 0) {
+          console.warn('INSERT did not return lastInsertRowid, querying ROWID...');
+          // Query the model we just inserted using filePath and zipPath
+          let insertedModel;
+          if (hasZipPathColumn && zipPath) {
+            insertedModel = db.prepare('SELECT id, ROWID FROM models WHERE filePath = ? AND zip_path = ?').get(filePath, zipPath);
+          } else if (hasZipPathColumn) {
+            insertedModel = db.prepare('SELECT id, ROWID FROM models WHERE filePath = ? AND (zip_path IS NULL OR zip_path = \'\')').get(filePath);
+          } else {
+            insertedModel = db.prepare('SELECT id, ROWID FROM models WHERE filePath = ?').get(filePath);
+          }
+          
+          if (insertedModel) {
+            if (insertedModel.id) {
+              modelId = insertedModel.id;
+              console.log(`Found model ID from query: ${modelId}`);
+            } else if (insertedModel.ROWID) {
+              // Update the id column with ROWID
+              console.log(`Model has NULL id but ROWID=${insertedModel.ROWID}, updating id column...`);
+              db.prepare('UPDATE models SET id = ? WHERE ROWID = ?').run(insertedModel.ROWID, insertedModel.ROWID);
+              modelId = insertedModel.ROWID;
+              console.log(`Updated model id to ${modelId}`);
+            } else {
+              throw new Error(`Cannot find ROWID for model with NULL id. filePath: ${filePath}, zipPath: ${zipPath}`);
+            }
+          } else {
+            throw new Error(`Cannot find newly inserted model. filePath: ${filePath}, zipPath: ${zipPath}`);
+          }
+        }
       }
       
       console.log(`Model saved with ID: ${modelId}`);
@@ -3783,11 +3993,11 @@ function ensureSlicersTableExists() {
       console.log('Slicers table does not exist. Creating it...');
       
       // Create the slicers table
-      db.prepare(`CREATE TABLE IF NOT EXISTS slicers (
+      db.exec(`CREATE TABLE IF NOT EXISTS slicers (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
           path TEXT NOT NULL
-      )`).run();
+      )`);
       
       console.log('Slicers table created successfully');
     } else {
@@ -3875,19 +4085,7 @@ async function checkAndCalculateMissingHashes() {
       await Promise.all(batch.map(async (file) => {
         try {
           // Check if file still exists
-          let fileExists = false;
-          if (file.filePath.includes(':')) {
-            // For archived models, only check if the zip file exists
-            // Use lastIndexOf to handle Windows drive letters (C:)
-            const lastColonIndex = file.filePath.lastIndexOf(':');
-            const zipPath = file.filePath.substring(0, lastColonIndex);
-            fileExists = fs.existsSync(zipPath);
-          } else {
-            // For regular files, check the full path
-            fileExists = fs.existsSync(file.filePath);
-          }
-          
-          if (!fileExists) {
+          if (!fs.existsSync(file.filePath)) {
             // Remove from database if file no longer exists
             db.prepare('DELETE FROM models WHERE filePath = ?').run(file.filePath);
             return;

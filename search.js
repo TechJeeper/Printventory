@@ -96,9 +96,15 @@ export async function getCombinedFilteredModels() {
   // Apply file type filter
   if (fileType) {
     const beforeCount = models.length;
-    models = models.filter(model =>
-      model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-    );
+    if (fileType === 'zip') {
+      // For ZIP files, check the isZipArchive property (same mechanism as thumbnail tag)
+      models = models.filter(model => model.isZipArchive);
+    } else {
+      // For regular files, check the file extension
+      models = models.filter(model =>
+        model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
+      );
+    }
     console.log(`After file type filter: ${models.length} models (removed ${beforeCount - models.length})`);
   }
 

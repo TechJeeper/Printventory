@@ -104,6 +104,7 @@
           <option value="">All Types</option>
           <option value="stl">STL</option>
           <option value="3mf">3MF</option>
+          <option value="zip">ZIP Archives</option>
         </select>
       </div>
       <div class="form-group">
@@ -282,6 +283,12 @@
       <button id="select-all-button" class="full-width-button">Select All Visible</button>
       <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
       <p class="selected-count">0 models selected</p>
+      <div id="multi-edit-progress" class="progress-indicator hidden">
+        <div class="progress-bar">
+          <div class="progress-fill"></div>
+        </div>
+        <p class="progress-text">Saving... <span class="progress-count">0</span>/<span class="progress-total">0</span></p>
+      </div>
       <div class="form-group checkbox-container">
         <label for="multi-printed">Printed:</label>
         <input type="checkbox" id="multi-printed">
@@ -355,9 +362,6 @@
           <p style="font-size: 0.9rem; margin: 0.2rem 0; color: #555;">
             De-duplication is performed using the file hash to ensure that only identical files are considered duplicates.
           </p>
-          <div id="zip-disclaimer" class="zip-disclaimer" style="display: none; background: #ffa500; color: #000; padding: 8px; border-radius: 4px; margin: 8px 0; font-size: 0.9rem;">
-            <strong>⚠️ Archive Files Notice:</strong> Files within zip archives are shown for reference but cannot be deleted. Only standalone files can be removed.
-          </div>
           <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
             <button type="submit" id="close-dedup">Close</button>
@@ -507,19 +511,17 @@
     <dialog id="file-types-dialog" class="modal">
       <form method="dialog">
         <h3>File Types</h3>
-        <p class="setting-description">
-          Configure which file types to scan for 3D models. Enabling ZIP file scanning will look within archive files for .3mf and .stl files, which may impact scan performance and time.
-        </p>
+        <p class="warning-text">Warning: Enabling ZIP Archives may impact performance during scanning and file operations.</p>
         <div class="form-group checkbox-container">
-          <label for="zip-support-enabled">Enable ZIP File Support:</label>
-          <input type="checkbox" id="zip-support-enabled">
+          <label for="enable-zip-archives">ZIP Archives:</label>
+          <input type="checkbox" id="enable-zip-archives">
         </div>
-        <p class="warning-text">
-          <strong>Warning:</strong> ZIP file scanning will examine the contents of archive files during directory scans. This feature may significantly increase scan time and impact performance, especially with large archives or many ZIP files.
+        <p class="setting-description">
+          When enabled, Printventory will scan ZIP archives for STL and 3MF files. Files found within archives will be added to your library with the ZIP file path as the source. Note that opening or slicing files from archives requires temporary extraction which may take additional time.
         </p>
         <div class="dialog-buttons">
-          <button type="button" id="save-file-types-settings">Save</button>
-          <button type="button" id="cancel-file-types-settings">Cancel</button>
+          <button type="button" id="save-file-types">Save</button>
+          <button type="button" id="cancel-file-types">Cancel</button>
         </div>
       </form>
     </dialog>

@@ -82,10 +82,13 @@ async function updateModelCounts(viewCount) {
 }
 
 // Add this new function to update individual model elements
-async function updateModelElement(filePath) {
+async function updateModelElement(filePath, zipEntryPath = null) {
   try {
-    const model = await window.electron.getModel(filePath);
-    if (!model) return;
+    const model = await window.electron.getModel(filePath, zipEntryPath);
+    if (!model) {
+      console.log(`updateModelElement: Model not found for filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
+      return;
+    }
 
     // Check current filter values
     const designer = document.getElementById('designer-select').value;
@@ -127,13 +130,34 @@ async function updateModelElement(filePath) {
       shouldBeVisible = !model.printed;
     }
 
-    // Escape the file path for use in querySelector
-    const escapedPath = CSS.escape(filePath);
+    // For zip files, use the unique identifier to find the correct element
+    let existingElement;
+    if (zipEntryPath) {
+      const fileIdentifier = createFileIdentifier(filePath, zipEntryPath);
+      const escapedIdentifier = CSS.escape(fileIdentifier);
+      existingElement = document.querySelector(`.file-item[data-fileidentifier="${escapedIdentifier}"]`);
+      
+      // Fallback to filepath if identifier not found
+      if (!existingElement) {
+        const escapedPath = CSS.escape(filePath);
+        const allWithPath = document.querySelectorAll(`.file-item[data-filepath="${escapedPath}"]`);
+        // Try to find the one with matching zipEntryPath in dataset
+        for (const el of allWithPath) {
+          const elZipPath = el.dataset.fileidentifier ? parseFileIdentifier(el.dataset.fileidentifier).zipEntryPath : null;
+          if (elZipPath === zipEntryPath) {
+            existingElement = el;
+            break;
+          }
+        }
+      }
+    } else {
+      // For regular files, use filePath
+      const escapedPath = CSS.escape(filePath);
+      existingElement = document.querySelector(`.file-item[data-filepath="${escapedPath}"]`);
+    }
     
-    // Find existing element using the escaped path
-    const existingElement = document.querySelector(`.file-item[data-filepath="${escapedPath}"]`);
     if (!existingElement) {
-      debugLog('Element not found for path:', filePath);
+      debugLog('Element not found for path:', filePath, zipEntryPath ? `(zip: ${zipEntryPath})` : '');
       return;
     }
 
@@ -142,8 +166,9 @@ async function updateModelElement(filePath) {
       existingElement.style.display = 'none';
       
       // If in multi-select mode and the item is hidden due to filter, remove it from selection
-      if (isMultiSelectMode && selectedModels.has(filePath)) {
-        selectedModels.delete(filePath);
+      const fileIdentifier = zipEntryPath ? createFileIdentifier(filePath, zipEntryPath) : filePath;
+      if (isMultiSelectMode && selectedModels.has(fileIdentifier)) {
+        selectedModels.delete(fileIdentifier);
         existingElement.classList.remove('selected');
         // Update the selection count
         updateSelectedCount();
@@ -174,23 +199,6 @@ async function updateModelElement(filePath) {
       statusElement.textContent = model.printed ? 'Printed' : 'Not Printed';
       existingElement.appendChild(statusElement);
     }
-
-    // Update archive status for zip files
-    const archiveStatusElement = existingElement.querySelector('.archive-status');
-    if (model.filePath && model.filePath.includes(':')) {
-      if (!archiveStatusElement) {
-        // Create archive status element if it doesn't exist
-        const archiveStatus = document.createElement('div');
-        archiveStatus.className = 'archive-status';
-        archiveStatus.textContent = 'Archive';
-        existingElement.appendChild(archiveStatus);
-      }
-    } else {
-      // Remove archive status if it exists but file is not in zip
-      if (archiveStatusElement) {
-        archiveStatusElement.remove();
-      }
-    }
     
     // Update designer info if available
     const fileInfo = existingElement.querySelector('.file-info');
@@ -208,8 +216,9 @@ async function updateModelElement(filePath) {
       }
     }
     
-    // Make sure selection state is preserved
-    if (selectedModels.has(filePath)) {
+    // Make sure selection state is preserved using unique identifier
+    const fileIdentifier = zipEntryPath ? createFileIdentifier(filePath, zipEntryPath) : filePath;
+    if (selectedModels.has(fileIdentifier)) {
       existingElement.classList.add('selected');
     } else {
       existingElement.classList.remove('selected');
@@ -232,11 +241,25 @@ async function updateModelElement(filePath) {
 
 
 // Move showModelDetails outside the DOMContentLoaded event listener
-async function showModelDetails(filePath) {
+async function showModelDetails(filePath, zipEntryPath = null) {
   try {
-    debugLog('Showing model details for:', filePath);
-    const model = await window.electron.getModel(filePath);
-    if (!model) return;
+    debugLog('Showing model details for:', filePath, zipEntryPath ? `(zip: ${zipEntryPath})` : '');
+    
+    // Get model - backend now supports zipEntryPath parameter
+    const model = await window.electron.getModel(filePath, zipEntryPath);
+    
+    if (!model) {
+      console.error(`Model not found for filePath: ${filePath}, zipEntryPath: ${zipEntryPath}`);
+      // Try to find the model without zipEntryPath as a fallback (for debugging)
+      if (zipEntryPath) {
+        console.log('Attempting fallback lookup without zipEntryPath...');
+        const fallbackModel = await window.electron.getModel(filePath, null);
+        if (fallbackModel) {
+          console.log('Found model without zipEntryPath:', fallbackModel);
+        }
+      }
+      return;
+    }
 
     // Get the details panel reference
     const detailsPanel = document.getElementById('model-details');
@@ -324,7 +347,8 @@ async function showModelDetails(filePath) {
 
       const handler = async (e) => {
         const value = config.type === 'checkbox' ? e.target.checked : e.target.value;
-        await autoSaveModel(config.field, value, filePath);
+        // Use the model's filePath (which may include zipEntryPath info) for saving
+        await autoSaveModel(config.field, value, model.filePath, zipEntryPath);
       };
 
       if (config.useChange) {
@@ -338,6 +362,23 @@ async function showModelDetails(filePath) {
 
     // Set form values
     document.getElementById('model-path').value = model.filePath || '';
+    // Store zipEntryPath and model ID in data attributes for later retrieval
+    const modelPathElement = document.getElementById('model-path');
+    if (modelPathElement) {
+      if (zipEntryPath) {
+        modelPathElement.dataset.zipEntryPath = zipEntryPath;
+      } else {
+        delete modelPathElement.dataset.zipEntryPath;
+      }
+      // Store the model ID so it can be used when saving
+      if (model.id) {
+        modelPathElement.dataset.modelId = model.id.toString();
+        console.log(`Stored model ID ${model.id} in model-path element`);
+      } else {
+        console.warn('Model retrieved without ID in showModelDetails:', model);
+        delete modelPathElement.dataset.modelId;
+      }
+    }
     document.getElementById('model-name').value = model.fileName || '';
     document.getElementById('model-designer').value = model.designer || '';
     document.getElementById('model-source').value = model.source || '';
@@ -359,10 +400,10 @@ async function showModelDetails(filePath) {
     const multiEditPanel = document.getElementById('multi-edit-panel');
     multiEditPanel.classList.add('hidden');
 
-    // Maintain selection state
+    // Maintain selection state using unique identifiers
     document.querySelectorAll('.file-item').forEach(item => {
-      const itemPath = item.getAttribute('data-filepath');
-      if (selectedModels.has(itemPath)) {
+      const itemIdentifier = item.dataset.fileidentifier;
+      if (itemIdentifier && selectedModels.has(itemIdentifier)) {
         item.classList.add('selected');
       } else {
         item.classList.remove('selected');
@@ -522,13 +563,7 @@ async function loadDuplicateFiles() {
     
     const dialog = document.getElementById('dedup-dialog');
     const duplicateGroups = dialog.querySelector('.duplicate-groups');
-    const zipDisclaimer = dialog.querySelector('#zip-disclaimer');
     duplicateGroups.innerHTML = '';
-    
-    // Hide disclaimer initially
-    if (zipDisclaimer) {
-      zipDisclaimer.style.display = 'none';
-    }
     
     // Show warning if hashes are being generated
     if (isGeneratingHashes) {
@@ -555,20 +590,6 @@ async function loadDuplicateFiles() {
       }
     } else {
       console.log(`Found ${Object.keys(duplicates).length} duplicate groups`);
-      
-      // Check if any files are in zip archives
-      let hasZipFiles = false;
-      for (const [hash, files] of Object.entries(duplicates)) {
-        if (files.some(file => file.filePath.includes(':'))) {
-          hasZipFiles = true;
-          break;
-        }
-      }
-      
-      // Show disclaimer if there are zip files
-      if (hasZipFiles && zipDisclaimer) {
-        zipDisclaimer.style.display = 'block';
-      }
       
       // Show and setup delete button
       const deleteButton = dialog.querySelector('#delete-selected');
@@ -621,31 +642,13 @@ async function loadDuplicateFiles() {
           const fileDiv = document.createElement('div');
           fileDiv.className = 'duplicate-file';
           
-          const isZipFile = file.filePath.includes(':');
-          
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
           checkbox.setAttribute('data-filepath', file.filePath);
           
-          // Disable checkbox for zip files
-          if (isZipFile) {
-            checkbox.disabled = true;
-            checkbox.title = 'Files within archives cannot be deleted';
-            fileDiv.classList.add('zip-file-disabled');
-          }
-          
           const filePath = document.createElement('span');
           filePath.className = 'duplicate-file-path';
           filePath.textContent = file.filePath;
-          
-          // Add archive indicator for zip files
-          if (isZipFile) {
-            const archiveIndicator = document.createElement('span');
-            archiveIndicator.className = 'archive-indicator';
-            archiveIndicator.textContent = ' 📦';
-            archiveIndicator.title = 'File is within an archive';
-            filePath.appendChild(archiveIndicator);
-          }
           
           const fileSize = document.createElement('span');
           fileSize.className = 'duplicate-file-size';
@@ -890,19 +893,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } else {
-      // Clear selection when disabling multiselect
-      selectedModels.clear();
-      document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
-      multiEditPanel.classList.add('hidden');
-      // Make sure details panel is shown if nothing else is selected
-      if (selectedModels.size === 0) {
-         detailsPanel.classList.remove('hidden'); // Remove hidden class if no models selected
-         closeDetailsPanel(); // Or potentially call closeDetailsPanel if preferred
-      }
-      button.textContent = 'Multi-Edit Mode';
-      button.classList.remove('active');
-      // Call exitMultiEditMode if needed for cleanup
-      exitMultiEditMode(); 
+      // Call exitMultiEditMode which will save values before exiting
+      await exitMultiEditMode(); 
     }
     updateSelectedCount();
   });
@@ -996,11 +988,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('save-model-button')?.addEventListener('click', async () => {
     try {
       const filePath = document.getElementById('model-path').value;
+      const modelPathElement = document.getElementById('model-path');
+      
+      // Get the model ID from the data attribute if available
+      const modelId = modelPathElement?.dataset.modelId ? parseInt(modelPathElement.dataset.modelId, 10) : null;
+      const zipEntryPath = modelPathElement?.dataset.zipEntryPath || null;
+      
+      if (modelId) {
+        console.log(`Save button: Using stored model ID ${modelId}`);
+      } else {
+        console.warn('Save button: No model ID found in data attribute, will rely on filePath lookup');
+      }
+      
       // Get all selected tags
       const tagElements = document.getElementById('model-tags').querySelectorAll('.tag');
       const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name'));
 
       const modelData = {
+        id: modelId, // Include the model ID if available
         filePath,
         fileName: document.getElementById('model-name').value,
         designer: document.getElementById('model-designer').value || 'Unknown',
@@ -1009,8 +1014,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         printed: document.getElementById('model-printed').checked,
         parentModel: document.getElementById('model-parent').value || '',
         license: document.getElementById('model-license').value || '',
-        tags: tags
+        tags: tags,
+        zipEntryPath: zipEntryPath // Include zipEntryPath if available
       };
+
+      console.log('Save button: Saving model with data:', { id: modelData.id, filePath: modelData.filePath, zipEntryPath: modelData.zipEntryPath });
 
       // Save the model with tags
       await window.electron.saveModel(modelData);
@@ -1590,12 +1598,16 @@ document.addEventListener('DOMContentLoaded', async () => {
           designerSelect.appendChild(option);
           designerSelect.value = newDesignerName;
           
-          // Trigger auto-save
+          // Manually trigger change event to ensure auto-save fires
+          designerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+          
+          // Trigger auto-save (also call directly in case change event doesn't fire)
           if (sourceDropdownId === 'multi-designer') {
             await autoSaveMultipleModels('designer', newDesignerName);
           } else {
             const filePath = document.getElementById('model-path').value;
-            await autoSaveModel('designer', newDesignerName, filePath);
+            const zipEntryPath = getModelZipEntryPath();
+            await autoSaveModel('designer', newDesignerName, filePath, zipEntryPath);
           }
         }
         
@@ -1678,12 +1690,16 @@ document.addEventListener('DOMContentLoaded', async () => {
           licenseSelect.appendChild(option);
           licenseSelect.value = newLicenseName;
           
-          // Trigger auto-save
+          // Manually trigger change event to ensure auto-save fires
+          licenseSelect.dispatchEvent(new Event('change', { bubbles: true }));
+          
+          // Trigger auto-save (also call directly in case change event doesn't fire)
           if (sourceDropdownId === 'multi-license') {
             await autoSaveMultipleModels('license', newLicenseName);
           } else {
             const filePath = document.getElementById('model-path').value;
-            await autoSaveModel('license', newLicenseName, filePath);
+            const zipEntryPath = getModelZipEntryPath();
+            await autoSaveModel('license', newLicenseName, filePath, zipEntryPath);
           }
         }
         
@@ -1696,18 +1712,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
-
-  // File Types dialog event listeners
-  document.getElementById('save-file-types-settings')?.addEventListener('click', async () => {
-    await saveFileTypesSettings();
-  });
-
-  document.getElementById('cancel-file-types-settings')?.addEventListener('click', () => {
-    const dialog = document.getElementById('file-types-dialog');
-    if (dialog) {
-      dialog.close();
-    }
-  });
 
   // Initialize dialog handlers
   initializeDialogHandlers();
@@ -2011,6 +2015,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     themeDialog.showModal();
   });
 
+  // Add File Types settings dialog handler
+  window.electron.onOpenFileTypesSettings(() => {
+    const dialog = document.getElementById('file-types-dialog');
+    if (dialog) {
+      initializeFileTypesSettings();
+      dialog.showModal();
+    }
+  });
+
+  // Add File Types settings event listeners
+  const saveFileTypesButton = document.getElementById('save-file-types');
+  if (saveFileTypesButton) {
+    saveFileTypesButton.addEventListener('click', async () => {
+      await saveFileTypesSettings();
+    });
+  }
+
+  const cancelFileTypesButton = document.getElementById('cancel-file-types');
+  if (cancelFileTypesButton) {
+    cancelFileTypesButton.addEventListener('click', () => {
+      const dialog = document.getElementById('file-types-dialog');
+      if (dialog) {
+        dialog.close();
+      }
+    });
+  }
+
 
   // Update the tag deletion handler
   async function deleteSelectedTags() {
@@ -2250,23 +2281,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-
-  // Add these event listeners for single-edit mode dropdowns
-  document.getElementById('model-designer').addEventListener('change', async (e) => {
-    const filePath = document.getElementById('model-path').value;
-    await autoSaveModel('designer', e.target.value, filePath);
-  });
-
-  document.getElementById('model-license').addEventListener('change', async (e) => {
-    const filePath = document.getElementById('model-path').value;
-    await autoSaveModel('license', e.target.value, filePath);
-  });
-
-  // The parent model listener is already present but let's make sure it's consistent
-  document.getElementById('model-parent').addEventListener('change', async (e) => {
-    const filePath = document.getElementById('model-path').value;
-    await autoSaveModel('parentModel', e.target.value, filePath);
-  });
+  // Note: Event listeners for model-designer, model-license, and model-parent
+  // are set up in showModelDetails() to ensure they have the correct filePath
 
   // Update the About dialog content in index.html
   const tosContent = `
@@ -2355,6 +2371,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  async function initializeFileTypesSettings() {
+    try {
+      // Load ZIP archives setting
+      const enableZipArchives = await window.electron.getSetting('enableZipArchives') || '0';
+      const checkbox = document.getElementById('enable-zip-archives');
+      if (checkbox) {
+        checkbox.checked = enableZipArchives === '1';
+      }
+    } catch (error) {
+      console.error('Error initializing file types settings:', error);
+    }
+  }
+
+  async function saveFileTypesSettings() {
+    try {
+      const checkbox = document.getElementById('enable-zip-archives');
+      if (!checkbox) {
+        throw new Error('Could not find ZIP archives checkbox');
+      }
+
+      // Save to database
+      await window.electron.saveSetting('enableZipArchives', checkbox.checked ? '1' : '0');
+      
+      // Close dialog and show success message
+      const dialog = document.getElementById('file-types-dialog');
+      if (dialog) {
+        dialog.close();
+      }
+      await window.electron.showMessage('Success', 'File types settings saved successfully');
+    } catch (error) {
+      console.error('Error saving file types settings:', error);
+      await window.electron.showMessage('Error', error.message);
+    }
+  }
+
   // Add performance settings event listeners
   document.addEventListener('DOMContentLoaded', async () => {
     // Initialize settings
@@ -2386,6 +2437,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
     }
+
   });
 
   // Add performance settings dialog handler
@@ -2620,105 +2672,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       container.innerHTML = '';
       container.appendChild(img);
       return existingThumbnail;
-    }
-
-    // Check if we already have a thumbnail for this file or a duplicate
-    try {
-      console.log(`🔍 [RENDER MODEL TO PNG] Starting deduplication check for ${filePath}`);
-      const allModels = await window.electron.getAllModels();
-      const fileName = filePath.split(/[/\\]/).pop();
-      console.log(`🔍 [RENDER MODEL TO PNG] Found ${allModels.length} models in database, looking for fileName: ${fileName}`);
-      
-      // Check for exact path match
-      const exactMatch = allModels.find(model => 
-        canonicalPath(model.filePath) === canonicalPath(filePath) &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (exactMatch) {
-        console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - exact path match found for ${filePath}`);
-        const img = document.createElement('img');
-        img.src = exactMatch.thumbnail;
-        img.style.width = '250px';
-        img.style.height = '250px';
-        container.innerHTML = '';
-        container.appendChild(img);
-        return exactMatch.thumbnail;
-      }
-      
-      // Check for content hash match
-      const fileStats = await window.electron.getFileStats(filePath);
-      const hashMatch = allModels.find(model => 
-        model.hash && 
-        model.hash === fileStats.hash &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (hashMatch) {
-        console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - content hash match found for ${filePath} (matches ${hashMatch.filePath})`);
-        const img = document.createElement('img');
-        img.src = hashMatch.thumbnail;
-        img.style.width = '250px';
-        img.style.height = '250px';
-        container.innerHTML = '';
-        container.appendChild(img);
-        return hashMatch.thumbnail;
-      }
-      
-      // Check for name and size match (fallback)
-      const nameSizeMatch = allModels.find(model => 
-        model.fileName === fileName && 
-        model.size === fileStats.size &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (nameSizeMatch) {
-        console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - name and size match found for ${filePath} (matches ${nameSizeMatch.filePath})`);
-        const img = document.createElement('img');
-        img.src = nameSizeMatch.thumbnail;
-        img.style.width = '250px';
-        img.style.height = '250px';
-        container.innerHTML = '';
-        container.appendChild(img);
-        return nameSizeMatch.thumbnail;
-      }
-      
-      // Special case: If this is a directory file, check if we have the same file from a zip archive
-      if (!filePath.includes('.zip:')) {
-        console.log(`[RENDER MODEL TO PNG] Checking for zip file match for directory file: ${filePath} (${fileName}, size: ${fileStats.size})`);
-        const zipFileWithSameName = allModels.find(model => 
-          model.fileName === fileName && 
-          model.size === fileStats.size &&
-          model.filePath.includes('.zip:') &&
-          model.thumbnail && 
-          model.thumbnail !== null && 
-          model.thumbnail !== ''
-        );
-        
-        if (zipFileWithSameName) {
-          console.log(`✅ [RENDER MODEL TO PNG] SKIPPING - zip file match found for ${filePath} (matches ${zipFileWithSameName.filePath})`);
-          const img = document.createElement('img');
-          img.src = zipFileWithSameName.thumbnail;
-          img.style.width = '250px';
-          img.style.height = '250px';
-          container.innerHTML = '';
-          container.appendChild(img);
-          return zipFileWithSameName.thumbnail;
-        } else {
-          console.log(`❌ [RENDER MODEL TO PNG] No zip file match found for ${filePath}`);
-        }
-      }
-
-      console.log(`🔄 [RENDER MODEL TO PNG] No duplicates found, generating thumbnail for ${filePath}`);
-    } catch (deduplicationError) {
-      console.error(`❌ [RENDER MODEL TO PNG] Error in deduplication logic:`, deduplicationError);
-      console.log(`🔄 [RENDER MODEL TO PNG] Continuing with thumbnail generation despite deduplication error`);
     }
 
     let renderer, scene, camera, canvas;
@@ -3188,9 +3141,33 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Add file type filter
       if (fileType) {
-        models = models.filter(model => 
-          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-        );
+        if (fileType === 'zip') {
+          // For ZIP files, check the isZipArchive property
+          models = models.filter(model => model.isZipArchive);
+        } else {
+          // For regular files, check the file extension (works for both regular and zip entries)
+          models = models.filter(model => 
+            model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
+          );
+        }
+      }
+
+      // Apply search term filter
+      if (searchTerm) {
+        const searchLower = searchTerm.toLowerCase();
+        models = models.filter(model => {
+          const searchFields = [
+            model.fileName, 
+            model.designer, 
+            model.parentModel, 
+            model.notes,
+            model.zipEntryPath || model.zip_path || '', // Include zip entry path for searching
+            model.source || ''
+          ]
+            .filter(Boolean)
+            .map(field => field.toLowerCase());
+          return searchFields.some(field => field.includes(searchLower));
+        });
       }
 
       // Apply filters
@@ -3290,14 +3267,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     printStatus.className = `print-status ${file.printed ? 'printed' : ''}`;
     printStatus.textContent = file.printed ? 'Printed' : 'Not Printed';
     fileElement.appendChild(printStatus);
-
-    // Add archive tag for zip files
-    if (file.filePath && file.filePath.includes(':')) {
-      const archiveStatus = document.createElement('div');
-      archiveStatus.className = 'archive-status';
-      archiveStatus.textContent = 'Archive';
-      fileElement.appendChild(archiveStatus);
-    }
 
     // Add thumbnail container
     const thumbnailContainer = document.createElement('div');
@@ -3785,6 +3754,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     await populateParentModelFilter();
     await populateTagFilter();
     await populateLicenseFilter();
+
+    // Refresh the display to show newly scanned models (same as when filters are applied)
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
+    } else {
+      // Fallback: get all models and display them
+      const allModels = await window.electron.getAllModels();
+      if (typeof window.renderFiles === 'function') {
+        await window.renderFiles(allModels, false, true);
+      } else if (typeof displayModels === 'function') {
+        await displayModels(allModels);
+      }
+    }
   }
 
   // Add event listener for "View Entire Library" button
@@ -4235,47 +4217,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add File Types settings event handler
-  window.electron.onOpenFileTypesSettings(() => {
-    const dialog = document.getElementById('file-types-dialog');
-    if (dialog) {
-      loadFileTypesSettings();
-      dialog.showModal();
-    }
-  });
-
-  // File Types settings functions
-  async function loadFileTypesSettings() {
-    try {
-      const zipSupportEnabled = await window.electron.getSetting('zipSupportEnabled');
-      const checkbox = document.getElementById('zip-support-enabled');
-      if (checkbox) {
-        checkbox.checked = zipSupportEnabled === 'true';
-      }
-    } catch (error) {
-      console.error('Error loading file types settings:', error);
-    }
-  }
-
-  async function saveFileTypesSettings() {
-    try {
-      const checkbox = document.getElementById('zip-support-enabled');
-      const zipSupportEnabled = checkbox ? checkbox.checked : false;
-      
-      await window.electron.saveSetting('zipSupportEnabled', zipSupportEnabled.toString());
-      
-      const dialog = document.getElementById('file-types-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-      
-      await window.electron.showMessage('Success', 'File types settings saved successfully');
-    } catch (error) {
-      console.error('Error saving file types settings:', error);
-      await window.electron.showMessage('Error', error.message);
-    }
-  }
-
   // Modify the prompt handler
   async function promptPendingThumbnails() {
     try {
@@ -4436,7 +4377,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           // Generate thumbnail
           try {
-            console.log(`🔥🔥🔥 [GENERATE THUMBNAILS FOR MODELS] About to call generateThumbnail for: ${model.filePath}`);
             const thumbnail = await generateThumbnail(model.filePath);
             
             // Validate thumbnail before saving
@@ -4573,6 +4513,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         printStatus.className = 'print-status';
         printStatus.textContent = 'Not Printed';
         thumbnailContainer.appendChild(printStatus);
+
+        // Add ZIP archive indicator if the model is from a ZIP archive
+        if (model.isZipArchive) {
+          const zipStatus = document.createElement('div');
+          zipStatus.className = 'zip-status';
+          zipStatus.textContent = 'ZIP';
+          zipStatus.title = 'File is contained within a ZIP archive';
+          thumbnailContainer.appendChild(zipStatus);
+        }
         
         fileElement.appendChild(thumbnailContainer);
         
@@ -4594,8 +4543,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         fileElement.appendChild(fileInfo);
         
-        // Add click handler
-        fileElement.addEventListener('click', (e) => handleFileClick(e, model.filePath));
+        // Add click handler - use unique identifier for archive files
+        const zipEntryPath = model.zip_path || model.zipEntryPath || null;
+        const fileIdentifier = createFileIdentifier(model.filePath, zipEntryPath);
+        fileElement.dataset.fileidentifier = fileIdentifier;
+        fileElement.addEventListener('click', () => {
+          toggleModelSelection(fileElement, fileIdentifier);
+        });
         
         // Add context menu handler
         addContextMenuHandler(fileElement, model.filePath);
@@ -4724,7 +4678,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (parentModel && model.parentModel !== parentModel) return false;
     if (printStatus === 'printed' && !model.printed) return false;
     if (printStatus === 'not-printed' && model.printed) return false;
-    if (fileType && !model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
+    if (fileType) {
+      if (fileType === 'zip') {
+        // For ZIP files, check the isZipArchive property
+        if (!model.isZipArchive) return false;
+      } else {
+        // For regular files, check the file extension
+        if (!model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
+      }
+    }
     
     // Handle tag filter
     if (tagFilter) {
@@ -4734,10 +4696,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Handle search term
     if (searchTerm) {
-      const searchFields = [model.fileName, model.designer, model.parentModel, model.notes]
+      const searchLower = searchTerm.toLowerCase();
+      const searchFields = [
+        model.fileName, 
+        model.designer, 
+        model.parentModel, 
+        model.notes,
+        model.zipEntryPath || model.zip_path || '', // Include zip entry path for searching
+        model.source || ''
+      ]
         .filter(Boolean)
         .map(field => field.toLowerCase());
-      if (!searchFields.some(field => field.includes(searchTerm.toLowerCase()))) return false;
+      if (!searchFields.some(field => field.includes(searchLower))) return false;
     }
 
     return true;
@@ -4894,8 +4864,34 @@ function updateSelectedCount() {
   }
 }
 
+// Helper functions to create and parse unique identifiers for archive files
+function createFileIdentifier(filePath, zipEntryPath) {
+  if (zipEntryPath) {
+    // For archive files, create a unique identifier combining filePath and zipEntryPath
+    // Use a separator that's unlikely to appear in file paths
+    return `ZIP:${filePath}::${zipEntryPath}`;
+  }
+  return filePath;
+}
+
+function parseFileIdentifier(identifier) {
+  if (identifier.startsWith('ZIP:')) {
+    const parts = identifier.substring(4).split('::');
+    return {
+      filePath: parts[0],
+      zipEntryPath: parts[1] || null,
+      isZipArchive: true
+    };
+  }
+  return {
+    filePath: identifier,
+    zipEntryPath: null,
+    isZipArchive: false
+  };
+}
+
 // Update the toggleModelSelection function`
-function toggleModelSelection(fileElement, filePath) {
+function toggleModelSelection(fileElement, fileIdentifier) {
   if (!isMultiSelectMode) {
     const wasSelected = fileElement.classList.contains('selected');
     
@@ -4912,24 +4908,26 @@ function toggleModelSelection(fileElement, filePath) {
         detailsPanel.classList.add('hidden');
       }
     } else {
-      // Add selection to the clicked item
-      selectedModels.add(filePath);
+      // Add selection to the clicked item using unique identifier
+      selectedModels.add(fileIdentifier);
       
       // Only select this specific element, not all elements with the same filePath
       fileElement.classList.add('selected');
       
-      // Show model details
-      showModelDetails(filePath);
+      // Show model details - parse identifier to get filePath and zipEntryPath
+      const parsed = parseFileIdentifier(fileIdentifier);
+      console.log('Parsed file identifier:', parsed);
+      showModelDetails(parsed.filePath, parsed.zipEntryPath);
     }
   } else {
     // Multi-select mode
     if (fileElement.classList.contains('selected')) {
       // Deselect
-      selectedModels.delete(filePath);
+      selectedModels.delete(fileIdentifier);
       fileElement.classList.remove('selected');
     } else {
       // Select
-      selectedModels.add(filePath);
+      selectedModels.add(fileIdentifier);
       fileElement.classList.add('selected');
     }
     updateSelectedCount();
@@ -4937,22 +4935,18 @@ function toggleModelSelection(fileElement, filePath) {
 }
 
 // Add helper functions before they're used
-async function loadModel(filePath) {
+async function loadModel(filePath, isZipArchive = false, zipEntryPath = null) {
   return new Promise(async (resolve, reject) => {
     let actualFilePath = filePath;
-    let tempPath = null;
+    let tempFilePath = null;
     
-    // Check if this is a ZIP file (contains colon after the drive letter)
-    if (filePath.includes(':') && filePath.split(':').length > 2) {
+    // If it's a ZIP file, extract it first
+    if (isZipArchive && zipEntryPath) {
       try {
-        const lastColonIndex = filePath.lastIndexOf(':');
-        const zipPath = filePath.substring(0, lastColonIndex);
-        const entryName = filePath.substring(lastColonIndex + 1);
-        tempPath = await window.electron.extractZipFile(zipPath, entryName);
-        actualFilePath = tempPath;
+        tempFilePath = await window.electron.extractZipFile(filePath, zipEntryPath);
+        actualFilePath = tempFilePath;
       } catch (error) {
-        console.error('Error extracting ZIP file for rendering:', error);
-        reject(error);
+        reject(new Error(`Failed to extract ZIP file: ${error.message}`));
         return;
       }
     }
@@ -4989,6 +4983,14 @@ async function loadModel(filePath) {
       THREE.ThreeMFLoader.fflate = fflate;
       loader = new THREE.ThreeMFLoader();
     } else {
+      // Clean up temp file if it was created
+      if (tempFilePath) {
+        try {
+          await window.electron.cleanupTempFile(tempFilePath);
+        } catch (error) {
+          console.error('Error cleaning up temp file:', error);
+        }
+      }
       reject(new Error(`Unsupported file type: ${fileExtension}`));
       return;
     }
@@ -5044,44 +5046,39 @@ async function loadModel(filePath) {
             return;
           }
           
-          // Clean up temporary file if it was created
-          if (tempPath) {
+          // Clean up temp file if it was created
+          if (tempFilePath) {
             try {
-              await window.electron.cleanupTempFile(tempPath);
+              await window.electron.cleanupTempFile(tempFilePath);
             } catch (cleanupError) {
               console.error('Error cleaning up temp file:', cleanupError);
             }
           }
-          
           resolve(mesh);
         } catch (error) {
           console.error('Error processing loaded object:', error);
-          
-          // Clean up temporary file if it was created
-          if (tempPath) {
+          // Clean up temp file if it was created
+          if (tempFilePath) {
             try {
-              await window.electron.cleanupTempFile(tempPath);
+              await window.electron.cleanupTempFile(tempFilePath);
             } catch (cleanupError) {
               console.error('Error cleaning up temp file:', cleanupError);
             }
           }
-          
           reject(error);
         }
       },
       undefined,
       async (error) => {
         console.error('Loader error:', error);
-        
-        // Clean up temporary file if it was created
-        if (tempPath) {
+        // Clean up temp file if it was created
+        if (tempFilePath) {
           try {
-            await window.electron.cleanupTempFile(tempPath);
+            await window.electron.cleanupTempFile(tempFilePath);
           } catch (cleanupError) {
             console.error('Error cleaning up temp file:', cleanupError);
           }
         }
-        
         reject(error);
       }
     );
@@ -5158,31 +5155,6 @@ function hideProgressBars() {
   progressSection.classList.add('hidden');
 }
 
-// Create a canonical path function that handles special characters consistently
-function canonicalPath(filepath) {
-  if (!filepath) return filepath;
-  
-  // Normalize path separators
-  let canonical = filepath.replace(/\\/g, '/');
-  
-  // Handle special characters that might cause issues
-  // Convert to a consistent format for database storage and comparison
-  canonical = canonical
-    .replace(/\s+/g, ' ')  // Normalize multiple spaces to single space
-    .replace(/#/g, '#')    // Keep hash as-is (don't encode for database storage)
-    .replace(/\$/g, '$')   // Keep dollar sign as-is
-    .replace(/\+/g, '+')   // Keep plus as-is
-    .replace(/\[/g, '[')   // Keep brackets as-is
-    .replace(/\]/g, ']')   // Keep brackets as-is
-    .replace(/\(/g, '(')   // Keep parentheses as-is
-    .replace(/\)/g, ')')   // Keep parentheses as-is
-    .replace(/'/g, "'")    // Keep single quote as-is
-    .replace(/"/g, '"')    // Keep double quote as-is
-    .trim();               // Remove leading/trailing whitespace
-  
-  return canonical;
-}
-
 // Update function signature to include background parameter
 async function scanAndRenderDirectory(directoryPath, background = false) {
   const progressSection = document.getElementById('progress-section');
@@ -5252,30 +5224,15 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     console.log('Scanned files:', totalFiles);
 
     const allModels = await window.electron.getAllModels();
-    const existingFiles = new Set(allModels.map(model => canonicalPath(model.filePath)));
-    
-    // Create maps for both path-based and hash-based thumbnail checking
-    const existingThumbnailsByPath = new Map(
-      allModels
-        .filter(model => model.thumbnail && model.thumbnail !== null && model.thumbnail !== '')
-        .map(model => [canonicalPath(model.filePath), model.thumbnail])
-    );
-    
-    // Create a map of hashes to thumbnails for duplicate content detection
-    const existingThumbnailsByHash = new Map(
-      allModels
-        .filter(model => model.thumbnail && model.thumbnail !== null && model.thumbnail !== '' && model.hash)
-        .map(model => [model.hash, model.thumbnail])
-    );
-    
-    console.log(`Found ${existingThumbnailsByPath.size} models with existing thumbnails out of ${allModels.length} total models`);
+    const existingFiles = new Set(allModels.map(model => model.filePath));
+    const existingThumbnails = new Map(allModels.map(model => [model.filePath, model.thumbnail]));
 
     if (!background) {
       progressBar.style.width = '0%';
       progressText.textContent = `Processing ${files.length} files...`;
     }
 
-    const newFiles = files.filter(file => !existingFiles.has(canonicalPath(file.filePath)));
+    const newFiles = files.filter(file => !existingFiles.has(file.filePath));
     
     // Use a more efficient approach for saving models
     if (newFiles.length > 0) {
@@ -5313,87 +5270,7 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       progressBar.style.width = '100%';
     }
 
-    const filesNeedingThumbnails = files.filter(file => {
-      // Check if file has a valid thumbnail in the database
-      const canonicalFilePath = canonicalPath(file.filePath);
-      
-      // First check by exact path
-      if (existingThumbnailsByPath.has(canonicalFilePath)) {
-        console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail (exact path match)`);
-        return false;
-      }
-      
-      // If file has a hash, check if we already have a thumbnail for this content
-      if (file.hash && existingThumbnailsByHash.has(file.hash)) {
-        console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail (content hash match)`);
-        return false;
-      }
-      
-      // For files without hashes, check if we have any file with the same name and size
-      // This is a fallback for when hashes aren't available yet
-      if (!file.hash) {
-        const sameNameSize = allModels.find(model => 
-          model.fileName === file.fileName && 
-          model.size === file.size &&
-          model.thumbnail && 
-          model.thumbnail !== null && 
-          model.thumbnail !== ''
-        );
-        
-        if (sameNameSize) {
-          console.log(`Skipping thumbnail generation for ${file.filePath} - already has thumbnail (name and size match)`);
-          return false;
-        }
-        
-        // Special case: If this is a directory file, check if we have the same file from a zip archive
-        // This handles the case where files exist in both directories and zip files
-        if (!file.filePath.includes('.zip:')) {
-          console.log(`Checking for zip file match for directory file: ${file.filePath} (${file.fileName}, size: ${file.size})`);
-          const zipFileWithSameName = allModels.find(model => 
-            model.fileName === file.fileName && 
-            model.size === file.size &&
-            model.filePath.includes('.zip:') &&
-            model.thumbnail && 
-            model.thumbnail !== null && 
-            model.thumbnail !== ''
-          );
-          
-          if (zipFileWithSameName) {
-            console.log(`✅ SKIPPING thumbnail generation for ${file.filePath} - already has thumbnail in zip file (${zipFileWithSameName.filePath})`);
-            return false;
-          } else {
-            console.log(`❌ No zip file match found for ${file.filePath}`);
-          }
-        }
-      }
-      
-      // Special handling for zip files: if we have a zip file with the same name and size,
-      // assume the files inside are the same and skip processing
-      if (file.filePath.includes('.zip:')) {
-        const zipPath = file.filePath.substring(0, file.filePath.lastIndexOf(':'));
-        const zipFileName = zipPath.split(/[/\\]/).pop();
-        
-        // Check if we have any file with the same zip filename and size
-        const sameZipFile = allModels.find(model => {
-          if (model.filePath.includes('.zip:')) {
-            const modelZipPath = model.filePath.substring(0, model.filePath.lastIndexOf(':'));
-            const modelZipFileName = modelZipPath.split(/[/\\]/).pop();
-            return modelZipFileName === zipFileName && model.size === file.size;
-          }
-          return false;
-        });
-        
-        if (sameZipFile) {
-          console.log(`Skipping thumbnail generation for ${file.filePath} - zip file already processed (${zipFileName})`);
-          return false;
-        }
-      }
-      
-      return true;
-    });
-    
-    console.log(`Files needing thumbnails: ${filesNeedingThumbnails.length} out of ${files.length} total files`);
-    
+    const filesNeedingThumbnails = files.filter(file => !existingThumbnails.has(file.filePath));
     if (!background) {
       progressText.textContent = `${filesNeedingThumbnails.length} models found`;
       renderProgressBar.style.width = '0%';
@@ -5418,82 +5295,19 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       
       while (thumbnailQueue.length > 0 && !isCancelled) {
         // Fill up to max concurrent thumbnails
-        while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0) {
+        while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0 && !isCancelled) {
           const file = thumbnailQueue.shift();
           
           const promise = (async () => {
             try {
-              const canonicalFilePath = canonicalPath(file.filePath);
-              
-              // Check by exact path first
-              if (existingThumbnailsByPath.has(canonicalFilePath)) {
-                console.log(`Thumbnail found for ${file.filePath} in database (exact path match). Skipping render.`);
+              // Check cancellation before starting
+              if (isCancelled) {
                 return;
               }
               
-              // Check by content hash if available
-              if (file.hash && existingThumbnailsByHash.has(file.hash)) {
-                console.log(`Thumbnail found for ${file.filePath} in database (content hash match). Skipping render.`);
+              if (existingThumbnails.has(file.filePath)) {
+                console.log(`Thumbnail found for ${file.filePath} in database. Skipping render.`);
                 return;
-              }
-              
-              // For files without hashes, check if we have any file with the same name and size
-              if (!file.hash) {
-                const sameNameSize = allModels.find(model => 
-                  model.fileName === file.fileName && 
-                  model.size === file.size &&
-                  model.thumbnail && 
-                  model.thumbnail !== null && 
-                  model.thumbnail !== ''
-                );
-                
-                if (sameNameSize) {
-                  console.log(`Thumbnail found for ${file.filePath} in database (name and size match). Skipping render.`);
-                  return;
-                }
-                
-                // Special case: If this is a directory file, check if we have the same file from a zip archive
-                // This handles the case where files exist in both directories and zip files
-                if (!file.filePath.includes('.zip:')) {
-                  console.log(`[THUMBNAIL GENERATION] Checking for zip file match for directory file: ${file.filePath} (${file.fileName}, size: ${file.size})`);
-                  const zipFileWithSameName = allModels.find(model => 
-                    model.fileName === file.fileName && 
-                    model.size === file.size &&
-                    model.filePath.includes('.zip:') &&
-                    model.thumbnail && 
-                    model.thumbnail !== null && 
-                    model.thumbnail !== ''
-                  );
-                  
-                  if (zipFileWithSameName) {
-                    console.log(`✅ [THUMBNAIL GENERATION] SKIPPING render for ${file.filePath} - already has thumbnail in zip file (${zipFileWithSameName.filePath})`);
-                    return;
-                  } else {
-                    console.log(`❌ [THUMBNAIL GENERATION] No zip file match found for ${file.filePath}`);
-                  }
-                }
-              }
-              
-              // Special handling for zip files: if we have a zip file with the same name and size,
-              // assume the files inside are the same and skip processing
-              if (file.filePath.includes('.zip:')) {
-                const zipPath = file.filePath.substring(0, file.filePath.lastIndexOf(':'));
-                const zipFileName = zipPath.split(/[/\\]/).pop();
-                
-                // Check if we have any file with the same zip filename and size
-                const sameZipFile = allModels.find(model => {
-                  if (model.filePath.includes('.zip:')) {
-                    const modelZipPath = model.filePath.substring(0, model.filePath.lastIndexOf(':'));
-                    const modelZipFileName = modelZipPath.split(/[/\\]/).pop();
-                    return modelZipFileName === zipFileName && model.size === file.size;
-                  }
-                  return false;
-                });
-                
-                if (sameZipFile) {
-                  console.log(`Thumbnail found for ${file.filePath} in database (zip file already processed: ${zipFileName}). Skipping render.`);
-                  return;
-                }
               }
               
               // Add code to actually render the thumbnail
@@ -5503,6 +5317,8 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
               
               if (fileExtension === '3mf') {
                 try {
+                  // Check cancellation before async operation
+                  if (isCancelled) return;
                   const images = await window.electron.get3MFImages(file.filePath);
                   if (images && images.length > 0) {
                     thumbnail = images;
@@ -5513,8 +5329,15 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
                 }
               }
               
-              if (!thumbnail) {
+              // Check cancellation before queuing render
+              if (!thumbnail && !isCancelled) {
                 thumbnail = await new Promise((resolve, reject) => {
+                  // Check cancellation one more time before adding to queue
+                  if (isCancelled) {
+                    resolve(null);
+                    return;
+                  }
+                  
                   renderQueue.push({
                     filePath: file.filePath,
                     container: document.createElement('div'), // Dummy container
@@ -5525,14 +5348,17 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
                   processRenderQueue();
                 });
                 
-                if (thumbnail) {
+                if (thumbnail && !isCancelled) {
                   await window.electron.saveThumbnail(file.filePath, thumbnail);
                 }
               }
             } catch (error) {
-              console.error('Error caching thumbnail:', error);
+              // Only log errors if not cancelled (cancellation may cause expected errors)
+              if (!isCancelled) {
+                console.error('Error caching thumbnail:', error);
+              }
             } finally {
-              if (!existingThumbnails.has(file.filePath)) {
+              if (!existingThumbnails.has(file.filePath) && !isCancelled) {
                 completedThumbnails++;
                 thumbnailProgressUpdate(completedThumbnails);
               }
@@ -5544,20 +5370,26 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
         }
         
         // Wait for at least one promise to complete before continuing
-        if (activePromises.size > 0) {
+        if (activePromises.size > 0 && !isCancelled) {
           await Promise.race(Array.from(activePromises));
         }
         
         // Check for cancellation after each batch
         if (isCancelled) {
           console.log('Thumbnail generation cancelled, stopping process');
+          // Clear remaining queue to prevent new tasks from starting
+          thumbnailQueue.length = 0;
           break;
         }
       }
       
-      // Wait for any remaining active promises to complete
-      if (activePromises.size > 0) {
+      // When cancelled, don't wait for all promises - let them finish in background
+      // but stop immediately. If not cancelled, wait for remaining promises.
+      if (!isCancelled && activePromises.size > 0) {
         await Promise.all(Array.from(activePromises));
+      } else if (isCancelled) {
+        // Just log that we're stopping - promises will clean themselves up
+        console.log(`Stopped thumbnail generation. ${activePromises.size} active tasks will finish in background.`);
       }
     } else {
       if (!background) {
@@ -5625,9 +5457,33 @@ async function refreshModelDisplay() {
 
     // Add file type filter
     if (fileType) {
-      models = models.filter(model => 
-        model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-      );
+      if (fileType === 'zip') {
+        // For ZIP files, check the isZipArchive property
+        models = models.filter(model => model.isZipArchive);
+      } else {
+        // For regular files, check the file extension (works for both regular and zip entries)
+        models = models.filter(model => 
+          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
+        );
+      }
+    }
+
+    // Apply search term filter
+    if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      models = models.filter(model => {
+        const searchFields = [
+          model.fileName, 
+          model.designer, 
+          model.parentModel, 
+          model.notes,
+          model.zipEntryPath || model.zip_path || '', // Include zip entry path for searching
+          model.source || ''
+        ]
+          .filter(Boolean)
+          .map(field => field.toLowerCase());
+        return searchFields.some(field => field.includes(searchLower));
+      });
     }
 
     // Apply filters
@@ -5821,9 +5677,14 @@ async function handleFilterChange() {
 async function renderFile(file, container, skipThumbnail = false) {
   const fileElement = document.createElement('div');
   fileElement.className = 'file-item';
-  fileElement.dataset.filepath = file.filePath; // Use dataset for data attributes
+  // Create unique identifier for archive files
+  const zipEntryPath = file.zip_path || file.zipEntryPath || null;
+  const fileIdentifier = createFileIdentifier(file.filePath, zipEntryPath);
+  
+  fileElement.dataset.filepath = file.filePath; // Keep original filePath for compatibility
+  fileElement.dataset.fileidentifier = fileIdentifier; // Store unique identifier
 
-  if (selectedModels.has(file.filePath)) {
+  if (selectedModels.has(fileIdentifier)) {
     fileElement.classList.add('selected');
   }
 
@@ -5832,12 +5693,13 @@ async function renderFile(file, container, skipThumbnail = false) {
   printStatus.textContent = file.printed? 'Printed': 'Not Printed';
   fileElement.appendChild(printStatus);
 
-  // Add archive tag for zip files
-  if (file.filePath && file.filePath.includes(':')) {
-    const archiveStatus = document.createElement('div');
-    archiveStatus.className = 'archive-status';
-    archiveStatus.textContent = 'Archive';
-    fileElement.appendChild(archiveStatus);
+  // Add ZIP archive indicator if the file is from a ZIP archive
+  if (file.isZipArchive) {
+    const zipStatus = document.createElement('div');
+    zipStatus.className = 'zip-status';
+    zipStatus.textContent = 'ZIP';
+    zipStatus.title = 'File is contained within a ZIP archive';
+    fileElement.appendChild(zipStatus);
   }
 
   const thumbnailContainer = document.createElement('div');
@@ -5905,7 +5767,7 @@ async function renderFile(file, container, skipThumbnail = false) {
   fileElement.appendChild(fileInfo);
 
   fileElement.addEventListener('click', () => {
-    toggleModelSelection(fileElement, file.filePath);
+    toggleModelSelection(fileElement, fileIdentifier);
   });
  // Add designer info if available
  if (file.designer) {
@@ -5917,55 +5779,6 @@ async function renderFile(file, container, skipThumbnail = false) {
 }
 
   if (!file.thumbnail &&!skipThumbnail) {
-    // Check for duplicates before processing
-    try {
-      const allModels = await window.electron.getAllModels();
-      const fileName = file.filePath.split(/[/\\]/).pop();
-      
-      // Check for exact path match
-      const exactMatch = allModels.find(model => 
-        canonicalPath(model.filePath) === canonicalPath(file.filePath) &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (exactMatch) {
-        console.log(`✅ [RENDER FILE] Using existing thumbnail for exact path match: ${file.filePath}`);
-        const img = document.createElement('img');
-        img.src = exactMatch.thumbnail;
-        img.className = 'model-thumbnail';
-        thumbnailContainer.innerHTML = '';
-        thumbnailContainer.appendChild(img);
-        thumbnailContainer.classList.remove('loading');
-        file.thumbnail = exactMatch.thumbnail;
-        return fileElement;
-      }
-      
-      // Check for name and size match (fallback)
-      const nameSizeMatch = allModels.find(model => 
-        model.fileName === fileName && 
-        model.size === file.size &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (nameSizeMatch) {
-        console.log(`✅ [RENDER FILE] Using existing thumbnail for name/size match: ${file.filePath} (matches ${nameSizeMatch.filePath})`);
-        const img = document.createElement('img');
-        img.src = nameSizeMatch.thumbnail;
-        img.className = 'model-thumbnail';
-        thumbnailContainer.innerHTML = '';
-        thumbnailContainer.appendChild(img);
-        thumbnailContainer.classList.remove('loading');
-        file.thumbnail = nameSizeMatch.thumbnail;
-        return fileElement;
-      }
-    } catch (duplicateCheckError) {
-      console.error(`❌ [RENDER FILE] Error checking for duplicates:`, duplicateCheckError);
-    }
-
     const fileExtension = file.filePath.split('.').pop().toLowerCase();
     if (fileExtension === '3mf') {
       try {
@@ -5994,6 +5807,8 @@ async function renderFile(file, container, skipThumbnail = false) {
           filePath: file.filePath,
           container: thumbnailContainer,
           existingThumbnail: null,
+          isZipArchive: file.isZipArchive || false,
+          zipEntryPath: file.zip_path || file.zipEntryPath || null,
           resolve,
           reject
         });
@@ -6034,7 +5849,7 @@ async function processRenderQueue() {
       activeRenders++;
       
       try {
-        const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
+        const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail, task.isZipArchive, task.zipEntryPath);
         task.resolve(result);
       } catch (error) {
         console.error(`Render task failed: ${error.message}`);
@@ -6053,7 +5868,7 @@ async function processRenderQueue() {
   }
 }
 
-async function renderModelToPNG(filePath, container, existingThumbnail) {
+async function renderModelToPNG(filePath, container, existingThumbnail, isZipArchive = false, zipEntryPath = null) {
   if (existingThumbnail) {
     const img = document.createElement('img');
     img.src = existingThumbnail;
@@ -6062,105 +5877,6 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     container.innerHTML = '';
     container.appendChild(img);
     return existingThumbnail;
-  }
-
-  // Check if we already have a thumbnail for this file or a duplicate
-  try {
-    console.log(`🔍 [RENDER MODEL TO PNG #2] Starting deduplication check for ${filePath}`);
-    const allModels = await window.electron.getAllModels();
-    const fileName = filePath.split(/[/\\]/).pop();
-    console.log(`🔍 [RENDER MODEL TO PNG #2] Found ${allModels.length} models in database, looking for fileName: ${fileName}`);
-    
-    // Check for exact path match
-    const exactMatch = allModels.find(model => 
-      canonicalPath(model.filePath) === canonicalPath(filePath) &&
-      model.thumbnail && 
-      model.thumbnail !== null && 
-      model.thumbnail !== ''
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - exact path match found for ${filePath}`);
-      const img = document.createElement('img');
-      img.src = exactMatch.thumbnail;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return exactMatch.thumbnail;
-    }
-    
-    // Check for content hash match
-    const fileStats = await window.electron.getFileStats(filePath);
-    const hashMatch = allModels.find(model => 
-      model.hash && 
-      model.hash === fileStats.hash &&
-      model.thumbnail && 
-      model.thumbnail !== null && 
-      model.thumbnail !== ''
-    );
-    
-    if (hashMatch) {
-      console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - content hash match found for ${filePath} (matches ${hashMatch.filePath})`);
-      const img = document.createElement('img');
-      img.src = hashMatch.thumbnail;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return hashMatch.thumbnail;
-    }
-    
-    // Check for name and size match (fallback)
-    const nameSizeMatch = allModels.find(model => 
-      model.fileName === fileName && 
-      model.size === fileStats.size &&
-      model.thumbnail && 
-      model.thumbnail !== null && 
-      model.thumbnail !== ''
-    );
-    
-    if (nameSizeMatch) {
-      console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - name and size match found for ${filePath} (matches ${nameSizeMatch.filePath})`);
-      const img = document.createElement('img');
-      img.src = nameSizeMatch.thumbnail;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return nameSizeMatch.thumbnail;
-    }
-    
-    // Special case: If this is a directory file, check if we have the same file from a zip archive
-    if (!filePath.includes('.zip:')) {
-      console.log(`[RENDER MODEL TO PNG #2] Checking for zip file match for directory file: ${filePath} (${fileName}, size: ${fileStats.size})`);
-      const zipFileWithSameName = allModels.find(model => 
-        model.fileName === fileName && 
-        model.size === fileStats.size &&
-        model.filePath.includes('.zip:') &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (zipFileWithSameName) {
-        console.log(`✅ [RENDER MODEL TO PNG #2] SKIPPING - zip file match found for ${filePath} (matches ${zipFileWithSameName.filePath})`);
-        const img = document.createElement('img');
-        img.src = zipFileWithSameName.thumbnail;
-        img.style.width = '250px';
-        img.style.height = '250px';
-        container.innerHTML = '';
-        container.appendChild(img);
-        return zipFileWithSameName.thumbnail;
-      } else {
-        console.log(`❌ [RENDER MODEL TO PNG #2] No zip file match found for ${filePath}`);
-      }
-    }
-
-    console.log(`🔄 [RENDER MODEL TO PNG #2] No duplicates found, generating thumbnail for ${filePath}`);
-  } catch (deduplicationError) {
-    console.error(`❌ [RENDER MODEL TO PNG #2] Error in deduplication logic:`, deduplicationError);
-    console.log(`🔄 [RENDER MODEL TO PNG #2] Continuing with thumbnail generation despite deduplication error`);
   }
 
   let renderer, scene, camera, canvas;
@@ -6193,7 +5909,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     scene.add(directionalLight);
 
     // Use loadModel function which has proper path encoding handling
-    model = await loadModel(filePath);
+    model = await loadModel(filePath, isZipArchive, zipEntryPath);
     if (!model) throw new Error('Failed to load model');
     
     scene.add(model);
@@ -6282,6 +5998,12 @@ async function populateModelDesignerDropdown(selectedDesigner, elementId = 'mode
 
   try {
     const designers = await window.electron.getDesigners();
+    // Sort designers alphabetically
+    designers.sort((a, b) => {
+      if (!a) return 1;
+      if (!b) return -1;
+      return a.localeCompare(b);
+    });
     designers.forEach(designer => {
       if (designer) { // Only add non-empty designers
         const option = document.createElement('option');
@@ -6298,19 +6020,6 @@ async function populateModelDesignerDropdown(selectedDesigner, elementId = 'mode
   }
 }
 
-// Update the change event listener
-document.getElementById('model-designer').addEventListener('change', async (event) => {
-  const designerSelect = event.target;
-  const newDesigner = designerSelect.value;
-  
-  if (newDesigner && newDesigner !== 'Unknown') {
-    const designers = await window.electron.getDesigners();
-    if (!designers.includes(newDesigner)) {
-      console.log('New designer will be added:', newDesigner);
-    }
-  }
-});
-
 async function populateDesignerDropdown() {
   const designerSelect = document.getElementById('designer-select');
   designerSelect.innerHTML = '<option value="">All Designers</option>';
@@ -6318,6 +6027,12 @@ async function populateDesignerDropdown() {
   designerSelect.innerHTML += '<option value="__none__">None</option>';
   try {
     const designers = await window.electron.getDesigners();
+    // Sort designers alphabetically
+    designers.sort((a, b) => {
+      if (!a) return 1;
+      if (!b) return -1;
+      return a.localeCompare(b);
+    });
     designers.forEach(designer => {
       const option = document.createElement('option');
       option.value = designer;
@@ -6354,18 +6069,22 @@ document.getElementById('new-designer-dialog').addEventListener('submit', async 
       option.textContent = newDesignerName;
       designerSelect.appendChild(option);
       designerSelect.value = newDesignerName;
+      
+      // Manually trigger change event to ensure auto-save fires
+      designerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-designer-name').value = '';
     document.getElementById('new-designer-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed
+    // Trigger auto-save and updates after dialog is closed (also call directly)
     if (sourceDropdownId === 'multi-designer') {
       await autoSaveMultipleModels('designer', newDesignerName);
     } else {
       const filePath = document.getElementById('model-path').value;
-      await autoSaveModel('designer', newDesignerName, filePath);
+      const zipEntryPath = getModelZipEntryPath();
+      await autoSaveModel('designer', newDesignerName, filePath, zipEntryPath);
     }
     
     // Update the designer filter dropdown
@@ -6404,18 +6123,22 @@ document.getElementById('new-parent-dialog').addEventListener('submit', async (e
       option.textContent = newParentName;
       parentSelect.appendChild(option);
       parentSelect.value = newParentName;
+      
+      // Manually trigger change event to ensure auto-save fires
+      parentSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-parent-name').value = '';
     document.getElementById('new-parent-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed
+    // Trigger auto-save and updates after dialog is closed (also call directly)
     if (sourceDropdownId === 'multi-parent') {
       await autoSaveMultipleModels('parentModel', newParentName);
     } else {
       const filePath = document.getElementById('model-path').value;
-      await autoSaveModel('parentModel', newParentName, filePath);
+      const zipEntryPath = getModelZipEntryPath();
+      await autoSaveModel('parentModel', newParentName, filePath, zipEntryPath);
     }
 
     // Update the filter dropdown
@@ -6561,8 +6284,9 @@ async function addTagToModel(tagName, containerId) {
     } else {
       // Single edit mode save
       const filePath = getModelFilePath();
+      const zipEntryPath = getModelZipEntryPath();
       if (filePath) {
-        await autoSaveModel('tags', currentTags, filePath);
+        await autoSaveModel('tags', currentTags, filePath, zipEntryPath);
       } else {
         console.error('No file path found for saving tags');
       }
@@ -6581,8 +6305,9 @@ async function addTagToModel(tagName, containerId) {
     const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
       .map(t => t.getAttribute('data-tag-name'));
     const filePath = getModelFilePath();
+    const zipEntryPath = getModelZipEntryPath();
     if (filePath) {
-      await autoSaveModel('tags', currentTags, filePath);
+      await autoSaveModel('tags', currentTags, filePath, zipEntryPath);
     } else {
       console.error('No file path found for saving tags');
     }
@@ -6744,30 +6469,8 @@ document.querySelectorAll('.add-tag-button').forEach(button => {
   });
 });
 
-// Update the dialog submit handlers to use the stored dropdown IDs
-document.getElementById('new-designer-dialog').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const newDesignerName = document.getElementById('new-designer-name').value.trim();
-  const sourceDropdownId = event.target.closest('dialog').dataset.sourceDropdown;
-  
-  if (newDesignerName) {
-    // Add the new designer to the dropdown
-    const designerSelect = document.getElementById(sourceDropdownId);
-    const option = document.createElement('option');
-    option.value = newDesignerName;
-    option.textContent = newDesignerName;
-    designerSelect.appendChild(option);
-    
-    // Select the new designer
-    designerSelect.value = newDesignerName;
-    
-    // Clear the input
-    document.getElementById('new-designer-name').value = '';
-    
-    // Close the dialog
-    document.getElementById('new-designer-dialog').close();
-  }
-});
+// Note: Designer dialog submit handler is already set up in DOMContentLoaded (line 1574)
+// Duplicate handler removed to avoid conflicts
 
 // Parent Model Dialog Submit Handler
 document.getElementById('new-parent-dialog').addEventListener('submit', async (event) => {
@@ -6783,18 +6486,22 @@ document.getElementById('new-parent-dialog').addEventListener('submit', async (e
       option.textContent = newParentName;
       parentSelect.appendChild(option);
       parentSelect.value = newParentName;
+      
+      // Manually trigger change event to ensure auto-save fires
+      parentSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-parent-name').value = '';
     document.getElementById('new-parent-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed
+    // Trigger auto-save and updates after dialog is closed (also call directly)
     if (sourceDropdownId === 'multi-parent') {
       await autoSaveMultipleModels('parentModel', newParentName);
     } else {
       const filePath = document.getElementById('model-path').value;
-      await autoSaveModel('parentModel', newParentName, filePath);
+      const zipEntryPath = getModelZipEntryPath();
+      await autoSaveModel('parentModel', newParentName, filePath, zipEntryPath);
     }
 
     // Update the filter dropdown
@@ -7075,33 +6782,15 @@ async function handleDeleteSelected() {
     return;
   }
 
-  // Filter out zip files (they should already be disabled, but double-check)
-  const nonZipFiles = selectedFiles.filter(filePath => !filePath.includes(':'));
-  const zipFiles = selectedFiles.filter(filePath => filePath.includes(':'));
-
-  if (zipFiles.length > 0) {
-    await window.electron.showMessage(
-      'Cannot Delete Archive Files',
-      `Files within archives cannot be deleted. Please select only standalone files.\n\nArchive files found:\n${zipFiles.join('\n')}`,
-      ['OK']
-    );
-    return;
-  }
-
-  if (nonZipFiles.length === 0) {
-    await window.electron.showMessage('No Valid Files', 'No valid files selected for deletion');
-    return;
-  }
-
   const confirm = await window.electron.showMessage(
     'Confirm Delete',
-    `Are you sure you want to DELETE ${nonZipFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${nonZipFiles.join('\n')}`,
+    `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${selectedFiles.join('\n')}`,
     ['Yes', 'No']
   );
 
   if (confirm === 'Yes') {
     try {
-      for (const filePath of nonZipFiles) {
+      for (const filePath of selectedFiles) {
         console.log('Attempting to delete:', filePath);
         const success = await window.electron.deleteFile(filePath);
         console.log('Delete result:', success);
@@ -7159,86 +6848,9 @@ async function renderFilteredFiles(files) {
 // Add a separate function for generating thumbnails
 async function generateThumbnail(file) {
   try {
-    console.log(`🚀🚀🚀 [GENERATE THUMBNAIL] Function called with:`, file);
     const filePath = (typeof file === 'string') ? file : file.filePath;
     if (!filePath) {
       throw new Error("generateThumbnail: filePath is undefined");
-    }
-    console.log(`🚀🚀🚀 [GENERATE THUMBNAIL] Processing filePath: ${filePath}`);
-
-    // Check if we already have a thumbnail for this file or a duplicate
-    try {
-      console.log(`🔍 [GENERATE THUMBNAIL] Starting deduplication check for ${filePath}`);
-      const allModels = await window.electron.getAllModels();
-      const fileName = filePath.split(/[/\\]/).pop();
-      console.log(`🔍 [GENERATE THUMBNAIL] Found ${allModels.length} models in database, looking for fileName: ${fileName}`);
-      
-      // Check for exact path match
-      const exactMatch = allModels.find(model => 
-        canonicalPath(model.filePath) === canonicalPath(filePath) &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (exactMatch) {
-        console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - exact path match found for ${filePath}`);
-        return exactMatch.thumbnail;
-      }
-      
-      // Check for content hash match
-      const fileStats = await window.electron.getFileStats(filePath);
-      const hashMatch = allModels.find(model => 
-        model.hash && 
-        model.hash === fileStats.hash &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (hashMatch) {
-        console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - content hash match found for ${filePath} (matches ${hashMatch.filePath})`);
-        return hashMatch.thumbnail;
-      }
-      
-      // Check for name and size match (fallback)
-      const nameSizeMatch = allModels.find(model => 
-        model.fileName === fileName && 
-        model.size === fileStats.size &&
-        model.thumbnail && 
-        model.thumbnail !== null && 
-        model.thumbnail !== ''
-      );
-      
-      if (nameSizeMatch) {
-        console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - name and size match found for ${filePath} (matches ${nameSizeMatch.filePath})`);
-        return nameSizeMatch.thumbnail;
-      }
-      
-      // Special case: If this is a directory file, check if we have the same file from a zip archive
-      if (!filePath.includes('.zip:')) {
-        console.log(`[GENERATE THUMBNAIL] Checking for zip file match for directory file: ${filePath} (${fileName}, size: ${fileStats.size})`);
-        const zipFileWithSameName = allModels.find(model => 
-          model.fileName === fileName && 
-          model.size === fileStats.size &&
-          model.filePath.includes('.zip:') &&
-          model.thumbnail && 
-          model.thumbnail !== null && 
-          model.thumbnail !== ''
-        );
-        
-        if (zipFileWithSameName) {
-          console.log(`✅ [GENERATE THUMBNAIL] SKIPPING - zip file match found for ${filePath} (matches ${zipFileWithSameName.filePath})`);
-          return zipFileWithSameName.thumbnail;
-        } else {
-          console.log(`❌ [GENERATE THUMBNAIL] No zip file match found for ${filePath}`);
-        }
-      }
-
-      console.log(`🔄 [GENERATE THUMBNAIL] No duplicates found, generating thumbnail for ${filePath}`);
-    } catch (deduplicationError) {
-      console.error(`❌ [GENERATE THUMBNAIL] Error in deduplication logic:`, deduplicationError);
-      console.log(`🔄 [GENERATE THUMBNAIL] Continuing with thumbnail generation despite deduplication error`);
     }
 
     // Use the exposed function to get file stats
@@ -7353,7 +6965,12 @@ function addContextMenuHandler(fileElement, filePath) {
 }
 
 // Update the exit multi-edit mode functionality
-function exitMultiEditMode() {
+async function exitMultiEditMode() {
+  // Save all current values before exiting
+  if (selectedModels.size > 0) {
+    await saveAllMultiEditValues();
+  }
+  
   // Clear selections
   selectedModels.clear();
   document.querySelectorAll('.file-item').forEach(item => {
@@ -7762,27 +7379,88 @@ window.electron.on('show-native-prompt', async (options) => {
 });
 
 // Add implementation of autoSaveModel function
-async function autoSaveModel(field, value, filePath) {
+async function autoSaveModel(field, value, filePath, zipEntryPath = null) {
   try {
     if (!filePath) {
       console.error('No file path provided for autoSaveModel');
       return;
     }
     
-    const model = await window.electron.getModel(filePath);
+    const model = await window.electron.getModel(filePath, zipEntryPath);
     if (!model) {
-      console.error(`Model not found for ${filePath}`);
+      console.error(`Model not found for ${filePath}${zipEntryPath ? ` (zip: ${zipEntryPath})` : ''}`);
       return;
     }
     
-    // Update the specified field
-    model[field] = value;
+    // Log the model ID to help debug production issues
+    if (!model.id) {
+      console.warn(`WARNING: Model retrieved without ID! filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
+      console.warn('Model object keys:', Object.keys(model));
+      console.warn('Model object:', model);
+    } else {
+      console.log(`autoSaveModel: Model ID=${model.id} for filePath=${filePath}`);
+    }
     
-    // Save the updated model
+    // Ensure zipEntryPath and zip_path are preserved in the model object
+    // The model from getModel should already have these, but ensure they're set
+    // Also get from model if zipEntryPath wasn't passed but model has it
+    const finalZipEntryPath = zipEntryPath || model.zipEntryPath || model.zip_path || null;
+    if (finalZipEntryPath) {
+      model.zipEntryPath = finalZipEntryPath;
+      model.zip_path = finalZipEntryPath;
+      model.isZipArchive = true;
+    }
+    
+    // Update the specified field
+    // Handle empty strings - convert to null for consistency
+    let fieldValue = value;
+    if (fieldValue === '' || fieldValue === undefined) {
+      fieldValue = null;
+    }
+    
+    model[field] = fieldValue;
+    
+    // Debug logging
+    console.log(`autoSaveModel: Setting field '${field}' to:`, fieldValue, `for model:`, {
+      id: model.id,
+      filePath,
+      zipEntryPath,
+      currentModel: {
+        designer: model.designer,
+        parentModel: model.parentModel,
+        license: model.license,
+        tags: model.tags
+      }
+    });
+    
+    // Ensure ID is preserved before saving - explicitly check and log
+    if (!model.id) {
+      console.error('ERROR: Attempting to save model without ID! This should not happen.');
+      console.error('Model data:', model);
+      console.error('Model keys:', Object.keys(model));
+      // Try to get the model again to see if ID is available
+      const retryModel = await window.electron.getModel(filePath, finalZipEntryPath);
+      if (retryModel && retryModel.id) {
+        console.log('Retry found model with ID, using that:', retryModel.id);
+        model.id = retryModel.id;
+      } else {
+        console.error('Retry also failed to get model ID. This is a critical error.');
+        // Don't proceed with save if we don't have an ID - it will cause issues
+        return false;
+      }
+    }
+    
+    // Explicitly ensure ID is a number (not a string) before saving
+    if (model.id && typeof model.id === 'string') {
+      model.id = parseInt(model.id, 10);
+    }
+    
+    // Save the updated model - explicitly pass ID
+    console.log(`autoSaveModel: About to save model with ID=${model.id}, filePath=${filePath}`);
     await window.electron.saveModel(model);
     
     // If this was called from the details panel, update the displayed file
-    await updateModelElement(filePath);
+    await updateModelElement(filePath, zipEntryPath);
     
     return true;
   } catch (error) {
@@ -7805,9 +7483,40 @@ async function autoSaveMultipleModels(field, value) {
       value = 'Unknown';
     }
     
+    // Show progress indicator
+    const progressIndicator = document.getElementById('multi-edit-progress');
+    const progressFill = progressIndicator?.querySelector('.progress-fill');
+    const progressCount = progressIndicator?.querySelector('.progress-count');
+    const progressTotal = progressIndicator?.querySelector('.progress-total');
+    const progressText = progressIndicator?.querySelector('.progress-text');
+    
+    const totalModels = selectedModels.size;
+    let currentIndex = 0;
+    
+    if (progressIndicator) {
+      progressIndicator.classList.remove('hidden');
+      if (progressTotal) progressTotal.textContent = totalModels;
+      if (progressText) progressText.textContent = `Saving ${field}...`;
+    }
+    
     // Update all selected models
-    for (const filePath of selectedModels) {
-      const model = await window.electron.getModel(filePath);
+    for (const fileIdentifier of selectedModels) {
+      currentIndex++;
+      
+      // Update progress
+      if (progressIndicator) {
+        const percent = (currentIndex / totalModels) * 100;
+        if (progressFill) {
+          progressFill.style.width = `${percent}%`;
+        }
+        if (progressCount) {
+          progressCount.textContent = currentIndex;
+        }
+      }
+      
+      // Parse the unique identifier to get filePath and zipEntryPath
+      const parsed = parseFileIdentifier(fileIdentifier);
+      const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
       if (model) {
         // Special handling for tags - MERGE instead of replace
         if (field === 'tags') {
@@ -7824,22 +7533,129 @@ async function autoSaveMultipleModels(field, value) {
         // Save the model
         await window.electron.saveModel(model);
         
-        // Update UI
-        await updateModelElement(filePath);
+        // Update UI - pass zipEntryPath so it can find the correct element
+        await updateModelElement(parsed.filePath, parsed.zipEntryPath);
       } else {
-        console.warn(`Could not find model for ${filePath} during autoSaveMultipleModels`);
+        console.warn(`Could not find model for ${fileIdentifier} during autoSaveMultipleModels`);
       }
+    }
+    
+    // Hide progress indicator after a short delay
+    if (progressIndicator) {
+      setTimeout(() => {
+        progressIndicator.classList.add('hidden');
+        if (progressFill) progressFill.style.width = '0%';
+      }, 500);
     }
     
     console.log(`Finished autoSaveMultipleModels for field ${field}.`); // Simplified log
     return true;
   } catch (error) {
     console.error(`Error in autoSaveMultipleModels for field ${field}:`, error);
+    // Hide progress on error
+    const progressIndicator = document.getElementById('multi-edit-progress');
+    if (progressIndicator) {
+      progressIndicator.classList.add('hidden');
+    }
     return false;
   }
 }
 
-// Helper function to get the current model file path
+// Function to save all current multi-edit values before exiting
+async function saveAllMultiEditValues() {
+  try {
+    if (selectedModels.size === 0) {
+      return;
+    }
+    
+    // Show progress indicator
+    const progressIndicator = document.getElementById('multi-edit-progress');
+    const progressFill = progressIndicator?.querySelector('.progress-fill');
+    const progressCount = progressIndicator?.querySelector('.progress-count');
+    const progressTotal = progressIndicator?.querySelector('.progress-total');
+    const progressText = progressIndicator?.querySelector('.progress-text');
+    
+    const totalModels = selectedModels.size;
+    let currentIndex = 0;
+    
+    if (progressIndicator) {
+      progressIndicator.classList.remove('hidden');
+      if (progressTotal) progressTotal.textContent = totalModels;
+      if (progressText) progressText.textContent = 'Saving all changes...';
+    }
+    
+    // Get all current values from the form
+    const designer = document.getElementById('multi-designer')?.value || 'Unknown';
+    const source = document.getElementById('multi-source')?.value || '';
+    const parent = document.getElementById('multi-parent')?.value || '';
+    const license = document.getElementById('multi-license')?.value || '';
+    const printed = document.getElementById('multi-printed')?.checked || false;
+    
+    // Get all selected tags
+    const tagElements = document.getElementById('multi-tags')?.querySelectorAll('.tag') || [];
+    const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name')).filter(Boolean);
+    
+    // Save each model with all current values
+    for (const fileIdentifier of selectedModels) {
+      currentIndex++;
+      
+      // Update progress
+      if (progressIndicator) {
+        const percent = (currentIndex / totalModels) * 100;
+        if (progressFill) {
+          progressFill.style.width = `${percent}%`;
+        }
+        if (progressCount) {
+          progressCount.textContent = currentIndex;
+        }
+      }
+      
+      // Parse the unique identifier to get filePath and zipEntryPath
+      const parsed = parseFileIdentifier(fileIdentifier);
+      const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
+      
+      if (model) {
+        // Update all fields
+        model.designer = designer;
+        if (source) model.source = source;
+        if (parent) model.parentModel = parent;
+        if (license) model.license = license;
+        model.printed = printed;
+        
+        // Handle tags - merge with existing if tags exist, otherwise replace
+        if (tags.length > 0) {
+          const existingTags = Array.isArray(model.tags) ? model.tags : [];
+          model.tags = [...new Set([...existingTags, ...tags])].sort();
+        }
+        
+        // Save the model
+        await window.electron.saveModel(model);
+        
+        // Update UI
+        await updateModelElement(parsed.filePath, parsed.zipEntryPath);
+      }
+    }
+    
+    // Hide progress indicator after a short delay
+    if (progressIndicator) {
+      setTimeout(() => {
+        progressIndicator.classList.add('hidden');
+        if (progressFill) progressFill.style.width = '0%';
+      }, 500);
+    }
+    
+    console.log('Saved all multi-edit values before exiting');
+  } catch (error) {
+    console.error('Error saving all multi-edit values:', error);
+    // Hide progress on error
+    const progressIndicator = document.getElementById('multi-edit-progress');
+    if (progressIndicator) {
+      progressIndicator.classList.add('hidden');
+    }
+  }
+}
+
+// Helper function to get the current model file path and zipEntryPath
 function getModelFilePath() {
   // First try to get it from the model-path input
   const pathInput = document.getElementById('model-path');
@@ -7853,6 +7669,15 @@ function getModelFilePath() {
     return detailsPanel.getAttribute('data-filepath');
   }
   
+  return null;
+}
+
+// Helper function to get the current model's zipEntryPath
+function getModelZipEntryPath() {
+  const pathInput = document.getElementById('model-path');
+  if (pathInput && pathInput.dataset.zipEntryPath) {
+    return pathInput.dataset.zipEntryPath;
+  }
   return null;
 }
 
@@ -7876,19 +7701,38 @@ function showMultiEditPanel() {
     multiSourceInput.value = '';
   }
   
+  // Remove existing event listeners by cloning and replacing elements
+  const multiEditFields = ['multi-designer', 'multi-parent', 'multi-license'];
+  multiEditFields.forEach(fieldId => {
+    const element = document.getElementById(fieldId);
+    if (element) {
+      const newElement = element.cloneNode(true);
+      element.parentNode.replaceChild(newElement, element);
+    }
+  });
+  
   // Add change handlers for multi-edit controls
-  document.getElementById('multi-designer')?.addEventListener('change', async (e) => {
-    const value = e.target.value || 'Unknown'; // Use default Unknown
-    await autoSaveMultipleModels('designer', value);
-  });
+  const multiDesigner = document.getElementById('multi-designer');
+  if (multiDesigner) {
+    multiDesigner.addEventListener('change', async (e) => {
+      const value = e.target.value || 'Unknown'; // Use default Unknown
+      await autoSaveMultipleModels('designer', value);
+    });
+  }
   
-  document.getElementById('multi-parent')?.addEventListener('change', async (e) => {
-    await autoSaveMultipleModels('parentModel', e.target.value);
-  });
+  const multiParent = document.getElementById('multi-parent');
+  if (multiParent) {
+    multiParent.addEventListener('change', async (e) => {
+      await autoSaveMultipleModels('parentModel', e.target.value);
+    });
+  }
   
-  document.getElementById('multi-license')?.addEventListener('change', async (e) => {
-    await autoSaveMultipleModels('license', e.target.value);
-  });
+  const multiLicense = document.getElementById('multi-license');
+  if (multiLicense) {
+    multiLicense.addEventListener('change', async (e) => {
+      await autoSaveMultipleModels('license', e.target.value);
+    });
+  }
   
   // Use input event with debounce for the source field so it saves as user types
   if (multiSourceInput) {
@@ -7925,13 +7769,15 @@ function showMultiEditPanel() {
         console.log(`Updating printed status to ${isChecked} for ${selectedModels.size} models`);
         
         // Process each selected model
-        for (const filePath of selectedModels) {
-          const model = await window.electron.getModel(filePath);
+        for (const fileIdentifier of selectedModels) {
+          // Parse the unique identifier to get filePath and zipEntryPath
+          const parsed = parseFileIdentifier(fileIdentifier);
+          const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
           if (model) {
             model.printed = isChecked;
             await window.electron.saveModel(model);
-            console.log(`Updated model ${filePath} printed status to ${isChecked}`);
-            await updateModelElement(filePath);
+            console.log(`Updated model ${fileIdentifier} printed status to ${isChecked}`);
+            await updateModelElement(parsed.filePath, parsed.zipEntryPath);
           }
         }
         
@@ -8019,12 +7865,14 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log(`Updating printed status to ${isChecked} for ${selectedModels.size} models`);
         
         // Process each selected model
-        for (const filePath of selectedModels) {
-          const model = await window.electron.getModel(filePath);
+        for (const fileIdentifier of selectedModels) {
+          // Parse the unique identifier to get filePath and zipEntryPath
+          const parsed = parseFileIdentifier(fileIdentifier);
+          const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
           if (model) {
             model.printed = isChecked;
             await window.electron.saveModel(model);
-            await updateModelElement(filePath);
+            await updateModelElement(parsed.filePath, parsed.zipEntryPath);
           }
         }
         

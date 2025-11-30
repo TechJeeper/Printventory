@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('electron', {
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   saveDirectory: (directoryPath) => ipcRenderer.invoke('save-directory', directoryPath),
   scanDirectory: (directoryPath) => ipcRenderer.invoke('scan-directory', directoryPath),
-  getModel: (filePath) => ipcRenderer.invoke('get-model', filePath),
+  getModel: (filePath, zipEntryPath = null) => ipcRenderer.invoke('get-model', filePath, zipEntryPath),
   saveModel: (modelData) => ipcRenderer.invoke('save-model', modelData),
   saveModelBatch: (modelDataBatch) => ipcRenderer.invoke('save-model-batch', modelDataBatch),
   saveThumbnail: (filePath, thumbnail) => ipcRenderer.invoke('save-thumbnail', filePath, thumbnail),
@@ -138,8 +138,6 @@ contextBridge.exposeInMainWorld('electron', {
   fetchMakerWorldPage: (url) => ipcRenderer.invoke('fetch-makerworld-page', url),
   onOpenSlicerSettings: (callback) => ipcRenderer.on('open-slicer-settings', callback),
   onOpenFileTypesSettings: (callback) => ipcRenderer.on('open-file-types-settings', callback),
-  extractZipFile: (zipPath, entryName) => ipcRenderer.invoke('extract-zip-file', zipPath, entryName),
-  cleanupTempFile: (tempPath) => ipcRenderer.invoke('cleanup-temp-file', tempPath),
   getSlicers: () => ipcRenderer.invoke('get-slicers'),
   saveSlicer: (slicer) => ipcRenderer.invoke('save-slicer', slicer),
   deleteSlicer: (id) => ipcRenderer.invoke('delete-slicer', id),
@@ -150,7 +148,9 @@ contextBridge.exposeInMainWorld('electron', {
   commitTransaction: () => ipcRenderer.invoke('database:commit-transaction'),
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),
   getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references'),
-  showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options)
+  showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options),
+  extractZipFile: (zipPath, zipEntryPath) => ipcRenderer.invoke('extract-zip-file', zipPath, zipEntryPath),
+  cleanupTempFile: (tempFilePath) => ipcRenderer.invoke('cleanup-temp-file', tempFilePath)
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {
