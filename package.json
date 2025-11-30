@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.0.8",
+  "version": "1.0.0",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "electron-builder -mw",
     "build:mac": "electron-builder --mac --universal",
     "build:win": "electron-builder -w",
-    "postinstall": "node scripts/patch-better-sqlite3.js && electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps"
   },
   "author": "TechJeeper Designs",
   "license": "ISC",
@@ -67,7 +67,6 @@
       "main.js",
       "preload.js",
       "renderer.js",
-      "scan-worker.js",
       "index.html",
       "styles.css",
       "logo.png",
@@ -90,15 +89,11 @@
       "buildResources": ".",
       "output": "dist"
     },
-    "asar": true,
-    "asarUnpack": [
-      "scan-worker.js",
-      "node_modules/node-stream-zip/**/*"
-    ]
+    "asar": true
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.1",
-    "electron": "39.2.0",
+    "electron": "34.0.1",
     "electron-builder": "^25.1.8",
     "electron-rebuild": "^3.2.9"
   },
@@ -113,7 +108,7 @@
     "node-stream-zip": "^1.15.0",
     "openai": "4.85.3",
     "puppeteer": "24.2.1",
-    "three": "0.181.1",
+    "three": "0.162.0",
     "threejs-webworker-3mf-loader": "github:manyfold3d/threejs-webworker-3mf-loader",
     "trash": "^9.0.0",
     "universal-analytics": "^0.5.3"

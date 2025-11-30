@@ -104,7 +104,6 @@
           <option value="">All Types</option>
           <option value="stl">STL</option>
           <option value="3mf">3MF</option>
-          <option value="zip">ZIP Archives</option>
         </select>
       </div>
       <div class="form-group">
@@ -283,12 +282,6 @@
       <button id="select-all-button" class="full-width-button">Select All Visible</button>
       <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
       <p class="selected-count">0 models selected</p>
-      <div id="multi-edit-progress" class="progress-indicator hidden">
-        <div class="progress-bar">
-          <div class="progress-fill"></div>
-        </div>
-        <p class="progress-text">Saving... <span class="progress-count">0</span>/<span class="progress-total">0</span></p>
-      </div>
       <div class="form-group checkbox-container">
         <label for="multi-printed">Printed:</label>
         <input type="checkbox" id="multi-printed">
@@ -506,23 +499,6 @@
           <button type="button" id="cancel-ai-config">Cancel</button>
         </div>
         <div id="ai-config-result" class="result-message"></div>
-      </form>
-    </dialog>
-    <dialog id="file-types-dialog" class="modal">
-      <form method="dialog">
-        <h3>File Types</h3>
-        <p class="warning-text">Warning: Enabling ZIP Archives may impact performance during scanning and file operations.</p>
-        <div class="form-group checkbox-container">
-          <label for="enable-zip-archives">ZIP Archives:</label>
-          <input type="checkbox" id="enable-zip-archives">
-        </div>
-        <p class="setting-description">
-          When enabled, Printventory will scan ZIP archives for STL and 3MF files. Files found within archives will be added to your library with the ZIP file path as the source. Note that opening or slicing files from archives requires temporary extraction which may take additional time.
-        </p>
-        <div class="dialog-buttons">
-          <button type="button" id="save-file-types">Save</button>
-          <button type="button" id="cancel-file-types">Cancel</button>
-        </div>
       </form>
     </dialog>
 

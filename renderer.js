@@ -82,13 +82,10 @@ async function updateModelCounts(viewCount) {
 }
 
 // Add this new function to update individual model elements
-async function updateModelElement(filePath, zipEntryPath = null) {
+async function updateModelElement(filePath) {
   try {
-    const model = await window.electron.getModel(filePath, zipEntryPath);
-    if (!model) {
-      console.log(`updateModelElement: Model not found for filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
-      return;
-    }
+    const model = await window.electron.getModel(filePath);
+    if (!model) return;
 
     // Check current filter values
     const designer = document.getElementById('designer-select').value;
@@ -130,34 +127,13 @@ async function updateModelElement(filePath, zipEntryPath = null) {
       shouldBeVisible = !model.printed;
     }
 
-    // For zip files, use the unique identifier to find the correct element
-    let existingElement;
-    if (zipEntryPath) {
-      const fileIdentifier = createFileIdentifier(filePath, zipEntryPath);
-      const escapedIdentifier = CSS.escape(fileIdentifier);
-      existingElement = document.querySelector(`.file-item[data-fileidentifier="${escapedIdentifier}"]`);
-      
-      // Fallback to filepath if identifier not found
-      if (!existingElement) {
-        const escapedPath = CSS.escape(filePath);
-        const allWithPath = document.querySelectorAll(`.file-item[data-filepath="${escapedPath}"]`);
-        // Try to find the one with matching zipEntryPath in dataset
-        for (const el of allWithPath) {
-          const elZipPath = el.dataset.fileidentifier ? parseFileIdentifier(el.dataset.fileidentifier).zipEntryPath : null;
-          if (elZipPath === zipEntryPath) {
-            existingElement = el;
-            break;
-          }
-        }
-      }
-    } else {
-      // For regular files, use filePath
-      const escapedPath = CSS.escape(filePath);
-      existingElement = document.querySelector(`.file-item[data-filepath="${escapedPath}"]`);
-    }
+    // Escape the file path for use in querySelector
+    const escapedPath = CSS.escape(filePath);
     
+    // Find existing element using the escaped path
+    const existingElement = document.querySelector(`.file-item[data-filepath="${escapedPath}"]`);
     if (!existingElement) {
-      debugLog('Element not found for path:', filePath, zipEntryPath ? `(zip: ${zipEntryPath})` : '');
+      debugLog('Element not found for path:', filePath);
       return;
     }
 
@@ -166,9 +142,8 @@ async function updateModelElement(filePath, zipEntryPath = null) {
       existingElement.style.display = 'none';
       
       // If in multi-select mode and the item is hidden due to filter, remove it from selection
-      const fileIdentifier = zipEntryPath ? createFileIdentifier(filePath, zipEntryPath) : filePath;
-      if (isMultiSelectMode && selectedModels.has(fileIdentifier)) {
-        selectedModels.delete(fileIdentifier);
+      if (isMultiSelectMode && selectedModels.has(filePath)) {
+        selectedModels.delete(filePath);
         existingElement.classList.remove('selected');
         // Update the selection count
         updateSelectedCount();
@@ -216,9 +191,8 @@ async function updateModelElement(filePath, zipEntryPath = null) {
       }
     }
     
-    // Make sure selection state is preserved using unique identifier
-    const fileIdentifier = zipEntryPath ? createFileIdentifier(filePath, zipEntryPath) : filePath;
-    if (selectedModels.has(fileIdentifier)) {
+    // Make sure selection state is preserved
+    if (selectedModels.has(filePath)) {
       existingElement.classList.add('selected');
     } else {
       existingElement.classList.remove('selected');
@@ -241,25 +215,11 @@ async function updateModelElement(filePath, zipEntryPath = null) {
 
 
 // Move showModelDetails outside the DOMContentLoaded event listener
-async function showModelDetails(filePath, zipEntryPath = null) {
+async function showModelDetails(filePath) {
   try {
-    debugLog('Showing model details for:', filePath, zipEntryPath ? `(zip: ${zipEntryPath})` : '');
-    
-    // Get model - backend now supports zipEntryPath parameter
-    const model = await window.electron.getModel(filePath, zipEntryPath);
-    
-    if (!model) {
-      console.error(`Model not found for filePath: ${filePath}, zipEntryPath: ${zipEntryPath}`);
-      // Try to find the model without zipEntryPath as a fallback (for debugging)
-      if (zipEntryPath) {
-        console.log('Attempting fallback lookup without zipEntryPath...');
-        const fallbackModel = await window.electron.getModel(filePath, null);
-        if (fallbackModel) {
-          console.log('Found model without zipEntryPath:', fallbackModel);
-        }
-      }
-      return;
-    }
+    debugLog('Showing model details for:', filePath);
+    const model = await window.electron.getModel(filePath);
+    if (!model) return;
 
     // Get the details panel reference
     const detailsPanel = document.getElementById('model-details');
@@ -347,8 +307,7 @@ async function showModelDetails(filePath, zipEntryPath = null) {
 
       const handler = async (e) => {
         const value = config.type === 'checkbox' ? e.target.checked : e.target.value;
-        // Use the model's filePath (which may include zipEntryPath info) for saving
-        await autoSaveModel(config.field, value, model.filePath, zipEntryPath);
+        await autoSaveModel(config.field, value, filePath);
       };
 
       if (config.useChange) {
@@ -362,23 +321,6 @@ async function showModelDetails(filePath, zipEntryPath = null) {
 
     // Set form values
     document.getElementById('model-path').value = model.filePath || '';
-    // Store zipEntryPath and model ID in data attributes for later retrieval
-    const modelPathElement = document.getElementById('model-path');
-    if (modelPathElement) {
-      if (zipEntryPath) {
-        modelPathElement.dataset.zipEntryPath = zipEntryPath;
-      } else {
-        delete modelPathElement.dataset.zipEntryPath;
-      }
-      // Store the model ID so it can be used when saving
-      if (model.id) {
-        modelPathElement.dataset.modelId = model.id.toString();
-        console.log(`Stored model ID ${model.id} in model-path element`);
-      } else {
-        console.warn('Model retrieved without ID in showModelDetails:', model);
-        delete modelPathElement.dataset.modelId;
-      }
-    }
     document.getElementById('model-name').value = model.fileName || '';
     document.getElementById('model-designer').value = model.designer || '';
     document.getElementById('model-source').value = model.source || '';
@@ -400,10 +342,10 @@ async function showModelDetails(filePath, zipEntryPath = null) {
     const multiEditPanel = document.getElementById('multi-edit-panel');
     multiEditPanel.classList.add('hidden');
 
-    // Maintain selection state using unique identifiers
+    // Maintain selection state
     document.querySelectorAll('.file-item').forEach(item => {
-      const itemIdentifier = item.dataset.fileidentifier;
-      if (itemIdentifier && selectedModels.has(itemIdentifier)) {
+      const itemPath = item.getAttribute('data-filepath');
+      if (selectedModels.has(itemPath)) {
         item.classList.add('selected');
       } else {
         item.classList.remove('selected');
@@ -893,8 +835,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } else {
-      // Call exitMultiEditMode which will save values before exiting
-      await exitMultiEditMode(); 
+      // Clear selection when disabling multiselect
+      selectedModels.clear();
+      document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
+      multiEditPanel.classList.add('hidden');
+      // Make sure details panel is shown if nothing else is selected
+      if (selectedModels.size === 0) {
+         detailsPanel.classList.remove('hidden'); // Remove hidden class if no models selected
+         closeDetailsPanel(); // Or potentially call closeDetailsPanel if preferred
+      }
+      button.textContent = 'Multi-Edit Mode';
+      button.classList.remove('active');
+      // Call exitMultiEditMode if needed for cleanup
+      exitMultiEditMode(); 
     }
     updateSelectedCount();
   });
@@ -988,24 +941,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('save-model-button')?.addEventListener('click', async () => {
     try {
       const filePath = document.getElementById('model-path').value;
-      const modelPathElement = document.getElementById('model-path');
-      
-      // Get the model ID from the data attribute if available
-      const modelId = modelPathElement?.dataset.modelId ? parseInt(modelPathElement.dataset.modelId, 10) : null;
-      const zipEntryPath = modelPathElement?.dataset.zipEntryPath || null;
-      
-      if (modelId) {
-        console.log(`Save button: Using stored model ID ${modelId}`);
-      } else {
-        console.warn('Save button: No model ID found in data attribute, will rely on filePath lookup');
-      }
-      
       // Get all selected tags
       const tagElements = document.getElementById('model-tags').querySelectorAll('.tag');
       const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name'));
 
       const modelData = {
-        id: modelId, // Include the model ID if available
         filePath,
         fileName: document.getElementById('model-name').value,
         designer: document.getElementById('model-designer').value || 'Unknown',
@@ -1014,11 +954,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         printed: document.getElementById('model-printed').checked,
         parentModel: document.getElementById('model-parent').value || '',
         license: document.getElementById('model-license').value || '',
-        tags: tags,
-        zipEntryPath: zipEntryPath // Include zipEntryPath if available
+        tags: tags
       };
-
-      console.log('Save button: Saving model with data:', { id: modelData.id, filePath: modelData.filePath, zipEntryPath: modelData.zipEntryPath });
 
       // Save the model with tags
       await window.electron.saveModel(modelData);
@@ -1243,19 +1180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     button.addEventListener('click', () => {
       const dialog = document.getElementById('new-parent-dialog');
       // Store which dropdown triggered the dialog
-      const container = button.closest('.designer-input-container');
-      dialog.dataset.sourceDropdown = container ? container.querySelector('select')?.id : 'model-parent';
-
-      // Reset form
-      dialog.querySelector('form').reset();
-      const input = document.getElementById('new-parent-name');
-      if (input) {
-        input.value = '';
-        requestAnimationFrame(() => {
-          input.focus();
-        });
-      }
-
+      dialog.dataset.sourceDropdown = button.closest('.designer-input-container').querySelector('select').id;
       dialog.showModal();
     });
   });
@@ -1610,16 +1535,12 @@ document.addEventListener('DOMContentLoaded', async () => {
           designerSelect.appendChild(option);
           designerSelect.value = newDesignerName;
           
-          // Manually trigger change event to ensure auto-save fires
-          designerSelect.dispatchEvent(new Event('change', { bubbles: true }));
-          
-          // Trigger auto-save (also call directly in case change event doesn't fire)
+          // Trigger auto-save
           if (sourceDropdownId === 'multi-designer') {
             await autoSaveMultipleModels('designer', newDesignerName);
           } else {
             const filePath = document.getElementById('model-path').value;
-            const zipEntryPath = getModelZipEntryPath();
-            await autoSaveModel('designer', newDesignerName, filePath, zipEntryPath);
+            await autoSaveModel('designer', newDesignerName, filePath);
           }
         }
         
@@ -1641,18 +1562,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (newDesignerDialog) {
         const sourceDropdownId = button.closest('.designer-input-container')?.querySelector('select')?.id;
         newDesignerDialog.dataset.sourceDropdown = sourceDropdownId;
-
-        // Reset the form
-        newDesignerDialog.querySelector('form').reset();
-        const input = document.getElementById('new-designer-name');
-        if (input) {
-          input.value = '';
-          // Ensure input is focused after dialog opens
-          requestAnimationFrame(() => {
-            input.focus();
-          });
-        }
-
         newDesignerDialog.showModal();
       }
     });
@@ -1674,8 +1583,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       input.value = '';
       
       // Store which dropdown triggered the dialog
-      const container = button.closest('.designer-input-container');
-      dialog.dataset.sourceDropdown = container ? container.querySelector('select')?.id : 'model-license';
+      dialog.dataset.sourceDropdown = button.closest('.designer-input-container')?.querySelector('select')?.id || 'model-license';
       
       // Show dialog and focus input
       dialog.showModal();
@@ -1715,16 +1623,12 @@ document.addEventListener('DOMContentLoaded', async () => {
           licenseSelect.appendChild(option);
           licenseSelect.value = newLicenseName;
           
-          // Manually trigger change event to ensure auto-save fires
-          licenseSelect.dispatchEvent(new Event('change', { bubbles: true }));
-          
-          // Trigger auto-save (also call directly in case change event doesn't fire)
+          // Trigger auto-save
           if (sourceDropdownId === 'multi-license') {
             await autoSaveMultipleModels('license', newLicenseName);
           } else {
             const filePath = document.getElementById('model-path').value;
-            const zipEntryPath = getModelZipEntryPath();
-            await autoSaveModel('license', newLicenseName, filePath, zipEntryPath);
+            await autoSaveModel('license', newLicenseName, filePath);
           }
         }
         
@@ -2040,33 +1944,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     themeDialog.showModal();
   });
 
-  // Add File Types settings dialog handler
-  window.electron.onOpenFileTypesSettings(() => {
-    const dialog = document.getElementById('file-types-dialog');
-    if (dialog) {
-      initializeFileTypesSettings();
-      dialog.showModal();
-    }
-  });
-
-  // Add File Types settings event listeners
-  const saveFileTypesButton = document.getElementById('save-file-types');
-  if (saveFileTypesButton) {
-    saveFileTypesButton.addEventListener('click', async () => {
-      await saveFileTypesSettings();
-    });
-  }
-
-  const cancelFileTypesButton = document.getElementById('cancel-file-types');
-  if (cancelFileTypesButton) {
-    cancelFileTypesButton.addEventListener('click', () => {
-      const dialog = document.getElementById('file-types-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-    });
-  }
-
 
   // Update the tag deletion handler
   async function deleteSelectedTags() {
@@ -2306,8 +2183,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Note: Event listeners for model-designer, model-license, and model-parent
-  // are set up in showModelDetails() to ensure they have the correct filePath
+
+  // Add these event listeners for single-edit mode dropdowns
+  document.getElementById('model-designer').addEventListener('change', async (e) => {
+    const filePath = document.getElementById('model-path').value;
+    await autoSaveModel('designer', e.target.value, filePath);
+  });
+
+  document.getElementById('model-license').addEventListener('change', async (e) => {
+    const filePath = document.getElementById('model-path').value;
+    await autoSaveModel('license', e.target.value, filePath);
+  });
+
+  // The parent model listener is already present but let's make sure it's consistent
+  document.getElementById('model-parent').addEventListener('change', async (e) => {
+    const filePath = document.getElementById('model-path').value;
+    await autoSaveModel('parentModel', e.target.value, filePath);
+  });
 
   // Update the About dialog content in index.html
   const tosContent = `
@@ -2396,41 +2288,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  async function initializeFileTypesSettings() {
-    try {
-      // Load ZIP archives setting
-      const enableZipArchives = await window.electron.getSetting('enableZipArchives') || '0';
-      const checkbox = document.getElementById('enable-zip-archives');
-      if (checkbox) {
-        checkbox.checked = enableZipArchives === '1';
-      }
-    } catch (error) {
-      console.error('Error initializing file types settings:', error);
-    }
-  }
-
-  async function saveFileTypesSettings() {
-    try {
-      const checkbox = document.getElementById('enable-zip-archives');
-      if (!checkbox) {
-        throw new Error('Could not find ZIP archives checkbox');
-      }
-
-      // Save to database
-      await window.electron.saveSetting('enableZipArchives', checkbox.checked ? '1' : '0');
-      
-      // Close dialog and show success message
-      const dialog = document.getElementById('file-types-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-      await window.electron.showMessage('Success', 'File types settings saved successfully');
-    } catch (error) {
-      console.error('Error saving file types settings:', error);
-      await window.electron.showMessage('Error', error.message);
-    }
-  }
-
   // Add performance settings event listeners
   document.addEventListener('DOMContentLoaded', async () => {
     // Initialize settings
@@ -2462,7 +2319,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
     }
-
   });
 
   // Add performance settings dialog handler
@@ -3166,33 +3022,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Add file type filter
       if (fileType) {
-        if (fileType === 'zip') {
-          // For ZIP files, check the isZipArchive property
-          models = models.filter(model => model.isZipArchive);
-        } else {
-          // For regular files, check the file extension (works for both regular and zip entries)
-          models = models.filter(model => 
-            model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-          );
-        }
-      }
-
-      // Apply search term filter
-      if (searchTerm) {
-        const searchLower = searchTerm.toLowerCase();
-        models = models.filter(model => {
-          const searchFields = [
-            model.fileName, 
-            model.designer, 
-            model.parentModel, 
-            model.notes,
-            model.zipEntryPath || model.zip_path || '', // Include zip entry path for searching
-            model.source || ''
-          ]
-            .filter(Boolean)
-            .map(field => field.toLowerCase());
-          return searchFields.some(field => field.includes(searchLower));
-        });
+        models = models.filter(model => 
+          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
+        );
       }
 
       // Apply filters
@@ -3779,19 +3611,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await populateParentModelFilter();
     await populateTagFilter();
     await populateLicenseFilter();
-
-    // Refresh the display to show newly scanned models (same as when filters are applied)
-    if (typeof window.performCombinedSearch === 'function') {
-      await window.performCombinedSearch();
-    } else {
-      // Fallback: get all models and display them
-      const allModels = await window.electron.getAllModels();
-      if (typeof window.renderFiles === 'function') {
-        await window.renderFiles(allModels, false, true);
-      } else if (typeof displayModels === 'function') {
-        await displayModels(allModels);
-      }
-    }
   }
 
   // Add event listener for "View Entire Library" button
@@ -4538,15 +4357,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         printStatus.className = 'print-status';
         printStatus.textContent = 'Not Printed';
         thumbnailContainer.appendChild(printStatus);
-
-        // Add ZIP archive indicator if the model is from a ZIP archive
-        if (model.isZipArchive) {
-          const zipStatus = document.createElement('div');
-          zipStatus.className = 'zip-status';
-          zipStatus.textContent = 'ZIP';
-          zipStatus.title = 'File is contained within a ZIP archive';
-          thumbnailContainer.appendChild(zipStatus);
-        }
         
         fileElement.appendChild(thumbnailContainer);
         
@@ -4568,13 +4378,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         fileElement.appendChild(fileInfo);
         
-        // Add click handler - use unique identifier for archive files
-        const zipEntryPath = model.zip_path || model.zipEntryPath || null;
-        const fileIdentifier = createFileIdentifier(model.filePath, zipEntryPath);
-        fileElement.dataset.fileidentifier = fileIdentifier;
-        fileElement.addEventListener('click', () => {
-          toggleModelSelection(fileElement, fileIdentifier);
-        });
+        // Add click handler
+        fileElement.addEventListener('click', (e) => handleFileClick(e, model.filePath));
         
         // Add context menu handler
         addContextMenuHandler(fileElement, model.filePath);
@@ -4703,15 +4508,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (parentModel && model.parentModel !== parentModel) return false;
     if (printStatus === 'printed' && !model.printed) return false;
     if (printStatus === 'not-printed' && model.printed) return false;
-    if (fileType) {
-      if (fileType === 'zip') {
-        // For ZIP files, check the isZipArchive property
-        if (!model.isZipArchive) return false;
-      } else {
-        // For regular files, check the file extension
-        if (!model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
-      }
-    }
+    if (fileType && !model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
     
     // Handle tag filter
     if (tagFilter) {
@@ -4721,18 +4518,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Handle search term
     if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      const searchFields = [
-        model.fileName, 
-        model.designer, 
-        model.parentModel, 
-        model.notes,
-        model.zipEntryPath || model.zip_path || '', // Include zip entry path for searching
-        model.source || ''
-      ]
+      const searchFields = [model.fileName, model.designer, model.parentModel, model.notes]
         .filter(Boolean)
         .map(field => field.toLowerCase());
-      if (!searchFields.some(field => field.includes(searchLower))) return false;
+      if (!searchFields.some(field => field.includes(searchTerm.toLowerCase()))) return false;
     }
 
     return true;
@@ -4889,34 +4678,8 @@ function updateSelectedCount() {
   }
 }
 
-// Helper functions to create and parse unique identifiers for archive files
-function createFileIdentifier(filePath, zipEntryPath) {
-  if (zipEntryPath) {
-    // For archive files, create a unique identifier combining filePath and zipEntryPath
-    // Use a separator that's unlikely to appear in file paths
-    return `ZIP:${filePath}::${zipEntryPath}`;
-  }
-  return filePath;
-}
-
-function parseFileIdentifier(identifier) {
-  if (identifier.startsWith('ZIP:')) {
-    const parts = identifier.substring(4).split('::');
-    return {
-      filePath: parts[0],
-      zipEntryPath: parts[1] || null,
-      isZipArchive: true
-    };
-  }
-  return {
-    filePath: identifier,
-    zipEntryPath: null,
-    isZipArchive: false
-  };
-}
-
 // Update the toggleModelSelection function`
-function toggleModelSelection(fileElement, fileIdentifier) {
+function toggleModelSelection(fileElement, filePath) {
   if (!isMultiSelectMode) {
     const wasSelected = fileElement.classList.contains('selected');
     
@@ -4933,26 +4696,24 @@ function toggleModelSelection(fileElement, fileIdentifier) {
         detailsPanel.classList.add('hidden');
       }
     } else {
-      // Add selection to the clicked item using unique identifier
-      selectedModels.add(fileIdentifier);
+      // Add selection to the clicked item
+      selectedModels.add(filePath);
       
       // Only select this specific element, not all elements with the same filePath
       fileElement.classList.add('selected');
       
-      // Show model details - parse identifier to get filePath and zipEntryPath
-      const parsed = parseFileIdentifier(fileIdentifier);
-      console.log('Parsed file identifier:', parsed);
-      showModelDetails(parsed.filePath, parsed.zipEntryPath);
+      // Show model details
+      showModelDetails(filePath);
     }
   } else {
     // Multi-select mode
     if (fileElement.classList.contains('selected')) {
       // Deselect
-      selectedModels.delete(fileIdentifier);
+      selectedModels.delete(filePath);
       fileElement.classList.remove('selected');
     } else {
       // Select
-      selectedModels.add(fileIdentifier);
+      selectedModels.add(filePath);
       fileElement.classList.add('selected');
     }
     updateSelectedCount();
@@ -4960,34 +4721,20 @@ function toggleModelSelection(fileElement, fileIdentifier) {
 }
 
 // Add helper functions before they're used
-async function loadModel(filePath, isZipArchive = false, zipEntryPath = null) {
-  return new Promise(async (resolve, reject) => {
-    let actualFilePath = filePath;
-    let tempFilePath = null;
-    
-    // If it's a ZIP file, extract it first
-    if (isZipArchive && zipEntryPath) {
-      try {
-        tempFilePath = await window.electron.extractZipFile(filePath, zipEntryPath);
-        actualFilePath = tempFilePath;
-      } catch (error) {
-        reject(new Error(`Failed to extract ZIP file: ${error.message}`));
-        return;
-      }
-    }
-    
-    const fileExtension = actualFilePath.split('.').pop().toLowerCase();
+async function loadModel(filePath) {
+  return new Promise((resolve, reject) => {
+    const fileExtension = filePath.split('.').pop().toLowerCase();
     
     // Properly encode the file path to handle special characters and Windows paths
     let encodedFilePath;
     
     // Check if we're running on Windows (starts with drive letter)
-    if (/^[A-Za-z]:/.test(actualFilePath)) {
+    if (/^[A-Za-z]:/.test(filePath)) {
       // For Windows paths: 
       // 1. Convert backslashes to forward slashes
       // 2. Add file:/// protocol
       // 3. Properly encode special characters
-      const normalizedPath = actualFilePath.replace(/\\/g, '/');
+      const normalizedPath = filePath.replace(/\\/g, '/');
       
       // Make sure to encode the URL properly, handling special characters
       encodedFilePath = `file:///${normalizedPath}`;
@@ -4997,7 +4744,7 @@ async function loadModel(filePath, isZipArchive = false, zipEntryPath = null) {
                                       .replace(/\s/g, '%20');
     } else {
       // For non-Windows paths, use standard URL encoding
-      encodedFilePath = encodeURI(actualFilePath).replace(/#/g, '%23');
+      encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
     }
     
     let loader;
@@ -5008,14 +4755,6 @@ async function loadModel(filePath, isZipArchive = false, zipEntryPath = null) {
       THREE.ThreeMFLoader.fflate = fflate;
       loader = new THREE.ThreeMFLoader();
     } else {
-      // Clean up temp file if it was created
-      if (tempFilePath) {
-        try {
-          await window.electron.cleanupTempFile(tempFilePath);
-        } catch (error) {
-          console.error('Error cleaning up temp file:', error);
-        }
-      }
       reject(new Error(`Unsupported file type: ${fileExtension}`));
       return;
     }
@@ -5025,7 +4764,7 @@ async function loadModel(filePath, isZipArchive = false, zipEntryPath = null) {
 
     loader.load(
       encodedFilePath,
-      async (object) => {
+      (object) => {
         try {
           let mesh;
           
@@ -5071,39 +4810,15 @@ async function loadModel(filePath, isZipArchive = false, zipEntryPath = null) {
             return;
           }
           
-          // Clean up temp file if it was created
-          if (tempFilePath) {
-            try {
-              await window.electron.cleanupTempFile(tempFilePath);
-            } catch (cleanupError) {
-              console.error('Error cleaning up temp file:', cleanupError);
-            }
-          }
           resolve(mesh);
         } catch (error) {
           console.error('Error processing loaded object:', error);
-          // Clean up temp file if it was created
-          if (tempFilePath) {
-            try {
-              await window.electron.cleanupTempFile(tempFilePath);
-            } catch (cleanupError) {
-              console.error('Error cleaning up temp file:', cleanupError);
-            }
-          }
           reject(error);
         }
       },
       undefined,
-      async (error) => {
+      (error) => {
         console.error('Loader error:', error);
-        // Clean up temp file if it was created
-        if (tempFilePath) {
-          try {
-            await window.electron.cleanupTempFile(tempFilePath);
-          } catch (cleanupError) {
-            console.error('Error cleaning up temp file:', cleanupError);
-          }
-        }
         reject(error);
       }
     );
@@ -5320,16 +5035,11 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       
       while (thumbnailQueue.length > 0 && !isCancelled) {
         // Fill up to max concurrent thumbnails
-        while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0 && !isCancelled) {
+        while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0) {
           const file = thumbnailQueue.shift();
           
           const promise = (async () => {
             try {
-              // Check cancellation before starting
-              if (isCancelled) {
-                return;
-              }
-              
               if (existingThumbnails.has(file.filePath)) {
                 console.log(`Thumbnail found for ${file.filePath} in database. Skipping render.`);
                 return;
@@ -5342,8 +5052,6 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
               
               if (fileExtension === '3mf') {
                 try {
-                  // Check cancellation before async operation
-                  if (isCancelled) return;
                   const images = await window.electron.get3MFImages(file.filePath);
                   if (images && images.length > 0) {
                     thumbnail = images;
@@ -5354,15 +5062,8 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
                 }
               }
               
-              // Check cancellation before queuing render
-              if (!thumbnail && !isCancelled) {
+              if (!thumbnail) {
                 thumbnail = await new Promise((resolve, reject) => {
-                  // Check cancellation one more time before adding to queue
-                  if (isCancelled) {
-                    resolve(null);
-                    return;
-                  }
-                  
                   renderQueue.push({
                     filePath: file.filePath,
                     container: document.createElement('div'), // Dummy container
@@ -5373,17 +5074,14 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
                   processRenderQueue();
                 });
                 
-                if (thumbnail && !isCancelled) {
+                if (thumbnail) {
                   await window.electron.saveThumbnail(file.filePath, thumbnail);
                 }
               }
             } catch (error) {
-              // Only log errors if not cancelled (cancellation may cause expected errors)
-              if (!isCancelled) {
-                console.error('Error caching thumbnail:', error);
-              }
+              console.error('Error caching thumbnail:', error);
             } finally {
-              if (!existingThumbnails.has(file.filePath) && !isCancelled) {
+              if (!existingThumbnails.has(file.filePath)) {
                 completedThumbnails++;
                 thumbnailProgressUpdate(completedThumbnails);
               }
@@ -5395,26 +5093,20 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
         }
         
         // Wait for at least one promise to complete before continuing
-        if (activePromises.size > 0 && !isCancelled) {
+        if (activePromises.size > 0) {
           await Promise.race(Array.from(activePromises));
         }
         
         // Check for cancellation after each batch
         if (isCancelled) {
           console.log('Thumbnail generation cancelled, stopping process');
-          // Clear remaining queue to prevent new tasks from starting
-          thumbnailQueue.length = 0;
           break;
         }
       }
       
-      // When cancelled, don't wait for all promises - let them finish in background
-      // but stop immediately. If not cancelled, wait for remaining promises.
-      if (!isCancelled && activePromises.size > 0) {
+      // Wait for any remaining active promises to complete
+      if (activePromises.size > 0) {
         await Promise.all(Array.from(activePromises));
-      } else if (isCancelled) {
-        // Just log that we're stopping - promises will clean themselves up
-        console.log(`Stopped thumbnail generation. ${activePromises.size} active tasks will finish in background.`);
       }
     } else {
       if (!background) {
@@ -5477,19 +5169,56 @@ async function refreshModelDisplay() {
     document.getElementById('tag-filter').value = tagFilter;
     document.getElementById('filetype-select').value = fileType; // Add this line
 
-    // Prepare filters object
-    const filters = {
-      designer,
-      license,
-      parentModel,
-      printStatus,
-      tagFilter,
-      fileType,
-      searchTerm
-    };
+    // Get all models with current sort option
+    let models = await window.electron.getAllModels(sortOption, 0);
 
-    // Get filtered models directly from backend
-    const models = await window.electron.getAllModels(sortOption, 0, filters);
+    // Add file type filter
+    if (fileType) {
+      models = models.filter(model => 
+        model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
+      );
+    }
+
+    // Apply filters
+    if (designer) {
+      if (designer === '__none__') {
+        models = models.filter(model => !model.designer || model.designer.trim() === '');
+      } else {
+        models = models.filter(model =>
+          model.designer &&
+          model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
+        );
+      }
+    }
+    if (license) {
+      if (license === '__none__') {
+        models = models.filter(model => !model.license || model.license.trim() === '');
+      } else {
+        models = models.filter(model => model.license === license);
+      }
+    }
+    if (parentModel) {
+      if (parentModel === '__none__') {
+        models = models.filter(model => !model.parentModel || model.parentModel.trim() === '');
+      } else {
+        models = models.filter(model => model.parentModel === parentModel);
+      }
+    }
+    if (printStatus === 'printed') {
+      models = models.filter(model => model.printed);
+    } else if (printStatus === 'not-printed') {
+      models = models.filter(model => !model.printed);
+    }
+    if (tagFilter) {
+      models = await Promise.all(models.map(async (model) => {
+        const modelTags = await window.electron.getModelTags(model.id);
+        if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
+          return model;
+        }
+        return null;
+      }));
+      models = models.filter(model => model !== null);
+    }
 
     // Display filtered models
     await displayModels(models);
@@ -5631,7 +5360,8 @@ async function handleFilterChange() {
     updateSelectedCount();
 
     // Get and display filtered models
-    await refreshModelDisplay();
+    const models = await window.getCombinedFilteredModels();
+    await displayModels(models);
   } catch (error) {
     console.error("Error applying filters:", error);
   }
@@ -5640,14 +5370,9 @@ async function handleFilterChange() {
 async function renderFile(file, container, skipThumbnail = false) {
   const fileElement = document.createElement('div');
   fileElement.className = 'file-item';
-  // Create unique identifier for archive files
-  const zipEntryPath = file.zip_path || file.zipEntryPath || null;
-  const fileIdentifier = createFileIdentifier(file.filePath, zipEntryPath);
-  
-  fileElement.dataset.filepath = file.filePath; // Keep original filePath for compatibility
-  fileElement.dataset.fileidentifier = fileIdentifier; // Store unique identifier
+  fileElement.dataset.filepath = file.filePath; // Use dataset for data attributes
 
-  if (selectedModels.has(fileIdentifier)) {
+  if (selectedModels.has(file.filePath)) {
     fileElement.classList.add('selected');
   }
 
@@ -5655,15 +5380,6 @@ async function renderFile(file, container, skipThumbnail = false) {
   printStatus.className = `print-status ${file.printed? 'printed': ''}`;
   printStatus.textContent = file.printed? 'Printed': 'Not Printed';
   fileElement.appendChild(printStatus);
-
-  // Add ZIP archive indicator if the file is from a ZIP archive
-  if (file.isZipArchive) {
-    const zipStatus = document.createElement('div');
-    zipStatus.className = 'zip-status';
-    zipStatus.textContent = 'ZIP';
-    zipStatus.title = 'File is contained within a ZIP archive';
-    fileElement.appendChild(zipStatus);
-  }
 
   const thumbnailContainer = document.createElement('div');
   thumbnailContainer.className = 'thumbnail-container loading';
@@ -5730,7 +5446,7 @@ async function renderFile(file, container, skipThumbnail = false) {
   fileElement.appendChild(fileInfo);
 
   fileElement.addEventListener('click', () => {
-    toggleModelSelection(fileElement, fileIdentifier);
+    toggleModelSelection(fileElement, file.filePath);
   });
  // Add designer info if available
  if (file.designer) {
@@ -5770,8 +5486,6 @@ async function renderFile(file, container, skipThumbnail = false) {
           filePath: file.filePath,
           container: thumbnailContainer,
           existingThumbnail: null,
-          isZipArchive: file.isZipArchive || false,
-          zipEntryPath: file.zip_path || file.zipEntryPath || null,
           resolve,
           reject
         });
@@ -5812,7 +5526,7 @@ async function processRenderQueue() {
       activeRenders++;
       
       try {
-        const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail, task.isZipArchive, task.zipEntryPath);
+        const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
         task.resolve(result);
       } catch (error) {
         console.error(`Render task failed: ${error.message}`);
@@ -5831,7 +5545,7 @@ async function processRenderQueue() {
   }
 }
 
-async function renderModelToPNG(filePath, container, existingThumbnail, isZipArchive = false, zipEntryPath = null) {
+async function renderModelToPNG(filePath, container, existingThumbnail) {
   if (existingThumbnail) {
     const img = document.createElement('img');
     img.src = existingThumbnail;
@@ -5872,7 +5586,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, isZipArc
     scene.add(directionalLight);
 
     // Use loadModel function which has proper path encoding handling
-    model = await loadModel(filePath, isZipArchive, zipEntryPath);
+    model = await loadModel(filePath);
     if (!model) throw new Error('Failed to load model');
     
     scene.add(model);
@@ -5961,12 +5675,6 @@ async function populateModelDesignerDropdown(selectedDesigner, elementId = 'mode
 
   try {
     const designers = await window.electron.getDesigners();
-    // Sort designers alphabetically
-    designers.sort((a, b) => {
-      if (!a) return 1;
-      if (!b) return -1;
-      return a.localeCompare(b);
-    });
     designers.forEach(designer => {
       if (designer) { // Only add non-empty designers
         const option = document.createElement('option');
@@ -5983,6 +5691,19 @@ async function populateModelDesignerDropdown(selectedDesigner, elementId = 'mode
   }
 }
 
+// Update the change event listener
+document.getElementById('model-designer').addEventListener('change', async (event) => {
+  const designerSelect = event.target;
+  const newDesigner = designerSelect.value;
+  
+  if (newDesigner && newDesigner !== 'Unknown') {
+    const designers = await window.electron.getDesigners();
+    if (!designers.includes(newDesigner)) {
+      console.log('New designer will be added:', newDesigner);
+    }
+  }
+});
+
 async function populateDesignerDropdown() {
   const designerSelect = document.getElementById('designer-select');
   designerSelect.innerHTML = '<option value="">All Designers</option>';
@@ -5990,12 +5711,6 @@ async function populateDesignerDropdown() {
   designerSelect.innerHTML += '<option value="__none__">None</option>';
   try {
     const designers = await window.electron.getDesigners();
-    // Sort designers alphabetically
-    designers.sort((a, b) => {
-      if (!a) return 1;
-      if (!b) return -1;
-      return a.localeCompare(b);
-    });
     designers.forEach(designer => {
       const option = document.createElement('option');
       option.value = designer;
@@ -6032,22 +5747,18 @@ document.getElementById('new-designer-dialog').addEventListener('submit', async 
       option.textContent = newDesignerName;
       designerSelect.appendChild(option);
       designerSelect.value = newDesignerName;
-      
-      // Manually trigger change event to ensure auto-save fires
-      designerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-designer-name').value = '';
     document.getElementById('new-designer-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed (also call directly)
+    // Trigger auto-save and updates after dialog is closed
     if (sourceDropdownId === 'multi-designer') {
       await autoSaveMultipleModels('designer', newDesignerName);
     } else {
       const filePath = document.getElementById('model-path').value;
-      const zipEntryPath = getModelZipEntryPath();
-      await autoSaveModel('designer', newDesignerName, filePath, zipEntryPath);
+      await autoSaveModel('designer', newDesignerName, filePath);
     }
     
     // Update the designer filter dropdown
@@ -6086,22 +5797,18 @@ document.getElementById('new-parent-dialog').addEventListener('submit', async (e
       option.textContent = newParentName;
       parentSelect.appendChild(option);
       parentSelect.value = newParentName;
-      
-      // Manually trigger change event to ensure auto-save fires
-      parentSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-parent-name').value = '';
     document.getElementById('new-parent-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed (also call directly)
+    // Trigger auto-save and updates after dialog is closed
     if (sourceDropdownId === 'multi-parent') {
       await autoSaveMultipleModels('parentModel', newParentName);
     } else {
       const filePath = document.getElementById('model-path').value;
-      const zipEntryPath = getModelZipEntryPath();
-      await autoSaveModel('parentModel', newParentName, filePath, zipEntryPath);
+      await autoSaveModel('parentModel', newParentName, filePath);
     }
 
     // Update the filter dropdown
@@ -6241,16 +5948,14 @@ async function addTagToModel(tagName, containerId) {
       .map(t => t.getAttribute('data-tag-name'));
     
     if (containerId === 'multi-tags') {
-      // When removing a tag in multi-edit, we want to remove this specific tag from ALL selected models
-      // regardless of what other tags they might have.
-      console.log(`Multi-edit: Removing tag '${tagName}' from selected models.`);
-      await autoSaveMultipleModels('tags-remove', tagName);
+      // When removing, we DO want to save the resulting list for all selected models
+      // Note: This sets all selected models to have exactly the tags remaining in the UI.
+      await autoSaveMultipleModels('tags', currentTags); 
     } else {
       // Single edit mode save
       const filePath = getModelFilePath();
-      const zipEntryPath = getModelZipEntryPath();
       if (filePath) {
-        await autoSaveModel('tags', currentTags, filePath, zipEntryPath);
+        await autoSaveModel('tags', currentTags, filePath);
       } else {
         console.error('No file path found for saving tags');
       }
@@ -6269,9 +5974,8 @@ async function addTagToModel(tagName, containerId) {
     const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
       .map(t => t.getAttribute('data-tag-name'));
     const filePath = getModelFilePath();
-    const zipEntryPath = getModelZipEntryPath();
     if (filePath) {
-      await autoSaveModel('tags', currentTags, filePath, zipEntryPath);
+      await autoSaveModel('tags', currentTags, filePath);
     } else {
       console.error('No file path found for saving tags');
     }
@@ -6433,8 +6137,30 @@ document.querySelectorAll('.add-tag-button').forEach(button => {
   });
 });
 
-// Note: Designer dialog submit handler is already set up in DOMContentLoaded (line 1574)
-// Duplicate handler removed to avoid conflicts
+// Update the dialog submit handlers to use the stored dropdown IDs
+document.getElementById('new-designer-dialog').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const newDesignerName = document.getElementById('new-designer-name').value.trim();
+  const sourceDropdownId = event.target.closest('dialog').dataset.sourceDropdown;
+  
+  if (newDesignerName) {
+    // Add the new designer to the dropdown
+    const designerSelect = document.getElementById(sourceDropdownId);
+    const option = document.createElement('option');
+    option.value = newDesignerName;
+    option.textContent = newDesignerName;
+    designerSelect.appendChild(option);
+    
+    // Select the new designer
+    designerSelect.value = newDesignerName;
+    
+    // Clear the input
+    document.getElementById('new-designer-name').value = '';
+    
+    // Close the dialog
+    document.getElementById('new-designer-dialog').close();
+  }
+});
 
 // Parent Model Dialog Submit Handler
 document.getElementById('new-parent-dialog').addEventListener('submit', async (event) => {
@@ -6450,22 +6176,18 @@ document.getElementById('new-parent-dialog').addEventListener('submit', async (e
       option.textContent = newParentName;
       parentSelect.appendChild(option);
       parentSelect.value = newParentName;
-      
-      // Manually trigger change event to ensure auto-save fires
-      parentSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-parent-name').value = '';
     document.getElementById('new-parent-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed (also call directly)
+    // Trigger auto-save and updates after dialog is closed
     if (sourceDropdownId === 'multi-parent') {
       await autoSaveMultipleModels('parentModel', newParentName);
     } else {
       const filePath = document.getElementById('model-path').value;
-      const zipEntryPath = getModelZipEntryPath();
-      await autoSaveModel('parentModel', newParentName, filePath, zipEntryPath);
+      await autoSaveModel('parentModel', newParentName, filePath);
     }
 
     // Update the filter dropdown
@@ -6929,12 +6651,7 @@ function addContextMenuHandler(fileElement, filePath) {
 }
 
 // Update the exit multi-edit mode functionality
-async function exitMultiEditMode() {
-  // Save all current values before exiting
-  if (selectedModels.size > 0) {
-    await saveAllMultiEditValues();
-  }
-  
+function exitMultiEditMode() {
   // Clear selections
   selectedModels.clear();
   document.querySelectorAll('.file-item').forEach(item => {
@@ -7343,88 +7060,27 @@ window.electron.on('show-native-prompt', async (options) => {
 });
 
 // Add implementation of autoSaveModel function
-async function autoSaveModel(field, value, filePath, zipEntryPath = null) {
+async function autoSaveModel(field, value, filePath) {
   try {
     if (!filePath) {
       console.error('No file path provided for autoSaveModel');
       return;
     }
     
-    const model = await window.electron.getModel(filePath, zipEntryPath);
+    const model = await window.electron.getModel(filePath);
     if (!model) {
-      console.error(`Model not found for ${filePath}${zipEntryPath ? ` (zip: ${zipEntryPath})` : ''}`);
+      console.error(`Model not found for ${filePath}`);
       return;
     }
     
-    // Log the model ID to help debug production issues
-    if (!model.id) {
-      console.warn(`WARNING: Model retrieved without ID! filePath=${filePath}, zipEntryPath=${zipEntryPath}`);
-      console.warn('Model object keys:', Object.keys(model));
-      console.warn('Model object:', model);
-    } else {
-      console.log(`autoSaveModel: Model ID=${model.id} for filePath=${filePath}`);
-    }
-    
-    // Ensure zipEntryPath and zip_path are preserved in the model object
-    // The model from getModel should already have these, but ensure they're set
-    // Also get from model if zipEntryPath wasn't passed but model has it
-    const finalZipEntryPath = zipEntryPath || model.zipEntryPath || model.zip_path || null;
-    if (finalZipEntryPath) {
-      model.zipEntryPath = finalZipEntryPath;
-      model.zip_path = finalZipEntryPath;
-      model.isZipArchive = true;
-    }
-    
     // Update the specified field
-    // Handle empty strings - convert to null for consistency
-    let fieldValue = value;
-    if (fieldValue === '' || fieldValue === undefined) {
-      fieldValue = null;
-    }
+    model[field] = value;
     
-    model[field] = fieldValue;
-    
-    // Debug logging
-    console.log(`autoSaveModel: Setting field '${field}' to:`, fieldValue, `for model:`, {
-      id: model.id,
-      filePath,
-      zipEntryPath,
-      currentModel: {
-        designer: model.designer,
-        parentModel: model.parentModel,
-        license: model.license,
-        tags: model.tags
-      }
-    });
-    
-    // Ensure ID is preserved before saving - explicitly check and log
-    if (!model.id) {
-      console.error('ERROR: Attempting to save model without ID! This should not happen.');
-      console.error('Model data:', model);
-      console.error('Model keys:', Object.keys(model));
-      // Try to get the model again to see if ID is available
-      const retryModel = await window.electron.getModel(filePath, finalZipEntryPath);
-      if (retryModel && retryModel.id) {
-        console.log('Retry found model with ID, using that:', retryModel.id);
-        model.id = retryModel.id;
-      } else {
-        console.error('Retry also failed to get model ID. This is a critical error.');
-        // Don't proceed with save if we don't have an ID - it will cause issues
-        return false;
-      }
-    }
-    
-    // Explicitly ensure ID is a number (not a string) before saving
-    if (model.id && typeof model.id === 'string') {
-      model.id = parseInt(model.id, 10);
-    }
-    
-    // Save the updated model - explicitly pass ID
-    console.log(`autoSaveModel: About to save model with ID=${model.id}, filePath=${filePath}`);
+    // Save the updated model
     await window.electron.saveModel(model);
     
     // If this was called from the details panel, update the displayed file
-    await updateModelElement(filePath, zipEntryPath);
+    await updateModelElement(filePath);
     
     return true;
   } catch (error) {
@@ -7447,40 +7103,9 @@ async function autoSaveMultipleModels(field, value) {
       value = 'Unknown';
     }
     
-    // Show progress indicator
-    const progressIndicator = document.getElementById('multi-edit-progress');
-    const progressFill = progressIndicator?.querySelector('.progress-fill');
-    const progressCount = progressIndicator?.querySelector('.progress-count');
-    const progressTotal = progressIndicator?.querySelector('.progress-total');
-    const progressText = progressIndicator?.querySelector('.progress-text');
-    
-    const totalModels = selectedModels.size;
-    let currentIndex = 0;
-    
-    if (progressIndicator) {
-      progressIndicator.classList.remove('hidden');
-      if (progressTotal) progressTotal.textContent = totalModels;
-      if (progressText) progressText.textContent = `Saving ${field}...`;
-    }
-    
     // Update all selected models
-    for (const fileIdentifier of selectedModels) {
-      currentIndex++;
-      
-      // Update progress
-      if (progressIndicator) {
-        const percent = (currentIndex / totalModels) * 100;
-        if (progressFill) {
-          progressFill.style.width = `${percent}%`;
-        }
-        if (progressCount) {
-          progressCount.textContent = currentIndex;
-        }
-      }
-      
-      // Parse the unique identifier to get filePath and zipEntryPath
-      const parsed = parseFileIdentifier(fileIdentifier);
-      const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
+    for (const filePath of selectedModels) {
+      const model = await window.electron.getModel(filePath);
       if (model) {
         // Special handling for tags - MERGE instead of replace
         if (field === 'tags') {
@@ -7488,13 +7113,6 @@ async function autoSaveMultipleModels(field, value) {
           const newTags = Array.isArray(value) ? value : []; 
           // Combine, filter out duplicates, and sort
           const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
-          model.tags = allTags;
-        } else if (field === 'tags-remove') {
-          // Special handling for removing specific tag
-          const existingTags = Array.isArray(model.tags) ? model.tags : [];
-          const tagToRemove = value;
-          // Filter out the tag to remove
-          const allTags = existingTags.filter(tag => tag !== tagToRemove).sort();
           model.tags = allTags;
         } else {
           // Handle other fields
@@ -7504,129 +7122,22 @@ async function autoSaveMultipleModels(field, value) {
         // Save the model
         await window.electron.saveModel(model);
         
-        // Update UI - pass zipEntryPath so it can find the correct element
-        await updateModelElement(parsed.filePath, parsed.zipEntryPath);
+        // Update UI
+        await updateModelElement(filePath);
       } else {
-        console.warn(`Could not find model for ${fileIdentifier} during autoSaveMultipleModels`);
+        console.warn(`Could not find model for ${filePath} during autoSaveMultipleModels`);
       }
-    }
-    
-    // Hide progress indicator after a short delay
-    if (progressIndicator) {
-      setTimeout(() => {
-        progressIndicator.classList.add('hidden');
-        if (progressFill) progressFill.style.width = '0%';
-      }, 500);
     }
     
     console.log(`Finished autoSaveMultipleModels for field ${field}.`); // Simplified log
     return true;
   } catch (error) {
     console.error(`Error in autoSaveMultipleModels for field ${field}:`, error);
-    // Hide progress on error
-    const progressIndicator = document.getElementById('multi-edit-progress');
-    if (progressIndicator) {
-      progressIndicator.classList.add('hidden');
-    }
     return false;
   }
 }
 
-// Function to save all current multi-edit values before exiting
-async function saveAllMultiEditValues() {
-  try {
-    if (selectedModels.size === 0) {
-      return;
-    }
-    
-    // Show progress indicator
-    const progressIndicator = document.getElementById('multi-edit-progress');
-    const progressFill = progressIndicator?.querySelector('.progress-fill');
-    const progressCount = progressIndicator?.querySelector('.progress-count');
-    const progressTotal = progressIndicator?.querySelector('.progress-total');
-    const progressText = progressIndicator?.querySelector('.progress-text');
-    
-    const totalModels = selectedModels.size;
-    let currentIndex = 0;
-    
-    if (progressIndicator) {
-      progressIndicator.classList.remove('hidden');
-      if (progressTotal) progressTotal.textContent = totalModels;
-      if (progressText) progressText.textContent = 'Saving all changes...';
-    }
-    
-    // Get all current values from the form
-    const designer = document.getElementById('multi-designer')?.value || 'Unknown';
-    const source = document.getElementById('multi-source')?.value || '';
-    const parent = document.getElementById('multi-parent')?.value || '';
-    const license = document.getElementById('multi-license')?.value || '';
-    const printed = document.getElementById('multi-printed')?.checked || false;
-    
-    // Get all selected tags
-    const tagElements = document.getElementById('multi-tags')?.querySelectorAll('.tag') || [];
-    const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name')).filter(Boolean);
-    
-    // Save each model with all current values
-    for (const fileIdentifier of selectedModels) {
-      currentIndex++;
-      
-      // Update progress
-      if (progressIndicator) {
-        const percent = (currentIndex / totalModels) * 100;
-        if (progressFill) {
-          progressFill.style.width = `${percent}%`;
-        }
-        if (progressCount) {
-          progressCount.textContent = currentIndex;
-        }
-      }
-      
-      // Parse the unique identifier to get filePath and zipEntryPath
-      const parsed = parseFileIdentifier(fileIdentifier);
-      const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
-      
-      if (model) {
-        // Update all fields
-        model.designer = designer;
-        if (source) model.source = source;
-        if (parent) model.parentModel = parent;
-        if (license) model.license = license;
-        model.printed = printed;
-        
-        // Handle tags - merge with existing if tags exist, otherwise replace
-        if (tags.length > 0) {
-          const existingTags = Array.isArray(model.tags) ? model.tags : [];
-          model.tags = [...new Set([...existingTags, ...tags])].sort();
-        }
-        
-        // Save the model
-        await window.electron.saveModel(model);
-        
-        // Update UI
-        await updateModelElement(parsed.filePath, parsed.zipEntryPath);
-      }
-    }
-    
-    // Hide progress indicator after a short delay
-    if (progressIndicator) {
-      setTimeout(() => {
-        progressIndicator.classList.add('hidden');
-        if (progressFill) progressFill.style.width = '0%';
-      }, 500);
-    }
-    
-    console.log('Saved all multi-edit values before exiting');
-  } catch (error) {
-    console.error('Error saving all multi-edit values:', error);
-    // Hide progress on error
-    const progressIndicator = document.getElementById('multi-edit-progress');
-    if (progressIndicator) {
-      progressIndicator.classList.add('hidden');
-    }
-  }
-}
-
-// Helper function to get the current model file path and zipEntryPath
+// Helper function to get the current model file path
 function getModelFilePath() {
   // First try to get it from the model-path input
   const pathInput = document.getElementById('model-path');
@@ -7640,15 +7151,6 @@ function getModelFilePath() {
     return detailsPanel.getAttribute('data-filepath');
   }
   
-  return null;
-}
-
-// Helper function to get the current model's zipEntryPath
-function getModelZipEntryPath() {
-  const pathInput = document.getElementById('model-path');
-  if (pathInput && pathInput.dataset.zipEntryPath) {
-    return pathInput.dataset.zipEntryPath;
-  }
   return null;
 }
 
@@ -7672,38 +7174,19 @@ function showMultiEditPanel() {
     multiSourceInput.value = '';
   }
   
-  // Remove existing event listeners by cloning and replacing elements
-  const multiEditFields = ['multi-designer', 'multi-parent', 'multi-license'];
-  multiEditFields.forEach(fieldId => {
-    const element = document.getElementById(fieldId);
-    if (element) {
-      const newElement = element.cloneNode(true);
-      element.parentNode.replaceChild(newElement, element);
-    }
+  // Add change handlers for multi-edit controls
+  document.getElementById('multi-designer')?.addEventListener('change', async (e) => {
+    const value = e.target.value || 'Unknown'; // Use default Unknown
+    await autoSaveMultipleModels('designer', value);
   });
   
-  // Add change handlers for multi-edit controls
-  const multiDesigner = document.getElementById('multi-designer');
-  if (multiDesigner) {
-    multiDesigner.addEventListener('change', async (e) => {
-      const value = e.target.value || 'Unknown'; // Use default Unknown
-      await autoSaveMultipleModels('designer', value);
-    });
-  }
+  document.getElementById('multi-parent')?.addEventListener('change', async (e) => {
+    await autoSaveMultipleModels('parentModel', e.target.value);
+  });
   
-  const multiParent = document.getElementById('multi-parent');
-  if (multiParent) {
-    multiParent.addEventListener('change', async (e) => {
-      await autoSaveMultipleModels('parentModel', e.target.value);
-    });
-  }
-  
-  const multiLicense = document.getElementById('multi-license');
-  if (multiLicense) {
-    multiLicense.addEventListener('change', async (e) => {
-      await autoSaveMultipleModels('license', e.target.value);
-    });
-  }
+  document.getElementById('multi-license')?.addEventListener('change', async (e) => {
+    await autoSaveMultipleModels('license', e.target.value);
+  });
   
   // Use input event with debounce for the source field so it saves as user types
   if (multiSourceInput) {
@@ -7740,15 +7223,13 @@ function showMultiEditPanel() {
         console.log(`Updating printed status to ${isChecked} for ${selectedModels.size} models`);
         
         // Process each selected model
-        for (const fileIdentifier of selectedModels) {
-          // Parse the unique identifier to get filePath and zipEntryPath
-          const parsed = parseFileIdentifier(fileIdentifier);
-          const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
+        for (const filePath of selectedModels) {
+          const model = await window.electron.getModel(filePath);
           if (model) {
             model.printed = isChecked;
             await window.electron.saveModel(model);
-            console.log(`Updated model ${fileIdentifier} printed status to ${isChecked}`);
-            await updateModelElement(parsed.filePath, parsed.zipEntryPath);
+            console.log(`Updated model ${filePath} printed status to ${isChecked}`);
+            await updateModelElement(filePath);
           }
         }
         
@@ -7836,14 +7317,12 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log(`Updating printed status to ${isChecked} for ${selectedModels.size} models`);
         
         // Process each selected model
-        for (const fileIdentifier of selectedModels) {
-          // Parse the unique identifier to get filePath and zipEntryPath
-          const parsed = parseFileIdentifier(fileIdentifier);
-          const model = await window.electron.getModel(parsed.filePath, parsed.zipEntryPath);
+        for (const filePath of selectedModels) {
+          const model = await window.electron.getModel(filePath);
           if (model) {
             model.printed = isChecked;
             await window.electron.saveModel(model);
-            await updateModelElement(parsed.filePath, parsed.zipEntryPath);
+            await updateModelElement(filePath);
           }
         }
         
