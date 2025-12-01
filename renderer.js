@@ -10,8 +10,8 @@ function debugLog(...args) {
 
 let BATCH_SIZE = 50; // Default batch size for database operations
 let MAX_FILE_SIZE_MB = 50; // Default max file size in MB
-const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
-const MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
+let THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
+let MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
 
 const MAX_MODELS_IN_MEMORY = 500;
 // Add these constants at the top level of the file
@@ -43,7 +43,7 @@ function handleUserInteraction() {
   clearTimeout(interactionTimeout);
   interactionTimeout = setTimeout(() => {
     isUserInteracting = false;
-  }, 300); // 300ms pause after interaction
+  }, 1000); // 1000ms pause after interaction
 }
 
 ['mousemove', 'mousedown', 'keydown', 'scroll', 'wheel'].forEach(event => {
@@ -56,7 +56,7 @@ let isRenderCancelled = false;
 let isBackgrounded = false;
 
 // Add these at the top with other global variables
-let RENDER_DELAY = 200; // Increase delay between renders to 200ms
+let RENDER_DELAY = 500; // Increase delay between renders to 500ms
 let autoStartedRendering = false;
 let thumbnailCache = new Map();
 let sharedRenderer = null;
@@ -2268,12 +2268,45 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function initializePerformanceSettings() {
     try {
       // Load max file size setting
-      const maxFileSize = await window.electron.getSetting('maxFileSizeMB') || '50';
-      const input = document.getElementById('max-file-size');
-      if (input) {
-        input.value = maxFileSize;
+      const maxFileSize = await window.electron.getSetting('maxFileSizeMB');
+      if (maxFileSize) {
         MAX_FILE_SIZE_MB = parseInt(maxFileSize);
+        const input = document.getElementById('max-file-size');
+        if (input) input.value = maxFileSize;
       }
+
+      // Load batch size
+      const batchSize = await window.electron.getSetting('batchSize');
+      if (batchSize) {
+        BATCH_SIZE = parseInt(batchSize);
+        const input = document.getElementById('batch-size');
+        if (input) input.value = batchSize;
+      }
+
+      // Load max concurrent renders
+      const concurrentRenders = await window.electron.getSetting('maxConcurrentRenders');
+      if (concurrentRenders) {
+        MAX_CONCURRENT_RENDERS = parseInt(concurrentRenders);
+        const input = document.getElementById('concurrent-renders');
+        if (input) input.value = concurrentRenders;
+      }
+
+      // Load thumbnail batch size
+      const thumbBatchSize = await window.electron.getSetting('thumbnailBatchSize');
+      if (thumbBatchSize) {
+        THUMBNAIL_BATCH_SIZE = parseInt(thumbBatchSize);
+        const input = document.getElementById('thumbnail-batch-size');
+        if (input) input.value = thumbBatchSize;
+      }
+
+      // Load render delay
+      const renderDelay = await window.electron.getSetting('renderDelay');
+      if (renderDelay) {
+        RENDER_DELAY = parseInt(renderDelay);
+        const input = document.getElementById('render-delay');
+        if (input) input.value = renderDelay;
+      }
+
     } catch (error) {
       console.error('Error initializing performance settings:', error);
     }
@@ -7672,19 +7705,21 @@ function renderVirtualGrid(models) {
   container.innerHTML = ''; // clear existing content
   container.style.position = 'relative';
   container.style.overflowY = 'auto';
+  container.style.display = 'block';
 
-  // Assume fixed item size (in pixels)
-  const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
-  const itemHeight = 320;  // fixed model height 300px + 20px margin
-  const containerWidth = container.clientWidth;
+  // Constants
+  const minItemWidth = 300; // Match CSS minmax(300px, 1fr)
+  const gap = 20; // Match CSS gap
+  const itemHeight = 380;  // Increased height to prevent overlap
+  const padding = 20; // Container padding
 
-  // Calculate number of columns (at least 1)
-  const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
-  const rowCount = Math.ceil(models.length / columns);
+  // State for caching
+  let lastStartRow = -1;
+  let lastEndRow = -1;
+  let lastColumns = -1;
 
   // Create a spacer element of full height to allow scrolling
   const spacer = document.createElement('div');
-  spacer.style.height = (rowCount * itemHeight) + 'px';
   spacer.style.width = '100%';
   spacer.style.position = 'relative';
   container.appendChild(spacer);
@@ -7704,37 +7739,64 @@ function renderVirtualGrid(models) {
     container.resizeObserver.disconnect();
   }
 
+  // Debounce function
+  const debounce = (func, wait) => {
+    let timeout;
+    return (...args) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => func.apply(this, args), wait);
+    };
+  };
+
   // Function to (re)render only the visible rows (plus a small buffer)
-  function renderVisibleItems() {
+  function renderVisibleItems(force = false) {
     const scrollTop = container.scrollTop;
     const containerHeight = container.clientHeight;
+    const containerWidth = container.clientWidth;
 
-    // Recalculate columns in case of resize
-    const currentContainerWidth = container.clientWidth;
-    const currentColumns = Math.max(Math.floor(currentContainerWidth / itemWidth), 1);
-    const currentRowCount = Math.ceil(models.length / currentColumns);
+    // Calculate available width for items (subtract padding)
+    const availableWidth = containerWidth - (2 * padding);
+
+    // Calculate columns: n * minWidth + (n-1) * gap <= availableWidth
+    let columns = Math.floor((availableWidth + gap) / (minItemWidth + gap));
+    columns = Math.max(columns, 1);
+
+    // Calculate actual item width to fill space
+    const itemWidth = (availableWidth - (columns - 1) * gap) / columns;
+
+    const rowCount = Math.ceil(models.length / columns);
 
     // Update spacer height
-    spacer.style.height = (currentRowCount * itemHeight) + 'px';
+    spacer.style.height = (rowCount * itemHeight + 2 * padding) + 'px';
 
     const buffer = 2; // extra rows to render before and after the visible area
     const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
-    const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+    const endRow = Math.min(rowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+
+    // Check if we need to re-render
+    if (!force && startRow === lastStartRow && endRow === lastEndRow && columns === lastColumns) {
+        return;
+    }
+
+    lastStartRow = startRow;
+    lastEndRow = endRow;
+    lastColumns = columns;
 
     // Clear and re-render only the visible items
     virtualContent.innerHTML = '';
 
     for (let row = startRow; row < endRow; row++) {
-      for (let col = 0; col < currentColumns; col++) {
-        const index = row * currentColumns + col;
+      for (let col = 0; col < columns; col++) {
+        const index = row * columns + col;
         if (index >= models.length) break;
 
         const model = models[index];
         const item = createModelItem(model);
         item.style.position = 'absolute';
-        item.style.top = (row * itemHeight) + 'px';
-        item.style.left = (col * itemWidth) + 'px';
-        item.style.width = '250px'; // Explicit width matching CSS
+        item.style.top = (padding + row * itemHeight) + 'px';
+        item.style.left = (padding + col * (itemWidth + gap)) + 'px';
+        item.style.width = itemWidth + 'px';
+        item.style.height = (itemHeight - gap) + 'px';
         item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
 
         virtualContent.appendChild(item);
@@ -7743,18 +7805,27 @@ function renderVirtualGrid(models) {
   }
 
   // Attach the scroll event handler to update visible items on scroll
+  let ticking = false;
   container.removeEventListener('scroll', container.virtualScrollHandler);
-  container.virtualScrollHandler = renderVisibleItems;
-  container.addEventListener('scroll', renderVisibleItems);
+  container.virtualScrollHandler = () => {
+    if (!ticking) {
+        window.requestAnimationFrame(() => {
+            renderVisibleItems();
+            ticking = false;
+        });
+        ticking = true;
+    }
+  };
+  container.addEventListener('scroll', container.virtualScrollHandler);
 
   // Handle window resize
-  container.resizeObserver = new ResizeObserver(() => {
-    renderVisibleItems();
-  });
+  container.resizeObserver = new ResizeObserver(debounce(() => {
+    renderVisibleItems(true);
+  }, 100));
   container.resizeObserver.observe(container);
 
   // Initial render of visible items
-  renderVisibleItems();
+  renderVisibleItems(true);
 }
 // ==================== END NEW CODE ====================
 
