@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electron', {
   saveDirectory: (directoryPath) => ipcRenderer.invoke('save-directory', directoryPath),
   scanDirectory: (directoryPath) => ipcRenderer.invoke('scan-directory', directoryPath),
   getModel: (filePath) => ipcRenderer.invoke('get-model', filePath),
+  getModelsFiltered: (filters) => ipcRenderer.invoke('get-models-filtered', filters),
   saveModel: (modelData) => ipcRenderer.invoke('save-model', modelData),
   saveModelBatch: (modelDataBatch) => ipcRenderer.invoke('save-model-batch', modelDataBatch),
   saveThumbnail: (filePath, thumbnail) => ipcRenderer.invoke('save-thumbnail', filePath, thumbnail),

@@ -12,7 +12,6 @@ export async function getCombinedFilteredModels() {
   // Get all models using the current sort option.
   const sortSelect = document.getElementById("sort-select");
   const sortOption = sortSelect ? sortSelect.value : "date-desc";
-  const allModels = await window.electron.getAllModels(sortOption, 0);
 
   // Get filter values from the filter menu.
   const designer = document.getElementById("designer-select")?.value || "";
@@ -25,7 +24,6 @@ export async function getCombinedFilteredModels() {
   // Get current search term from the new search bar in the filter menu.
   const searchInput = document.getElementById("search-filter-input");
   const currentSearchTerm = searchInput ? searchInput.value.trim() : "";
-  const searchLower = currentSearchTerm.toLowerCase();
 
   // Check if any filters are active - if so, we should reset viewingEntireLibrary flag
   const hasActiveFilters = designer || license || parentModel || printStatus !== "all" || 
@@ -37,200 +35,30 @@ export async function getCombinedFilteredModels() {
     console.log("Reset viewingEntireLibrary flag due to active filters");
   }
 
-  console.log("Starting filter process with:", {
-    totalModels: allModels.length,
-    filters: {
-      designer,
-      license,
-      parentModel,
-      printStatus,
-      tagFilter,
-      fileType,
-      searchTerm: currentSearchTerm
-    }
-  });
+  // Construct filters object
+  const filters = {
+    sortOption,
+    designer,
+    license,
+    parentModel,
+    printed: printStatus === "all" ? undefined : printStatus,
+    tag: tagFilter,
+    fileType,
+    search: currentSearchTerm,
+    directory: window.currentDirectoryFilter
+  };
 
-  // First, deduplicate the initial models based on filePath
-  const uniquePathMap = new Map();
-  for (const model of allModels) {
-    if (!uniquePathMap.has(model.filePath)) {
-      uniquePathMap.set(model.filePath, model);
-    }
+  console.log("Requesting filtered models from backend:", filters);
+
+  try {
+    // Use the new optimized IPC handler to get filtered results directly from DB
+    const models = await window.electron.getModelsFiltered(filters);
+    console.log(`Received ${models.length} models from backend`);
+    return models;
+  } catch (error) {
+    console.error("Error fetching filtered models:", error);
+    return [];
   }
-  
-  // Start with deduplicated models
-  let models = Array.from(uniquePathMap.values());
-  console.log(`After initial deduplication: ${models.length} models (removed ${allModels.length - models.length} duplicates)`);
-
-  // Apply search term filter first if it exists
-  if (searchLower) {
-    const beforeCount = models.length;
-    const fuseOptions = {
-      keys: ['fileName', 'designer', 'notes', 'parentModel', 'license', 'filePath', 'source'],
-      threshold: 0.3,
-      includeScore: true,
-      minMatchCharLength: 2,
-      ignoreLocation: true
-    };
-    const fuse = new Fuse(models, fuseOptions);
-    const searchResults = fuse.search(searchLower);
-    console.log(`Fuse search results for "${searchLower}":`, searchResults.length);
-    
-    // Use all results but sort by score
-    const fuseResults = searchResults.map(result => result.item);
-
-    // Check for tag matches
-    const remainingModels = models.filter(model => !fuseResults.includes(model));
-    const tagMatches = [];
-    for (const model of remainingModels) {
-      const modelTags = await window.electron.getModelTags(model.id);
-      if (modelTags && modelTags.some(tag => tag.name.toLowerCase().includes(searchLower))) {
-        tagMatches.push(model);
-      }
-    }
-    
-    models = [...new Set([...fuseResults, ...tagMatches])];
-    console.log(`After search filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply file type filter
-  if (fileType) {
-    const beforeCount = models.length;
-    models = models.filter(model =>
-      model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-    );
-    console.log(`After file type filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply designer filter
-  if (designer) {
-    const beforeCount = models.length;
-    if (designer === "__none__") {
-      models = models.filter(model => !model.designer || model.designer.trim() === '');
-    } else {
-      models = models.filter(model => 
-        model.designer && model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
-      );
-    }
-    console.log(`After designer filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply license filter
-  if (license) {
-    const beforeCount = models.length;
-    if (license === "__none__") {
-      models = models.filter(model => {
-        const isEmpty = !model.license || 
-                       model.license === null || 
-                       model.license === undefined || 
-                       model.license === 'null' ||
-                       model.license === 'undefined' ||
-                       String(model.license).trim() === '';
-        return isEmpty;
-      });
-      console.log(`After license "__none__" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    } else {
-      models = models.filter(model => model.license === license);
-      console.log(`After license "${license}" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    }
-  }
-
-  // Apply parent model filter
-  if (parentModel) {
-    const beforeCount = models.length;
-    if (parentModel === "__none__") {
-      models = models.filter(model => {
-        const isEmpty = !model.parentModel || 
-                       model.parentModel === null || 
-                       model.parentModel === undefined || 
-                       model.parentModel === 'null' ||
-                       model.parentModel === 'undefined' ||
-                       String(model.parentModel).trim() === '';
-        return isEmpty;
-      });
-      console.log(`After parentModel "__none__" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    } else {
-      models = models.filter(model => model.parentModel === parentModel);
-      console.log(`After parentModel "${parentModel}" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    }
-  }
-
-  // Apply printed filter
-  if (printStatus === "printed") {
-    const beforeCount = models.length;
-    models = models.filter(model => model.printed);
-    console.log(`After printed filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  } else if (printStatus === "not-printed") {
-    const beforeCount = models.length;
-    models = models.filter(model => !model.printed);
-    console.log(`After not-printed filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply directory filter
-  const directoryFilter = window.currentDirectoryFilter || "";
-  if (directoryFilter) {
-    const beforeCount = models.length;
-    console.log(`Applying directory filter: "${directoryFilter}"`);
-    
-    models = models.filter(model => {
-      // Skip models without a valid filepath
-      if (!model.filePath) return false;
-      
-      // Normalize slashes for consistent directory separation
-      const normalizedPath = model.filePath.replace(/\\/g, '/');
-      
-      // Get the parent directory from the model file path
-      const lastSlashIndex = normalizedPath.lastIndexOf('/');
-      if (lastSlashIndex === -1) return false; // No directory in path
-      
-      const dirPath = normalizedPath.substring(0, lastSlashIndex);
-      const parentDir = dirPath.substring(dirPath.lastIndexOf('/') + 1);
-      
-      // Check if the parent directory matches the filter (case-insensitive)
-      const matches = parentDir.toLowerCase() === directoryFilter.toLowerCase();
-      
-      if (!matches && models.length < 10) {
-        console.log(`Model ${model.fileName} in directory "${parentDir}" doesn't match "${directoryFilter}"`);
-      }
-      
-      return matches;
-    });
-    
-    console.log(`After directory filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply tag filter
-  if (tagFilter) {
-    const beforeCount = models.length;
-    const filteredModels = [];
-    for (const model of models) {
-      const modelTags = await window.electron.getModelTags(model.id);
-      if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
-        filteredModels.push(model);
-      }
-    }
-    models = filteredModels;
-    console.log(`After tag filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Final debug log
-  console.log("Final filtered results:", {
-    totalResults: models.length,
-    sampleResults: models.slice(0, 3)
-  });
-
-  // Add a final deduplication step based on filePath
-  const finalUniqueModels = new Map();
-  for (const model of models) {
-    if (!finalUniqueModels.has(model.filePath)) {
-      finalUniqueModels.set(model.filePath, model);
-    }
-  }
-  models = Array.from(finalUniqueModels.values());
-
-  console.log(`After final deduplication: ${models.length} models`);
-
-  return models;
 }
 
 export async function performCombinedSearch() {
@@ -519,15 +347,8 @@ export function initializeCombinedSearch() {
     newSortSelect.addEventListener('change', async (e) => {
       console.log(`Sort changed: ${e.target.value}`);
       
-      // Get all models with the new sort option
-      const models = await window.electron.getAllModels(e.target.value);
-      
-      // Completely refresh the grid with the new sort order
-      if (typeof window.renderFiles === 'function') {
-        await window.renderFiles(models, false, true);
-      } else {
-        console.error('renderFiles function not available');
-      }
+      // Just re-run performCombinedSearch which will use the current sort option
+      await performCombinedSearch();
     });
   }
 

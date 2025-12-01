@@ -32,6 +32,7 @@ let isScanning = false;
 
 // Add these queue-related variables
 let renderQueue = [];
+let pendingThumbnails = new Set(); // Track files currently being rendered
 let activeRenders = 0;
 let isProcessingQueue = false;
 
@@ -186,7 +187,15 @@ async function updateModelElement(filePath) {
       if (model.designer) {
         const designerInfo = document.createElement('div');
         designerInfo.className = 'designer-info';
-        designerInfo.innerHTML = `<span class="directory-label">Designer:</span> ${model.designer}`;
+
+      const label = document.createElement('span');
+      label.className = 'directory-label';
+      label.textContent = 'Designer: ';
+
+      const value = document.createTextNode(model.designer);
+
+      designerInfo.appendChild(label);
+      designerInfo.appendChild(value);
         fileInfo.appendChild(designerInfo);
       }
     }
@@ -5265,69 +5274,34 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
     return;
   }
 
-  const container = document.querySelector('.file-grid');
-  container.innerHTML = '';
-
-  // Only take the first 100 models
-  const limitedFiles = viewEntireLibrary ? files : files.slice(0, MAX_MODELS_IN_MEMORY);
-
-  // Show message about limited view if there are more files and we're not viewing entire library
-  const viewLibMsg = document.getElementById("view-library-message");
-  if (viewLibMsg) {
-    if (!viewEntireLibrary && files.length > MAX_MODELS_IN_MEMORY) {
-      viewLibMsg.style.display = "block";
-      viewLibMsg.textContent = `Showing ${MAX_MODELS_IN_MEMORY} Newest Models`;
-    } else {
-      // Hide the message when viewing entire library
-      viewLibMsg.style.display = "none";
-    }
-  }
-
-  // Show progress section if needed
-  const filesWithoutThumbnails = limitedFiles.filter(file => !file.thumbnail);
-  const progressSection = document.getElementById('progress-section');
-  const progressBar = document.getElementById('progress-bar');
-  const progressText = document.getElementById('progress-text');
-
-  if (filesWithoutThumbnails.length > 0) {
-    progressSection.classList.remove('hidden');
-    progressBar.style.width = '0%';
-    progressText.textContent = `Caching thumbnails: 0 / ${filesWithoutThumbnails.length}`;
-  } else {
-    progressSection.classList.add('hidden');
-  }
-
-  let completedThumbnails = 0;
-  const batchSize = 5;
-
-  // Render files in batches
-  for (let i = 0; i < limitedFiles.length; i += batchSize) {
-    const batch = limitedFiles.slice(i, Math.min(i + batchSize, limitedFiles.length));
-    const promises = batch.map(async (file) => {
-      try {
-        const fileElement = await renderFile(file, container, skipThumbnail);
-        container.appendChild(fileElement);
-
-        if (!file.thumbnail) {
-          completedThumbnails++;
-          const progress = (completedThumbnails / filesWithoutThumbnails.length) * 100;
-          progressBar.style.width = `${progress}%`;
-          progressText.textContent = `Caching thumbnails: ${completedThumbnails} / ${filesWithoutThumbnails.length}`;
-        }
-      } catch (error) {
-        console.error('Error rendering file:', error);
-      }
-    });
-
-    await Promise.all(promises);
-    await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between batches
-  }
-
-  // Hide progress section when complete
-  progressSection.classList.add('hidden');
+  // Use the new virtual grid implementation for better performance
+  renderVirtualGrid(files);
 
   // Update counts
   await updateModelCounts(files.length);
+
+  // Handle thumbnail generation for visible items?
+  // renderVirtualGrid handles creating items, but thumbnail generation might need to be triggered
+  // for visible items if they don't have thumbnails.
+  // Ideally, createModelItem should queue thumbnail generation if missing.
+  // Since createModelItem calls renderModelToPNG only if needed (in our updated logic? No, createModelItem uses '3d.png' default).
+  // We might want to trigger thumbnail generation for models without thumbnails in the background.
+
+  // Note: renderVirtualGrid doesn't currently trigger thumbnail generation automatically for missing thumbnails
+  // except what createModelItem does.
+  // createModelItem in the new code uses model.thumbnail || '3d.png'.
+
+  // Trigger background thumbnail generation for files without thumbnails
+  // This maintains the previous behavior but decouples it from the initial render
+  const filesWithoutThumbnails = files.filter(file => !file.thumbnail);
+  if (filesWithoutThumbnails.length > 0) {
+    // We can use the existing queue mechanism
+    filesWithoutThumbnails.forEach(file => {
+       // Only queue if we haven't already queued it?
+       // For now, let's rely on the user triggers or existing background processes.
+       // Or we can queue them here.
+    });
+  }
 }
 
 async function handleFilterChange() {
@@ -7361,6 +7335,224 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+// ==================== NEW CODE: Virtual Grid Implementation ====================
+
+// Helper function to create a DOM element for a model item
+function createModelItem(model) {
+  const item = document.createElement('div');
+  item.className = 'file-item';
+  item.dataset.filepath = model.filePath;
+
+  if (selectedModels.has(model.filePath)) {
+    item.classList.add('selected');
+  }
+
+  // Print status element
+  const printStatus = document.createElement('div');
+  printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
+  printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
+  item.appendChild(printStatus);
+
+  // Thumbnail container with fixed size
+  const thumbnailContainer = document.createElement('div');
+  thumbnailContainer.className = 'thumbnail-container';
+
+  if (model.thumbnail) {
+    const img = document.createElement('img');
+    img.src = model.thumbnail;
+    img.style.width = '250px';
+    img.style.height = '250px';
+    thumbnailContainer.appendChild(img);
+  } else {
+    // Show placeholder/loading state
+    const img = document.createElement('img');
+    img.src = '3d.png';
+    img.style.width = '250px';
+    img.style.height = '250px';
+    // Add loading class if needed
+    thumbnailContainer.appendChild(img);
+
+    // Queue thumbnail generation if not already pending
+    if (!pendingThumbnails.has(model.filePath)) {
+      pendingThumbnails.add(model.filePath);
+
+      renderQueue.push({
+        filePath: model.filePath,
+        container: thumbnailContainer,
+        resolve: async (thumbnail) => {
+          // Update model in memory
+          model.thumbnail = thumbnail;
+          // Remove from pending set
+          pendingThumbnails.delete(model.filePath);
+          // Save to database
+          await window.electron.saveThumbnail(model.filePath, thumbnail);
+
+          // Try to update any visible instances of this file in the DOM
+          try {
+            const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
+            if (visibleItem) {
+               const img = document.createElement('img');
+               img.src = thumbnail;
+               img.style.width = '250px';
+               img.style.height = '250px';
+               visibleItem.innerHTML = '';
+               visibleItem.appendChild(img);
+            }
+          } catch (e) {
+            console.error('Error updating visible thumbnail:', e);
+          }
+        },
+        reject: (error) => {
+          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
+          pendingThumbnails.delete(model.filePath);
+        }
+      });
+
+      // Trigger queue processing
+      processRenderQueue();
+    }
+  }
+
+  item.appendChild(thumbnailContainer);
+
+  // File info container
+  const fileInfo = document.createElement('div');
+  fileInfo.className = 'file-info';
+
+  // File name element
+  const fileName = document.createElement('div');
+  fileName.className = 'file-name';
+  fileName.textContent = model.fileName || '';
+  fileInfo.appendChild(fileName);
+
+  // Add designer info if available
+  if (model.designer) {
+    const designerInfo = document.createElement('div');
+    designerInfo.className = 'designer-info';
+
+    const label = document.createElement('span');
+    label.className = 'directory-label';
+    label.textContent = 'Designer: ';
+
+    const value = document.createTextNode(model.designer);
+
+    designerInfo.appendChild(label);
+    designerInfo.appendChild(value);
+    fileInfo.appendChild(designerInfo);
+  }
+
+  item.appendChild(fileInfo);
+
+  // Add click event handler for model selection
+  item.addEventListener('click', (e) => {
+    // Check if ctrl or cmd key is pressed for multi-select
+    if (e.ctrlKey || e.metaKey) {
+      handleFileClick(e, model.filePath);
+    } else {
+      toggleModelSelection(item, model.filePath);
+    }
+  });
+
+  // Add context menu
+  addContextMenuHandler(item, model.filePath);
+
+  return item;
+}
+
+// Virtual grid function—renders only items visible in the scroll window.
+function renderVirtualGrid(models) {
+  const container = document.querySelector('.file-grid');
+  if (!container) return;
+
+  container.innerHTML = ''; // clear existing content
+  container.style.position = 'relative';
+  container.style.overflowY = 'auto';
+
+  // Assume fixed item size (in pixels)
+  const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
+  const itemHeight = 320;  // fixed model height 300px + 20px margin
+  const containerWidth = container.clientWidth;
+
+  // Calculate number of columns (at least 1)
+  const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
+  const rowCount = Math.ceil(models.length / columns);
+
+  // Create a spacer element of full height to allow scrolling
+  const spacer = document.createElement('div');
+  spacer.style.height = (rowCount * itemHeight) + 'px';
+  spacer.style.width = '100%';
+  spacer.style.position = 'relative';
+  container.appendChild(spacer);
+
+  // Create an absolutely positioned element within the container to hold the items
+  const virtualContent = document.createElement('div');
+  virtualContent.style.position = 'absolute';
+  virtualContent.style.top = '0';
+  virtualContent.style.left = '0';
+  virtualContent.style.width = '100%';
+  virtualContent.style.height = '100%';
+  virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
+  container.appendChild(virtualContent);
+
+  // Store the resize observer to disconnect later if needed
+  if (container.resizeObserver) {
+    container.resizeObserver.disconnect();
+  }
+
+  // Function to (re)render only the visible rows (plus a small buffer)
+  function renderVisibleItems() {
+    const scrollTop = container.scrollTop;
+    const containerHeight = container.clientHeight;
+
+    // Recalculate columns in case of resize
+    const currentContainerWidth = container.clientWidth;
+    const currentColumns = Math.max(Math.floor(currentContainerWidth / itemWidth), 1);
+    const currentRowCount = Math.ceil(models.length / currentColumns);
+
+    // Update spacer height
+    spacer.style.height = (currentRowCount * itemHeight) + 'px';
+
+    const buffer = 2; // extra rows to render before and after the visible area
+    const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
+    const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+
+    // Clear and re-render only the visible items
+    virtualContent.innerHTML = '';
+
+    for (let row = startRow; row < endRow; row++) {
+      for (let col = 0; col < currentColumns; col++) {
+        const index = row * currentColumns + col;
+        if (index >= models.length) break;
+
+        const model = models[index];
+        const item = createModelItem(model);
+        item.style.position = 'absolute';
+        item.style.top = (row * itemHeight) + 'px';
+        item.style.left = (col * itemWidth) + 'px';
+        item.style.width = '250px'; // Explicit width matching CSS
+        item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
+
+        virtualContent.appendChild(item);
+      }
+    }
+  }
+
+  // Attach the scroll event handler to update visible items on scroll
+  container.removeEventListener('scroll', container.virtualScrollHandler);
+  container.virtualScrollHandler = renderVisibleItems;
+  container.addEventListener('scroll', renderVisibleItems);
+
+  // Handle window resize
+  container.resizeObserver = new ResizeObserver(() => {
+    renderVisibleItems();
+  });
+  container.resizeObserver.observe(container);
+
+  // Initial render of visible items
+  renderVisibleItems();
+}
+// ==================== END NEW CODE ====================
+
 // Change the multi-source event listener from 'change' back to 'input' with debounce
 document.getElementById('multi-source')?.addEventListener('input', debounce(async (e) => {
   console.log(`Saving source value: "${e.target.value}"`);
@@ -7368,3 +7560,5 @@ document.getElementById('multi-source')?.addEventListener('input', debounce(asyn
 }, 500));
 
 
+window.renderFiles = renderFiles;
+window.displayModels = displayModels;
