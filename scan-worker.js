@@ -8,18 +8,70 @@ const MAX_CONCURRENT_OPS = 50;
 
 async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false) {
   const files = [];
-  let totalFiles = 0;
   let processedFiles = 0;
 
-  // Use a stack for directory traversal
-  const directoryStack = [directoryPath];
+  // Use a simple queue system
+  const queue = [{ type: 'dir', path: directoryPath }];
   const seenDirs = new Set();
-
-  // Processing queue for files
-  const processingQueue = [];
   let activeOps = 0;
 
-  // Function to process a single file entry
+  // Promise to signal completion
+  let resolveDone;
+  const donePromise = new Promise(resolve => { resolveDone = resolve; });
+
+  const processNext = () => {
+    // If no active ops and queue is empty, we are done
+    if (activeOps === 0 && queue.length === 0) {
+      resolveDone({ files, totalFiles: processedFiles });
+      return;
+    }
+
+    // While we have capacity and items in queue, start processing
+    while (activeOps < MAX_CONCURRENT_OPS && queue.length > 0) {
+      const item = queue.shift();
+      activeOps++;
+
+      if (item.type === 'dir') {
+        processDirectory(item.path).finally(() => {
+          activeOps--;
+          processNext();
+        });
+      } else if (item.type === 'file') {
+        processFile(item.path, item.name).finally(() => {
+          activeOps--;
+          processNext();
+        });
+      }
+    }
+  };
+
+  const processDirectory = async (dirPath) => {
+    if (seenDirs.has(dirPath)) return;
+    seenDirs.add(dirPath);
+
+    try {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+
+        if (entry.isDirectory()) {
+          // Skip system directories and __MACOSX
+          if (entry.name.toLowerCase() === '__macosx' ||
+              /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
+            continue;
+          }
+          // Prioritize files over directories to keep memory usage lower?
+          // Actually directories first might discover more work faster.
+          queue.push({ type: 'dir', path: fullPath });
+        } else {
+          queue.push({ type: 'file', path: fullPath, name: entry.name });
+        }
+      }
+    } catch (err) {
+      console.error(`Skipping directory ${dirPath} due to error: ${err.message}`);
+    }
+  };
+
   const processFile = async (filePath, fileName) => {
     try {
       const stats = await fs.promises.stat(filePath);
@@ -50,56 +102,10 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
     }
   };
 
-  // Main loop
-  while (directoryStack.length > 0 || processingQueue.length > 0 || activeOps > 0) {
-    // Fill up active operations
-    while (activeOps < MAX_CONCURRENT_OPS && processingQueue.length > 0) {
-      const { filePath, fileName } = processingQueue.shift();
-      activeOps++;
-      processFile(filePath, fileName).then(() => {
-        activeOps--;
-      });
-    }
+  // Start processing
+  processNext();
 
-    // Process directories if we have space or empty queue
-    if (directoryStack.length > 0) {
-      // Process a directory synchronously to discover files quickly
-      // but don't block too long.
-      const currentDir = directoryStack.pop();
-      if (seenDirs.has(currentDir)) continue;
-      seenDirs.add(currentDir);
-
-      try {
-        const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
-        
-        for (const entry of entries) {
-          const fullPath = path.join(currentDir, entry.name);
-
-          if (entry.isDirectory()) {
-            // Skip system directories and __MACOSX
-            if (entry.name.toLowerCase() === '__macosx' ||
-                /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
-              continue;
-            }
-            directoryStack.push(fullPath);
-          } else {
-            // Add file to queue
-            processingQueue.push({ filePath: fullPath, fileName: entry.name });
-          }
-        }
-      } catch (err) {
-        console.error(`Skipping directory ${currentDir} due to error: ${err.message}`);
-      }
-    } else if (activeOps > 0) {
-      // If no directories left but active ops, wait a bit
-      await new Promise(resolve => setTimeout(resolve, 10));
-    } else {
-      // No directories, no active ops, no queue -> done
-      break;
-    }
-  }
-
-  return { files, totalFiles: processedFiles };
+  return donePromise;
 }
 
 async function scanZipFile(zipPath, maxFileSize) {

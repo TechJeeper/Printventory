@@ -1164,6 +1164,138 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
   }
 });
 
+ipcMain.handle('get-models-filtered', async (event, filters) => {
+  try {
+    const {
+      sortOption = "date-desc",
+      limit = 0,
+      offset = 0,
+      designer,
+      license,
+      parentModel,
+      printed,
+      tag,
+      fileType,
+      search,
+      directory
+    } = filters;
+
+    let query = `SELECT DISTINCT m.* FROM models m`;
+    const params = [];
+    const conditions = [];
+
+    // Join tags if filtering by tag
+    if (tag) {
+      query += ` JOIN model_tags mt ON m.id = mt.model_id JOIN tags t ON mt.tag_id = t.id`;
+      conditions.push(`t.name = ?`);
+      params.push(tag);
+    }
+
+    // Apply other filters
+    if (designer) {
+      if (designer === "__none__") {
+        conditions.push(`(m.designer IS NULL OR m.designer = '')`);
+      } else {
+        conditions.push(`m.designer = ?`);
+        params.push(designer);
+      }
+    }
+
+    if (license) {
+      if (license === "__none__") {
+        conditions.push(`(m.license IS NULL OR m.license = '' OR m.license = 'null' OR m.license = 'undefined')`);
+      } else {
+        conditions.push(`m.license = ?`);
+        params.push(license);
+      }
+    }
+
+    if (parentModel) {
+      if (parentModel === "__none__") {
+        conditions.push(`(m.parentModel IS NULL OR m.parentModel = '' OR m.parentModel = 'null' OR m.parentModel = 'undefined')`);
+      } else {
+        conditions.push(`m.parentModel = ?`);
+        params.push(parentModel);
+      }
+    }
+
+    if (printed !== undefined && printed !== "all") {
+      if (printed === "printed") {
+        conditions.push(`m.printed = 1`);
+      } else if (printed === "not-printed") {
+        conditions.push(`(m.printed = 0 OR m.printed IS NULL)`);
+      }
+    }
+
+    if (fileType) {
+      conditions.push(`lower(m.fileName) LIKE ?`);
+      params.push(`%.${fileType.toLowerCase()}`);
+    }
+
+    if (directory) {
+      // Normalize slashes for directory comparison - this is tricky in SQL directly without extensions
+      // We'll use a LIKE clause assuming standard path separators or normalized ones in DB
+      // Better to rely on the application code to ensure DB paths are consistent or use a looser match
+      // For now, we'll try to match the path ending with the directory name before the filename
+      // This is an approximation. A robust solution might need a custom SQLite function.
+      // But based on current memory, paths in DB might vary.
+      // Let's stick to a simple LIKE for now as a starting point.
+      conditions.push(`(m.filePath LIKE ? OR m.filePath LIKE ?)`);
+      params.push(`%/${directory}/%`);
+      params.push(`%\\${directory}\\%`);
+    }
+
+    if (search) {
+      const searchPattern = `%${search}%`;
+      conditions.push(`(m.fileName LIKE ? OR m.designer LIKE ? OR m.notes LIKE ? OR m.parentModel LIKE ? OR m.source LIKE ?)`);
+      params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ` + conditions.join(' AND ');
+    }
+
+    // Add sorting
+    let orderClause = "";
+    switch (sortOption) {
+      case "name-asc":
+        orderClause = "ORDER BY m.fileName ASC";
+        break;
+      case "name-desc":
+        orderClause = "ORDER BY m.fileName DESC";
+        break;
+      case "size-asc":
+        orderClause = "ORDER BY m.size ASC";
+        break;
+      case "size-desc":
+        orderClause = "ORDER BY m.size DESC";
+        break;
+      case "date-asc":
+        orderClause = "ORDER BY m.modifiedDate ASC";
+        break;
+      case "date-desc":
+      default:
+        orderClause = "ORDER BY m.modifiedDate DESC";
+        break;
+    }
+    query += ` ${orderClause}`;
+
+    // Add limit/offset
+    if (limit > 0) {
+      query += ` LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+    }
+
+    console.log('Executing filtered query:', query, params);
+    const models = db.prepare(query).all(...params);
+    return models;
+
+  } catch (error) {
+    console.error("Error in getModelsFiltered IPC:", error);
+    return [];
+  }
+});
+
 ipcMain.handle('get-parent-models', async () => {
   try {
     const rows = db.prepare("SELECT DISTINCT parentModel FROM models WHERE parentModel IS NOT NULL AND parentModel != ''").all();
