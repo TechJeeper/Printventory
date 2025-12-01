@@ -10,8 +10,8 @@ function debugLog(...args) {
 
 let BATCH_SIZE = 50; // Default batch size for database operations
 let MAX_FILE_SIZE_MB = 50; // Default max file size in MB
-const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
-const MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
+let THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
+let MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
 
 const MAX_MODELS_IN_MEMORY = 500;
 // Add these constants at the top level of the file
@@ -43,7 +43,7 @@ function handleUserInteraction() {
   clearTimeout(interactionTimeout);
   interactionTimeout = setTimeout(() => {
     isUserInteracting = false;
-  }, 300); // 300ms pause after interaction
+  }, 1000); // 1000ms pause after interaction
 }
 
 ['mousemove', 'mousedown', 'keydown', 'scroll', 'wheel'].forEach(event => {
@@ -56,7 +56,7 @@ let isRenderCancelled = false;
 let isBackgrounded = false;
 
 // Add these at the top with other global variables
-let RENDER_DELAY = 200; // Increase delay between renders to 200ms
+let RENDER_DELAY = 500; // Increase delay between renders to 500ms
 let autoStartedRendering = false;
 let thumbnailCache = new Map();
 let sharedRenderer = null;
@@ -2268,12 +2268,45 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function initializePerformanceSettings() {
     try {
       // Load max file size setting
-      const maxFileSize = await window.electron.getSetting('maxFileSizeMB') || '50';
-      const input = document.getElementById('max-file-size');
-      if (input) {
-        input.value = maxFileSize;
+      const maxFileSize = await window.electron.getSetting('maxFileSizeMB');
+      if (maxFileSize) {
         MAX_FILE_SIZE_MB = parseInt(maxFileSize);
+        const input = document.getElementById('max-file-size');
+        if (input) input.value = maxFileSize;
       }
+
+      // Load batch size
+      const batchSize = await window.electron.getSetting('batchSize');
+      if (batchSize) {
+        BATCH_SIZE = parseInt(batchSize);
+        const input = document.getElementById('batch-size');
+        if (input) input.value = batchSize;
+      }
+
+      // Load max concurrent renders
+      const concurrentRenders = await window.electron.getSetting('maxConcurrentRenders');
+      if (concurrentRenders) {
+        MAX_CONCURRENT_RENDERS = parseInt(concurrentRenders);
+        const input = document.getElementById('concurrent-renders');
+        if (input) input.value = concurrentRenders;
+      }
+
+      // Load thumbnail batch size
+      const thumbBatchSize = await window.electron.getSetting('thumbnailBatchSize');
+      if (thumbBatchSize) {
+        THUMBNAIL_BATCH_SIZE = parseInt(thumbBatchSize);
+        const input = document.getElementById('thumbnail-batch-size');
+        if (input) input.value = thumbBatchSize;
+      }
+
+      // Load render delay
+      const renderDelay = await window.electron.getSetting('renderDelay');
+      if (renderDelay) {
+        RENDER_DELAY = parseInt(renderDelay);
+        const input = document.getElementById('render-delay');
+        if (input) input.value = renderDelay;
+      }
+
     } catch (error) {
       console.error('Error initializing performance settings:', error);
     }
