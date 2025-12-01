@@ -7683,6 +7683,9 @@ function createModelItem(model) {
 
   // Add click event handler for model selection
   item.addEventListener('click', (e) => {
+    // Prevent event from bubbling up to potentially conflicting handlers
+    e.stopPropagation();
+
     // Check if ctrl or cmd key is pressed for multi-select
     if (e.ctrlKey || e.metaKey) {
       handleFileClick(e, model.filePath);
