@@ -583,8 +583,7 @@ function createWindow() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
-        },
-        createFileTypesMenu()
+        }
       ]
     },
     {
@@ -643,32 +642,6 @@ function createWindow() {
       mainWindow.webContents.send('ping');
     }
   }, PING_INTERVAL);
-}
-
-function createFileTypesMenu() {
-  return {
-    label: 'File Types',
-    submenu: [
-      {
-        label: 'Zip Support (Performance Impact)',
-        type: 'checkbox',
-        checked: (db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipSupport'))?.value === 'true',
-        click: async (menuItem) => {
-          try {
-            const key = 'enableZipSupport';
-            const value = menuItem.checked ? 'true' : 'false';
-            db.prepare(`
-              INSERT INTO settings (key, value)
-              VALUES (?, ?)
-              ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            `).run(key, value);
-          } catch (error) {
-            console.error('Error saving zip support setting:', error);
-          }
-        }
-      }
-    ]
-  };
 }
 
 function createApplicationMenu() {
@@ -756,8 +729,7 @@ function createApplicationMenu() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
-        },
-        createFileTypesMenu()
+        }
       ]
     },
     {
@@ -1061,11 +1033,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                   }
                 } else if (enableZipSupport && ext === '.zip') {
                   try {
-                    const stats = fs.statSync(fullPath);
-                    if (stats.size <= maxFileSize) {
-                      const zipFiles = await scanZipFile(fullPath, maxFileSize);
-                      files.push(...zipFiles);
-                    }
+                    const zipFiles = await scanZipFile(fullPath, maxFileSize);
+                    files.push(...zipFiles);
                   } catch (error) {
                     console.error(\`Error processing zip file \${fullPath}:\`, error);
                   }
