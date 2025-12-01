@@ -583,7 +583,8 @@ function createWindow() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
-        }
+        },
+        createFileTypesMenu()
       ]
     },
     {
@@ -755,7 +756,8 @@ function createApplicationMenu() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
-        }
+        },
+        createFileTypesMenu()
       ]
     },
     {
