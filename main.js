@@ -720,6 +720,10 @@ function createApplicationMenu() {
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
+        },
+        {
+          label: 'File Types',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
         }
       ]
     },
