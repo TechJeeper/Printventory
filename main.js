@@ -9,6 +9,7 @@ const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
 const ua = require('universal-analytics');
+const StreamZip = require('node-stream-zip');
 
 // Create an analytics wrapper for GA4
 const analytics = {
@@ -460,6 +461,7 @@ function initializeDefaultSettings() {
       { key: 'ClientId', value: crypto.randomUUID() }, // Generate a unique client ID
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
+      { key: 'enableZipSupport', value: 'false' },
     ];
     
     // Insert default settings if they don't exist
@@ -577,7 +579,8 @@ function createWindow() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
-        }
+        },
+        createFileTypesMenu()
       ]
     },
     {
@@ -636,6 +639,32 @@ function createWindow() {
       mainWindow.webContents.send('ping');
     }
   }, PING_INTERVAL);
+}
+
+function createFileTypesMenu() {
+  return {
+    label: 'File Types',
+    submenu: [
+      {
+        label: 'Zip Support (Performance Impact)',
+        type: 'checkbox',
+        checked: (db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipSupport'))?.value === 'true',
+        click: async (menuItem) => {
+          try {
+            const key = 'enableZipSupport';
+            const value = menuItem.checked ? 'true' : 'false';
+            db.prepare(`
+              INSERT INTO settings (key, value)
+              VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            `).run(key, value);
+          } catch (error) {
+            console.error('Error saving zip support setting:', error);
+          }
+        }
+      }
+    ]
+  };
 }
 
 function createApplicationMenu() {
@@ -719,7 +748,8 @@ function createApplicationMenu() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
-        }
+        },
+        createFileTypesMenu()
       ]
     },
     {
@@ -803,6 +833,25 @@ ipcMain.handle('open-file-dialog', async () => {
 
 // Update the calculateFileHash function to be more robust
 async function calculateFileHash(filePath) {
+  // Check if this is a file inside a zip archive
+  if (filePath.includes('.zip:')) {
+    const parts = filePath.split('.zip:');
+    if (parts.length === 2) {
+      const zipPath = parts[0] + '.zip';
+      const entryPath = parts[1];
+
+      try {
+        const entryData = await extractFileFromZip(zipPath, entryPath);
+        const hash = crypto.createHash('sha256');
+        hash.update(entryData);
+        return hash.digest('hex');
+      } catch (error) {
+        console.error(`Error calculating hash for zip entry ${filePath}:`, error);
+        throw error;
+      }
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
@@ -850,6 +899,19 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
+// Add this helper function for zip extraction
+async function extractFileFromZip(zipPath, entryPath) {
+  try {
+    const zip = new StreamZip.async({ file: zipPath });
+    const data = await zip.entryData(entryPath);
+    await zip.close();
+    return data;
+  } catch (error) {
+    console.error(`Error extracting file from zip ${zipPath}:`, error);
+    throw error;
+  }
+}
+
 // Update the removeNonExistentFiles function
 async function removeNonExistentFiles(scanDirectoryPath) {
   try {
@@ -891,6 +953,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
   try {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
+    const enableZipSupport = (await db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipSupport'))?.value === 'true';
     
     // First, remove any non-existent files from the scanned directory
     const removedCount = await removeNonExistentFiles(directoryPath);
@@ -907,8 +970,40 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         const fs = require('fs');
         const path = require('path');
         const crypto = require('crypto');
+        const StreamZip = require('node-stream-zip');
 
-        async function scanDirectory(directoryPath, maxFileSize) {
+        async function scanZipFile(zipPath, maxFileSize) {
+          const files = [];
+          try {
+            const zip = new StreamZip.async({ file: zipPath });
+            const entries = await zip.entries();
+
+            for (const entry of Object.values(entries)) {
+              if (!entry.isDirectory) {
+                const ext = path.extname(entry.name).toLowerCase();
+                if (ext === '.stl' || ext === '.3mf') {
+                  if (entry.size <= maxFileSize) {
+                    files.push({
+                      filePath: \`\${zipPath}:\${entry.name}\`,
+                      fileName: path.basename(entry.name),
+                      size: entry.size,
+                      mtime: entry.time ? new Date(entry.time) : new Date(),
+                      isZipArchive: true
+                    });
+                  }
+                }
+              }
+            }
+
+            await zip.close();
+          } catch (error) {
+            console.error(\`Error scanning ZIP file \${zipPath}:\`, error);
+          }
+
+          return files;
+        }
+
+        async function scanDirectory(directoryPath, maxFileSize, enableZipSupport) {
           const files = [];
           let totalFiles = 0;
           let processedFiles = 0;
@@ -956,6 +1051,16 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                   } catch (error) {
                     console.error(\`Error processing file \${fullPath}:\`, error);
                   }
+                } else if (enableZipSupport && ext === '.zip') {
+                  try {
+                    const stats = fs.statSync(fullPath);
+                    if (stats.size <= maxFileSize) {
+                      const zipFiles = await scanZipFile(fullPath, maxFileSize);
+                      files.push(...zipFiles);
+                    }
+                  } catch (error) {
+                    console.error(\`Error processing zip file \${fullPath}:\`, error);
+                  }
                 }
                 processedFiles++;
                 if (processedFiles % 100 === 0) {
@@ -971,9 +1076,9 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
           return { files, totalFiles: processedFiles };
         }
 
-        parentPort.on('message', async ({ directoryPath, maxFileSize }) => {
+        parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipSupport }) => {
           try {
-            const result = await scanDirectory(directoryPath, maxFileSize);
+            const result = await scanDirectory(directoryPath, maxFileSize, enableZipSupport);
             parentPort.postMessage({ type: 'done', result });
           } catch (error) {
             parentPort.postMessage({ type: 'error', error: error.message });
@@ -1043,7 +1148,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
       });
 
       // Start the worker
-      worker.postMessage({ directoryPath, maxFileSize });
+      worker.postMessage({ directoryPath, maxFileSize, enableZipSupport });
     });
   } catch (error) {
     console.error('Error in scan-directory handler:', error);
@@ -1228,8 +1333,13 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     }
 
     if (fileType) {
-      conditions.push(`lower(m.fileName) LIKE ?`);
-      params.push(`%.${fileType.toLowerCase()}`);
+      if (fileType === 'zip') {
+        conditions.push(`m.filePath LIKE ?`);
+        params.push('%.zip:%');
+      } else {
+        conditions.push(`lower(m.fileName) LIKE ?`);
+        params.push(`%.${fileType.toLowerCase()}`);
+      }
     }
 
     if (directory) {
@@ -1345,6 +1455,31 @@ ipcMain.handle('get-setting', async (event, key) => {
   } catch (error) {
     console.error('Error getting setting:', error);
     return null;
+  }
+});
+
+// Add handler for getting file data (for STL rendering from zip)
+ipcMain.handle('get-file-data', async (event, filePath) => {
+  try {
+    if (filePath.includes('.zip:')) {
+      const parts = filePath.split('.zip:');
+      if (parts.length === 2) {
+        const zipPath = parts[0] + '.zip';
+        const entryPath = parts[1];
+
+        const data = await extractFileFromZip(zipPath, entryPath);
+        // Convert buffer to base64 to send over IPC safely if needed,
+        // but Electron handles Buffers fine.
+        // However, Three.js loaders might expect ArrayBuffer.
+        // Node Buffer is Uint8Array, which should be fine.
+        return data;
+      }
+    } else {
+      return await fs.promises.readFile(filePath);
+    }
+  } catch (error) {
+    console.error('Error getting file data:', error);
+    throw error;
   }
 });
 
@@ -1909,8 +2044,159 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   if (filePaths.length === 1) {
     event.sender.send('select-model-by-filepath', filePaths[0]);
   }
+
+  // Check if all selected files are archived
+  const allArchived = filePaths.every(fp => fp.includes('.zip:'));
+
+  let menuItems;
+
+  if (allArchived) {
+    // Restricted context menu for archived models
+    menuItems = [
+      {
+        label: 'Open',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            // Extract to temp and open
+            const filePath = filePaths[0];
+            const parts = filePath.split('.zip:');
+            const zipPath = parts[0] + '.zip';
+            const entryPath = parts[1];
+
+            const tempDir = os.tmpdir();
+            const tempFilePath = path.join(tempDir, path.basename(entryPath));
+
+            const zip = new StreamZip.async({ file: zipPath });
+            await zip.extract(entryPath, tempFilePath);
+            await zip.close();
+
+            await shell.openPath(tempFilePath);
+          } catch (error) {
+            console.error('Error opening archived file:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open file',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Extract',
+        click: async () => {
+          const win = BrowserWindow.fromWebContents(event.sender);
+          const result = await dialog.showOpenDialog(win, {
+            title: 'Select Destination Folder',
+            properties: ['openDirectory']
+          });
+
+          if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+            const destFolder = result.filePaths[0];
+            let successCount = 0;
+            let errorCount = 0;
+
+            for (const filePath of filePaths) {
+              try {
+                const parts = filePath.split('.zip:');
+                const zipPath = parts[0] + '.zip';
+                const entryPath = parts[1];
+                const fileName = path.basename(entryPath);
+                const destPath = path.join(destFolder, fileName);
+
+                const zip = new StreamZip.async({ file: zipPath });
+                await zip.extract(entryPath, destPath);
+                await zip.close();
+                successCount++;
+              } catch (error) {
+                console.error(`Error extracting ${filePath}:`, error);
+                errorCount++;
+              }
+            }
+
+            if (errorCount > 0) {
+              await dialog.showMessageBox({
+                type: 'warning',
+                title: 'Extraction Complete',
+                message: `Extracted ${successCount} files. Failed to extract ${errorCount} files.`
+              });
+            } else {
+              await dialog.showMessageBox({
+                type: 'info',
+                title: 'Extraction Complete',
+                message: `Successfully extracted ${successCount} files.`
+              });
+            }
+          }
+        }
+      },
+      {
+        label: 'Open Directory',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            const filePath = filePaths[0];
+            const parts = filePath.split('.zip:');
+            const zipPath = parts[0] + '.zip';
+            await shell.showItemInFolder(zipPath);
+          } catch (error) {
+            console.error('Error opening directory:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open directory',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Remove from Library',
+        click: async () => {
+          const confirm = await dialog.showMessageBox({
+            type: 'warning',
+            title: 'Confirm Remove',
+            message: `Are you sure you want to remove ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${filePaths.join('\n')}`,
+            buttons: ['Yes', 'No'],
+            defaultId: 1,
+            cancelId: 1,
+          });
+          if (confirm.response === 0) { // User clicked "Yes"
+            try {
+              // Use a transaction to handle all removals
+              db.transaction(() => {
+                filePaths.forEach(fp => {
+                  const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
+                  if (model) {
+                    // First delete from model_tags (child table)
+                    db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+                    // Then delete from models (parent table)
+                    db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+                  }
+                });
+              })();
+
+              event.sender.send('refresh-grid');
+            } catch (error) {
+              console.error('Error removing from library:', error);
+              await dialog.showMessageBox({
+                type: 'error',
+                title: 'Error',
+                message: `An error occurred while removing from library: ${error.message}`
+              });
+            }
+          }
+        }
+      }
+    ];
+
+    const menu = Menu.buildFromTemplate(menuItems);
+    menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
+    return;
+  }
   
-  let menuItems = [
+  menuItems = [
     {
       label: 'Open File',
       enabled: filePaths.length === 1,
@@ -2369,19 +2655,39 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   try {
     console.log('Starting to process 3MF file:', filePath);
     
-    // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.error('File does not exist:', filePath);
-      return null;
+    // Check if file is in a zip archive
+    let data;
+    if (filePath.includes('.zip:')) {
+      const parts = filePath.split('.zip:');
+      if (parts.length === 2) {
+        const zipPath = parts[0] + '.zip';
+        const entryPath = parts[1];
+
+        console.log(`Extracting 3MF from zip archive: ${zipPath}, entry: ${entryPath}`);
+
+        try {
+          data = await extractFileFromZip(zipPath, entryPath);
+          console.log('Extracted 3MF data from zip archive, size:', data.length);
+        } catch (error) {
+          console.error(`Error extracting 3MF from zip:`, error);
+          return null;
+        }
+      }
+    } else {
+      // Check if file exists
+      if (!fs.existsSync(filePath)) {
+        console.error('File does not exist:', filePath);
+        return null;
+      }
+
+      console.log('Reading file data...');
+      data = await fs.promises.readFile(filePath);
+      console.log('File read successfully, size:', data.length, 'bytes');
     }
     
     // Use JSZip to extract the 3MF file (which is a zip file)
     console.log('Creating JSZip instance...');
     const zip = new JSZip();
-    
-    console.log('Reading file data...');
-    const data = await fs.promises.readFile(filePath);
-    console.log('File read successfully, size:', data.length, 'bytes');
     
     console.log('Loading zip contents...');
     const contents = await zip.loadAsync(data);
@@ -2454,7 +2760,27 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
 ipcMain.handle('get3MFSTL', async (event, filePath) => {
   try {
     const zip = new JSZip();
-    const data = await fs.promises.readFile(filePath);
+    let data;
+
+    if (filePath.includes('.zip:')) {
+      const parts = filePath.split('.zip:');
+      if (parts.length === 2) {
+        const zipPath = parts[0] + '.zip';
+        const entryPath = parts[1];
+
+        try {
+          data = await extractFileFromZip(zipPath, entryPath);
+        } catch (error) {
+          console.error(`Error extracting STL from zip:`, error);
+          return null;
+        }
+      }
+    } else {
+      data = await fs.promises.readFile(filePath);
+    }
+
+    if (!data) return null;
+
     const contents = await zip.loadAsync(data);
     
     // Look for STL files in the 3MF
@@ -3056,6 +3382,26 @@ ipcMain.handle('clear-and-save-slicers', async (event, slicers) => {
 
 ipcMain.handle('get-file-stats', async (event, filePath) => {
   try {
+    if (filePath.includes('.zip:')) {
+      const parts = filePath.split('.zip:');
+      if (parts.length === 2) {
+        const zipPath = parts[0] + '.zip';
+        const entryPath = parts[1];
+
+        const zip = new StreamZip.async({ file: zipPath });
+        const entry = await zip.entry(entryPath);
+        await zip.close();
+
+        if (entry) {
+          return {
+            size: entry.size,
+            mtime: entry.time ? new Date(entry.time) : new Date(),
+            isDirectory: () => false,
+            isFile: () => true
+          };
+        }
+      }
+    }
     const stats = await fs.promises.stat(filePath);
     return stats;
   } catch (error) {

@@ -144,6 +144,8 @@ contextBridge.exposeInMainWorld('electron', {
   clearAndSaveSlicers: (slicers) => ipcRenderer.invoke('clear-and-save-slicers', slicers),
   getAppVersion: () => version,
   getFileStats: (filePath) => ipcRenderer.invoke('get-file-stats', filePath),
+  getFileData: (filePath) => ipcRenderer.invoke('get-file-data', filePath),
+  isZipFile: (filePath) => filePath.includes('.zip:'),
   startTransaction: () => ipcRenderer.invoke('database:start-transaction'),
   commitTransaction: () => ipcRenderer.invoke('database:commit-transaction'),
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),
