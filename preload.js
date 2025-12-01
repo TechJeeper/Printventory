@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld('electron', {
   checkForUpdates: (isBeta) => ipcRenderer.invoke('check-for-updates', isBeta),
   openUpdatePage: (isBeta) => ipcRenderer.invoke('open-update-page', isBeta),
   onOpenSTLHome: (callback) => ipcRenderer.on('open-stl-home', callback),
+  onOpenFileTypeSettings: (callback) => ipcRenderer.on('open-file-type-settings', callback),
   send: (channel, data) => {
     // Optionally add a whitelist of channels if needed for security
     const validChannels = [

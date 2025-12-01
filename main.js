@@ -547,6 +547,10 @@ function createWindow() {
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
+        },
+        {
+          label: 'File Types',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
         }
       ]
     },
@@ -3057,6 +3061,10 @@ ipcMain.on('open-tag-manager', (event) => {
 
 ipcMain.on('start-print-roulette', (event) => {
   mainWindow.webContents.send('start-print-roulette');
+});
+
+ipcMain.on('open-file-type-settings', (event) => {
+  mainWindow.webContents.send('open-file-type-settings');
 });
 
 // Add this new IPC handler at the end to open external URLs using the system's default browser

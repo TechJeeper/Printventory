@@ -35,6 +35,20 @@ let renderQueue = [];
 let pendingThumbnails = new Set(); // Track files currently being rendered
 let activeRenders = 0;
 let isProcessingQueue = false;
+let isUserInteracting = false;
+let interactionTimeout;
+
+function handleUserInteraction() {
+  isUserInteracting = true;
+  clearTimeout(interactionTimeout);
+  interactionTimeout = setTimeout(() => {
+    isUserInteracting = false;
+  }, 300); // 300ms pause after interaction
+}
+
+['mousemove', 'mousedown', 'keydown', 'scroll', 'wheel'].forEach(event => {
+  window.addEventListener(event, handleUserInteraction, { passive: true });
+});
 
 // Add these at the top of the file
 let isScanCancelled = false;
@@ -2747,6 +2761,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     try {
       while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
+        if (isUserInteracting) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          continue;
+        }
+
         const task = renderQueue.shift();
         activeRenders++;
         
@@ -4142,6 +4161,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // File Type Settings Handler
+  window.electron.onOpenFileTypeSettings(async () => {
+    const dialog = document.getElementById('file-type-settings-dialog');
+    if (dialog) {
+      try {
+        const enableZipSupport = await window.electron.getSetting('enableZipSupport');
+        const checkbox = document.getElementById('enable-zip-support');
+        if (checkbox) {
+          checkbox.checked = enableZipSupport === 'true';
+        }
+        dialog.showModal();
+      } catch (error) {
+        console.error('Error loading file type settings:', error);
+      }
+    }
+  });
+
+  document.getElementById('file-type-settings-dialog')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const checkbox = document.getElementById('enable-zip-support');
+    const dialog = document.getElementById('file-type-settings-dialog');
+
+    try {
+      await window.electron.saveSetting('enableZipSupport', checkbox.checked ? 'true' : 'false');
+      dialog.close();
+      await window.electron.showMessage('Success', 'Settings saved. Changes will take effect on next scan.');
+    } catch (error) {
+      console.error('Error saving file type settings:', error);
+      await window.electron.showMessage('Error', 'Failed to save settings.');
+    }
+  });
+
+  document.getElementById('cancel-file-type-settings')?.addEventListener('click', () => {
+    document.getElementById('file-type-settings-dialog').close();
+  });
+
   // Modify the prompt handler
   async function promptPendingThumbnails() {
     try {
@@ -4809,9 +4864,80 @@ function toggleModelSelection(fileElement, filePath) {
 
 // Add helper functions before they're used
 async function loadModel(filePath) {
+  const fileExtension = filePath.split('.').pop().toLowerCase();
+
+  let loader;
+
+  if (fileExtension === 'stl') {
+    loader = new THREE.STLLoader();
+  } else if (fileExtension === '3mf') {
+    THREE.ThreeMFLoader.fflate = fflate;
+    loader = new THREE.ThreeMFLoader();
+  } else {
+    throw new Error(`Unsupported file type: ${fileExtension}`);
+  }
+
+  // Handle Zip Files
+  if (filePath.includes('.zip:')) {
+    try {
+      const fileData = await window.electron.getFileData(filePath);
+      if (!fileData) throw new Error('Failed to get file data from zip');
+
+      // Need to convert Node Buffer to ArrayBuffer for Three.js loaders
+      const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength);
+
+      return new Promise((resolve, reject) => {
+        try {
+          const object = loader.parse(arrayBuffer);
+
+          let mesh;
+          if (object.isBufferGeometry) {
+            const material = new THREE.MeshPhongMaterial({
+              color: 0xcccccc,
+              specular: 0x111111,
+              shininess: 200,
+              flatShading: true
+            });
+            object.computeVertexNormals();
+            mesh = new THREE.Mesh(object, material);
+            if (fileExtension === 'stl') {
+              mesh.rotation.x = -Math.PI / 2;
+            }
+          } else if (object.isObject3D) {
+            mesh = object;
+            // Preserve materials for 3MF
+            if (fileExtension !== '3mf') {
+              mesh.traverse((child) => {
+                if (child.isMesh) {
+                  child.material = new THREE.MeshPhongMaterial({
+                    color: 0xcccccc,
+                    specular: 0x111111,
+                    shininess: 200,
+                    flatShading: true
+                  });
+                }
+              });
+            }
+            if (fileExtension === '3mf') {
+              mesh.rotation.x = -Math.PI / 2;
+            }
+          } else {
+            reject(new Error('Unsupported object type'));
+            return;
+          }
+          resolve(mesh);
+        } catch (error) {
+          console.error('Error parsing zip content:', error);
+          reject(error);
+        }
+      });
+    } catch (error) {
+      console.error('Error loading from zip:', error);
+      throw error;
+    }
+  }
+
   return new Promise((resolve, reject) => {
-    const fileExtension = filePath.split('.').pop().toLowerCase();
-    
     // Properly encode the file path to handle special characters and Windows paths
     let encodedFilePath;
     
@@ -4832,18 +4958,6 @@ async function loadModel(filePath) {
     } else {
       // For non-Windows paths, use standard URL encoding
       encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
-    }
-    
-    let loader;
-    
-    if (fileExtension === 'stl') {
-      loader = new THREE.STLLoader();
-    } else if (fileExtension === '3mf') {
-      THREE.ThreeMFLoader.fflate = fflate;
-      loader = new THREE.ThreeMFLoader();
-    } else {
-      reject(new Error(`Unsupported file type: ${fileExtension}`));
-      return;
     }
 
     // Log the encoded path for debugging
@@ -5574,6 +5688,11 @@ async function processRenderQueue() {
   
   try {
     while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
+      if (isUserInteracting) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        continue;
+      }
+
       const task = renderQueue.shift();
       activeRenders++;
       
