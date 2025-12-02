@@ -2606,85 +2606,132 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Update the renderModelToPNG function to check file size before attempting to render
   async function renderModelToPNG(filePath, container, existingThumbnail) {
-    if (existingThumbnail) {
-      const img = document.createElement('img');
-      img.src = existingThumbnail;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return existingThumbnail;
+    // Simple mutex for renderModelToPNG to prevent race conditions with shared renderer
+    while (window.isRenderingLocked) {
+        await new Promise(resolve => setTimeout(resolve, 50));
     }
-
-    let renderer, scene, camera, canvas;
-    let model = null; // Declare model in outer scope
+    window.isRenderingLocked = true;
 
     try {
-      canvas = document.createElement('canvas');
-      canvas.width = 250;
-      canvas.height = 250;
-      
-      renderer = new THREE.WebGLRenderer({
-          antialias: false,
-          alpha: true,
-          canvas: canvas,
-          powerPreference: 'low-power',
-          precision: 'lowp',
-          setPixelRatio: .2,
-          setClearColor: 0x000000,
-      });
-      
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+        if (existingThumbnail) {
+            const img = document.createElement('img');
+            img.src = existingThumbnail;
+            img.style.width = '250px';
+            img.style.height = '250px';
+            container.innerHTML = '';
+            container.appendChild(img);
+            return existingThumbnail;
+        }
 
-      renderer.setClearColor(0x000000, 0);
-      
-      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-      directionalLight.position.set(1, 1, 1).normalize();
-      scene.add(ambientLight);
-      scene.add(directionalLight);
+        // Check for 3MF embedded image first
+        if (filePath.toLowerCase().endsWith('.3mf')) {
+            try {
+                const embeddedImage = await extract3MFThumbnail(filePath);
+                if (embeddedImage && embeddedImage.length > 0) {
+                    const imgUrl = Array.isArray(embeddedImage) ? embeddedImage[0] : embeddedImage;
+                    const img = document.createElement('img');
+                    img.src = imgUrl;
+                    img.style.width = '250px';
+                    img.style.height = '250px';
+                    container.innerHTML = '';
+                    container.appendChild(img);
+                    return imgUrl;
+                }
+            } catch (imageError) {
+                console.error('renderModelToPNG: Error checking for embedded image:', imageError);
+            }
+        }
 
-      // Use loadModel function which has proper path encoding handling
-      model = await loadModel(filePath);
-      if (!model) throw new Error('Failed to load model');
-      
-      scene.add(model);
-      fitCameraToObject(camera, model, scene, renderer);
-      renderer.render(scene, camera);
+        let scene, camera;
+        let model = null; // Declare model in outer scope
+        const sharedRendererInstance = getSharedRenderer();
 
-      const imgData = canvas.toDataURL('image/png');
+        try {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
 
-      const img = document.createElement('img');
-      img.src = imgData;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
+            sharedRendererInstance.setClearColor(0x000000, 0);
+            sharedRendererInstance.setSize(250, 250, false);
 
-      return imgData;
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(1, 1, 1).normalize();
+            scene.add(ambientLight);
+            scene.add(directionalLight);
 
-    } catch (error) {
-      console.error('Error rendering model:', error);
-      const img = document.createElement('img');
-      img.src = '3d.png';
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return '3d.png';
+            // Use loadModel function which has proper path encoding handling
+            model = await loadModel(filePath);
+            if (!model) throw new Error('Failed to load model');
+
+            scene.add(model);
+            fitCameraToObject(camera, model, scene, sharedRendererInstance);
+            sharedRendererInstance.render(scene, camera);
+
+            const imgData = sharedRendererInstance.domElement.toDataURL('image/png');
+
+            const img = document.createElement('img');
+            img.src = imgData;
+            img.style.width = '250px';
+            img.style.height = '250px';
+            container.innerHTML = '';
+            container.appendChild(img);
+
+            return imgData;
+
+        } catch (error) {
+            console.error('Error rendering model:', error);
+            const img = document.createElement('img');
+            img.src = '3d.png';
+            img.style.width = '250px';
+            img.style.height = '250px';
+            container.innerHTML = '';
+            container.appendChild(img);
+            return '3d.png';
+        } finally {
+            // Clean up THREE.js resources
+            if (scene) {
+                scene.traverse((object) => {
+                    if (object.geometry) {
+                        object.geometry.dispose();
+                        object.geometry = null;
+                    }
+                    if (object.material) {
+                        if (Array.isArray(object.material)) {
+                            object.material.forEach(material => {
+                                material.dispose();
+                                material = null;
+                            });
+                        } else {
+                            object.material.dispose();
+                            object.material = null;
+                        }
+                    }
+                });
+                scene.clear();
+                scene = null;
+            }
+
+            // Explicitly clean up the model
+            if (model) {
+                model.traverse(child => {
+                    if (child.geometry) {
+                        child.geometry.dispose();
+                        child.geometry = null;
+                    }
+                });
+                model = null;
+            }
+
+            // Reset renderer state but keep the instance
+            if (sharedRendererInstance) {
+                sharedRendererInstance.clear();
+            }
+
+            // Force garbage collection
+            if (typeof gc === 'function') gc();
+        }
     } finally {
-      // Cleanup code that uses model
-      if (model) {
-        model.traverse(child => {
-          if (child.geometry) {
-            child.geometry.dispose();
-            child.geometry = null;
-          }
-        });
-        model = null;
-      }
-      // ... rest of cleanup code ...
+        window.isRenderingLocked = false;
     }
   }
   
