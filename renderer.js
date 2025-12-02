@@ -1483,8 +1483,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderProgressText.textContent = `Processing models: ${progress.processed} / ${progress.total}`;
       });
 
-      // This function now handles both scanning and thumbnail generation
-      await scanAndRenderDirectory(directoryPath[0]);
+      // This function now handles scanning and returns files needing thumbnails
+      const filesNeedingThumbnails = await scanAndRenderDirectory(directoryPath[0]);
 
       // Update UI after scan completes
       await populateDesignerDropdown();
@@ -1504,6 +1504,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       // Update counts
       await updateModelCounts(allModels.length);
+
+      // Trigger background thumbnail generation if needed
+      if (filesNeedingThumbnails && filesNeedingThumbnails.length > 0) {
+        generateThumbnailsBackground(filesNeedingThumbnails);
+      }
 
     } catch (error) {
       console.error('Error scanning directory:', error);
@@ -5115,6 +5120,36 @@ function hideProgressBars() {
   progressSection.classList.add('hidden');
 }
 
+// Add this new function at the top level, before scanAndRenderDirectory
+async function generateThumbnailsBackground(files) {
+  console.log(`Starting background thumbnail generation for ${files.length} files`);
+
+  for (const file of files) {
+    // Check for cancellation (using isScanCancelled might be tricky if it's reset, maybe introduce isThumbGenCancelled)
+    if (isScanCancelled) {
+      console.log('Background thumbnail generation cancelled');
+      break;
+    }
+
+    // Check for user interaction to be non-intrusive
+    while (isUserInteracting) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    try {
+        // We can use the generateThumbnail helper which uses renderQueue
+        // and handles 3MF embedded images internally via renderModelToPNG
+        await generateThumbnail(file.filePath);
+    } catch (e) {
+        console.error('Error generating thumbnail in background:', e);
+    }
+
+    // Small delay to keep UI responsive
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  console.log('Background thumbnail generation complete');
+}
+
 // Update function signature to include background parameter
 async function scanAndRenderDirectory(directoryPath, background = false) {
   const progressSection = document.getElementById('progress-section');
@@ -5238,103 +5273,6 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       container.innerHTML = '';
     }
 
-    if (filesNeedingThumbnails.length > 0) {
-      let completedThumbnails = 0;
-      const thumbnailProgressUpdate = (completed) => {
-        if (!background) {
-          const progress = (completed / filesNeedingThumbnails.length) * 100;
-          renderProgressBar.style.width = `${progress}%`;
-          renderProgressText.textContent = `${completed} / ${filesNeedingThumbnails.length} models`;
-        }
-      };
-
-      // Improved thumbnail generation with concurrency control and cancellation
-      const maxConcurrentThumbnails = 5; // Increased from 1 for better performance
-      const thumbnailQueue = [...filesNeedingThumbnails];
-      const activePromises = new Set();
-      
-      while (thumbnailQueue.length > 0 && !isCancelled) {
-        // Fill up to max concurrent thumbnails
-        while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0) {
-          const file = thumbnailQueue.shift();
-          
-          const promise = (async () => {
-            try {
-              if (existingThumbnails.has(file.filePath)) {
-                console.log(`Thumbnail found for ${file.filePath} in database. Skipping render.`);
-                return;
-              }
-              
-              // Add code to actually render the thumbnail
-              // Use the same thumbnail generation code that's in renderFile
-              const fileExtension = file.filePath.split('.').pop().toLowerCase();
-              let thumbnail = null;
-              
-              if (fileExtension === '3mf') {
-                try {
-                  const images = await window.electron.get3MFImages(file.filePath);
-                  if (images && images.length > 0) {
-                    thumbnail = images;
-                    await window.electron.saveThumbnail(file.filePath, thumbnail);
-                  }
-                } catch (imageError) {
-                  console.error('Error checking for embedded image:', imageError);
-                }
-              }
-              
-              if (!thumbnail) {
-                thumbnail = await new Promise((resolve, reject) => {
-                  renderQueue.push({
-                    filePath: file.filePath,
-                    container: document.createElement('div'), // Dummy container
-                    existingThumbnail: null,
-                    resolve,
-                    reject
-                  });
-                  processRenderQueue();
-                });
-                
-                if (thumbnail) {
-                  await window.electron.saveThumbnail(file.filePath, thumbnail);
-                }
-              }
-            } catch (error) {
-              console.error('Error caching thumbnail:', error);
-            } finally {
-              if (!existingThumbnails.has(file.filePath)) {
-                completedThumbnails++;
-                thumbnailProgressUpdate(completedThumbnails);
-              }
-              activePromises.delete(promise);
-            }
-          })();
-          
-          activePromises.add(promise);
-        }
-        
-        // Wait for at least one promise to complete before continuing
-        if (activePromises.size > 0) {
-          await Promise.race(Array.from(activePromises));
-        }
-        
-        // Check for cancellation after each batch
-        if (isCancelled) {
-          console.log('Thumbnail generation cancelled, stopping process');
-          break;
-        }
-      }
-      
-      // Wait for any remaining active promises to complete
-      if (activePromises.size > 0) {
-        await Promise.all(Array.from(activePromises));
-      }
-    } else {
-      if (!background) {
-        renderProgressBar.style.width = '100%';
-        renderProgressText.textContent = 'All thumbnails up to date';
-      }
-    }
-    
     // Update additional UI components only if not in background mode
     if (!background) {
 
@@ -5346,6 +5284,8 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       const finalModels = await window.electron.getAllModels();
       await updateModelCounts(finalModels.length);
     }
+
+    return filesNeedingThumbnails;
   } catch (error) {
     console.error('Error scanning directory:', error);
     if (!background) {
