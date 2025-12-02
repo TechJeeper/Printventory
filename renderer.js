@@ -2858,20 +2858,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('loadModel: Starting for file:', filePath);
       const fileExtension = filePath.split('.').pop().toLowerCase();
       
-      // For 3MF files, try to extract embedded image first
-      if (fileExtension === '3mf') {
-        console.log('loadModel: Checking for embedded images in 3MF');
-        try {
-          const embeddedImage = await extract3MFThumbnail(filePath);
-          if (embeddedImage) {
-            console.log('loadModel: Found embedded image, using that instead of 3D rendering');
-            return null; // This will trigger the fallback to use the embedded image
-          }
-        } catch (imageError) {
-          console.error('loadModel: Error checking for embedded image:', imageError);
-        }
-      }
-      
       // Properly encode the file path to handle special characters and Windows paths
       let encodedFilePath;
       
@@ -5760,6 +5746,25 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     return existingThumbnail;
   }
 
+    // Check for 3MF embedded image first
+    if (filePath.toLowerCase().endsWith('.3mf')) {
+      try {
+        const embeddedImage = await extract3MFThumbnail(filePath);
+        if (embeddedImage && embeddedImage.length > 0) {
+          const imgUrl = Array.isArray(embeddedImage) ? embeddedImage[0] : embeddedImage;
+          const img = document.createElement('img');
+          img.src = imgUrl;
+          img.style.width = '250px';
+          img.style.height = '250px';
+          container.innerHTML = '';
+          container.appendChild(img);
+          return imgUrl;
+        }
+      } catch (imageError) {
+        console.error('renderModelToPNG: Error checking for embedded image:', imageError);
+      }
+    }
+
   let renderer, scene, camera, canvas;
   let model = null; // Declare model in outer scope
 
@@ -7610,44 +7615,69 @@ function createModelItem(model) {
     // Add loading class if needed
     thumbnailContainer.appendChild(img);
 
-    // Queue thumbnail generation if not already pending
-    if (!pendingThumbnails.has(model.filePath)) {
-      pendingThumbnails.add(model.filePath);
-
-      renderQueue.push({
-        filePath: model.filePath,
-        container: thumbnailContainer,
-        resolve: async (thumbnail) => {
-          // Update model in memory
-          model.thumbnail = thumbnail;
-          // Remove from pending set
-          pendingThumbnails.delete(model.filePath);
-          // Save to database
-          await window.electron.saveThumbnail(model.filePath, thumbnail);
-
-          // Try to update any visible instances of this file in the DOM
-          try {
-            const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
-            if (visibleItem) {
-               const img = document.createElement('img');
-               img.src = thumbnail;
-               img.style.width = '250px';
-               img.style.height = '250px';
-               visibleItem.innerHTML = '';
-               visibleItem.appendChild(img);
+    if (model.hasThumbnail) {
+      if (!pendingThumbnails.has(model.filePath)) {
+        pendingThumbnails.add(model.filePath);
+        window.electron.getThumbnail(model.filePath).then((thumbnail) => {
+          if (thumbnail) {
+            model.thumbnail = thumbnail;
+            const item = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
+            if (item) {
+              const img = document.createElement('img');
+              img.src = thumbnail;
+              img.style.width = '250px';
+              img.style.height = '250px';
+              item.innerHTML = '';
+              item.appendChild(img);
             }
-          } catch (e) {
-            console.error('Error updating visible thumbnail:', e);
           }
-        },
-        reject: (error) => {
-          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
           pendingThumbnails.delete(model.filePath);
-        }
-      });
+        }).catch(err => {
+          console.error('Error fetching thumbnail:', err);
+          pendingThumbnails.delete(model.filePath);
+        });
+      }
+    } else {
+      // Queue thumbnail generation if not already pending
+      if (!pendingThumbnails.has(model.filePath)) {
+        pendingThumbnails.add(model.filePath);
 
-      // Trigger queue processing
-      processRenderQueue();
+        renderQueue.push({
+          filePath: model.filePath,
+          container: thumbnailContainer,
+          resolve: async (thumbnail) => {
+            // Update model in memory
+            model.thumbnail = thumbnail;
+            model.hasThumbnail = 1;
+            // Remove from pending set
+            pendingThumbnails.delete(model.filePath);
+            // Save to database
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+
+            // Try to update any visible instances of this file in the DOM
+            try {
+              const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
+              if (visibleItem) {
+                const img = document.createElement('img');
+                img.src = thumbnail;
+                img.style.width = '250px';
+                img.style.height = '250px';
+                visibleItem.innerHTML = '';
+                visibleItem.appendChild(img);
+              }
+            } catch (e) {
+              console.error('Error updating visible thumbnail:', e);
+            }
+          },
+          reject: (error) => {
+            console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
+            pendingThumbnails.delete(model.filePath);
+          }
+        });
+
+        // Trigger queue processing
+        processRenderQueue();
+      }
     }
   }
 
