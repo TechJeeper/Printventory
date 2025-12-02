@@ -2412,8 +2412,12 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   try {
     console.log('Starting to process 3MF file:', filePath);
     
-    // Check if file is in a zip archive
+    let zip;
     let data;
+
+    // Handle nested zip scenario (3MF inside a Zip) - still need to extract it first
+    // Note: StreamZip doesn't support reading from a buffer, so for nested zips we still use JSZip for now
+    // or we'd need to write to a temp file.
     if (filePath.includes('.zip:')) {
       const parts = filePath.split('.zip:');
       if (parts.length === 2) {
@@ -2425,91 +2429,126 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
         try {
           data = await extractFileFromZip(zipPath, entryPath);
           console.log('Extracted 3MF data from zip archive, size:', data.length);
+
+          // Fallback to JSZip for in-memory buffer processing (nested zip case)
+          console.log('Using JSZip for in-memory buffer...');
+          const jsZip = new JSZip();
+          const contents = await jsZip.loadAsync(data);
+
+          // Logic for JSZip (same as before but restricted to this block)
+          // Look for plate_1.png in the Metadata directory
+          const possiblePaths = [
+            'Metadata/plate_1.png', 'metadata/plate_1.png',
+            'Metadata/thumbnail.png', 'metadata/thumbnail.png'
+          ];
+
+          for (const p of possiblePaths) {
+            const file = contents.file(p) || contents.file(p.replace('/', '\\'));
+            if (file) {
+              const imageData = await file.async('base64');
+              return [`data:image/png;base64,${imageData}`];
+            }
+          }
+
+          // Fallback search
+          const imageFiles = [];
+          contents.forEach((relativePath, file) => {
+             if (relativePath.match(/\.png$/i)) {
+                 imageFiles.push({ path: relativePath, file: file });
+             }
+          });
+
+          // Prioritize Metadata
+          imageFiles.sort((a, b) => {
+              const aMeta = a.path.toLowerCase().includes('metadata');
+              const bMeta = b.path.toLowerCase().includes('metadata');
+              if (aMeta && !bMeta) return -1;
+              if (!aMeta && bMeta) return 1;
+              return 0;
+          });
+
+          if (imageFiles.length > 0) {
+              const imageData = await imageFiles[0].file.async('base64');
+              return [`data:image/png;base64,${imageData}`];
+          }
+          return null;
+
         } catch (error) {
           console.error(`Error extracting 3MF from zip:`, error);
           return null;
         }
       }
-    } else {
-      // Check if file exists
-      if (!fs.existsSync(filePath)) {
+    }
+
+    // Standard file on disk - Use StreamZip for efficiency
+    if (!fs.existsSync(filePath)) {
         console.error('File does not exist:', filePath);
         return null;
-      }
-
-      console.log('Reading file data...');
-      data = await fs.promises.readFile(filePath);
-      console.log('File read successfully, size:', data.length, 'bytes');
-    }
-    
-    // Use JSZip to extract the 3MF file (which is a zip file)
-    console.log('Creating JSZip instance...');
-    const zip = new JSZip();
-    
-    console.log('Loading zip contents...');
-    const contents = await zip.loadAsync(data);
-    console.log('Zip contents loaded successfully');
-    
-    // Log all files in the 3MF
-    console.log('\nContents of 3MF file:', filePath);
-    console.log('Number of files in archive:', Object.keys(contents.files).length);
-    console.log('All files in archive:');
-    Object.keys(contents.files).forEach(filename => {
-      const file = contents.files[filename];
-      console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
-    });
-    
-    // Look for plate_1.png in the Metadata directory, trying different case variations
-    const possiblePaths = [
-      'Metadata/plate_1.png',
-      'metadata/plate_1.png',
-      '/Metadata/plate_1.png',
-      '/metadata/plate_1.png'
-    ];
-
-    // Try each possible path
-    console.log('\nSearching for plate_1.png...');
-    for (const path of possiblePaths) {
-      console.log('Checking for:', path);
-      const plateImage = contents.files[path];
-      if (plateImage) {
-        console.log('Found plate_1.png at:', path);
-        const imageData = await plateImage.async('base64');
-        console.log('Successfully extracted plate_1.png data');
-        return [`data:image/png;base64,${imageData}`];
-      }
-    }
-    
-    // If plate_1.png wasn't found, look for any images in the Metadata directory first
-    console.log('\nLooking for any images in Metadata directory...');
-    const imageFiles = [];
-    for (const [path, file] of Object.entries(contents.files)) {
-      // Check if file is in Metadata directory first
-      if (path.toLowerCase().includes('metadata/') && path.match(/\.(png|jpe?g|gif)$/i)) {
-        console.log('Found image in Metadata:', path);
-        const imageData = await file.async('base64');
-        imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
-      }
     }
 
-    // If no images found in Metadata, look elsewhere in the 3MF
-    if (imageFiles.length === 0) {
-      console.log('\nLooking for images anywhere in 3MF...');
-      for (const [path, file] of Object.entries(contents.files)) {
-        if (path.match(/\.(png|jpe?g|gif)$/i)) {
-          console.log('Found image:', path);
-          const imageData = await file.async('base64');
-          imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
+    zip = new StreamZip.async({ file: filePath });
+    
+    try {
+        const entries = await zip.entries();
+        const entryNames = Object.keys(entries);
+
+        // Priority list for thumbnails
+        const thumbnailCandidates = [
+            'Metadata/plate_1.png',
+            'metadata/plate_1.png',
+            'Metadata/thumbnail.png',
+            'metadata/thumbnail.png'
+        ];
+
+        let targetEntry = null;
+
+        // Check for preferred thumbnails
+        for (const candidate of thumbnailCandidates) {
+            // Check direct match
+            if (entries[candidate]) {
+                targetEntry = candidate;
+                break;
+            }
+            // Check Windows style path match
+            const winCandidate = candidate.replace(/\//g, '\\');
+            if (entries[winCandidate]) {
+                targetEntry = winCandidate;
+                break;
+            }
         }
-      }
+
+        // If no standard thumbnail found, search for any png in Metadata
+        if (!targetEntry) {
+            const metadataPng = entryNames.find(name =>
+                name.toLowerCase().includes('metadata') && name.toLowerCase().endsWith('.png')
+            );
+            if (metadataPng) targetEntry = metadataPng;
+        }
+
+        // If still nothing, look for any png (often in other folders)
+        if (!targetEntry) {
+             const anyPng = entryNames.find(name => name.toLowerCase().endsWith('.png'));
+             if (anyPng) targetEntry = anyPng;
+        }
+
+        if (targetEntry) {
+            console.log('Found 3MF thumbnail:', targetEntry);
+            const data = await zip.entryData(targetEntry);
+            await zip.close();
+            return [`data:image/png;base64,${data.toString('base64')}`];
+        }
+
+        await zip.close();
+        return null;
+
+    } catch (err) {
+        console.error('Error processing 3MF with StreamZip:', err);
+        if (zip) await zip.close();
+        return null;
     }
-    
-    console.log('\nFound total images:', imageFiles.length);
-    return imageFiles;
+
   } catch (error) {
     console.error('Error reading 3MF images:', error);
-    console.error('Error details:', error.message);
-    console.error('Error stack:', error.stack);
     return null;
   }
 });

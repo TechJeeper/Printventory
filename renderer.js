@@ -2858,20 +2858,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('loadModel: Starting for file:', filePath);
       const fileExtension = filePath.split('.').pop().toLowerCase();
       
-      // For 3MF files, try to extract embedded image first
-      if (fileExtension === '3mf') {
-        console.log('loadModel: Checking for embedded images in 3MF');
-        try {
-          const embeddedImage = await extract3MFThumbnail(filePath);
-          if (embeddedImage) {
-            console.log('loadModel: Found embedded image, using that instead of 3D rendering');
-            return null; // This will trigger the fallback to use the embedded image
-          }
-        } catch (imageError) {
-          console.error('loadModel: Error checking for embedded image:', imageError);
-        }
-      }
-      
       // Properly encode the file path to handle special characters and Windows paths
       let encodedFilePath;
       
@@ -5759,6 +5745,25 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     container.appendChild(img);
     return existingThumbnail;
   }
+
+    // Check for 3MF embedded image first
+    if (filePath.toLowerCase().endsWith('.3mf')) {
+      try {
+        const embeddedImage = await extract3MFThumbnail(filePath);
+        if (embeddedImage && embeddedImage.length > 0) {
+          const imgUrl = Array.isArray(embeddedImage) ? embeddedImage[0] : embeddedImage;
+          const img = document.createElement('img');
+          img.src = imgUrl;
+          img.style.width = '250px';
+          img.style.height = '250px';
+          container.innerHTML = '';
+          container.appendChild(img);
+          return imgUrl;
+        }
+      } catch (imageError) {
+        console.error('renderModelToPNG: Error checking for embedded image:', imageError);
+      }
+    }
 
   let renderer, scene, camera, canvas;
   let model = null; // Declare model in outer scope
