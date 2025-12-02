@@ -7610,44 +7610,69 @@ function createModelItem(model) {
     // Add loading class if needed
     thumbnailContainer.appendChild(img);
 
-    // Queue thumbnail generation if not already pending
-    if (!pendingThumbnails.has(model.filePath)) {
-      pendingThumbnails.add(model.filePath);
-
-      renderQueue.push({
-        filePath: model.filePath,
-        container: thumbnailContainer,
-        resolve: async (thumbnail) => {
-          // Update model in memory
-          model.thumbnail = thumbnail;
-          // Remove from pending set
-          pendingThumbnails.delete(model.filePath);
-          // Save to database
-          await window.electron.saveThumbnail(model.filePath, thumbnail);
-
-          // Try to update any visible instances of this file in the DOM
-          try {
-            const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
-            if (visibleItem) {
-               const img = document.createElement('img');
-               img.src = thumbnail;
-               img.style.width = '250px';
-               img.style.height = '250px';
-               visibleItem.innerHTML = '';
-               visibleItem.appendChild(img);
+    if (model.hasThumbnail) {
+      if (!pendingThumbnails.has(model.filePath)) {
+        pendingThumbnails.add(model.filePath);
+        window.electron.getThumbnail(model.filePath).then((thumbnail) => {
+          if (thumbnail) {
+            model.thumbnail = thumbnail;
+            const item = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
+            if (item) {
+              const img = document.createElement('img');
+              img.src = thumbnail;
+              img.style.width = '250px';
+              img.style.height = '250px';
+              item.innerHTML = '';
+              item.appendChild(img);
             }
-          } catch (e) {
-            console.error('Error updating visible thumbnail:', e);
           }
-        },
-        reject: (error) => {
-          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
           pendingThumbnails.delete(model.filePath);
-        }
-      });
+        }).catch(err => {
+          console.error('Error fetching thumbnail:', err);
+          pendingThumbnails.delete(model.filePath);
+        });
+      }
+    } else {
+      // Queue thumbnail generation if not already pending
+      if (!pendingThumbnails.has(model.filePath)) {
+        pendingThumbnails.add(model.filePath);
 
-      // Trigger queue processing
-      processRenderQueue();
+        renderQueue.push({
+          filePath: model.filePath,
+          container: thumbnailContainer,
+          resolve: async (thumbnail) => {
+            // Update model in memory
+            model.thumbnail = thumbnail;
+            model.hasThumbnail = 1;
+            // Remove from pending set
+            pendingThumbnails.delete(model.filePath);
+            // Save to database
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+
+            // Try to update any visible instances of this file in the DOM
+            try {
+              const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
+              if (visibleItem) {
+                const img = document.createElement('img');
+                img.src = thumbnail;
+                img.style.width = '250px';
+                img.style.height = '250px';
+                visibleItem.innerHTML = '';
+                visibleItem.appendChild(img);
+              }
+            } catch (e) {
+              console.error('Error updating visible thumbnail:', e);
+            }
+          },
+          reject: (error) => {
+            console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
+            pendingThumbnails.delete(model.filePath);
+          }
+        });
+
+        // Trigger queue processing
+        processRenderQueue();
+      }
     }
   }
 

@@ -11,6 +11,8 @@ const https = require('https');
 const ua = require('universal-analytics');
 const StreamZip = require('node-stream-zip');
 
+const MODEL_LIST_COLUMNS = `id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, (thumbnail IS NOT NULL AND thumbnail != '') as hasThumbnail`;
+
 // Create an analytics wrapper for GA4
 const analytics = {
   // Generate a session ID when the app starts
@@ -1119,9 +1121,9 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
     let models;
     if (limit === 0) {
       // When limit is 0, load all models without a limit
-      models = db.prepare(`SELECT * FROM models ${orderClause}`).all();
+      models = db.prepare(`SELECT ${MODEL_LIST_COLUMNS} FROM models ${orderClause}`).all();
     } else {
-      models = db.prepare(`SELECT * FROM models ${orderClause} LIMIT ?`).all(limit);
+      models = db.prepare(`SELECT ${MODEL_LIST_COLUMNS} FROM models ${orderClause} LIMIT ?`).all(limit);
     }
     return models;
   } catch (error) {
@@ -1146,7 +1148,8 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
       directory
     } = filters;
 
-    let query = `SELECT DISTINCT m.* FROM models m`;
+    const columns = `m.id, m.filePath, m.fileName, m.designer, m.source, m.notes, m.printed, m.parentModel, m.hash, m.size, m.license, m.modifiedDate, (m.thumbnail IS NOT NULL AND m.thumbnail != '') as hasThumbnail`;
+    let query = `SELECT DISTINCT ${columns} FROM models m`;
     const params = [];
     const conditions = [];
 
@@ -2970,7 +2973,7 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-    const models = db.prepare('SELECT * FROM models WHERE filePath LIKE ?').all(`${directoryPath}%`);
+    const models = db.prepare(`SELECT ${MODEL_LIST_COLUMNS} FROM models WHERE filePath LIKE ?`).all(`${directoryPath}%`);
     return models;
   } catch (error) {
     console.error('Error fetching models by directory:', error);
@@ -2983,7 +2986,7 @@ ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) 
   try {
     const offset = (page - 1) * pageSize;
     const models = db.prepare(
-      `SELECT * FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
+      `SELECT ${MODEL_LIST_COLUMNS} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);
     return models;
   } catch (error) {
