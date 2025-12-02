@@ -2543,7 +2543,11 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
 
     } catch (err) {
         console.error('Error processing 3MF with StreamZip:', err);
-        if (zip) await zip.close();
+        try {
+            if (zip) await zip.close();
+        } catch (closeErr) {
+            console.error('Error closing zip:', closeErr);
+        }
         return null;
     }
 
