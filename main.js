@@ -375,6 +375,7 @@ function initializeDatabase() {
     db.exec('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_models_modifiedDate ON models(modifiedDate)');
     
     // Repair model_tags table to fix any foreign key issues
     repairModelTagsTable();
@@ -894,6 +895,21 @@ async function extractFileFromZip(zipPath, entryPath) {
   }
 }
 
+// Helper function to delete model data from database
+function deleteModelData(modelId) {
+  try {
+    // First delete from model_tags (child table)
+    db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
+
+    // Then delete from models (parent table)
+    db.prepare('DELETE FROM models WHERE id = ?').run(modelId);
+    return true;
+  } catch (error) {
+    console.error(`Error deleting model data for id ${modelId}:`, error);
+    throw error;
+  }
+}
+
 // Update the removeNonExistentFiles function
 async function removeNonExistentFiles(scanDirectoryPath) {
   try {
@@ -907,12 +923,7 @@ async function removeNonExistentFiles(scanDirectoryPath) {
         const normalizedFilePath = normalizePath(model.filePath);
         if (normalizedFilePath.startsWith(normalizedScanPath)) {
           if (!fs.existsSync(model.filePath)) {
-            // First delete from model_tags (child table)
-            db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-            
-            // Then delete from models (parent table)
-            db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
-            
+            deleteModelData(model.id);
             removedCount++;
           }
         }
@@ -1618,8 +1629,11 @@ ipcMain.handle('trash-file', async (event, filePath) => {
     // If trash succeeds, remove from database
     await new Promise((resolve, reject) => {
       console.log('Deleting from database:', normalizedPath);
-      db.prepare('DELETE FROM models WHERE filePath = ?').run(normalizedPath);
-          resolve();
+      const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(normalizedPath);
+      if (model) {
+        deleteModelData(model.id);
+      }
+      resolve();
     });
     
     return true;
@@ -1926,10 +1940,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                 filePaths.forEach(fp => {
                   const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
                   if (model) {
-                    // First delete from model_tags (child table)
-                    db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-                    // Then delete from models (parent table)
-                    db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+                    deleteModelData(model.id);
                   }
                 });
               })();
@@ -2237,10 +2248,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               filePaths.forEach(fp => {
                 const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
                 if (model) {
-                  // First delete from model_tags (child table)
-                  db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-                  // Then delete from models (parent table)
-                  db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+                  deleteModelData(model.id);
                 }
               });
             })();
@@ -2309,11 +2317,7 @@ async function deleteFile(filePath) {
       // Get the model ID first
       const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePath);
       if (model) {
-        // First delete from model_tags (child table)
-        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-        
-        // Then delete from models (parent table)
-        db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+        deleteModelData(model.id);
       }
     })();
     
