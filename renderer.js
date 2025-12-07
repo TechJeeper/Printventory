@@ -69,6 +69,7 @@ let generatedThumbnailsCount = 0;
 // Add WebGL context management variables
 let sharedScene = null;
 let sharedCamera = null;
+let sharedCanvas = null;
 let contextUseCount = 0;
 const MAX_CONTEXT_USES = 20; // Reset context after this many uses
 const MAX_CONTEXT_REUSE_COUNT = 100; // Add this missing constant
@@ -97,6 +98,198 @@ async function updateModelCounts(viewCount) {
 }
 
 // Add this new function to update individual model elements
+function getSharedRenderer() {
+    if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
+      // Clean up existing resources before creating new ones
+      if (sharedRenderer) {
+        sharedRenderer.dispose();
+        sharedRenderer.forceContextLoss();
+        sharedRenderer = null;
+      }
+      if (sharedCanvas) {
+        sharedCanvas.remove();
+        sharedCanvas = null;
+      }
+
+      // Create new canvas and renderer
+      sharedCanvas = document.createElement('canvas');
+      sharedCanvas.width = 250;
+      sharedCanvas.height = 250;
+
+      sharedRenderer = new THREE.WebGLRenderer({
+        antialias: false,
+        alpha: true,
+        canvas: sharedCanvas,
+        powerPreference: 'low-power',
+        preserveDrawingBuffer: true // Add this for better context management
+      });
+
+      contextUseCount = 0;
+
+      // Add context loss handler
+      sharedCanvas.addEventListener('webglcontextlost', (event) => {
+        event.preventDefault();
+        sharedRenderer.dispose();
+        sharedRenderer = null;
+        sharedCanvas = null;
+      }, false);
+    }
+    contextUseCount++;
+    return sharedRenderer;
+  }
+
+  async function extract3MFThumbnail(filePath) {
+    try {
+      const images = await window.electron.get3MFImages(filePath);
+      return images && images.length > 0? images: null; // Concise return
+    } catch (error) {
+      console.error('extract3MFThumbnail error:', error);
+      // Consider re-throwing the error if you want the calling function to handle it:
+      // throw error;
+      return null; // Or return null to indicate failure
+    }
+  }
+
+  async function extract3MFSTL(filePath) {
+    try {
+      return await window.electron.get3MFSTL(filePath); // Direct return
+    } catch (error) {
+      console.error('extract3MFSTL error:', error);
+      // throw error;  // Same consideration as above
+      return null;
+    }
+  }
+
+  // Update the renderModelToPNG function to check file size before attempting to render
+  async function renderModelToPNG(filePath, container, existingThumbnail) {
+    // Simple mutex for renderModelToPNG to prevent race conditions with shared renderer
+    while (window.isRenderingLocked) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    window.isRenderingLocked = true;
+
+    try {
+        if (existingThumbnail) {
+            const img = document.createElement('img');
+            img.src = existingThumbnail;
+            img.style.width = '250px';
+            img.style.height = '250px';
+            container.innerHTML = '';
+            container.appendChild(img);
+            return existingThumbnail;
+        }
+
+        // Check for 3MF embedded image first
+        if (filePath.toLowerCase().endsWith('.3mf')) {
+            try {
+                const embeddedImage = await extract3MFThumbnail(filePath);
+                if (embeddedImage && embeddedImage.length > 0) {
+                    const imgUrl = Array.isArray(embeddedImage) ? embeddedImage[0] : embeddedImage;
+                    const img = document.createElement('img');
+                    img.src = imgUrl;
+                    img.style.width = '250px';
+                    img.style.height = '250px';
+                    container.innerHTML = '';
+                    container.appendChild(img);
+                    return imgUrl;
+                }
+            } catch (imageError) {
+                console.error('renderModelToPNG: Error checking for embedded image:', imageError);
+            }
+        }
+
+        let scene, camera;
+        let model = null; // Declare model in outer scope
+        const sharedRendererInstance = getSharedRenderer();
+
+        try {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+
+            sharedRendererInstance.setClearColor(0x000000, 0);
+            sharedRendererInstance.setSize(250, 250, false);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(1, 1, 1).normalize();
+            scene.add(ambientLight);
+            scene.add(directionalLight);
+
+            // Use loadModel function which has proper path encoding handling
+            model = await loadModel(filePath);
+            if (!model) throw new Error('Failed to load model');
+
+            scene.add(model);
+            fitCameraToObject(camera, model, scene, sharedRendererInstance);
+            sharedRendererInstance.render(scene, camera);
+
+            const imgData = sharedRendererInstance.domElement.toDataURL('image/png');
+
+            const img = document.createElement('img');
+            img.src = imgData;
+            img.style.width = '250px';
+            img.style.height = '250px';
+            container.innerHTML = '';
+            container.appendChild(img);
+
+            return imgData;
+
+        } catch (error) {
+            console.error('Error rendering model:', error);
+            const img = document.createElement('img');
+            img.src = '3d.png';
+            img.style.width = '250px';
+            img.style.height = '250px';
+            container.innerHTML = '';
+            container.appendChild(img);
+            return '3d.png';
+        } finally {
+            // Clean up THREE.js resources
+            if (scene) {
+                scene.traverse((object) => {
+                    if (object.geometry) {
+                        object.geometry.dispose();
+                        object.geometry = null;
+                    }
+                    if (object.material) {
+                        if (Array.isArray(object.material)) {
+                            object.material.forEach(material => {
+                                material.dispose();
+                                material = null;
+                            });
+                        } else {
+                            object.material.dispose();
+                            object.material = null;
+                        }
+                    }
+                });
+                scene.clear();
+                scene = null;
+            }
+
+            // Explicitly clean up the model
+            if (model) {
+                model.traverse(child => {
+                    if (child.geometry) {
+                        child.geometry.dispose();
+                        child.geometry = null;
+                    }
+                });
+                model = null;
+            }
+
+            // Reset renderer state but keep the instance
+            if (sharedRendererInstance) {
+                sharedRendererInstance.clear();
+            }
+
+            // Force garbage collection
+            if (typeof gc === 'function') gc();
+        }
+    } finally {
+        window.isRenderingLocked = false;
+    }
+  }
 async function updateModelElement(filePath) {
   try {
     const model = await window.electron.getModel(filePath);
@@ -113,6 +306,758 @@ async function updateModelElement(filePath) {
     
     if (designer) {
       if (designer === '__none__') {
+  // Update the renderFile function to use the new click handler
+  async function renderFile(file, container, skipThumbnail = false) {
+    const fileElement = document.createElement('div');
+    fileElement.className = 'file-item';
+    fileElement.dataset.filepath = file.filePath;
+
+    // Maintain selection state if this file was previously selected
+    if (selectedModels.has(file.filePath)) {
+      fileElement.classList.add('selected');
+    }
+
+    // Add print status indicator
+    const printStatus = document.createElement('div');
+    printStatus.className = `print-status ${file.printed ? 'printed' : ''}`;
+    printStatus.textContent = file.printed ? 'Printed' : 'Not Printed';
+    fileElement.appendChild(printStatus);
+
+    // Add thumbnail container
+    const thumbnailContainer = document.createElement('div');
+    thumbnailContainer.className = 'thumbnail-container loading';
+    fileElement.appendChild(thumbnailContainer);
+
+    const fileInfo = document.createElement('div');
+    fileInfo.className = 'file-info';
+
+    const fileName = document.createElement('div');
+    fileName.className = 'file-name';
+    fileName.textContent = file.fileName;
+    fileInfo.appendChild(fileName);
+
+    const parentDirArray = file.filePath.split(/[/\]/).slice(-2, -1);
+    const parentDir = parentDirArray[0];
+
+    const parentDirElement = document.createElement('div');
+    parentDirElement.className = 'parent-directory';
+    parentDirElement.innerHTML = `
+        <span class="directory-label">Directory:</span>
+        <a href="#" class="directory-link">${parentDir}</a>
+    `;
+
+    parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const viewLibMsg = document.getElementById("view-library-message");
+        if (viewLibMsg) { viewLibMsg.style.display = "none"; }
+
+        window.currentDirectoryFilter = parentDir;
+
+        if (typeof window.performCombinedSearch === 'function') {
+            await window.performCombinedSearch();
+        }
+
+        const filterIndicator = document.getElementById('current-filter');
+        filterIndicator.innerHTML = `
+          Showing models in directory: ${parentDir}
+          <button class="clear-filter-button">Clear Filter</button>
+        `;
+        filterIndicator.classList.add('visible');
+
+        filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
+          window.currentDirectoryFilter = "";
+          filterIndicator.innerHTML = "";
+          filterIndicator.classList.remove('visible');
+          if (typeof window.performCombinedSearch === 'function') {
+            await window.performCombinedSearch();
+          }
+        });
+      });
+
+    fileInfo.appendChild(parentDirElement);
+
+    const fileDetails = document.createElement('div');
+    fileDetails.className = 'file-details';
+    fileDetails.innerHTML = `<span class="directory-label">Size:
+      <span>${file.size? formatFileSize(file.size): ''}</span>
+    `;
+    fileInfo.appendChild(fileDetails);
+    fileElement.appendChild(fileInfo);
+
+    fileElement.addEventListener('click', () => {
+      toggleModelSelection(fileElement, file.filePath);
+    });
+
+   if (file.designer) {
+    const designerInfo = document.createElement('div');
+    designerInfo.className = 'designer-info';
+    designerInfo.innerHTML = `<span class="directory-label">Designer:
+    <span>${file.designer}</span>`;
+    fileInfo.appendChild(designerInfo);
+  }
+
+    // Handle thumbnail rendering
+    const model = await window.electron.getModel(file.filePath);
+    skipThumbnail = model && model.thumbnail ? true : false;
+
+    if (!skipThumbnail) {
+      const fileExtension = file.filePath.split('.').pop().toLowerCase();
+      if (fileExtension === '3mf') {
+        try {
+          const images = await window.electron.get3MFImages(file.filePath);
+          if (images && images.length > 0) {
+            const img = document.createElement('img');
+            img.src = images[0];
+            img.className = 'model-thumbnail';
+            thumbnailContainer.innerHTML = '';
+            thumbnailContainer.appendChild(img);
+            thumbnailContainer.classList.remove('loading');
+
+            await window.electron.saveThumbnail(file.filePath, images[0]);
+            file.thumbnail = images[0];
+
+            addContextMenuHandler(fileElement, file.filePath);
+            return fileElement;
+          }
+        } catch (imageError) {
+          console.error('renderFile: Error checking for embedded image:', imageError);
+        }
+      }
+
+      try {
+        const thumbnail = await new Promise((resolve, reject) => {
+          renderQueue.push({
+            filePath: file.filePath,
+            container: thumbnailContainer,
+            existingThumbnail: null,
+            resolve,
+            reject
+          });
+          processRenderQueue();
+        });
+
+        if (thumbnail) {
+          await window.electron.saveThumbnail(file.filePath, thumbnail);
+        }
+      } catch (error) {
+        console.error(`Error rendering thumbnail for ${file.fileName}:`, error);
+        thumbnailContainer.innerHTML = '<div class="error-message">Error loading model</div>';
+      }
+    } else {
+      const img = document.createElement('img');
+      img.src = file.thumbnail || '3d.png';
+      thumbnailContainer.innerHTML = '';
+      thumbnailContainer.appendChild(img);
+    }
+    thumbnailContainer.classList.remove('loading');
+
+    // Add context menu handler
+    addContextMenuHandler(fileElement, file.filePath);
+
+    return fileElement;
+  }
+
+      // Create placeholder items for all models
+      let fragment = document.createDocumentFragment();
+
+      // Use the same file-item creation and styling as the regular view
+      modelRefs.forEach(model => {
+        const fileElement = document.createElement('div');
+        fileElement.className = 'file-item';
+        fileElement.setAttribute('data-filepath', model.filePath);
+
+        const thumbnailContainer = document.createElement('div');
+        thumbnailContainer.className = 'thumbnail-container';
+        thumbnailContainer.style.background = getComputedStyle(document.documentElement).getPropertyValue('--model-background-color');
+
+        // Create print status indicator
+        const printStatus = document.createElement('div');
+        printStatus.className = 'print-status';
+        printStatus.textContent = 'Not Printed';
+        thumbnailContainer.appendChild(printStatus);
+
+        fileElement.appendChild(thumbnailContainer);
+
+        // Create file info container
+        const fileInfo = document.createElement('div');
+        fileInfo.className = 'file-info';
+
+        // Add file name element
+        const fileName = document.createElement('div');
+        fileName.className = 'file-name';
+        fileName.textContent = path.basename(model.filePath);
+        fileInfo.appendChild(fileName);
+
+        // Add file details
+        const fileDetails = document.createElement('div');
+        fileDetails.className = 'file-details';
+        fileDetails.textContent = 'Loading...';
+        fileInfo.appendChild(fileDetails);
+
+        fileElement.appendChild(fileInfo);
+
+        // Add click handler
+        fileElement.addEventListener('click', (e) => handleFileClick(e, model.filePath));
+
+        // Add context menu handler
+        addContextMenuHandler(fileElement, model.filePath);
+
+        fragment.appendChild(fileElement);
+      });
+
+      grid.appendChild(fragment);
+
+      // Start loading models and rendering thumbnails
+      loadAndRenderModels(modelRefs);
+
+      // Hide spinner when initial rendering is done
+      document.getElementById('spinner').classList.add('hidden');
+
+    } catch (error) {
+      console.error('Error initializing virtual scrolling:', error);
+      document.getElementById('spinner').classList.add('hidden');
+    }
+  }
+  // Add this helper function to load and render models
+  async function loadAndRenderModels(modelRefs, batchSize = 20) {
+    if (!modelRefs || !Array.isArray(modelRefs)) {
+      console.warn('Invalid model references provided to loadAndRenderModels');
+      return;
+    }
+
+    try {
+      // Process in batches for better performance
+      for (let i = 0; i < modelRefs.length; i += batchSize) {
+        const batch = modelRefs.slice(i, i + batchSize);
+
+        // Load detailed model data for each model in the batch
+        for (const modelRef of batch) {
+          if (!modelRef || !modelRef.filePath) {
+            console.warn('Invalid model reference:', modelRef);
+            continue; // Skip this iteration
+          }
+
+          try {
+            // Get model data from electron
+            const model = await window.electron.getModel(modelRef.filePath);
+            if (!model) {
+              console.warn(`No model data returned for ${modelRef.filePath}`);
+              continue; // Skip if no model data
+            }
+
+            // Find the element for this model
+            const fileElement = document.querySelector(`.file-item[data-filepath="${CSS.escape(modelRef.filePath)}"]`);
+            if (!fileElement) {
+              console.warn(`Element for model ${modelRef.filePath} not found in DOM`);
+              continue; // Skip if element not found
+            }
+
+            // Update print status
+            const printStatus = fileElement.querySelector('.print-status');
+            if (printStatus) {
+              if (model.printed) {
+                printStatus.textContent = 'Printed';
+                printStatus.classList.add('printed');
+              } else {
+                printStatus.textContent = 'Not Printed';
+                printStatus.classList.remove('printed');
+              }
+            }
+
+            // Update file details
+            const fileDetails = fileElement.querySelector('.file-details');
+            if (fileDetails) {
+              // Use formatFileSize function if it exists
+              const sizeText = model.size ?
+                (typeof formatFileSize === 'function' ? formatFileSize(model.size) : `${Math.round(model.size / 1024)} KB`) :
+                '';
+
+              const designerText = model.designer ? `Designer: ${model.designer}` : '';
+              fileDetails.textContent = [sizeText, designerText].filter(Boolean).join(' • ');
+            }
+
+            // Load thumbnail
+            const thumbnailContainer = fileElement.querySelector('.thumbnail-container');
+            if (thumbnailContainer) {
+              // Check if an image already exists
+              if (!thumbnailContainer.querySelector('img')) {
+                if (model.thumbnail) {
+                  const img = document.createElement('img');
+                  img.src = model.thumbnail;
+                  thumbnailContainer.appendChild(img);
+                } else {
+                  // Queue for thumbnail generation if the function exists
+                  if (typeof renderModelToPNG === 'function') {
+                    renderModelToPNG(modelRef.filePath, thumbnailContainer);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error(`Error loading model ${modelRef.filePath}:`, e);
+            // Continue with next model even if one fails
+          }
+        }
+
+        // Allow UI to update between batches
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    } catch (error) {
+      console.error('Error in loadAndRenderModels:', error);
+    }
+  }
+  // Add this function to check if a model should be visible based on current filters
+  async function isModelVisible(model) {
+    const designer = document.getElementById('designer-select').value;
+    const license = document.getElementById('license-select').value;
+    const parentModel = document.getElementById('parent-select').value;
+    const printStatus = document.getElementById('printed-select').value;
+    const tagFilter = document.getElementById('tag-filter').value;
+    const fileType = document.getElementById('filetype-select').value;
+    const searchTerm = document.getElementById('search-filter-input')?.value.trim() || '';
+
+    // Apply each filter
+    if (designer && designer !== '__none__' && model.designer !== designer) return false;
+    if (designer === '__none__' && model.designer) return false;
+    if (license && model.license !== license) return false;
+    if (parentModel && model.parentModel !== parentModel) return false;
+    if (printStatus === 'printed' && !model.printed) return false;
+    if (printStatus === 'not-printed' && model.printed) return false;
+    if (fileType) {
+        if (fileType === 'zip') {
+            if (!model.filePath.includes('.zip:')) return false;
+        } else if (!model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) {
+            return false;
+        }
+    }
+
+    // Handle tag filter
+    if (tagFilter) {
+      const modelTags = await window.electron.getModelTags(model.id);
+      if (!modelTags || !modelTags.some(tag => tag.name === tagFilter)) return false;
+    }
+
+    // Handle search term
+    if (searchTerm) {
+      const searchFields = [model.fileName, model.designer, model.parentModel, model.notes]
+        .filter(Boolean)
+        .map(field => field.toLowerCase());
+      if (!searchFields.some(field => field.includes(searchTerm.toLowerCase()))) return false;
+    }
+
+    return true;
+  }
+  // 8. Add memory management
+  function cleanupMemory() {
+    if (thumbnailCache.size > 1000) { // Limit cache size
+      const entriesToRemove = Array.from(thumbnailCache.keys()).slice(0, 500);
+      entriesToRemove.forEach(key => thumbnailCache.delete(key));
+    }
+
+    if (sharedRenderer) {
+      sharedRenderer.state.reset();
+    }
+  }
+
+  // Add function for deep cleanup of Three.js resources
+  function deepCleanThreeResources() {
+    if (sharedRenderer) {
+      sharedRenderer.forceContextLoss();
+      sharedRenderer.dispose();
+      sharedRenderer = null;
+    }
+
+    // Force garbage collection
+    if (typeof gc === 'function') {
+      gc();
+      gc(); // Call twice to ensure full collection
+    }
+
+    // Clear texture cache
+    THREE.Cache.clear();
+  }
+  function displayThumbnail(thumbnail, container, size) {
+    const img = document.createElement('img');
+    img.src = thumbnail;
+    img.style.width = size;
+    img.style.height = size;
+    img.className = 'model-thumbnail'; // Add a class for styling (optional)
+    container.innerHTML = ''; // Clear existing content
+    container.appendChild(img);
+    return thumbnail;
+  }
+  async function renderSTLThumbnail(filePath, container) {
+    const renderer = getSharedRenderer();
+    const thumbnailSize = '250px';
+
+    let scene, camera, model;
+
+    try {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+
+      const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
+      scene.add(light);
+
+      model = await loadModel(filePath, {
+        optimizeGeometry: true,
+        skipMaterials: true
+      });
+
+      if (!model) {
+        throw new Error('Failed to load model');
+      }
+
+      model.traverse(child => {
+        if (child.isMesh) {
+          child.material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+        }
+      });
+
+      scene.add(model);
+      fitCameraToObject(camera, model, scene, renderer);
+
+      renderer.render(scene, camera);
+      const imgData = renderer.domElement.toDataURL('image/png', 0.8);
+
+      thumbnailCache.set(filePath, imgData);
+
+      return displayThumbnail(imgData, container, thumbnailSize);
+
+    } catch (error) {
+      console.error('Error rendering STL:', error);
+      return displayThumbnail('3d.png', container, thumbnailSize);
+    } finally {
+      // Clean up THREE.js resources
+      if (scene) {
+        scene.traverse((object) => {
+          if (object.geometry) {
+            object.geometry.dispose();
+            object.geometry = null;
+          }
+          if (object.material) {
+            if (Array.isArray(object.material)) {
+              object.material.forEach(material => {
+                material.dispose();
+                material = null;
+              });
+            } else {
+              object.material.dispose();
+              object.material = null;
+            }
+          }
+        });
+        scene.clear();
+        scene = null;
+      }
+
+      // Explicitly clean up the model
+      if (model) {
+        model.traverse(child => {
+          if (child.geometry) {
+            child.geometry.dispose();
+            child.geometry = null;
+          }
+        });
+        model = null;
+      }
+
+      // Reset renderer state but keep the instance
+      if (sharedRenderer) {
+        sharedRenderer.forceContextLoss();
+        sharedRenderer.resetState();
+        sharedRenderer.clear();
+      }
+
+      // Force garbage collection
+      if (typeof gc === 'function') gc();
+    }
+  }
+  // 7. Optimize the render queue processing
+  async function processRenderQueue() {
+    if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
+      return;
+    }
+
+    isProcessingQueue = true;
+
+    try {
+      while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
+        if (isUserInteracting) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          continue;
+        }
+
+        const task = renderQueue.shift();
+        activeRenders++;
+
+        try {
+          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
+          task.resolve(result);
+        } catch (error) {
+          console.error(`Render task failed: ${error.message}`);
+          // Retry once after longer delay
+          setTimeout(() => renderQueue.push(task), 2000);
+        } finally {
+          activeRenders--;
+          await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
+        }
+      }
+    } finally {
+      isProcessingQueue = false;
+      if (renderQueue.length > 0) {
+        setTimeout(processRenderQueue, 100);
+      }
+    }
+  }
+  async function loadModel(filePath, options = {}) {
+    try {
+      console.log('loadModel: Starting for file:', filePath);
+      const fileExtension = filePath.split('.').pop().toLowerCase();
+
+      // Properly encode the file path to handle special characters and Windows paths
+      let encodedFilePath;
+
+      // Check if we're running on Windows (starts with drive letter)
+      if (/^[A-Za-z]:/.test(filePath)) {
+        // For Windows paths:
+        // 1. Convert backslashes to forward slashes
+        // 2. Add file:/// protocol
+        // 3. Properly encode special characters
+
+        try {
+          // First normalize the path to use forward slashes
+          const normalizedPath = filePath.replace(/\\/g, '/');
+
+          // Create URL object for proper handling - this works better for Windows paths
+          const fileUrl = new URL(`file:///${normalizedPath}`);
+
+          // Get the properly encoded pathname from the URL
+          encodedFilePath = fileUrl.href;
+
+          // Explicitly handle hash character in path segments
+          if (normalizedPath.includes('#')) {
+            // Replace the hash character with its URL encoding (%23)
+            // But ensure we don't double-encode anything
+            encodedFilePath = encodedFilePath.replace(/#/g, '%23');
+          }
+
+          // Ensure other problematic characters are properly encoded
+          encodedFilePath = encodedFilePath
+            .replace(/\?/g, '%3F')
+            .replace(/\s/g, '%20')
+            .replace(/\(/g, '%28')
+            .replace(/\)/g, '%29')
+            .replace(/'/g, '%27')
+            .replace(/\[/g, '%5B')
+            .replace(/\]/g, '%5D');
+        } catch (error) {
+          console.error('Error creating URL from file path:', error);
+
+          // Fallback method: direct string replacement
+          const normalizedPath = filePath.replace(/\\/g, '/');
+          encodedFilePath = `file:///${normalizedPath}`
+              .replace(/#/g, '%23')
+              .replace(/\s/g, '%20');
+        }
+
+        console.log('loadModel: Encoded Windows path:', encodedFilePath);
+      } else {
+        // For non-Windows paths, use a direct encoding approach
+        try {
+          const normalizedPath = filePath.replace(/\\/g, '/');
+
+          // Simply replace problematic characters directly
+          encodedFilePath = `file://${normalizedPath}`
+              .replace(/#/g, '%23')
+              .replace(/\s/g, '%20')
+              .replace(/\(/g, '%28')
+              .replace(/\)/g, '%29')
+              .replace(/'/g, '%27')
+              .replace(/\[/g, '%5B')
+              .replace(/\]/g, '%5D');
+        } catch (error) {
+          console.error('Error encoding non-Windows file path:', error);
+          // Super simple fallback
+          encodedFilePath = `file://${filePath.replace(/#/g, '%23')}`;
+        }
+        console.log('loadModel: Encoded Unix path:', encodedFilePath);
+      }
+
+      // If no embedded image found, proceed with 3D loading
+      let loader;
+      if (fileExtension === 'stl') {
+        if (!THREE.STLLoader) {
+          console.error('loadModel: THREE.STLLoader not available');
+          throw new Error('THREE.STLLoader not initialized');
+        }
+        loader = new THREE.STLLoader();
+      } else if (fileExtension === '3mf') {
+        if (!THREE.ThreeMFLoader) {
+          console.error('loadModel: THREE.ThreeMFLoader not available');
+          throw new Error('THREE.ThreeMFLoader not initialized');
+        }
+        if (!fflate) {
+          console.error('loadModel: fflate not available');
+          throw new Error('fflate not initialized');
+        }
+        THREE.ThreeMFLoader.fflate = fflate;
+        loader = new THREE.ThreeMFLoader();
+      } else {
+        throw new Error(`Unsupported file type: ${fileExtension}`);
+      }
+
+      if (!loader) {
+        throw new Error('Failed to initialize loader');
+      }
+
+      // Special handling for zip archives
+      if (filePath.includes('.zip:')) {
+        try {
+          const fileData = await window.electron.getFileData(filePath);
+          if (!fileData) throw new Error('Failed to get file data from zip');
+
+          // Need to convert Node Buffer to ArrayBuffer for Three.js loaders
+          const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength);
+
+          return new Promise((resolve, reject) => {
+            try {
+              // Parse the array buffer directly
+              const object = loader.parse(arrayBuffer);
+
+              // Standard processing for the loaded object (same as in loader.load callback)
+              let mesh;
+              if (object.isBufferGeometry) {
+                if (!THREE.MeshPhongMaterial) {
+                  throw new Error('THREE.MeshPhongMaterial not initialized');
+                }
+                const material = new THREE.MeshPhongMaterial({
+                  color: 0xcccccc,
+                  specular: 0x111111,
+                  shininess: 200
+                });
+                if (!THREE.Mesh) {
+                  throw new Error('THREE.Mesh not initialized');
+                }
+
+                object.computeBoundingBox();
+                object.center();
+                object.computeVertexNormals();
+
+                mesh = new THREE.Mesh(object, material);
+
+                if (fileExtension === 'stl') {
+                  mesh.rotation.x = -Math.PI / 2;
+                }
+              } else if (object.isObject3D) {
+                mesh = object;
+                // Only override material for non-3MF files (like STL if loaded as Object3D) or if we want a uniform look
+                // For 3MF, we want to preserve original materials
+                if (fileExtension !== '3mf') {
+                  mesh.traverse((child) => {
+                    if (child.isMesh) {
+                      child.material = new THREE.MeshPhongMaterial({
+                        color: 0xcccccc,
+                        specular: 0x111111,
+                        shininess: 200
+                      });
+                    }
+                  });
+                }
+                if (fileExtension === '3mf') {
+                  mesh.rotation.x = -Math.PI / 2;
+                }
+              } else {
+                reject(new Error('Unsupported object type'));
+                return;
+              }
+              resolve(mesh);
+            } catch (error) {
+              console.error('loadModel: Error parsing zip content:', error);
+              reject(error);
+            }
+          });
+        } catch (error) {
+          console.error('loadModel: Error loading from zip:', error);
+          throw error;
+        }
+      }
+
+      return new Promise((resolve, reject) => {
+        try {
+          loader.load(
+              encodedFilePath, // Use the encoded path instead of the original
+              (object) => {
+                try {
+                  let mesh;
+                  if (object.isBufferGeometry) {
+                    if (!THREE.MeshPhongMaterial) {
+                      console.error('loadModel: THREE.MeshPhongMaterial not available');
+                      throw new Error('THREE.MeshPhongMaterial not initialized');
+                    }
+                    const material = new THREE.MeshPhongMaterial({
+                      color: 0xcccccc,
+                      specular: 0x111111,
+                      shininess: 200
+                    });
+                    if (!THREE.Mesh) {
+                      console.error('loadModel: THREE.Mesh not available');
+                      throw new Error('THREE.Mesh not initialized');
+                    }
+
+                    // Proper geometry centering instead of normalization
+                    object.computeBoundingBox();
+                    object.center();
+                    object.computeVertexNormals();
+
+                    mesh = new THREE.Mesh(object, material);
+
+                    if (fileExtension === 'stl') {
+                      mesh.rotation.x = -Math.PI / 2;
+                    }
+                  } else if (object.isObject3D) {
+                    mesh = object;
+                    mesh.traverse((child) => {
+                      if (child.isMesh) {
+                        child.material = new THREE.MeshPhongMaterial({
+                          color: 0xcccccc,
+                          specular: 0x111111,
+                          shininess: 200
+                        });
+                      }
+                    });
+                    if (fileExtension === '3mf') {
+                      mesh.rotation.x = -Math.PI / 2;
+                    }
+                  } else {
+                    reject(new Error('Unsupported object type'));
+                    return;
+                  }
+                  resolve(mesh);
+                } catch (error) {
+                  console.error('loadModel: Error processing loaded object:', error);
+                  reject(error);
+                }
+              },
+              (progress) => {
+                // Progress callback
+              },
+              (error) => {
+                console.error('loadModel: Loader error:', error);
+                reject(error);
+              }
+          );
+        } catch (error) {
+          console.error('loadModel: Error in loader.load:', error);
+          reject(error);
+        }
+      });
+    } catch (error) {
+      console.error('loadModel error:', error);
+      throw error;
+    }
+  }
         shouldBeVisible = !model.designer || model.designer.trim() === '';
       } else {
         shouldBeVisible = model.designer && 
@@ -2050,55 +2995,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Update the addTag function
-  async function addTagToModel(tagName, containerId) {
-    const tagContainer = document.getElementById(containerId);
-    if (!tagContainer) {
-      console.error(`Tag container with ID ${containerId} not found`);
-      return;
-    }
-    
-    // Check if tag already exists visually
-    const existingTag = Array.from(tagContainer.children)
-      .find(tag => tag.getAttribute('data-tag-name') === tagName);
-    
-    if (existingTag) return; // Don't add visual duplicates
-
-    // Create new tag element
-    const tag = document.createElement('div');
-    tag.className = 'tag';
-    tag.setAttribute('data-tag-name', tagName);
-    tag.innerHTML = `
-      ${tagName}
-      <span class=\"tag-remove\">×</span>
-    `;
-
-    // Add remove handler with auto-save
-    tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-      tag.remove(); 
-      // Auto-save the updated tags after REMOVAL
-      const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-        .map(t => t.getAttribute('data-tag-name'));
-      
-      if (containerId === 'multi-tags') {
-        // When removing, we DO want to save the resulting list for all selected models
-        // Note: This sets all selected models to have exactly the tags remaining in the UI.
-        await autoSaveMultipleModels('tags', currentTags); 
-      } else {
-        // Single edit mode save
-        const filePath = getModelFilePath();
-        if (filePath) {
-          await autoSaveModel('tags', currentTags, filePath);
-        } else {
-          console.error('No file path found for saving tags');
-        }
-      }
-    });
-
-    tagContainer.appendChild(tag); // Add tag visually
-
-    // Auto-save logic after ADDING a tag
-    if (containerId === 'multi-tags') {
-      // For multi-edit ADD, only save the *newly added tag* to append it
       console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
       await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
     } else {
@@ -2200,7 +3096,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const dropdown = event.target.closest('.tags-input-container').querySelector('select');
       if (dropdown) {
         await refreshTagDropdown(dropdown);
-        
+
         // Optional: Add a visual feedback for refresh
         const refreshButton = event.target;
         refreshButton.style.transform = 'rotate(360deg)';
@@ -2325,7 +3221,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       const maxFileSize = parseInt(input.value);
-      
+
       // Validate input
       if (isNaN(maxFileSize) || maxFileSize < 1 || maxFileSize > 1000) {
         throw new Error('Invalid max file size. Must be between 1 and 1000 MB.');
@@ -2333,378 +3229,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Save to database
       await window.electron.saveSetting('maxFileSizeMB', maxFileSize.toString());
-      
-      // Update the global variable
-      MAX_FILE_SIZE_MB = maxFileSize;
-      
-      // Close dialog and show success message
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-      await window.electron.showMessage('Success', 'Performance settings saved successfully');
-    } catch (error) {
-      console.error('Error saving performance settings:', error);
-      await window.electron.showMessage('Error', error.message);
-    }
-  }
 
-  // Add performance settings event listeners
-  document.addEventListener('DOMContentLoaded', async () => {
-    // Initialize settings
-    await initializeSettings();
-    
-    // Add performance settings dialog handlers
-    window.electron.onOpenPerformanceSettings(() => {
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        initializePerformanceSettings();
-        dialog.showModal();
-      }
-    });
-
-    // Remove the form submit handler and only use the save button
-    const saveButton = document.getElementById('save-performance-settings');
-    if (saveButton) {
-      saveButton.addEventListener('click', async () => {
-        await savePerformanceSettings();
-      });
-    }
-
-    const cancelButton = document.getElementById('cancel-performance-settings');
-    if (cancelButton) {
-      cancelButton.addEventListener('click', () => {
-        const dialog = document.getElementById('performance-settings-dialog');
-        if (dialog) {
-          dialog.close();
-        }
-      });
-    }
-  });
-
-  // Add performance settings dialog handler
-  window.electron.onOpenPerformanceSettings(() => {
-    const dialog = document.getElementById('performance-settings-dialog');
-    initializePerformanceSettings();
-    dialog.showModal();
-  });
-
-  document.getElementById('performance-settings-dialog').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    
-    try {
-      const newBatchSize = parseInt(document.getElementById('batch-size').value);
-      const newConcurrentRenders = parseInt(document.getElementById('concurrent-renders').value);
-      const newMaxFileSize = parseInt(document.getElementById('max-file-size').value);
-      const newThumbnailBatchSize = parseInt(document.getElementById('thumbnail-batch-size').value);
-      const newRenderDelay = parseInt(document.getElementById('render-delay').value);
-
-      // Validate inputs
-      if (isNaN(newBatchSize) || newBatchSize < 1 || newBatchSize > 100) {
-        throw new Error('Invalid batch size. Must be between 1 and 100.');
-      }
-      if (isNaN(newConcurrentRenders) || newConcurrentRenders < 1 || newConcurrentRenders > 10) {
-        throw new Error('Invalid concurrent renders. Must be between 1 and 10.');
-      }
-      if (isNaN(newMaxFileSize) || newMaxFileSize < 1 || newMaxFileSize > 1000) {
-        throw new Error('Invalid max file size. Must be between 1 and 1000 MB.');
-      }
-      if (isNaN(newThumbnailBatchSize) || newThumbnailBatchSize < 5 || newThumbnailBatchSize > 20) {
-        throw new Error('Invalid thumbnail batch size. Must be between 5 and 20.');
-      }
-      if (isNaN(newRenderDelay) || newRenderDelay < 0 || newRenderDelay > 100) {
-        throw new Error('Invalid render delay. Must be between 0 and 100 ms.');
-      }
-
-      // Save settings
-      await window.electron.saveSetting('batchSize', newBatchSize.toString());
-      await window.electron.saveSetting('maxConcurrentRenders', newConcurrentRenders.toString());
-      await window.electron.saveSetting('maxFileSizeMB', newMaxFileSize.toString());
-      await window.electron.saveSetting('thumbnailBatchSize', newThumbnailBatchSize.toString());
-      await window.electron.saveSetting('renderDelay', newRenderDelay.toString());
-
-      // Update variables
-      BATCH_SIZE = newBatchSize;
-      MAX_CONCURRENT_RENDERS = newConcurrentRenders;
-      MAX_FILE_SIZE_MB = newMaxFileSize;
-      THUMBNAIL_BATCH_SIZE = newThumbnailBatchSize;
-      RENDER_DELAY = newRenderDelay;
-
-      document.getElementById('performance-settings-dialog').close();
-    } catch (error) {
-      console.error('Error saving performance settings:', error);
-      await window.electron.showMessage('Error', error.message);
-    }
-  });
-
-  document.getElementById('cancel-performance-settings')?.addEventListener('click', () => {
-    document.getElementById('performance-settings-dialog').close();
-  });
-
-  // Update the file scanning function to use MAX_FILE_SIZE_MB
-  function isValidFile(filename, size) {
-    const maxSize = MAX_FILE_SIZE_MB * 1024 * 1024;
-    const isValid = (filename.toLowerCase().endsWith('.stl') || 
-                    filename.toLowerCase().endsWith('.3mf')) && 
-                    size <= maxSize;
-    debugLog(`File validation: ${filename}, size: ${size}, max: ${maxSize}, valid: ${isValid}`);
-    return isValid;
-  }
-
-  // Add this function to initialize all settings including performance settings
-  async function initializeSettings() {
-    try {
-      // Initialize other settings as needed
-      const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
-      if (backgroundColor) {
-        document.documentElement.style.setProperty('--model-background-color', backgroundColor);
-        document.getElementById('model-background-color').value = backgroundColor;
-      }
-    } catch (error) {
-      console.error('Error initializing settings:', error);
-    }
-  }
-
-  // Call initializeSettings when the app starts
-  document.addEventListener('DOMContentLoaded', async () => {
-    await initializeSettings();
-    // Rest of your initialization code...
-  });
-
-  // Performance settings handlers
-  const savePerformanceButton = document.getElementById('save-performance-settings');
-  if (savePerformanceButton) {
-    savePerformanceButton.addEventListener('click', async () => {
-      const input = document.getElementById('max-file-size');
-      if (!input) {
-        await window.electron.showMessage('Error', 'Could not find max file size input');
-        return;
-      }
-
-      const maxFileSize = parseInt(input.value);
-      if (isNaN(maxFileSize) || maxFileSize < 1 || maxFileSize > 1000) {
-        await window.electron.showMessage('Error', 'Invalid max file size. Must be between 1 and 1000 MB.');
-        return;
-      }
-
-      try {
-        await window.electron.saveSetting('maxFileSizeMB', maxFileSize.toString());
-        MAX_FILE_SIZE_MB = maxFileSize;
-        const dialog = document.getElementById('performance-settings-dialog');
-        if (dialog) {
-          dialog.close();
-        }
-        await window.electron.showMessage('Success', 'Performance settings saved successfully');
-      } catch (error) {
-        console.error('Error saving performance settings:', error);
-        await window.electron.showMessage('Error', error.message);
-      }
-    });
-  }
-
-  const cancelPerformanceButton = document.getElementById('cancel-performance-settings');
-  if (cancelPerformanceButton) {
-    cancelPerformanceButton.addEventListener('click', () => {
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-    });
-  }
-
-  window.electron.onOpenPerformanceSettings(() => {
-    const dialog = document.getElementById('performance-settings-dialog');
-    if (dialog) {
-      const maxFileSize = window.electron.getSetting('maxFileSizeMB') || '50';
-      const input = document.getElementById('max-file-size');
-      if (input) {
-        input.value = maxFileSize;
-      }
-      dialog.showModal();
-    }
-  });
-
-  // ... rest of the existing code ...
-
-  // Add this near the other electron event listeners
-  window.electron.onDbCleanup(async (event, data) => {
-    if (data.message) {
-      await window.electron.showMessage('Database Cleanup', data.message);
-    }
-  });
-
-  // 1. Implement thumbnail caching system
-  const thumbnailCache = new Map();
-
-  // 2. Optimize renderer settings and reuse renderer instance
-  let sharedRenderer = null;
-  let sharedCanvas = null;
-  const MAX_CONTEXT_REUSE_COUNT = 100; // Number of renders before recreating context
-  let contextUseCount = 0;
-
-  function getSharedRenderer() {
-    if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
-      // Clean up existing resources before creating new ones
-      if (sharedRenderer) {
-        sharedRenderer.dispose();
-        sharedRenderer.forceContextLoss();
-        sharedRenderer = null;
-      }
-      if (sharedCanvas) {
-        sharedCanvas.remove();
-        sharedCanvas = null;
-      }
-
-      // Create new canvas and renderer
-      sharedCanvas = document.createElement('canvas');
-      sharedCanvas.width = 250;
-      sharedCanvas.height = 250;
-      
-      sharedRenderer = new THREE.WebGLRenderer({
-        antialias: false,
-        alpha: true,
-        canvas: sharedCanvas,
-        powerPreference: 'low-power',
-        preserveDrawingBuffer: true // Add this for better context management
-      });
-      
-      contextUseCount = 0;
-      
-      // Add context loss handler
-      sharedCanvas.addEventListener('webglcontextlost', (event) => {
-        event.preventDefault();
-        sharedRenderer.dispose();
-        sharedRenderer = null;
-        sharedCanvas = null;
-      }, false);
-    }
-    contextUseCount++;
-    return sharedRenderer;
-  }
-
-  async function extract3MFThumbnail(filePath) {
-    try {
-      const images = await window.electron.get3MFImages(filePath);
-      return images && images.length > 0? images: null; // Concise return
-    } catch (error) {
-      console.error('extract3MFThumbnail error:', error);
-      // Consider re-throwing the error if you want the calling function to handle it:
-      // throw error; 
-      return null; // Or return null to indicate failure
-    }
-  }
-  
-  async function extract3MFSTL(filePath) {
-    try {
-      return await window.electron.get3MFSTL(filePath); // Direct return
-    } catch (error) {
-      console.error('extract3MFSTL error:', error);
-      // throw error;  // Same consideration as above
-      return null;
-    }
-  }
-
-  // Update the renderModelToPNG function to check file size before attempting to render
-  async function renderModelToPNG(filePath, container, existingThumbnail) {
-    // Simple mutex for renderModelToPNG to prevent race conditions with shared renderer
-    while (window.isRenderingLocked) {
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    window.isRenderingLocked = true;
-
-    try {
-        if (existingThumbnail) {
-            const img = document.createElement('img');
-            img.src = existingThumbnail;
-            img.style.width = '250px';
-            img.style.height = '250px';
-            container.innerHTML = '';
-            container.appendChild(img);
-            return existingThumbnail;
-        }
-
-        // Check for 3MF embedded image first
-        if (filePath.toLowerCase().endsWith('.3mf')) {
-            try {
-                const embeddedImage = await extract3MFThumbnail(filePath);
-                if (embeddedImage && embeddedImage.length > 0) {
-                    const imgUrl = Array.isArray(embeddedImage) ? embeddedImage[0] : embeddedImage;
-                    const img = document.createElement('img');
-                    img.src = imgUrl;
-                    img.style.width = '250px';
-                    img.style.height = '250px';
-                    container.innerHTML = '';
-                    container.appendChild(img);
-                    return imgUrl;
-                }
-            } catch (imageError) {
-                console.error('renderModelToPNG: Error checking for embedded image:', imageError);
-            }
-        }
-
-        let scene, camera;
-        let model = null; // Declare model in outer scope
-        const sharedRendererInstance = getSharedRenderer();
-
-        try {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-
-            sharedRendererInstance.setClearColor(0x000000, 0);
-            sharedRendererInstance.setSize(250, 250, false);
-
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-            directionalLight.position.set(1, 1, 1).normalize();
-            scene.add(ambientLight);
-            scene.add(directionalLight);
-
-            // Use loadModel function which has proper path encoding handling
-            model = await loadModel(filePath);
-            if (!model) throw new Error('Failed to load model');
-
-            scene.add(model);
-            fitCameraToObject(camera, model, scene, sharedRendererInstance);
-            sharedRendererInstance.render(scene, camera);
-
-            const imgData = sharedRendererInstance.domElement.toDataURL('image/png');
-
-            const img = document.createElement('img');
-            img.src = imgData;
-            img.style.width = '250px';
-            img.style.height = '250px';
-            container.innerHTML = '';
-            container.appendChild(img);
-
-            return imgData;
-
-        } catch (error) {
-            console.error('Error rendering model:', error);
-            const img = document.createElement('img');
-            img.src = '3d.png';
-            img.style.width = '250px';
-            img.style.height = '250px';
-            container.innerHTML = '';
-            container.appendChild(img);
-            return '3d.png';
-        } finally {
-            // Clean up THREE.js resources
-            if (scene) {
-                scene.traverse((object) => {
-                    if (object.geometry) {
-                        object.geometry.dispose();
-                        object.geometry = null;
-                    }
-                    if (object.material) {
-                        if (Array.isArray(object.material)) {
-                            object.material.forEach(material => {
-                                material.dispose();
-                                material = null;
-                            });
-                        } else {
-                            object.material.dispose();
-                            object.material = null;
-                        }
                     }
                 });
                 scene.clear();
@@ -2736,70 +3261,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   
   
-  function displayThumbnail(thumbnail, container, size) {
-    const img = document.createElement('img');
-    img.src = thumbnail;
-    img.style.width = size;
-    img.style.height = size;
-    img.className = 'model-thumbnail'; // Add a class for styling (optional)
-    container.innerHTML = ''; // Clear existing content
-    container.appendChild(img);
-    return thumbnail;
   }
 
-  async function renderSTLThumbnail(filePath, container) {
-    const renderer = getSharedRenderer();
-    const thumbnailSize = '250px';
-  
-    let scene, camera, model;
-  
-    try {
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-  
-      const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
-      scene.add(light);
-  
-      model = await loadModel(filePath, {
-        optimizeGeometry: true,
-        skipMaterials: true
-      });
-  
-      if (!model) {
-        throw new Error('Failed to load model');
-      }
-  
-      model.traverse(child => {
-        if (child.isMesh) {
-          child.material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
-        }
-      });
-  
-      scene.add(model);
-      fitCameraToObject(camera, model, scene, renderer);
-  
-      renderer.render(scene, camera);
-      const imgData = renderer.domElement.toDataURL('image/png', 0.8);
-  
-      thumbnailCache.set(filePath, imgData);
-  
-      return displayThumbnail(imgData, container, thumbnailSize);
-  
-    } catch (error) {
-      console.error('Error rendering STL:', error);
-      return displayThumbnail('3d.png', container, thumbnailSize);
-    } finally {
-      // Clean up THREE.js resources
-      if (scene) {
-        scene.traverse((object) => {
-          if (object.geometry) {
-            object.geometry.dispose();
-            object.geometry = null;
-          }
-          if (object.material) {
-            if (Array.isArray(object.material)) {
-              object.material.forEach(material => {
-                material.dispose();
                 material = null;
               });
             } else {
@@ -2834,36 +3297,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (typeof gc === 'function') gc();
     }
   }
-  
+
 
   // 7. Optimize the render queue processing
-  async function processRenderQueue() {
-    if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
-      return;
-    }
-
-    isProcessingQueue = true;
-    
-    try {
-      while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
-        if (isUserInteracting) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-          continue;
-        }
-
-        const task = renderQueue.shift();
-        activeRenders++;
-        
-        try {
-          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
-          task.resolve(result);
-        } catch (error) {
-          console.error(`Render task failed: ${error.message}`);
-          // Retry once after longer delay
-          setTimeout(() => renderQueue.push(task), 2000);
-        } finally {
-          activeRenders--;
-          await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
         }
       }
     } finally {
@@ -2875,205 +3311,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // 8. Add memory management
-  function cleanupMemory() {
-    if (thumbnailCache.size > 1000) { // Limit cache size
-      const entriesToRemove = Array.from(thumbnailCache.keys()).slice(0, 500);
-      entriesToRemove.forEach(key => thumbnailCache.delete(key));
-    }
-    
-    if (sharedRenderer) {
-      sharedRenderer.state.reset();
-    }
-  }
-
-  // Add function for deep cleanup of Three.js resources
-  function deepCleanThreeResources() {
-    if (sharedRenderer) {
-      sharedRenderer.forceContextLoss();
-      sharedRenderer.dispose();
-      sharedRenderer = null;
-    }
-    
-    // Force garbage collection
-    if (typeof gc === 'function') {
-      gc();
       gc(); // Call twice to ensure full collection
     }
-    
+
     // Clear texture cache
     THREE.Cache.clear();
   }
 
   // 9. Add model loading with better resource management
-  async function loadModel(filePath, options = {}) {
-    try {
-      console.log('loadModel: Starting for file:', filePath);
-      const fileExtension = filePath.split('.').pop().toLowerCase();
-      
-      // Properly encode the file path to handle special characters and Windows paths
-      let encodedFilePath;
-      
-      // Check if we're running on Windows (starts with drive letter)
-      if (/^[A-Za-z]:/.test(filePath)) {
-        // For Windows paths: 
-        // 1. Convert backslashes to forward slashes
-        // 2. Add file:/// protocol
-        // 3. Properly encode special characters
-        
-        try {
-          // First normalize the path to use forward slashes
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Create URL object for proper handling - this works better for Windows paths
-          const fileUrl = new URL(`file:///${normalizedPath}`);
-          
-          // Get the properly encoded pathname from the URL
-          encodedFilePath = fileUrl.href;
-          
-          // Explicitly handle hash character in path segments
-          if (normalizedPath.includes('#')) {
-            // Replace the hash character with its URL encoding (%23)
-            // But ensure we don't double-encode anything
-            encodedFilePath = encodedFilePath.replace(/#/g, '%23');
-          }
-          
-          // Ensure other problematic characters are properly encoded
-          encodedFilePath = encodedFilePath
-            .replace(/\?/g, '%3F')
-            .replace(/\s/g, '%20')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/'/g, '%27')
-            .replace(/\[/g, '%5B')
-            .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error creating URL from file path:', error);
-          
-          // Fallback method: direct string replacement
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          encodedFilePath = `file:///${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20');
-        }
-        
-        console.log('loadModel: Encoded Windows path:', encodedFilePath);
-      } else {
-        // For non-Windows paths, use a direct encoding approach
-        try {
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Simply replace problematic characters directly
-          encodedFilePath = `file://${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20')
-              .replace(/\(/g, '%28')
-              .replace(/\)/g, '%29')
-              .replace(/'/g, '%27')
-              .replace(/\[/g, '%5B')
-              .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error encoding non-Windows file path:', error);
-          // Super simple fallback
-          encodedFilePath = `file://${filePath.replace(/#/g, '%23')}`;
-        }
-        console.log('loadModel: Encoded Unix path:', encodedFilePath);
-      }
-      
-      // If no embedded image found, proceed with 3D loading
-      let loader;
-      if (fileExtension === 'stl') {
-        if (!THREE.STLLoader) {
-          console.error('loadModel: THREE.STLLoader not available');
-          throw new Error('THREE.STLLoader not initialized');
-        }
-        loader = new THREE.STLLoader();
-      } else if (fileExtension === '3mf') {
-        if (!THREE.ThreeMFLoader) {
-          console.error('loadModel: THREE.ThreeMFLoader not available');
-          throw new Error('THREE.ThreeMFLoader not initialized');
-        }
-        if (!fflate) {
-          console.error('loadModel: fflate not available');
-          throw new Error('fflate not initialized');
-        }
-        THREE.ThreeMFLoader.fflate = fflate;
-        loader = new THREE.ThreeMFLoader();
-      } else {
-        throw new Error(`Unsupported file type: ${fileExtension}`);
-      }
-
-      if (!loader) {
-        throw new Error('Failed to initialize loader');
-      }
-
-      // Special handling for zip archives
-      if (filePath.includes('.zip:')) {
-        try {
-          const fileData = await window.electron.getFileData(filePath);
-          if (!fileData) throw new Error('Failed to get file data from zip');
-
-          // Need to convert Node Buffer to ArrayBuffer for Three.js loaders
-          const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength);
-
-          return new Promise((resolve, reject) => {
-            try {
-              // Parse the array buffer directly
-              const object = loader.parse(arrayBuffer);
-
-              // Standard processing for the loaded object (same as in loader.load callback)
-              let mesh;
-              if (object.isBufferGeometry) {
-                if (!THREE.MeshPhongMaterial) {
-                  throw new Error('THREE.MeshPhongMaterial not initialized');
-                }
-                const material = new THREE.MeshPhongMaterial({
-                  color: 0xcccccc,
-                  specular: 0x111111,
-                  shininess: 200
-                });
-                if (!THREE.Mesh) {
-                  throw new Error('THREE.Mesh not initialized');
-                }
-
-                object.computeBoundingBox();
-                object.center();
-                object.computeVertexNormals();
-
-                mesh = new THREE.Mesh(object, material);
-
-                if (fileExtension === 'stl') {
-                  mesh.rotation.x = -Math.PI / 2;
-                }
-              } else if (object.isObject3D) {
-                mesh = object;
-                // Only override material for non-3MF files (like STL if loaded as Object3D) or if we want a uniform look
-                // For 3MF, we want to preserve original materials
-                if (fileExtension !== '3mf') {
-                  mesh.traverse((child) => {
-                    if (child.isMesh) {
-                      child.material = new THREE.MeshPhongMaterial({
-                        color: 0xcccccc,
-                        specular: 0x111111,
-                        shininess: 200
-                      });
-                    }
-                  });
-                }
-                if (fileExtension === '3mf') {
-                  mesh.rotation.x = -Math.PI / 2;
-                }
-              } else {
-                reject(new Error('Unsupported object type'));
-                return;
-              }
-              resolve(mesh);
-            } catch (error) {
-              console.error('loadModel: Error parsing zip content:', error);
-              reject(error);
-            }
-          });
-        } catch (error) {
-          console.error('loadModel: Error loading from zip:', error);
           throw error;
         }
       }
@@ -3156,79 +3401,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
   // Add a helper function to refresh the model display
-  async function refreshModelDisplay() {
-    try {
-      // Get current filter values
-      const designer = document.getElementById('designer-select').value;
-      const license = document.getElementById('license-select').value;
-      const parentModel = document.getElementById('parent-select').value;
-      const printStatus = document.getElementById('printed-select').value;
-      const tagFilter = document.getElementById('tag-filter').value;
-      const sortOption = document.getElementById('sort-select').value;
-      const fileType = document.getElementById('filetype-select').value; // Add this line
-      const searchInput = document.getElementById("search-filter-input");
-      const searchTerm = searchInput ? searchInput.value.trim() : "";
-
-      // If any filter is active or a search term is entered, hide the view library message.
-      if (designer || license || parentModel || printStatus !== "all" || tagFilter || fileType || searchTerm) {
-        const viewLibMsg = document.getElementById("view-library-message");
-        if (viewLibMsg) {
-          viewLibMsg.style.display = "none";
-        }
-      }
-      
-      // Update filter dropdowns without clearing selections
-
-      
-      // Restore filter selections
-      document.getElementById('designer-select').value = designer;
-      document.getElementById('license-select').value = license;
-      document.getElementById('parent-select').value = parentModel;
-      document.getElementById('printed-select').value = printStatus;
-      document.getElementById('tag-filter').value = tagFilter;
-      document.getElementById('filetype-select').value = fileType; // Add this line
-
-      // Get all models with current sort option
-      let models = await window.electron.getAllModels(sortOption, 0);
-
-      // Add file type filter
-      if (fileType) {
-        models = models.filter(model => 
-          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-        );
-      }
-
-      // Apply filters
-      if (designer) {
-        if (designer === '__none__') {
-          models = models.filter(model => !model.designer || model.designer.trim() === '');
-        } else {
-          models = models.filter(model =>
-            model.designer &&
-            model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
-          );
-        }
-      }
-      if (license) {
-        if (license === '__none__') {
-          models = models.filter(model => !model.license || model.license.trim() === '');
-        } else {
-          models = models.filter(model => model.license === license);
-        }
-      }
-      if (parentModel) {
-        if (parentModel === '__none__') {
-          models = models.filter(model => !model.parentModel || model.parentModel.trim() === '');
-        } else {
-          models = models.filter(model => model.parentModel === parentModel);
-        }
-      }
-      if (printStatus === 'printed') {
-        models = models.filter(model => model.printed);
-      } else if (printStatus === 'not-printed') {
-        models = models.filter(model => !model.printed);
-      }
-      if (tagFilter) {
         models = await Promise.all(models.map(async (model) => {
           const modelTags = await window.electron.getModelTags(model.id);
           if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
@@ -3261,7 +3433,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       // Single select mode
       const wasSelected = element.classList.contains('selected');
-      
+
       // Clear all selections first
       document.querySelectorAll('.file-item').forEach(item => {
         item.classList.remove('selected');
@@ -3280,164 +3452,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Update the renderFile function to use the new click handler
-  async function renderFile(file, container, skipThumbnail = false) {
-    const fileElement = document.createElement('div');
-    fileElement.className = 'file-item';
-    fileElement.dataset.filepath = file.filePath;
- 
-    // Maintain selection state if this file was previously selected
-    if (selectedModels.has(file.filePath)) {
-      fileElement.classList.add('selected');
-    }
-
-    // Add print status indicator
-    const printStatus = document.createElement('div');
-    printStatus.className = `print-status ${file.printed ? 'printed' : ''}`;
-    printStatus.textContent = file.printed ? 'Printed' : 'Not Printed';
-    fileElement.appendChild(printStatus);
-
-    // Add thumbnail container
-    const thumbnailContainer = document.createElement('div');
-    thumbnailContainer.className = 'thumbnail-container loading';
-    fileElement.appendChild(thumbnailContainer);
-
-
-
-
-    directoryElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      // Hide any welcome or view library message.
-      const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-      
-      // Set the global directory filter.
-      window.currentDirectoryFilter = parentDir;
-      
-      // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-      await performCombinedSearch();
-      
-      // Update the filter indicator to show the active parent directory filter.
-      const filterIndicator = document.getElementById('current-filter');
-      filterIndicator.innerHTML = `
-        Showing models in directory: ${parentDir}
-        <button class="clear-filter-button">Clear Filter</button>
-      `;
-      filterIndicator.classList.add('visible');
-      
-      // Attach a click handler to clear the directory filter.
-      filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-        window.currentDirectoryFilter = "";
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
-        await performCombinedSearch();
-      });
-    });
-
-    fileInfo.appendChild(directoryElement);
-
-    const fileDetails = document.createElement('div');
-    fileDetails.className = 'file-details';
-    fileDetails.innerHTML = `
-      <span>${file.designer || 'Unknown'}</span>
-      <span>${file.size ? formatFileSize(file.size) : ''}</span>
-    `;
-    fileInfo.appendChild(fileDetails);
-    fileElement.appendChild(fileInfo);
-
-    // Add click handler
-    fileElement.addEventListener('click', () => {
-      toggleModelSelection(fileElement, file.filePath);
-    });
-
-    // Handle thumbnail rendering
-    const model = await window.electron.getModel(file.filePath);
-    skipThumbnail = model && model.thumbnail ? true : false;
-    if (!skipThumbnail) {
-      try {
-        const fileExtension = file.filePath.split('.').pop().toLowerCase();
-        if (fileExtension === '3mf') {
-          const images = await window.electron.get3MFImages(file.filePath);
-          if (images && images.length > 0) {
-            const img = document.createElement('img');
-            img.src = images[0];
-            img.className = 'model-thumbnail';
-            thumbnailContainer.innerHTML = '';
-            thumbnailContainer.appendChild(img);
-            thumbnailContainer.classList.remove('loading');
-            await window.electron.saveThumbnail(file.filePath, images[0]);
-            file.thumbnail = images[0];
-            return fileElement;
-          }
-        }
-
-        const thumbnail = await new Promise((resolve, reject) => {
-          renderQueue.push({
-            filePath: file.filePath,
-            container: thumbnailContainer,
-            existingThumbnail: null,
-            resolve,
-            reject
-          });
-          processRenderQueue();
-        });
-
-        if (thumbnail) {
-          await window.electron.saveThumbnail(file.filePath, thumbnail);
-        }
-      } catch (error) {
-        console.error(`Error rendering thumbnail for ${file.fileName}:`, error);
-        thumbnailContainer.innerHTML = '<div class="error-message">Error loading model</div>';
-      }
-    } else {
-      const img = document.createElement('img');
-      img.src = file.thumbnail || '3d.png';
-      thumbnailContainer.innerHTML = '';
-      thumbnailContainer.appendChild(img);
-    }
-    thumbnailContainer.classList.remove('loading');
-
-    // Add context menu handler
-    addContextMenuHandler(fileElement, file.filePath);
-
-    return fileElement;
-  }
-
-  // Add this function to filter by directory
-  async function filterByDirectory(directoryPath) {
-    try {
-        const models = await window.electron.getModelsByDirectory(directoryPath);
-        await displayModels(models);
-    } catch (error) {
-        console.error('Error filtering by directory:', error);
-    }
-  }
-
-  // Add these constants at the top with other constants
-  const ROULETTE_SPINS = 10; // Number of models to highlight before stopping
-  const ROULETTE_INITIAL_DELAY = 100; // Initial delay between highlights in ms
-  const ROULETTE_DELAY_INCREMENT = 20; // How much to slow down each spin
-
-  // Add the roulette functionality
-  async function startPrintRoulette() {
-    // Get all visible models in the grid
-    const visibleModels = Array.from(document.querySelectorAll('.file-item'));
-    if (visibleModels.length === 0) return;
-
-    // Clear any existing selections
-    selectedModels.clear();
-    document.querySelectorAll('.file-item').forEach(item => {
-      item.classList.remove('selected');
-    });
-    
-    // Close details panel if open
-    const detailsPanel = document.getElementById('model-details');
-    if (detailsPanel) {
-      detailsPanel.classList.add('hidden');
-    }
-
-    let delay = ROULETTE_INITIAL_DELAY;
-    let previousItem = null;
 
     // Function to highlight a random item.
     // Pass doScroll=true to scroll the item into view.
@@ -3677,30 +3691,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Update the grid initialization function
-  async function initializeGrid(sortOption = 'name') {
-    console.log('Initializing grid with sort option:', sortOption);
-    
-    // Add event listener for sort dropdown
-    const sortSelect = document.getElementById('sort-select');
-    if (sortSelect) {
-      // Remove any existing event listeners by cloning and replacing
-      const newSortSelect = sortSelect.cloneNode(true);
-      sortSelect.parentNode.replaceChild(newSortSelect, sortSelect);
-      
-      newSortSelect.addEventListener('change', async (e) => {
-        console.log('Sort option changed to:', e.target.value);
-        
-        // Get all models with the new sort option
-        const models = await window.electron.getAllModels(e.target.value);
-        
-        // Completely refresh the grid with the new sort order
-        await renderFiles(models, false, true);
-        
-        // Update model counts
-        await updateModelCounts();
-      });
-    }
-    
     // ... existing code ...
   }
 
@@ -4499,29 +4489,29 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('tag-filter').value = '';
       document.getElementById('filetype-select').value = '';
       document.getElementById('search-filter-input').value = '';
-      
+
       // Explicitly clear the directory filter
       window.currentDirectoryFilter = "";
-      
+
       // Hide the "Showing 100 Newest Models" message
       const viewLibMsg = document.getElementById("view-library-message");
       if (viewLibMsg) {
         viewLibMsg.style.display = "none";
       }
-      
+
       // Flag that we're viewing the entire library
       window.viewingEntireLibrary = true;
-      
+
       // Clear the filter indicator
       const filterIndicator = document.getElementById('current-filter');
       if (filterIndicator) {
         filterIndicator.innerHTML = "";
         filterIndicator.classList.remove('visible');
       }
-      
+
       // Use the combined search function to retrieve and display models with all filters applied correctly
       await window.performCombinedSearch();
-      
+
       console.log("Viewing entire library");
     } catch (error) {
       console.error('Error loading library:', error);
@@ -4530,166 +4520,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // New function to initialize virtual scrolling
-  async function initializeVirtualScrolling(modelRefs) {
-    try {
-      // First, clear any existing content
-      const grid = document.getElementById('file-grid');
-      grid.innerHTML = '';
-      
-      // Show loading
-      document.getElementById('spinner').classList.remove('hidden');
-      
-      // Calculate total number of models
-      const totalCount = modelRefs.length;
-      console.log(`Setting up virtual grid with ${totalCount} models`);
-      
-      // Update the model count display
-      updateModelCounts(totalCount);
-      
-      // Create placeholder items for all models
-      let fragment = document.createDocumentFragment();
-      
-      // Use the same file-item creation and styling as the regular view
-      modelRefs.forEach(model => {
-        const fileElement = document.createElement('div');
-        fileElement.className = 'file-item';
-        fileElement.setAttribute('data-filepath', model.filePath);
-        
-        const thumbnailContainer = document.createElement('div');
-        thumbnailContainer.className = 'thumbnail-container';
-        thumbnailContainer.style.background = getComputedStyle(document.documentElement).getPropertyValue('--model-background-color');
-        
-        // Create print status indicator
-        const printStatus = document.createElement('div');
-        printStatus.className = 'print-status';
-        printStatus.textContent = 'Not Printed';
-        thumbnailContainer.appendChild(printStatus);
-        
-        fileElement.appendChild(thumbnailContainer);
-        
-        // Create file info container
-        const fileInfo = document.createElement('div');
-        fileInfo.className = 'file-info';
-        
-        // Add file name element
-        const fileName = document.createElement('div');
-        fileName.className = 'file-name';
-        fileName.textContent = path.basename(model.filePath);
-        fileInfo.appendChild(fileName);
-        
-        // Add file details
-        const fileDetails = document.createElement('div');
-        fileDetails.className = 'file-details';
-        fileDetails.textContent = 'Loading...';
-        fileInfo.appendChild(fileDetails);
-        
-        fileElement.appendChild(fileInfo);
-        
-        // Add click handler
-        fileElement.addEventListener('click', (e) => handleFileClick(e, model.filePath));
-        
-        // Add context menu handler
-        addContextMenuHandler(fileElement, model.filePath);
-        
-        fragment.appendChild(fileElement);
-      });
-      
-      grid.appendChild(fragment);
-      
-      // Start loading models and rendering thumbnails
-      loadAndRenderModels(modelRefs);
-      
-      // Hide spinner when initial rendering is done
-      document.getElementById('spinner').classList.add('hidden');
-      
-    } catch (error) {
-      console.error('Error initializing virtual scrolling:', error);
-      document.getElementById('spinner').classList.add('hidden');
-    }
-  }
-
-  // Add this helper function to load and render models
-  async function loadAndRenderModels(modelRefs, batchSize = 20) {
-    if (!modelRefs || !Array.isArray(modelRefs)) {
-      console.warn('Invalid model references provided to loadAndRenderModels');
-      return;
-    }
-    
-    try {
-      // Process in batches for better performance
-      for (let i = 0; i < modelRefs.length; i += batchSize) {
-        const batch = modelRefs.slice(i, i + batchSize);
-        
-        // Load detailed model data for each model in the batch
-        for (const modelRef of batch) {
-          if (!modelRef || !modelRef.filePath) {
-            console.warn('Invalid model reference:', modelRef);
-            continue; // Skip this iteration
-          }
-          
-          try {
-            // Get model data from electron
-            const model = await window.electron.getModel(modelRef.filePath);
-            if (!model) {
-              console.warn(`No model data returned for ${modelRef.filePath}`);
-              continue; // Skip if no model data
-            }
-            
-            // Find the element for this model
-            const fileElement = document.querySelector(`.file-item[data-filepath="${CSS.escape(modelRef.filePath)}"]`);
-            if (!fileElement) {
-              console.warn(`Element for model ${modelRef.filePath} not found in DOM`);
-              continue; // Skip if element not found
-            }
-            
-            // Update print status
-            const printStatus = fileElement.querySelector('.print-status');
-            if (printStatus) {
-              if (model.printed) {
-                printStatus.textContent = 'Printed';
-                printStatus.classList.add('printed');
-              } else {
-                printStatus.textContent = 'Not Printed';
-                printStatus.classList.remove('printed');
-              }
-            }
-            
-            // Update file details
-            const fileDetails = fileElement.querySelector('.file-details');
-            if (fileDetails) {
-              // Use formatFileSize function if it exists
-              const sizeText = model.size ? 
-                (typeof formatFileSize === 'function' ? formatFileSize(model.size) : `${Math.round(model.size / 1024)} KB`) : 
-                '';
-              
-              const designerText = model.designer ? `Designer: ${model.designer}` : '';
-              fileDetails.textContent = [sizeText, designerText].filter(Boolean).join(' • ');
-            }
-            
-            // Load thumbnail
-            const thumbnailContainer = fileElement.querySelector('.thumbnail-container');
-            if (thumbnailContainer) {
-              // Check if an image already exists
-              if (!thumbnailContainer.querySelector('img')) {
-                if (model.thumbnail) {
-                  const img = document.createElement('img');
-                  img.src = model.thumbnail;
-                  thumbnailContainer.appendChild(img);
-                } else {
-                  // Queue for thumbnail generation if the function exists
-                  if (typeof renderModelToPNG === 'function') {
-                    renderModelToPNG(modelRef.filePath, thumbnailContainer);
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            console.error(`Error loading model ${modelRef.filePath}:`, e);
-            // Continue with next model even if one fails
-          }
-        }
-        
-        // Allow UI to update between batches
         await new Promise(resolve => setTimeout(resolve, 0));
       }
     } catch (error) {
@@ -4699,38 +4529,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
   // Add this function to check if a model should be visible based on current filters
-  async function isModelVisible(model) {
-    const designer = document.getElementById('designer-select').value;
-    const license = document.getElementById('license-select').value;
-    const parentModel = document.getElementById('parent-select').value;
-    const printStatus = document.getElementById('printed-select').value;
-    const tagFilter = document.getElementById('tag-filter').value;
-    const fileType = document.getElementById('filetype-select').value;
-    const searchTerm = document.getElementById('search-filter-input')?.value.trim() || '';
-
-    // Apply each filter
-    if (designer && designer !== '__none__' && model.designer !== designer) return false;
-    if (designer === '__none__' && model.designer) return false;
-    if (license && model.license !== license) return false;
-    if (parentModel && model.parentModel !== parentModel) return false;
-    if (printStatus === 'printed' && !model.printed) return false;
-    if (printStatus === 'not-printed' && model.printed) return false;
-    if (fileType) {
-        if (fileType === 'zip') {
-            if (!model.filePath.includes('.zip:')) return false;
-        } else if (!model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) {
-            return false;
-        }
-    }
-    
-    // Handle tag filter
-    if (tagFilter) {
-      const modelTags = await window.electron.getModelTags(model.id);
-      if (!modelTags || !modelTags.some(tag => tag.name === tagFilter)) return false;
-    }
-
-    // Handle search term
-    if (searchTerm) {
       const searchFields = [model.fileName, model.designer, model.parentModel, model.notes]
         .filter(Boolean)
         .map(field => field.toLowerCase());
@@ -4934,113 +4732,6 @@ function toggleModelSelection(fileElement, filePath) {
 }
 
 // Add helper functions before they're used
-async function loadModel(filePath) {
-  const fileExtension = filePath.split('.').pop().toLowerCase();
-
-  let loader;
-
-  if (fileExtension === 'stl') {
-    loader = new THREE.STLLoader();
-  } else if (fileExtension === '3mf') {
-    THREE.ThreeMFLoader.fflate = fflate;
-    loader = new THREE.ThreeMFLoader();
-  } else {
-    throw new Error(`Unsupported file type: ${fileExtension}`);
-  }
-
-  // Handle Zip Files
-  if (filePath.includes('.zip:')) {
-    try {
-      const fileData = await window.electron.getFileData(filePath);
-      if (!fileData) throw new Error('Failed to get file data from zip');
-
-      // Need to convert Node Buffer to ArrayBuffer for Three.js loaders
-      const arrayBuffer = fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength);
-
-      return new Promise((resolve, reject) => {
-        try {
-          const object = loader.parse(arrayBuffer);
-
-          let mesh;
-          if (object.isBufferGeometry) {
-            const material = new THREE.MeshPhongMaterial({
-              color: 0xcccccc,
-              specular: 0x111111,
-              shininess: 200,
-              flatShading: true
-            });
-            object.computeVertexNormals();
-            mesh = new THREE.Mesh(object, material);
-            if (fileExtension === 'stl') {
-              mesh.rotation.x = -Math.PI / 2;
-            }
-          } else if (object.isObject3D) {
-            mesh = object;
-            // Preserve materials for 3MF
-            if (fileExtension !== '3mf') {
-              mesh.traverse((child) => {
-                if (child.isMesh) {
-                  child.material = new THREE.MeshPhongMaterial({
-                    color: 0xcccccc,
-                    specular: 0x111111,
-                    shininess: 200,
-                    flatShading: true
-                  });
-                }
-              });
-            }
-            if (fileExtension === '3mf') {
-              mesh.rotation.x = -Math.PI / 2;
-            }
-          } else {
-            reject(new Error('Unsupported object type'));
-            return;
-          }
-          resolve(mesh);
-        } catch (error) {
-          console.error('Error parsing zip content:', error);
-          reject(error);
-        }
-      });
-    } catch (error) {
-      console.error('Error loading from zip:', error);
-      throw error;
-    }
-  }
-
-  return new Promise((resolve, reject) => {
-    // Properly encode the file path to handle special characters and Windows paths
-    let encodedFilePath;
-    
-    // Check if we're running on Windows (starts with drive letter)
-    if (/^[A-Za-z]:/.test(filePath)) {
-      // For Windows paths: 
-      // 1. Convert backslashes to forward slashes
-      // 2. Add file:/// protocol
-      // 3. Properly encode special characters
-      const normalizedPath = filePath.replace(/\\/g, '/');
-      
-      // Make sure to encode the URL properly, handling special characters
-      encodedFilePath = `file:///${normalizedPath}`;
-      // Encode special characters but preserve the file:/// and path structure
-      encodedFilePath = encodedFilePath.replace(/#/g, '%23')
-                                      .replace(/\?/g, '%3F')
-                                      .replace(/\s/g, '%20');
-    } else {
-      // For non-Windows paths, use standard URL encoding
-      encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
-    }
-
-    // Log the encoded path for debugging
-    console.log('Loading model from encoded path:', encodedFilePath);
-
-    loader.load(
-      encodedFilePath,
-      (object) => {
-        try {
-          let mesh;
-          
-          // Handle STL files (geometry)
           if (object.isBufferGeometry) {
             const material = new THREE.MeshPhongMaterial({
               color: 0xcccccc,
@@ -5539,289 +5230,6 @@ async function handleFilterChange() {
   }
 }
 
-async function renderFile(file, container, skipThumbnail = false) {
-  const fileElement = document.createElement('div');
-  fileElement.className = 'file-item';
-  fileElement.dataset.filepath = file.filePath; // Use dataset for data attributes
-
-  if (selectedModels.has(file.filePath)) {
-    fileElement.classList.add('selected');
-  }
-
-  const printStatus = document.createElement('div');
-  printStatus.className = `print-status ${file.printed? 'printed': ''}`;
-  printStatus.textContent = file.printed? 'Printed': 'Not Printed';
-  fileElement.appendChild(printStatus);
-
-  const thumbnailContainer = document.createElement('div');
-  thumbnailContainer.className = 'thumbnail-container loading';
-  fileElement.appendChild(thumbnailContainer);
-
-  const fileInfo = document.createElement('div');
-  fileInfo.className = 'file-info';
-
-  const fileName = document.createElement('div');
-  fileName.className = 'file-name';
-  fileName.textContent = file.fileName;
-  fileInfo.appendChild(fileName);
-
-  const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1); // Keep this as an array for now
-  const parentDir = parentDirArray[0]; // Get the string value from the array
-  
-  const parentDirElement = document.createElement('div');
-  parentDirElement.className = 'parent-directory';
-  parentDirElement.innerHTML = `
-      <span class="directory-label">Directory:</span> 
-      <a href="#" class="directory-link">${parentDir}</a>
-  `;
-  
-  parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      // Hide any welcome or view library message.
-      const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-      
-      // Set the global directory filter.
-      window.currentDirectoryFilter = parentDir;
-      
-      // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-      await performCombinedSearch();
-      
-      // Update the filter indicator to show the active parent directory filter.
-      const filterIndicator = document.getElementById('current-filter');
-      filterIndicator.innerHTML = `
-        Showing models in directory: ${parentDir}
-        <button class="clear-filter-button">Clear Filter</button>
-      `;
-      filterIndicator.classList.add('visible');
-      
-      // Attach a click handler to clear the directory filter.
-      filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-        window.currentDirectoryFilter = "";
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
-        await performCombinedSearch();
-      });
-    });
-
-  fileInfo.appendChild(parentDirElement);
-
- 
-
-  const fileDetails = document.createElement('div');
-  fileDetails.className = 'file-details';
-  fileDetails.innerHTML = `<span class="directory-label">Size:
-    <span>${file.size? formatFileSize(file.size): ''}</span>
-  `;
-  fileInfo.appendChild(fileDetails);
-  fileElement.appendChild(fileInfo);
-
-  fileElement.addEventListener('click', () => {
-    toggleModelSelection(fileElement, file.filePath);
-  });
- // Add designer info if available
- if (file.designer) {
-  const designerInfo = document.createElement('div');
-  designerInfo.className = 'designer-info';
-  designerInfo.innerHTML = `<span class="directory-label">Designer:
-  <span>${file.designer}</span>`;
-  fileInfo.appendChild(designerInfo);
-}
-
-  if (!file.thumbnail &&!skipThumbnail) {
-    const fileExtension = file.filePath.split('.').pop().toLowerCase();
-    if (fileExtension === '3mf') {
-      try {
-        const images = await window.electron.get3MFImages(file.filePath);
-        if (images && images.length > 0) {
-          const img = document.createElement('img');
-          img.src = images;
-          img.className = 'model-thumbnail';
-          thumbnailContainer.innerHTML = '';
-          thumbnailContainer.appendChild(img);
-          thumbnailContainer.classList.remove('loading');
-          
-          await window.electron.saveThumbnail(file.filePath, images);
-          file.thumbnail = images;
-          
-          return fileElement;
-        }
-      } catch (imageError) {
-        console.error('renderFile: Error checking for embedded image:', imageError);
-      }
-    }
-
-    try {
-      const thumbnail = await new Promise((resolve, reject) => {
-        renderQueue.push({
-          filePath: file.filePath,
-          container: thumbnailContainer,
-          existingThumbnail: null,
-          resolve,
-          reject
-        });
-        processRenderQueue();
-      });
-
-      if (thumbnail) {
-        await window.electron.saveThumbnail(file.filePath, thumbnail);
-      }
-    } catch (error) {
-      console.error(`Error rendering thumbnail for ${file.fileName}:`, error);
-      thumbnailContainer.innerHTML = '<div class="error-message">Error loading model</div>';
-    }
-  } else if (file.thumbnail) { // Check if file.thumbnail exists before creating img element
-    const img = document.createElement('img');
-    img.src = file.thumbnail || '3d.png'; // Provide a default image
-    img.className = 'model-thumbnail'; // Add class for styling
-    thumbnailContainer.innerHTML = '';
-    thumbnailContainer.appendChild(img);
-    thumbnailContainer.classList.remove('loading');
-  }
-
-  addContextMenuHandler(fileElement, file.filePath);
-
-  return fileElement;
-}
-
-async function processRenderQueue() {
-  if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
-    return;
-  }
-
-  isProcessingQueue = true;
-  
-  try {
-    while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
-      if (isUserInteracting) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        continue;
-      }
-
-      const task = renderQueue.shift();
-      activeRenders++;
-      
-      try {
-        const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
-        task.resolve(result);
-      } catch (error) {
-        console.error(`Render task failed: ${error.message}`);
-        // Retry once after longer delay
-        setTimeout(() => renderQueue.push(task), 2000);
-      } finally {
-        activeRenders--;
-        await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
-      }
-    }
-  } finally {
-    isProcessingQueue = false;
-    if (renderQueue.length > 0) {
-      setTimeout(processRenderQueue, 100);
-    }
-  }
-}
-
-async function renderModelToPNG(filePath, container, existingThumbnail) {
-  if (existingThumbnail) {
-    const img = document.createElement('img');
-    img.src = existingThumbnail;
-    img.style.width = '250px';
-    img.style.height = '250px';
-    container.innerHTML = '';
-    container.appendChild(img);
-    return existingThumbnail;
-  }
-
-    // Check for 3MF embedded image first
-    if (filePath.toLowerCase().endsWith('.3mf')) {
-      try {
-        const embeddedImage = await extract3MFThumbnail(filePath);
-        if (embeddedImage && embeddedImage.length > 0) {
-          const imgUrl = Array.isArray(embeddedImage) ? embeddedImage[0] : embeddedImage;
-          const img = document.createElement('img');
-          img.src = imgUrl;
-          img.style.width = '250px';
-          img.style.height = '250px';
-          container.innerHTML = '';
-          container.appendChild(img);
-          return imgUrl;
-        }
-      } catch (imageError) {
-        console.error('renderModelToPNG: Error checking for embedded image:', imageError);
-      }
-    }
-
-  let renderer, scene, camera, canvas;
-  let model = null; // Declare model in outer scope
-
-  try {
-    canvas = document.createElement('canvas');
-    canvas.width = 250;
-    canvas.height = 250;
-    
-    renderer = new THREE.WebGLRenderer({
-        antialias: false,
-        alpha: true,
-        canvas: canvas,
-        powerPreference: 'low-power',
-        precision: 'lowp',
-        setPixelRatio: .2,
-        setClearColor: 0x000000,
-    });
-    
-    scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-
-    renderer.setClearColor(0x000000, 0);
-    
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(1, 1, 1).normalize();
-    scene.add(ambientLight);
-    scene.add(directionalLight);
-
-    // Use loadModel function which has proper path encoding handling
-    model = await loadModel(filePath);
-    if (!model) throw new Error('Failed to load model');
-    
-    scene.add(model);
-    fitCameraToObject(camera, model, scene, renderer);
-    renderer.render(scene, camera);
-
-    const imgData = canvas.toDataURL('image/png');
-
-    const img = document.createElement('img');
-    img.src = imgData;
-    img.style.width = '250px';
-    img.style.height = '250px';
-    container.innerHTML = '';
-    container.appendChild(img);
-
-    return imgData;
-
-  } catch (error) {
-    console.error('Error rendering model:', error);
-    const img = document.createElement('img');
-    img.src = '3d.png';
-    img.style.width = '250px';
-    img.style.height = '250px';
-    container.innerHTML = '';
-    container.appendChild(img);
-    return '3d.png';
-  } finally {
-    // Cleanup code that uses model
-    if (model) {
-      model.traverse(child => {
-        if (child.geometry) {
-          child.geometry.dispose();
-          child.geometry = null;
-        }
-      });
-      model = null;
-    }
-    // ... rest of cleanup code ...
-  }
 }
 
 
