@@ -336,7 +336,7 @@ async function updateModelElement(filePath) {
     fileName.textContent = file.fileName;
     fileInfo.appendChild(fileName);
 
-    const parentDirArray = file.filePath.split(/[/\]/).slice(-2, -1);
+    const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1);
     const parentDir = parentDirArray[0];
 
     const parentDirElement = document.createElement('div');
