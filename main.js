@@ -9,9 +9,6 @@ const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
 const ua = require('universal-analytics');
-const StreamZip = require('node-stream-zip');
-
-const MODEL_LIST_COLUMNS = `id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, (thumbnail IS NOT NULL AND thumbnail != '') as hasThumbnail`;
 
 // Create an analytics wrapper for GA4
 const analytics = {
@@ -375,7 +372,6 @@ function initializeDatabase() {
     db.exec('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_models_modifiedDate ON models(modifiedDate)');
     
     // Repair model_tags table to fix any foreign key issues
     repairModelTagsTable();
@@ -464,7 +460,6 @@ function initializeDefaultSettings() {
       { key: 'ClientId', value: crypto.randomUUID() }, // Generate a unique client ID
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
-      { key: 'enableZipSupport', value: 'false' },
     ];
     
     // Insert default settings if they don't exist
@@ -550,10 +545,6 @@ function createWindow() {
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        },
-        {
-          label: 'File Types',
-          click: () => mainWindow.webContents.send('open-file-type-settings')
         }
       ]
     },
@@ -696,10 +687,6 @@ function createApplicationMenu() {
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        },
-        {
-          label: 'File Types',
-          click: () => mainWindow.webContents.send('open-file-type-settings')
         }
       ]
     },
@@ -816,25 +803,6 @@ ipcMain.handle('open-file-dialog', async () => {
 
 // Update the calculateFileHash function to be more robust
 async function calculateFileHash(filePath) {
-  // Check if this is a file inside a zip archive
-  if (filePath.includes('.zip:')) {
-    const parts = filePath.split('.zip:');
-    if (parts.length === 2) {
-      const zipPath = parts[0] + '.zip';
-      const entryPath = parts[1];
-
-      try {
-        const entryData = await extractFileFromZip(zipPath, entryPath);
-        const hash = crypto.createHash('sha256');
-        hash.update(entryData);
-        return hash.digest('hex');
-      } catch (error) {
-        console.error(`Error calculating hash for zip entry ${filePath}:`, error);
-        throw error;
-      }
-    }
-  }
-
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
@@ -882,34 +850,6 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
-// Add this helper function for zip extraction
-async function extractFileFromZip(zipPath, entryPath) {
-  try {
-    const zip = new StreamZip.async({ file: zipPath });
-    const data = await zip.entryData(entryPath);
-    await zip.close();
-    return data;
-  } catch (error) {
-    console.error(`Error extracting file from zip ${zipPath}:`, error);
-    throw error;
-  }
-}
-
-// Helper function to delete model data from database
-function deleteModelData(modelId) {
-  try {
-    // First delete from model_tags (child table)
-    db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
-
-    // Then delete from models (parent table)
-    db.prepare('DELETE FROM models WHERE id = ?').run(modelId);
-    return true;
-  } catch (error) {
-    console.error(`Error deleting model data for id ${modelId}:`, error);
-    throw error;
-  }
-}
-
 // Update the removeNonExistentFiles function
 async function removeNonExistentFiles(scanDirectoryPath) {
   try {
@@ -923,7 +863,12 @@ async function removeNonExistentFiles(scanDirectoryPath) {
         const normalizedFilePath = normalizePath(model.filePath);
         if (normalizedFilePath.startsWith(normalizedScanPath)) {
           if (!fs.existsSync(model.filePath)) {
-            deleteModelData(model.id);
+            // First delete from model_tags (child table)
+            db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+            
+            // Then delete from models (parent table)
+            db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+            
             removedCount++;
           }
         }
@@ -946,7 +891,6 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
   try {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
-    const enableZipSupport = (await db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipSupport'))?.value === 'true';
     
     // First, remove any non-existent files from the scanned directory
     const removedCount = await removeNonExistentFiles(directoryPath);
@@ -958,7 +902,84 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
 
     return new Promise((resolve, reject) => {
       // Create a worker for scanning
-      const worker = new Worker(path.join(__dirname, 'scan-worker.js'));
+      const worker = new Worker(`
+        const { parentPort, workerData } = require('worker_threads');
+        const fs = require('fs');
+        const path = require('path');
+        const crypto = require('crypto');
+
+        async function scanDirectory(directoryPath, maxFileSize) {
+          const files = [];
+          let totalFiles = 0;
+          let processedFiles = 0;
+
+          // Use a stack instead of recursion for better performance
+          const directoryStack = [directoryPath];
+          const seenDirs = new Set();
+
+          while (directoryStack.length > 0) {
+            const currentDir = directoryStack.pop();
+            if (seenDirs.has(currentDir)) continue;
+            seenDirs.add(currentDir);
+
+            let entries;
+            try {
+              entries = fs.readdirSync(currentDir, { withFileTypes: true });
+            } catch (err) {
+              console.error(\`Skipping directory \${currentDir} due to error: \${err.message}\`);
+              continue;
+            }
+
+            for (const entry of entries) {
+              const fullPath = path.join(currentDir, entry.name);
+              
+              if (entry.isDirectory()) {
+                // Skip system directories and __MACOSX
+                if (entry.name.toLowerCase() === '__macosx' || 
+                    /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
+                  continue;
+                }
+                directoryStack.push(fullPath);
+              } else {
+                const ext = path.extname(entry.name).toLowerCase();
+                if (ext === '.stl' || ext === '.3mf') {
+                  try {
+                    const stats = fs.statSync(fullPath);
+                    if (stats.size <= maxFileSize) {
+                      files.push({
+                        filePath: fullPath,
+                        fileName: entry.name,
+                        size: stats.size,
+                        mtime: stats.mtime
+                      });
+                    }
+                  } catch (error) {
+                    console.error(\`Error processing file \${fullPath}:\`, error);
+                  }
+                }
+                processedFiles++;
+                if (processedFiles % 100 === 0) {
+                  parentPort.postMessage({ 
+                    type: 'progress', 
+                    processed: processedFiles 
+                  });
+                }
+              }
+            }
+          }
+
+          return { files, totalFiles: processedFiles };
+        }
+
+        parentPort.on('message', async ({ directoryPath, maxFileSize }) => {
+          try {
+            const result = await scanDirectory(directoryPath, maxFileSize);
+            parentPort.postMessage({ type: 'done', result });
+          } catch (error) {
+            parentPort.postMessage({ type: 'error', error: error.message });
+          }
+        });
+      `, { eval: true });
 
       // Set up worker message handling
       worker.on('message', async (message) => {
@@ -1022,7 +1043,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
       });
 
       // Start the worker
-      worker.postMessage({ directoryPath, maxFileSize, enableZipSupport });
+      worker.postMessage({ directoryPath, maxFileSize });
     });
   } catch (error) {
     console.error('Error in scan-directory handler:', error);
@@ -1132,9 +1153,9 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
     let models;
     if (limit === 0) {
       // When limit is 0, load all models without a limit
-      models = db.prepare(`SELECT ${MODEL_LIST_COLUMNS} FROM models ${orderClause}`).all();
+      models = db.prepare(`SELECT * FROM models ${orderClause}`).all();
     } else {
-      models = db.prepare(`SELECT ${MODEL_LIST_COLUMNS} FROM models ${orderClause} LIMIT ?`).all(limit);
+      models = db.prepare(`SELECT * FROM models ${orderClause} LIMIT ?`).all(limit);
     }
     return models;
   } catch (error) {
@@ -1159,8 +1180,7 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
       directory
     } = filters;
 
-    const columns = `m.id, m.filePath, m.fileName, m.designer, m.source, m.notes, m.printed, m.parentModel, m.hash, m.size, m.license, m.modifiedDate, (m.thumbnail IS NOT NULL AND m.thumbnail != '') as hasThumbnail`;
-    let query = `SELECT DISTINCT ${columns} FROM models m`;
+    let query = `SELECT DISTINCT m.* FROM models m`;
     const params = [];
     const conditions = [];
 
@@ -1208,13 +1228,8 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     }
 
     if (fileType) {
-      if (fileType === 'zip') {
-        conditions.push(`m.filePath LIKE ?`);
-        params.push('%.zip:%');
-      } else {
-        conditions.push(`lower(m.fileName) LIKE ?`);
-        params.push(`%.${fileType.toLowerCase()}`);
-      }
+      conditions.push(`lower(m.fileName) LIKE ?`);
+      params.push(`%.${fileType.toLowerCase()}`);
     }
 
     if (directory) {
@@ -1333,31 +1348,6 @@ ipcMain.handle('get-setting', async (event, key) => {
   }
 });
 
-// Add handler for getting file data (for STL rendering from zip)
-ipcMain.handle('get-file-data', async (event, filePath) => {
-  try {
-    if (filePath.includes('.zip:')) {
-      const parts = filePath.split('.zip:');
-      if (parts.length === 2) {
-        const zipPath = parts[0] + '.zip';
-        const entryPath = parts[1];
-
-        const data = await extractFileFromZip(zipPath, entryPath);
-        // Convert buffer to base64 to send over IPC safely if needed,
-        // but Electron handles Buffers fine.
-        // However, Three.js loaders might expect ArrayBuffer.
-        // Node Buffer is Uint8Array, which should be fine.
-        return data;
-      }
-    } else {
-      return await fs.promises.readFile(filePath);
-    }
-  } catch (error) {
-    console.error('Error getting file data:', error);
-    throw error;
-  }
-});
-
 // Add error handling to the saveSetting handler
 ipcMain.handle('save-setting', async (event, key, value) => {
   try {
@@ -1442,6 +1432,113 @@ function shouldSkipDirectory(dirName) {
   return systemDirs.some(dir => dirName.toLowerCase() === dir.toLowerCase());
 }
 
+// Update the scanDirectory function
+async function scanDirectory(directoryPath, isValidFile) {
+  const files = [];
+  let totalFiles = 0;
+  let isCancelled = false;
+
+  // Function to check if a directory should be processed
+  function shouldProcessDirectory(dirName) {
+    return !shouldSkipDirectory(dirName);
+  }
+
+  // Process a batch of entries in parallel
+  async function processBatch(entries, currentDir) {
+    if (isCancelled) return [];
+
+    const batchResults = await Promise.all(
+      entries.map(async (entry) => {
+        const fullPath = path.join(currentDir, entry.name);
+        
+        if (entry.isDirectory()) {
+          // Skip system directories
+          if (!shouldProcessDirectory(entry.name)) {
+            debugLog(`Skipping system directory: ${entry.name}`);
+            return { files: [], count: 0 };
+          }
+          
+          return await scanRecursive(fullPath);
+        } else {
+          totalFiles++;
+          
+          try {
+            const stats = await fs.promises.stat(fullPath);
+            if (isValidFile(entry.name, stats.size)) {
+              return { 
+                files: [{
+                  filePath: fullPath,
+                  fileName: entry.name,
+                  size: stats.size,
+                  mtime: stats.mtime
+                }], 
+                count: 1 
+              };
+            }
+          } catch (error) {
+            console.error(`Error processing file ${fullPath}:`, error);
+          }
+          return { files: [], count: 0 };
+        }
+      })
+    );
+    
+    // Combine results from the batch
+    return batchResults.reduce(
+      (acc, result) => {
+        if (result) {
+          acc.files.push(...result.files);
+          acc.count += result.count;
+        }
+        return acc;
+      },
+      { files: [], count: 0 }
+    );
+  }
+
+  // Scan directory recursively with improved parallelism
+  async function scanRecursive(dir) {
+    try {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      
+      // Process in batches of 50 for better performance
+      const BATCH_SIZE = 50;
+      const results = [];
+      
+      for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+        const batch = entries.slice(i, i + BATCH_SIZE);
+        const batchResult = await processBatch(batch, dir);
+        results.push(batchResult);
+        
+        if (isCancelled) break;
+      }
+      
+      // Combine all batch results
+      return results.reduce(
+        (acc, result) => {
+          acc.files.push(...result.files);
+          acc.count += result.count;
+          return acc;
+        },
+        { files: [], count: 0 }
+      );
+    } catch (error) {
+      console.error(`Error reading directory ${dir}:`, error);
+      return { files: [], count: 0 };
+    }
+  }
+
+  // Add a method to cancel the scan
+  const cancelScan = () => {
+    isCancelled = true;
+  };
+
+  // Start the scan
+  const result = await scanRecursive(directoryPath);
+  files.push(...result.files);
+  
+  return { files, totalFiles, cancelScan };
+}
 
 async function saveThumbnail(filePath, thumbnail) {
   try {
@@ -1629,11 +1726,8 @@ ipcMain.handle('trash-file', async (event, filePath) => {
     // If trash succeeds, remove from database
     await new Promise((resolve, reject) => {
       console.log('Deleting from database:', normalizedPath);
-      const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(normalizedPath);
-      if (model) {
-        deleteModelData(model.id);
-      }
-      resolve();
+      db.prepare('DELETE FROM models WHERE filePath = ?').run(normalizedPath);
+          resolve();
     });
     
     return true;
@@ -1815,156 +1909,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   if (filePaths.length === 1) {
     event.sender.send('select-model-by-filepath', filePaths[0]);
   }
-
-  // Check if all selected files are archived
-  const allArchived = filePaths.every(fp => fp.includes('.zip:'));
-
-  let menuItems;
-
-  if (allArchived) {
-    // Restricted context menu for archived models
-    menuItems = [
-      {
-        label: 'Open',
-        enabled: filePaths.length === 1,
-        click: async () => {
-          try {
-            // Extract to temp and open
-            const filePath = filePaths[0];
-            const parts = filePath.split('.zip:');
-            const zipPath = parts[0] + '.zip';
-            const entryPath = parts[1];
-
-            const tempDir = os.tmpdir();
-            const tempFilePath = path.join(tempDir, path.basename(entryPath));
-
-            const zip = new StreamZip.async({ file: zipPath });
-            await zip.extract(entryPath, tempFilePath);
-            await zip.close();
-
-            await shell.openPath(tempFilePath);
-          } catch (error) {
-            console.error('Error opening archived file:', error);
-            dialog.showMessageBox({
-              type: 'error',
-              title: 'Error',
-              message: 'Could not open file',
-              detail: error.message
-            });
-          }
-        }
-      },
-      {
-        label: 'Extract',
-        click: async () => {
-          const win = BrowserWindow.fromWebContents(event.sender);
-          const result = await dialog.showOpenDialog(win, {
-            title: 'Select Destination Folder',
-            properties: ['openDirectory']
-          });
-
-          if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
-            const destFolder = result.filePaths[0];
-            let successCount = 0;
-            let errorCount = 0;
-
-            for (const filePath of filePaths) {
-              try {
-                const parts = filePath.split('.zip:');
-                const zipPath = parts[0] + '.zip';
-                const entryPath = parts[1];
-                const fileName = path.basename(entryPath);
-                const destPath = path.join(destFolder, fileName);
-
-                const zip = new StreamZip.async({ file: zipPath });
-                await zip.extract(entryPath, destPath);
-                await zip.close();
-                successCount++;
-              } catch (error) {
-                console.error(`Error extracting ${filePath}:`, error);
-                errorCount++;
-              }
-            }
-
-            if (errorCount > 0) {
-              await dialog.showMessageBox({
-                type: 'warning',
-                title: 'Extraction Complete',
-                message: `Extracted ${successCount} files. Failed to extract ${errorCount} files.`
-              });
-            } else {
-              await dialog.showMessageBox({
-                type: 'info',
-                title: 'Extraction Complete',
-                message: `Successfully extracted ${successCount} files.`
-              });
-            }
-          }
-        }
-      },
-      {
-        label: 'Open Directory',
-        enabled: filePaths.length === 1,
-        click: async () => {
-          try {
-            const filePath = filePaths[0];
-            const parts = filePath.split('.zip:');
-            const zipPath = parts[0] + '.zip';
-            await shell.showItemInFolder(zipPath);
-          } catch (error) {
-            console.error('Error opening directory:', error);
-            dialog.showMessageBox({
-              type: 'error',
-              title: 'Error',
-              message: 'Could not open directory',
-              detail: error.message
-            });
-          }
-        }
-      },
-      {
-        label: 'Remove from Library',
-        click: async () => {
-          const confirm = await dialog.showMessageBox({
-            type: 'warning',
-            title: 'Confirm Remove',
-            message: `Are you sure you want to remove ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${filePaths.join('\n')}`,
-            buttons: ['Yes', 'No'],
-            defaultId: 1,
-            cancelId: 1,
-          });
-          if (confirm.response === 0) { // User clicked "Yes"
-            try {
-              // Use a transaction to handle all removals
-              db.transaction(() => {
-                filePaths.forEach(fp => {
-                  const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
-                  if (model) {
-                    deleteModelData(model.id);
-                  }
-                });
-              })();
-
-              event.sender.send('refresh-grid');
-            } catch (error) {
-              console.error('Error removing from library:', error);
-              await dialog.showMessageBox({
-                type: 'error',
-                title: 'Error',
-                message: `An error occurred while removing from library: ${error.message}`
-              });
-            }
-          }
-        }
-      }
-    ];
-
-    const menu = Menu.buildFromTemplate(menuItems);
-    menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
-    return;
-  }
   
-  menuItems = [
+  let menuItems = [
     {
       label: 'Open File',
       enabled: filePaths.length === 1,
@@ -2248,7 +2194,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               filePaths.forEach(fp => {
                 const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
                 if (model) {
-                  deleteModelData(model.id);
+                  // First delete from model_tags (child table)
+                  db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+                  // Then delete from models (parent table)
+                  db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
                 }
               });
             })();
@@ -2317,7 +2266,11 @@ async function deleteFile(filePath) {
       // Get the model ID first
       const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePath);
       if (model) {
-        deleteModelData(model.id);
+        // First delete from model_tags (child table)
+        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+        
+        // Then delete from models (parent table)
+        db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
       }
     })();
     
@@ -2416,147 +2369,84 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   try {
     console.log('Starting to process 3MF file:', filePath);
     
-    let zip;
-    let data;
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      console.error('File does not exist:', filePath);
+      return null;
+    }
+    
+    // Use JSZip to extract the 3MF file (which is a zip file)
+    console.log('Creating JSZip instance...');
+    const zip = new JSZip();
+    
+    console.log('Reading file data...');
+    const data = await fs.promises.readFile(filePath);
+    console.log('File read successfully, size:', data.length, 'bytes');
+    
+    console.log('Loading zip contents...');
+    const contents = await zip.loadAsync(data);
+    console.log('Zip contents loaded successfully');
+    
+    // Log all files in the 3MF
+    console.log('\nContents of 3MF file:', filePath);
+    console.log('Number of files in archive:', Object.keys(contents.files).length);
+    console.log('All files in archive:');
+    Object.keys(contents.files).forEach(filename => {
+      const file = contents.files[filename];
+      console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
+    });
+    
+    // Look for plate_1.png in the Metadata directory, trying different case variations
+    const possiblePaths = [
+      'Metadata/plate_1.png',
+      'metadata/plate_1.png',
+      '/Metadata/plate_1.png',
+      '/metadata/plate_1.png'
+    ];
 
-    // Handle nested zip scenario (3MF inside a Zip) - still need to extract it first
-    // Note: StreamZip doesn't support reading from a buffer, so for nested zips we still use JSZip for now
-    // or we'd need to write to a temp file.
-    if (filePath.includes('.zip:')) {
-      const parts = filePath.split('.zip:');
-      if (parts.length === 2) {
-        const zipPath = parts[0] + '.zip';
-        const entryPath = parts[1];
-
-        console.log(`Extracting 3MF from zip archive: ${zipPath}, entry: ${entryPath}`);
-
-        try {
-          data = await extractFileFromZip(zipPath, entryPath);
-          console.log('Extracted 3MF data from zip archive, size:', data.length);
-
-          // Fallback to JSZip for in-memory buffer processing (nested zip case)
-          console.log('Using JSZip for in-memory buffer...');
-          const jsZip = new JSZip();
-          const contents = await jsZip.loadAsync(data);
-
-          // Logic for JSZip (same as before but restricted to this block)
-          // Look for plate_1.png in the Metadata directory
-          const possiblePaths = [
-            'Metadata/plate_1.png', 'metadata/plate_1.png',
-            'Metadata/thumbnail.png', 'metadata/thumbnail.png'
-          ];
-
-          for (const p of possiblePaths) {
-            const file = contents.file(p) || contents.file(p.replace('/', '\\'));
-            if (file) {
-              const imageData = await file.async('base64');
-              return [`data:image/png;base64,${imageData}`];
-            }
-          }
-
-          // Fallback search
-          const imageFiles = [];
-          contents.forEach((relativePath, file) => {
-             if (relativePath.match(/\.png$/i)) {
-                 imageFiles.push({ path: relativePath, file: file });
-             }
-          });
-
-          // Prioritize Metadata
-          imageFiles.sort((a, b) => {
-              const aMeta = a.path.toLowerCase().includes('metadata');
-              const bMeta = b.path.toLowerCase().includes('metadata');
-              if (aMeta && !bMeta) return -1;
-              if (!aMeta && bMeta) return 1;
-              return 0;
-          });
-
-          if (imageFiles.length > 0) {
-              const imageData = await imageFiles[0].file.async('base64');
-              return [`data:image/png;base64,${imageData}`];
-          }
-          return null;
-
-        } catch (error) {
-          console.error(`Error extracting 3MF from zip:`, error);
-          return null;
-        }
+    // Try each possible path
+    console.log('\nSearching for plate_1.png...');
+    for (const path of possiblePaths) {
+      console.log('Checking for:', path);
+      const plateImage = contents.files[path];
+      if (plateImage) {
+        console.log('Found plate_1.png at:', path);
+        const imageData = await plateImage.async('base64');
+        console.log('Successfully extracted plate_1.png data');
+        return [`data:image/png;base64,${imageData}`];
+      }
+    }
+    
+    // If plate_1.png wasn't found, look for any images in the Metadata directory first
+    console.log('\nLooking for any images in Metadata directory...');
+    const imageFiles = [];
+    for (const [path, file] of Object.entries(contents.files)) {
+      // Check if file is in Metadata directory first
+      if (path.toLowerCase().includes('metadata/') && path.match(/\.(png|jpe?g|gif)$/i)) {
+        console.log('Found image in Metadata:', path);
+        const imageData = await file.async('base64');
+        imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
       }
     }
 
-    // Standard file on disk - Use StreamZip for efficiency
-    if (!fs.existsSync(filePath)) {
-        console.error('File does not exist:', filePath);
-        return null;
+    // If no images found in Metadata, look elsewhere in the 3MF
+    if (imageFiles.length === 0) {
+      console.log('\nLooking for images anywhere in 3MF...');
+      for (const [path, file] of Object.entries(contents.files)) {
+        if (path.match(/\.(png|jpe?g|gif)$/i)) {
+          console.log('Found image:', path);
+          const imageData = await file.async('base64');
+          imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
+        }
+      }
     }
-
-    zip = new StreamZip.async({ file: filePath });
     
-    try {
-        const entries = await zip.entries();
-        const entryNames = Object.keys(entries);
-
-        // Priority list for thumbnails
-        const thumbnailCandidates = [
-            'Metadata/plate_1.png',
-            'metadata/plate_1.png',
-            'Metadata/thumbnail.png',
-            'metadata/thumbnail.png'
-        ];
-
-        let targetEntry = null;
-
-        // Check for preferred thumbnails
-        for (const candidate of thumbnailCandidates) {
-            // Check direct match
-            if (entries[candidate]) {
-                targetEntry = candidate;
-                break;
-            }
-            // Check Windows style path match
-            const winCandidate = candidate.replace(/\//g, '\\');
-            if (entries[winCandidate]) {
-                targetEntry = winCandidate;
-                break;
-            }
-        }
-
-        // If no standard thumbnail found, search for any png in Metadata
-        if (!targetEntry) {
-            const metadataPng = entryNames.find(name =>
-                name.toLowerCase().includes('metadata') && name.toLowerCase().endsWith('.png')
-            );
-            if (metadataPng) targetEntry = metadataPng;
-        }
-
-        // If still nothing, look for any png (often in other folders)
-        if (!targetEntry) {
-             const anyPng = entryNames.find(name => name.toLowerCase().endsWith('.png'));
-             if (anyPng) targetEntry = anyPng;
-        }
-
-        if (targetEntry) {
-            console.log('Found 3MF thumbnail:', targetEntry);
-            const data = await zip.entryData(targetEntry);
-            await zip.close();
-            return [`data:image/png;base64,${data.toString('base64')}`];
-        }
-
-        await zip.close();
-        return null;
-
-    } catch (err) {
-        console.error('Error processing 3MF with StreamZip:', err);
-        try {
-            if (zip) await zip.close();
-        } catch (closeErr) {
-            console.error('Error closing zip:', closeErr);
-        }
-        return null;
-    }
-
+    console.log('\nFound total images:', imageFiles.length);
+    return imageFiles;
   } catch (error) {
     console.error('Error reading 3MF images:', error);
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
     return null;
   }
 });
@@ -2564,27 +2454,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
 ipcMain.handle('get3MFSTL', async (event, filePath) => {
   try {
     const zip = new JSZip();
-    let data;
-
-    if (filePath.includes('.zip:')) {
-      const parts = filePath.split('.zip:');
-      if (parts.length === 2) {
-        const zipPath = parts[0] + '.zip';
-        const entryPath = parts[1];
-
-        try {
-          data = await extractFileFromZip(zipPath, entryPath);
-        } catch (error) {
-          console.error(`Error extracting STL from zip:`, error);
-          return null;
-        }
-      }
-    } else {
-      data = await fs.promises.readFile(filePath);
-    }
-
-    if (!data) return null;
-
+    const data = await fs.promises.readFile(filePath);
     const contents = await zip.loadAsync(data);
     
     // Look for STL files in the 3MF
@@ -2863,10 +2733,6 @@ ipcMain.on('start-print-roulette', (event) => {
   mainWindow.webContents.send('start-print-roulette');
 });
 
-ipcMain.on('open-file-type-settings', (event) => {
-  mainWindow.webContents.send('open-file-type-settings');
-});
-
 // Add this new IPC handler at the end to open external URLs using the system's default browser
 ipcMain.handle('open-external', async (event, url) => {
   try {
@@ -3020,7 +2886,7 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-    const models = db.prepare(`SELECT ${MODEL_LIST_COLUMNS} FROM models WHERE filePath LIKE ?`).all(`${directoryPath}%`);
+    const models = db.prepare('SELECT * FROM models WHERE filePath LIKE ?').all(`${directoryPath}%`);
     return models;
   } catch (error) {
     console.error('Error fetching models by directory:', error);
@@ -3033,7 +2899,7 @@ ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) 
   try {
     const offset = (page - 1) * pageSize;
     const models = db.prepare(
-      `SELECT ${MODEL_LIST_COLUMNS} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
+      `SELECT * FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);
     return models;
   } catch (error) {
@@ -3190,26 +3056,6 @@ ipcMain.handle('clear-and-save-slicers', async (event, slicers) => {
 
 ipcMain.handle('get-file-stats', async (event, filePath) => {
   try {
-    if (filePath.includes('.zip:')) {
-      const parts = filePath.split('.zip:');
-      if (parts.length === 2) {
-        const zipPath = parts[0] + '.zip';
-        const entryPath = parts[1];
-
-        const zip = new StreamZip.async({ file: zipPath });
-        const entry = await zip.entry(entryPath);
-        await zip.close();
-
-        if (entry) {
-          return {
-            size: entry.size,
-            mtime: entry.time ? new Date(entry.time) : new Date(),
-            isDirectory: () => false,
-            isFile: () => true
-          };
-        }
-      }
-    }
     const stats = await fs.promises.stat(filePath);
     return stats;
   } catch (error) {

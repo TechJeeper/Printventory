@@ -89,7 +89,6 @@ contextBridge.exposeInMainWorld('electron', {
   checkForUpdates: (isBeta) => ipcRenderer.invoke('check-for-updates', isBeta),
   openUpdatePage: (isBeta) => ipcRenderer.invoke('open-update-page', isBeta),
   onOpenSTLHome: (callback) => ipcRenderer.on('open-stl-home', callback),
-  onOpenFileTypeSettings: (callback) => ipcRenderer.on('open-file-type-settings', callback),
   send: (channel, data) => {
     // Optionally add a whitelist of channels if needed for security
     const validChannels = [
@@ -145,8 +144,6 @@ contextBridge.exposeInMainWorld('electron', {
   clearAndSaveSlicers: (slicers) => ipcRenderer.invoke('clear-and-save-slicers', slicers),
   getAppVersion: () => version,
   getFileStats: (filePath) => ipcRenderer.invoke('get-file-stats', filePath),
-  getFileData: (filePath) => ipcRenderer.invoke('get-file-data', filePath),
-  isZipFile: (filePath) => filePath.includes('.zip:'),
   startTransaction: () => ipcRenderer.invoke('database:start-transaction'),
   commitTransaction: () => ipcRenderer.invoke('database:commit-transaction'),
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),

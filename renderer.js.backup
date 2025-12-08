@@ -32,7 +32,6 @@ let isScanning = false;
 
 // Add these queue-related variables
 let renderQueue = [];
-let pendingThumbnails = new Set(); // Track files currently being rendered
 let activeRenders = 0;
 let isProcessingQueue = false;
 
@@ -187,15 +186,7 @@ async function updateModelElement(filePath) {
       if (model.designer) {
         const designerInfo = document.createElement('div');
         designerInfo.className = 'designer-info';
-
-      const label = document.createElement('span');
-      label.className = 'directory-label';
-      label.textContent = 'Designer: ';
-
-      const value = document.createTextNode(model.designer);
-
-      designerInfo.appendChild(label);
-      designerInfo.appendChild(value);
+        designerInfo.innerHTML = `<span class="directory-label">Designer:</span> ${model.designer}`;
         fileInfo.appendChild(designerInfo);
       }
     }
@@ -249,34 +240,14 @@ async function showModelDetails(filePath) {
       modelDetailsHeader.insertAdjacentElement('afterend', enterMultiEditButton);
 
       // Add click handler
-      enterMultiEditButton.addEventListener('click', async () => { // Made async
+      enterMultiEditButton.addEventListener('click', () => {
         isMultiSelectMode = true;
         const multiEditPanel = document.getElementById('multi-edit-panel');
         detailsPanel.classList.add('hidden');
         multiEditPanel.classList.remove('hidden');
-        
-        // Update the other toggle button's state and text
-        const toggleButton = document.getElementById('edit-mode-toggle');
-        if (toggleButton) {
-          toggleButton.textContent = 'Exit Multi-Edit Mode';
-          toggleButton.classList.add('active');
-        }
-        
-        // *** ADDED DROPDOWN POPULATION LOGIC ***
-        try {
-          await populateModelDesignerDropdown(null, 'multi-designer');
-          await populateModelLicenseDropdown(null, 'multi-license');
-          await populateParentModelDropdown(null, 'multi-parent');
-          await populateTagSelect('multi-tag-select', 'multi-tags');
-        } catch (error) {
-          console.error('Error populating multi-edit dropdowns:', error);
-        }
-        // ****************************************
-
-        showMultiEditPanel(); // *** ADDED CALL TO ATTACH LISTENERS ***
-
-        // Scroll the multi-edit panel into view
-        multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.getElementById('edit-mode-toggle').textContent = 'Exit Multi-Edit Mode';
+        document.getElementById('edit-mode-toggle').classList.add('active');
+        showMultiEditPanel();
       });
     }
 
@@ -420,18 +391,6 @@ function forceDialogRefresh(dialog, input) {
       }, 100);
     }, 50);
   });
-}
-
-// Moved resetInputState definition before the focus handler that calls it
-function resetInputState(input) {
-  if (!input) return;
-  input.disabled = false;
-  input.readOnly = false;
-  // Don't clear the value here to preserve any entered data on refocus
-  setTimeout(() => {
-    input.focus();
-    input.click();
-  }, 50);
 }
 
 // Add window focus handler
@@ -818,45 +777,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   await populateTagFilter();
 
   // Update the edit mode toggle button listener
-  document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => { // Ensure async
+  document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => {
     isMultiSelectMode = !isMultiSelectMode;
     const button = document.getElementById('edit-mode-toggle');
     const multiEditPanel = document.getElementById('multi-edit-panel');
     const detailsPanel = document.getElementById('model-details');
     
-    if (isMultiSelectMode) {
-      button.textContent = 'Exit Multi-Edit Mode'; // Changed from Single-Edit
-      button.classList.add('active');
-      multiEditPanel.classList.remove('hidden');
-      detailsPanel.classList.add('hidden');
-      
-      // Populate dropdowns
-      try {
-        await populateModelDesignerDropdown(null, 'multi-designer');
-        await populateModelLicenseDropdown(null, 'multi-license');
-        await populateParentModelDropdown(null, 'multi-parent');
-        await populateTagSelect('multi-tag-select', 'multi-tags');
-      } catch (error) {
-        console.error('Error populating multi-edit dropdowns:', error);
-      }
-      
-      showMultiEditPanel(); // Call to attach listeners
-      
-      multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } else {
-      // Clear selection when disabling multiselect
+    // Clear selection when disabling multiselect
+    if (!isMultiSelectMode) {
       selectedModels.clear();
       document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
       multiEditPanel.classList.add('hidden');
-      // Make sure details panel is shown if nothing else is selected
-      if (selectedModels.size === 0) {
-         detailsPanel.classList.remove('hidden'); // Remove hidden class if no models selected
-         closeDetailsPanel(); // Or potentially call closeDetailsPanel if preferred
-      }
+      modelDetails.classList.remove('hidden');
       button.textContent = 'Multi-Edit Mode';
       button.classList.remove('active');
-      // Call exitMultiEditMode if needed for cleanup
-      exitMultiEditMode(); 
+    } else {
+      multiEditPanel.classList.remove('hidden');
+      modelDetails.classList.add('hidden');
+      button.textContent = 'Single-Edit Mode';
+      button.classList.add('active');
+      // Populate dropdowns
+      await populateModelDesignerDropdown(null, 'multi-designer');
+      await populateModelLicenseDropdown(null, 'multi-license');
+      await populateParentModelDropdown(null, 'multi-parent');
+      await populateTagSelect('multi-tag-select', 'multi-tags');
+      
+      // Scroll the multi-edit panel into view with smooth animation
+      multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     updateSelectedCount();
   });
@@ -870,8 +817,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Show the dialog
     tagDialog.showModal();
     
-    // Use forceDialogRefresh to ensure input focus works properly on Windows
-    forceDialogRefresh(tagDialog, newTagInput);
+    // Force a proper reset of the input field
+    requestAnimationFrame(() => {
+        newTagInput.disabled = false;
+        newTagInput.readOnly = false;
+        newTagInput.blur();
+        newTagInput.focus();
+    });
   });
 
   document.getElementById('cancel-tag-button')?.addEventListener('click', () => {
@@ -891,8 +843,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const savedTag = await window.electron.saveTag(newTagName);
         // Add the new tag to the model immediately if in single edit mode
         if (!isMultiSelectMode) {
-          console.log(`Single edit mode: Adding new tag '${savedTag.name}' to model-tags`); // Added log
-          // This line should handle adding the tag visually and saving
           addTagToModel(savedTag.name, 'model-tags');
         }
         // Reset form state before closing
@@ -979,7 +929,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update the multi-save button handler
   document.getElementById('multi-save-button')?.addEventListener('click', async () => {
     try {
-      const designer = document.getElementById('multi-designer').value || 'Unknown'; // Default to Unknown
+      const designer = document.getElementById('multi-designer').value;
       const source = document.getElementById('multi-source').value;
       const parent = document.getElementById('multi-parent').value;
       const license = document.getElementById('multi-license').value;
@@ -995,17 +945,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         const modelData = {
           filePath,
-          designer, // Always include designer (now has default)
+          ...(designer && { designer }),
           ...(source && { source }),
           ...(parent && { parentModel: parent }),
           ...(license && { license }),
           printed: printed,
-          tags: tags.length > 0 ? tags : (existingModel.tags || []) // Keep tag logic simple here, merging is in auto-save
+          tags: tags.length > 0 ? tags : (existingModel.tags || [])
         };
 
         await window.electron.saveModel(modelData);
         await updateModelElement(filePath);
       }
+
 
       // Clear selection and hide multi-edit panel
       selectedModels.clear();
@@ -1175,6 +1126,51 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await populateTagFilter();
 
+  // Add event listener for Update Selected Models button
+  document.getElementById('multi-save-button')?.addEventListener('click', async () => {
+    try {
+      const designer = document.getElementById('multi-designer').value;
+      const source = document.getElementById('multi-source').value;
+      const parent = document.getElementById('multi-parent').value;
+      const license = document.getElementById('multi-license').value;
+      const printed = document.getElementById('multi-printed').value;
+
+      // Get all selected tags
+      const tagElements = document.getElementById('multi-tags').querySelectorAll('.tag');
+      const tags = Array.from(tagElements).map(tag => tag.getAttribute('data-tag-name'));
+
+      // Update each selected model
+      for (const filePath of selectedModels) {
+        const existingModel = await window.electron.getModel(filePath);
+        
+        const modelData = {
+          filePath,
+          ...(designer && { designer }),
+          ...(source && { source }),
+          ...(parent && { parentModel: parent }),
+          ...(license && { license }),
+          printed: printed,
+          tags: tags.length > 0 ? tags : (existingModel.tags || [])
+        };
+
+        await window.electron.saveModel(modelData);
+        await updateModelElement(filePath);
+      }
+
+
+      // Clear selection and hide multi-edit panel
+      selectedModels.clear();
+      isMultiSelectMode = false;
+      document.getElementById('multi-edit-panel').classList.add('hidden');
+      document.getElementById('model-details').classList.remove('hidden');
+      document.getElementById('edit-mode-toggle').textContent = 'Multi-Edit Mode';
+      document.getElementById('edit-mode-toggle').classList.remove('active');
+
+    } catch (error) {
+      console.error('Error saving multiple models:', error);
+    }
+  });
+
   // Update the add button event listeners to handle both panels
   document.querySelectorAll('.add-designer-button').forEach(button => {
     button.addEventListener('click', () => {
@@ -1195,64 +1191,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.querySelectorAll('.add-tag-button').forEach(button => {
-    button.addEventListener('click', async () => {
-      // Get the container ID for the tags container - we'll need this to know where to add the tag
-      const sourceContainer = button.closest('.tags-container').querySelector('.tags-list').id;
-      
-      // Use the HTML dialog instead of Electron's dialog
-      const tagDialog = document.getElementById('new-tag-dialog');
-      const newTagInput = document.getElementById('new-tag-name');
-      
-      // Clear any previous input
-      if (newTagInput) {
-        newTagInput.value = '';
-      }
-      
-      // Store the source container ID on the dialog for reference when submitting
-      tagDialog.setAttribute('data-source-container', sourceContainer);
-      
-      // Show the dialog
-      tagDialog.showModal();
+    button.addEventListener('click', () => {
+      const dialog = document.getElementById('new-tag-dialog');
+      // Store which container triggered the dialog
+      dialog.dataset.sourceContainer = button.closest('.tags-container').querySelector('.tags-list').id;
+      dialog.showModal();
     });
-  });
-  
-  // Handle the tag dialog submit
-  document.getElementById('add-tag-submit')?.addEventListener('click', async (e) => {
-    e.preventDefault();
-    const tagDialog = document.getElementById('new-tag-dialog');
-    const newTagInput = document.getElementById('new-tag-name');
-    const sourceContainer = tagDialog.getAttribute('data-source-container');
-    
-    if (newTagInput && newTagInput.value.trim()) {
-      const tagName = newTagInput.value.trim();
-      try {
-        // First save the tag to the database
-            const tag = await window.electron.saveTag(tagName);
-            if (tag) {
-              // Update all tag dropdowns
-              await updateAllTagDropdowns();
-              
-          // Add the tag to the model(s)
-          if (sourceContainer) {
-            // Add the tag to the model using our helper function
-                await addTagToModel(tagName, sourceContainer);
-            console.log(`Added tag "${tagName}" to ${sourceContainer}`);
-              }
-          
-          // Close the dialog
-          tagDialog.close();
-            }
-          } catch (error) {
-            console.error('Error adding tag:', error);
-            await window.electron.showMessage('Error', 'Failed to add tag: ' + error.message);
-        }
-      }
-    });
-  
-  // Handle the tag dialog cancel button
-  document.getElementById('cancel-tag-button')?.addEventListener('click', () => {
-    const tagDialog = document.getElementById('new-tag-dialog');
-    tagDialog.close();
   });
 
   // Add fetch button event listeners
@@ -1416,15 +1360,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add scan directory button event listener
   document.getElementById('scan-directory-button')?.addEventListener('click', async () => {
     if (isScanning) return; // Prevent multiple scans
-    
-    // First, check if there are any active filters and clear them
-    const clearFilterButton = document.querySelector('.clear-filter-button');
-    if (clearFilterButton) {
-      console.log('Clearing filters before directory scan');
-      clearFilterButton.click(); // Programmatically trigger the clear filters action
-      // Wait a moment for the filter clearing to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
     
     const directoryPath = await window.electron.openFileDialog();
     if (!directoryPath || directoryPath.length === 0) return;
@@ -1860,7 +1795,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add event listener for generating missing thumbnails
   window.electron.onGenerateMissingThumbnails(async (_event) => {
     try {
-      const modelsWithoutThumbs = await window.electron.getModelsWithDefaultThumbnails();
+      const modelsWithoutThumbs = await window.electron.getModelsWithoutThumbnails();
       
       if (modelsWithoutThumbs.length === 0) {
         await window.electron.showMessage('Information', 'All models already have thumbnails. Nothing to generate.');
@@ -1954,6 +1889,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
 
+  // Add this function near the top with other utility functions
+  function resetInputState() {
+    // Clear any selected tags
+    selectedTags.clear();
+    
+    // Reset the input field
+    const tagInput = document.getElementById('tag-manager-search');
+    if (tagInput) {
+      tagInput.value = '';
+    }
+    
+    // Clear any visual selections
+    document.querySelectorAll('.tag.selected').forEach(tag => {
+      tag.classList.remove('selected');
+    });
+  }
+
   // Update the tag deletion handler
   async function deleteSelectedTags() {
     try {
@@ -2031,71 +1983,48 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Update the addTag function
-  async function addTagToModel(tagName, containerId) {
-    const tagContainer = document.getElementById(containerId);
-    if (!tagContainer) {
-      console.error(`Tag container with ID ${containerId} not found`);
+  async function addTag() {
+    const tagInput = document.getElementById('new-tag-name');
+    const tagName = tagInput.value.trim();
+    
+    if (!tagName) {
       return;
     }
     
-    // Check if tag already exists visually
-    const existingTag = Array.from(tagContainer.children)
-      .find(tag => tag.getAttribute('data-tag-name') === tagName);
-    
-    if (existingTag) return; // Don't add visual duplicates
-
-    // Create new tag element
-    const tag = document.createElement('div');
-    tag.className = 'tag';
-    tag.setAttribute('data-tag-name', tagName);
-    tag.innerHTML = `
-      ${tagName}
-      <span class=\"tag-remove\">×</span>
-    `;
-
-    // Add remove handler with auto-save
-    tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-      tag.remove(); 
-      // Auto-save the updated tags after REMOVAL
-      const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-        .map(t => t.getAttribute('data-tag-name'));
-      
-      if (containerId === 'multi-tags') {
-        // When removing, we DO want to save the resulting list for all selected models
-        // Note: This sets all selected models to have exactly the tags remaining in the UI.
-        await autoSaveMultipleModels('tags', currentTags); 
-      } else {
-        // Single edit mode save
-        const filePath = getModelFilePath();
-        if (filePath) {
-          await autoSaveModel('tags', currentTags, filePath);
-        } else {
-          console.error('No file path found for saving tags');
+    try {
+      const tag = await window.electron.saveTag(tagName);
+      if (tag) {
+        // Clear the input
+        tagInput.value = '';
+        
+        // Update all tag dropdowns
+        await updateAllTagDropdowns();
+        
+        // Close the dialog
+        document.getElementById('tag-dialog').close();
+        
+        // Optionally, add the new tag to the current model if we're adding from a model
+        const currentModelPath = document.querySelector('.model-details').getAttribute('data-filepath');
+        if (currentModelPath) {
+          const model = await window.electron.getModel(currentModelPath);
+          if (model) {
+            model.tags = model.tags || [];
+            if (!model.tags.includes(tagName)) {
+              model.tags.push(tagName);
+              await window.electron.saveModel(model);
+              await showModelDetails(currentModelPath);
+            }
+          }
         }
       }
-    });
-
-    tagContainer.appendChild(tag); // Add tag visually
-
-    // Auto-save logic after ADDING a tag
-    if (containerId === 'multi-tags') {
-      // For multi-edit ADD, only save the *newly added tag* to append it
-      console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-      await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
-    } else {
-      // For single-edit ADD, save the full list for that model
-      const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-        .map(t => t.getAttribute('data-tag-name'));
-      const filePath = getModelFilePath();
-      if (filePath) {
-        await autoSaveModel('tags', currentTags, filePath);
-      } else {
-        console.error('No file path found for saving tags');
-      }
+    } catch (error) {
+      console.error('Error adding tag:', error);
+      await window.electron.showMessage('Error', 'Failed to add tag: ' + error.message);
     }
   }
 
   // Make sure the add-tag-button event listener is updated
+  document.getElementById('add-tag-button')?.addEventListener('click', addTag);
 
   // Add this function to handle tag dropdown click
   async function refreshTagDropdown(dropdown) {
@@ -2191,6 +2120,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
   });
+
+  // Add this to your DOMContentLoaded event listener
+  document.addEventListener('DOMContentLoaded', () => {
+    // Enable paste on source inputs
+    ['model-source', 'multi-source'].forEach(id => {
+      const input = document.getElementById(id);
+      if (input) {
+        input.addEventListener('paste', (e) => {
+          e.stopPropagation();
+        });
+      }
+    });
+  });
+
 
 
   // Add these event listeners for single-edit mode dropdowns
@@ -2554,46 +2497,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Update the renderModelToPNG function to check file size before attempting to render
   async function renderModelToPNG(filePath, container, existingThumbnail) {
-    if (existingThumbnail) {
-      const img = document.createElement('img');
-      img.src = existingThumbnail;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return existingThumbnail;
-    }
-
     let renderer, scene, camera, canvas;
     let model = null; // Declare model in outer scope
 
     try {
-      canvas = document.createElement('canvas');
-      canvas.width = 250;
-      canvas.height = 250;
-      
-      renderer = new THREE.WebGLRenderer({
-          antialias: false,
-          alpha: true,
-          canvas: canvas,
-          powerPreference: 'low-power',
-          precision: 'lowp',
-          setPixelRatio: .2,
-          setClearColor: 0x000000,
-      });
-      
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+      // ... existing setup code ...
 
-      renderer.setClearColor(0x000000, 0);
-      
-      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-      directionalLight.position.set(1, 1, 1).normalize();
-      scene.add(ambientLight);
-      scene.add(directionalLight);
-
-      // Use loadModel function which has proper path encoding handling
       model = await loadModel(filePath);
       if (!model) throw new Error('Failed to load model');
       
@@ -2601,26 +2510,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       fitCameraToObject(camera, model, scene, renderer);
       renderer.render(scene, camera);
 
-      const imgData = canvas.toDataURL('image/png');
-
-      const img = document.createElement('img');
-      img.src = imgData;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-
-      return imgData;
+      // ... existing rendering code ...
 
     } catch (error) {
-      console.error('Error rendering model:', error);
-      const img = document.createElement('img');
-      img.src = '3d.png';
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return '3d.png';
+      console.error(`Error rendering model ${filePath}:`, error);
+      // ... error handling code ...
     } finally {
       // Cleanup code that uses model
       if (model) {
@@ -2782,25 +2676,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Add function for deep cleanup of Three.js resources
-  function deepCleanThreeResources() {
-    if (sharedRenderer) {
-      sharedRenderer.forceContextLoss();
-      sharedRenderer.dispose();
-      sharedRenderer = null;
-    }
-    
-    // Force garbage collection
-    if (typeof gc === 'function') {
-      gc();
-      gc(); // Call twice to ensure full collection
-    }
-    
-    // Clear texture cache
-    THREE.Cache.clear();
-  }
+  // Call cleanup periodically
+  setInterval(cleanupMemory, 60000); // Every minute
 
-  // 9. Add model loading with better resource management
+  // 9. Optimize model loading
   async function loadModel(filePath, options = {}) {
     try {
       console.log('loadModel: Starting for file:', filePath);
@@ -2820,75 +2699,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
       
-      // Properly encode the file path to handle special characters and Windows paths
-      let encodedFilePath;
-      
-      // Check if we're running on Windows (starts with drive letter)
-      if (/^[A-Za-z]:/.test(filePath)) {
-        // For Windows paths: 
-        // 1. Convert backslashes to forward slashes
-        // 2. Add file:/// protocol
-        // 3. Properly encode special characters
-        
-        try {
-          // First normalize the path to use forward slashes
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Create URL object for proper handling - this works better for Windows paths
-          const fileUrl = new URL(`file:///${normalizedPath}`);
-          
-          // Get the properly encoded pathname from the URL
-          encodedFilePath = fileUrl.href;
-          
-          // Explicitly handle hash character in path segments
-          if (normalizedPath.includes('#')) {
-            // Replace the hash character with its URL encoding (%23)
-            // But ensure we don't double-encode anything
-            encodedFilePath = encodedFilePath.replace(/#/g, '%23');
-          }
-          
-          // Ensure other problematic characters are properly encoded
-          encodedFilePath = encodedFilePath
-            .replace(/\?/g, '%3F')
-            .replace(/\s/g, '%20')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/'/g, '%27')
-            .replace(/\[/g, '%5B')
-            .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error creating URL from file path:', error);
-          
-          // Fallback method: direct string replacement
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          encodedFilePath = `file:///${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20');
-        }
-        
-        console.log('loadModel: Encoded Windows path:', encodedFilePath);
-      } else {
-        // For non-Windows paths, use a direct encoding approach
-        try {
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Simply replace problematic characters directly
-          encodedFilePath = `file://${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20')
-              .replace(/\(/g, '%28')
-              .replace(/\)/g, '%29')
-              .replace(/'/g, '%27')
-              .replace(/\[/g, '%5B')
-              .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error encoding non-Windows file path:', error);
-          // Super simple fallback
-          encodedFilePath = `file://${filePath.replace(/#/g, '%23')}`;
-        }
-        console.log('loadModel: Encoded Unix path:', encodedFilePath);
-      }
-      
       // If no embedded image found, proceed with 3D loading
       let loader;
       if (fileExtension === 'stl') {
@@ -2897,6 +2707,35 @@ document.addEventListener('DOMContentLoaded', async () => {
           throw new Error('THREE.STLLoader not initialized');
         }
         loader = new THREE.STLLoader();
+        loader.load(
+          filePath,
+          (geometry) => {
+            try {
+              const material = new THREE.MeshPhongMaterial({
+                color: 0xcccccc,
+                specular: 0x111111,
+                shininess: 200
+              });
+              
+              // Proper geometry centering instead of normalization
+              geometry.computeBoundingBox();
+              geometry.center();
+              geometry.computeVertexNormals();
+              
+              const mesh = new THREE.Mesh(geometry, material);
+              mesh.rotation.x = -Math.PI / 2;
+              resolve(mesh);
+            } catch (error) {
+              console.error('STL load error:', error);
+              reject(error);
+            }
+          },
+          undefined,
+          (error) => {
+            console.error('STL loader error:', error);
+            reject(error);
+          }
+        );
       } else if (fileExtension === '3mf') {
         if (!THREE.ThreeMFLoader) {
           console.error('loadModel: THREE.ThreeMFLoader not available');
@@ -2919,66 +2758,59 @@ document.addEventListener('DOMContentLoaded', async () => {
       return new Promise((resolve, reject) => {
         try {
           loader.load(
-              encodedFilePath, // Use the encoded path instead of the original
-              (object) => {
-                try {
-                  let mesh;
-                  if (object.isBufferGeometry) {
-                    if (!THREE.MeshPhongMaterial) {
-                      console.error('loadModel: THREE.MeshPhongMaterial not available');
-                      throw new Error('THREE.MeshPhongMaterial not initialized');
-                    }
-                    const material = new THREE.MeshPhongMaterial({
-                      color: 0xcccccc,
-                      specular: 0x111111,
-                      shininess: 200
-                    });
-                    if (!THREE.Mesh) {
-                      console.error('loadModel: THREE.Mesh not available');
-                      throw new Error('THREE.Mesh not initialized');
-                    }
-                    
-                    // Proper geometry centering instead of normalization
-                    object.computeBoundingBox();
-                    object.center();
-                    object.computeVertexNormals();
-                    
-                    mesh = new THREE.Mesh(object, material);
-                    
-                    if (fileExtension === 'stl') {
-                      mesh.rotation.x = -Math.PI / 2;
-                    }
-                  } else if (object.isObject3D) {
-                    mesh = object;
-                    mesh.traverse((child) => {
-                      if (child.isMesh) {
-                        child.material = new THREE.MeshPhongMaterial({
-                          color: 0xcccccc,
-                          specular: 0x111111,
-                          shininess: 200
-                        });
-                      }
-                    });
-                    if (fileExtension === '3mf') {
-                      mesh.rotation.x = -Math.PI / 2;
-                    }
-                  } else {
-                    reject(new Error('Unsupported object type'));
-                    return;
+            filePath,
+            (object) => {
+              try {
+                let mesh;
+                if (object.isBufferGeometry) {
+                  if (!THREE.MeshPhongMaterial) {
+                    console.error('loadModel: THREE.MeshPhongMaterial not available');
+                    throw new Error('THREE.MeshPhongMaterial not initialized');
                   }
-                  resolve(mesh);
-                } catch (error) {
-                  console.error('loadModel: Error processing loaded object:', error);
-                  reject(error);
+                  const material = new THREE.MeshPhongMaterial({
+                    color: 0xcccccc,
+                    specular: 0x111111,
+                    shininess: 200
+                  });
+                  if (!THREE.Mesh) {
+                    console.error('loadModel: THREE.Mesh not available');
+                    throw new Error('THREE.Mesh not initialized');
+                  }
+                  mesh = new THREE.Mesh(object, material);
+                  
+                  if (fileExtension === 'stl') {
+                    mesh.rotation.x = -Math.PI / 2;
+                  }
+                } else if (object.isObject3D) {
+                  mesh = object;
+                  mesh.traverse((child) => {
+                    if (child.isMesh) {
+                      child.material = new THREE.MeshPhongMaterial({
+                        color: 0xcccccc,
+                        specular: 0x111111,
+                        shininess: 200
+                      });
+                    }
+                  });
+                  if (fileExtension === '3mf') {
+                    mesh.rotation.x = -Math.PI / 2;
+                  }
+                } else {
+                  reject(new Error('Unsupported object type'));
+                  return;
                 }
-              },
-              (progress) => {
-                // Progress callback
-              },
-              (error) => {
-                console.error('loadModel: Loader error:', error);
+                resolve(mesh);
+              } catch (error) {
+                console.error('loadModel: Error processing loaded object:', error);
                 reject(error);
               }
+            },
+            (progress) => {
+            },
+            (error) => {
+              console.error('loadModel: Loader error:', error);
+              reject(error);
+            }
           );
         } catch (error) {
           console.error('loadModel: Error in loader.load:', error);
@@ -3843,7 +3675,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Only show alert for single model tag generation (not for batch operations)
       if (!document.getElementById('progress-dialog').open) {
-        await window.electron.showMessage('Success', 'Tags generated and added successfully!');
+        alert('Tags generated and added successfully!');
       }
       
       // Optionally, provide feedback to the user (only once, not an alert per model in multi-select)
@@ -4165,120 +3997,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Clear any existing analytics data
       if (window.dataLayer) {
         window.dataLayer = [];
-      }
-    }
-  }
-
-  // Add function for generating thumbnails for multiple models
-  async function generateThumbnailsForModels(models) {
-    const BATCH_SIZE = 1; // Process one at a time
-    const progressDialog = document.getElementById('thumbnail-progress-dialog');
-    const progressBar = document.getElementById('thumbnail-progress-bar');
-    const progressText = document.getElementById('thumbnail-progress-text');
-    
-    // Check if progress elements exist before proceeding
-    const hasProgressUI = progressDialog && progressBar && progressText;
-    
-    totalThumbnailsToGenerate = models.length;
-    generatedThumbnailsCount = 0;
-
-    try {
-      // Show progress dialog if it exists
-      if (hasProgressUI) {
-        progressDialog.showModal();
-      }
-      
-      for (let i = 0; i < models.length; i++) {
-        const model = models[i];
-        
-        try {
-          // Update progress before starting each model
-          generatedThumbnailsCount = i;
-          
-          // Only update UI elements if they exist
-          if (hasProgressUI) {
-            const progress = Math.floor((i / totalThumbnailsToGenerate) * 100);
-            progressBar.style.width = `${progress}%`;
-            progressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
-          }
-          
-          // Check for embedded thumbnail first (for 3MF files)
-          if (model.filePath.toLowerCase().endsWith('.3mf')) {
-            try {
-              const embeddedImage = await extract3MFThumbnail(model.filePath);
-              
-              // Validate that embeddedImage is a proper string containing image data
-              if (embeddedImage && typeof embeddedImage === 'string' && embeddedImage.startsWith('data:image')) {
-                await window.electron.saveThumbnail(model.filePath, embeddedImage);
-                continue; // Skip 3D rendering if we have an embedded image
-              } else if (embeddedImage && Array.isArray(embeddedImage) && embeddedImage.length > 0) {
-                // Handle case where it returns an array of images
-                const firstImage = embeddedImage[0];
-                if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
-                  await window.electron.saveThumbnail(model.filePath, firstImage);
-                  continue;
-                }
-              }
-              
-              // If we get here, the embedded image wasn't valid
-              debugLog(`No valid embedded image found in 3MF file: ${model.filePath}`);
-            } catch (embeddedError) {
-              console.error(`Error extracting embedded image from 3MF: ${model.filePath}`, embeddedError);
-              // Continue to regular thumbnail generation
-            }
-          }
-
-          // Generate thumbnail
-          try {
-            const thumbnail = await generateThumbnail(model.filePath);
-            
-            // Validate thumbnail before saving
-            if (thumbnail && typeof thumbnail === 'string' && 
-                (thumbnail.startsWith('data:image') || thumbnail === '3d.png')) {
-              await window.electron.saveThumbnail(model.filePath, thumbnail);
-            } else {
-              console.error(`Invalid thumbnail generated for ${model.filePath}:`, thumbnail);
-              // Save default thumbnail
-              await window.electron.saveThumbnail(model.filePath, '3d.png');
-            }
-          } catch (thumbnailError) {
-            console.error(`Error generating thumbnail for ${model.filePath}:`, thumbnailError);
-            // Save default thumbnail
-            await window.electron.saveThumbnail(model.filePath, '3d.png');
-          }
-          
-          // Force cleanup after each model
-          if (typeof deepCleanThreeResources === 'function') {
-            deepCleanThreeResources();
-          }
-          
-          // Add delay between models
-          await new Promise(resolve => setTimeout(resolve, 50)); // Use a reasonable default if THUMBNAIL_GENERATION_DELAY is not defined
-          
-        } catch (error) {
-          console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
-          // Try to save a default thumbnail to prevent future attempts
-          try {
-            await window.electron.saveThumbnail(model.filePath, '3d.png');
-          } catch (saveError) {
-            console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
-          }
-          // Continue with next model even if one fails
-        }
-      }
-
-      // Update final progress
-      if (hasProgressUI) {
-        progressBar.style.width = '100%';
-        progressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
-      }
-      
-    } catch (error) {
-      console.error('Error in thumbnail generation:', error);
-    } finally {
-      // Close the dialog if it exists and was opened
-      if (hasProgressUI && progressDialog.open) {
-        progressDialog.close();
       }
     }
   }
@@ -4733,33 +4451,41 @@ function toggleModelSelection(fileElement, filePath) {
 async function loadModel(filePath) {
   return new Promise((resolve, reject) => {
     const fileExtension = filePath.split('.').pop().toLowerCase();
-    
-    // Properly encode the file path to handle special characters and Windows paths
-    let encodedFilePath;
-    
-    // Check if we're running on Windows (starts with drive letter)
-    if (/^[A-Za-z]:/.test(filePath)) {
-      // For Windows paths: 
-      // 1. Convert backslashes to forward slashes
-      // 2. Add file:/// protocol
-      // 3. Properly encode special characters
-      const normalizedPath = filePath.replace(/\\/g, '/');
-      
-      // Make sure to encode the URL properly, handling special characters
-      encodedFilePath = `file:///${normalizedPath}`;
-      // Encode special characters but preserve the file:/// and path structure
-      encodedFilePath = encodedFilePath.replace(/#/g, '%23')
-                                      .replace(/\?/g, '%3F')
-                                      .replace(/\s/g, '%20');
-    } else {
-      // For non-Windows paths, use standard URL encoding
-      encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
-    }
-    
+    // Properly encode the file path to handle special characters like '#'
+    const encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
     let loader;
     
     if (fileExtension === 'stl') {
       loader = new THREE.STLLoader();
+      loader.load(
+        encodedFilePath,
+        (geometry) => {
+          try {
+            const material = new THREE.MeshPhongMaterial({
+              color: 0xcccccc,
+              specular: 0x111111,
+              shininess: 200
+            });
+            
+            // Proper geometry centering instead of normalization
+            geometry.computeBoundingBox();
+            geometry.center();
+            geometry.computeVertexNormals();
+            
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.rotation.x = -Math.PI / 2;
+            resolve(mesh);
+          } catch (error) {
+            console.error('STL load error:', error);
+            reject(error);
+          }
+        },
+        undefined,
+        (error) => {
+          console.error('STL loader error:', error);
+          reject(error);
+        }
+      );
     } else if (fileExtension === '3mf') {
       THREE.ThreeMFLoader.fflate = fflate;
       loader = new THREE.ThreeMFLoader();
@@ -4768,49 +4494,41 @@ async function loadModel(filePath) {
       return;
     }
 
-    // Log the encoded path for debugging
-    console.log('Loading model from encoded path:', encodedFilePath);
-
     loader.load(
       encodedFilePath,
       (object) => {
         try {
           let mesh;
-          
-          // Handle STL files (geometry)
           if (object.isBufferGeometry) {
+            if (!THREE.MeshPhongMaterial) {
+              console.error('loadModel: THREE.MeshPhongMaterial not available');
+              throw new Error('THREE.MeshPhongMaterial not initialized');
+            }
             const material = new THREE.MeshPhongMaterial({
               color: 0xcccccc,
               specular: 0x111111,
-              shininess: 200,
-              flatShading: true // Use flat shading for better performance
+              shininess: 200
             });
-            
-            // Optimize geometry
-            object.computeVertexNormals();
-            
+            if (!THREE.Mesh) {
+              console.error('loadModel: THREE.Mesh not available');
+              throw new Error('THREE.Mesh not initialized');
+            }
             mesh = new THREE.Mesh(object, material);
             
             if (fileExtension === 'stl') {
               mesh.rotation.x = -Math.PI / 2;
             }
-          } 
-          // Handle 3MF files (object)
-          else if (object.isObject3D) {
+          } else if (object.isObject3D) {
             mesh = object;
-            
-            // Apply simple material to all meshes
             mesh.traverse((child) => {
               if (child.isMesh) {
                 child.material = new THREE.MeshPhongMaterial({
                   color: 0xcccccc,
                   specular: 0x111111,
-                  shininess: 200,
-                  flatShading: true
+                  shininess: 200
                 });
               }
             });
-            
             if (fileExtension === '3mf') {
               mesh.rotation.x = -Math.PI / 2;
             }
@@ -4818,16 +4536,17 @@ async function loadModel(filePath) {
             reject(new Error('Unsupported object type'));
             return;
           }
-          
           resolve(mesh);
         } catch (error) {
-          console.error('Error processing loaded object:', error);
+          console.error('loadModel: Error processing loaded object:', error);
           reject(error);
         }
       },
-      undefined,
+      (progress) => {
+        console.log('loadModel: Loading progress:', progress);
+      },
       (error) => {
-        console.error('Loader error:', error);
+        console.error('loadModel: Loader error:', error);
         reject(error);
       }
     );
@@ -5274,34 +4993,69 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
     return;
   }
 
-  // Use the new virtual grid implementation for better performance
-  renderVirtualGrid(files);
+  const container = document.querySelector('.file-grid');
+  container.innerHTML = '';
+
+  // Only take the first 100 models
+  const limitedFiles = viewEntireLibrary ? files : files.slice(0, MAX_MODELS_IN_MEMORY);
+
+  // Show message about limited view if there are more files and we're not viewing entire library
+  const viewLibMsg = document.getElementById("view-library-message");
+  if (viewLibMsg) {
+    if (!viewEntireLibrary && files.length > MAX_MODELS_IN_MEMORY) {
+      viewLibMsg.style.display = "block";
+      viewLibMsg.textContent = `Showing ${MAX_MODELS_IN_MEMORY} Newest Models`;
+    } else {
+      // Hide the message when viewing entire library
+      viewLibMsg.style.display = "none";
+    }
+  }
+
+  // Show progress section if needed
+  const filesWithoutThumbnails = limitedFiles.filter(file => !file.thumbnail);
+  const progressSection = document.getElementById('progress-section');
+  const progressBar = document.getElementById('progress-bar');
+  const progressText = document.getElementById('progress-text');
+
+  if (filesWithoutThumbnails.length > 0) {
+    progressSection.classList.remove('hidden');
+    progressBar.style.width = '0%';
+    progressText.textContent = `Caching thumbnails: 0 / ${filesWithoutThumbnails.length}`;
+  } else {
+    progressSection.classList.add('hidden');
+  }
+
+  let completedThumbnails = 0;
+  const batchSize = 5;
+
+  // Render files in batches
+  for (let i = 0; i < limitedFiles.length; i += batchSize) {
+    const batch = limitedFiles.slice(i, Math.min(i + batchSize, limitedFiles.length));
+    const promises = batch.map(async (file) => {
+      try {
+        const fileElement = await renderFile(file, container, skipThumbnail);
+        container.appendChild(fileElement);
+
+        if (!file.thumbnail) {
+          completedThumbnails++;
+          const progress = (completedThumbnails / filesWithoutThumbnails.length) * 100;
+          progressBar.style.width = `${progress}%`;
+          progressText.textContent = `Caching thumbnails: ${completedThumbnails} / ${filesWithoutThumbnails.length}`;
+        }
+      } catch (error) {
+        console.error('Error rendering file:', error);
+      }
+    });
+
+    await Promise.all(promises);
+    await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between batches
+  }
+
+  // Hide progress section when complete
+  progressSection.classList.add('hidden');
 
   // Update counts
   await updateModelCounts(files.length);
-
-  // Handle thumbnail generation for visible items?
-  // renderVirtualGrid handles creating items, but thumbnail generation might need to be triggered
-  // for visible items if they don't have thumbnails.
-  // Ideally, createModelItem should queue thumbnail generation if missing.
-  // Since createModelItem calls renderModelToPNG only if needed (in our updated logic? No, createModelItem uses '3d.png' default).
-  // We might want to trigger thumbnail generation for models without thumbnails in the background.
-
-  // Note: renderVirtualGrid doesn't currently trigger thumbnail generation automatically for missing thumbnails
-  // except what createModelItem does.
-  // createModelItem in the new code uses model.thumbnail || '3d.png'.
-
-  // Trigger background thumbnail generation for files without thumbnails
-  // This maintains the previous behavior but decouples it from the initial render
-  const filesWithoutThumbnails = files.filter(file => !file.thumbnail);
-  if (filesWithoutThumbnails.length > 0) {
-    // We can use the existing queue mechanism
-    filesWithoutThumbnails.forEach(file => {
-       // Only queue if we haven't already queued it?
-       // For now, let's rely on the user triggers or existing background processes.
-       // Or we can queue them here.
-    });
-  }
 }
 
 async function handleFilterChange() {
@@ -5559,7 +5313,6 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     scene.add(ambientLight);
     scene.add(directionalLight);
 
-    // Use loadModel function which has proper path encoding handling
     model = await loadModel(filePath);
     if (!model) throw new Error('Failed to load model');
     
@@ -5828,10 +5581,9 @@ document.getElementById('cancel-parent-button')?.addEventListener('click', () =>
 function debounce(func, wait) {
   let timeout;
   return function executedFunction(...args) {
-    const context = this; // Store the context
     const later = () => {
-      timeout = null; // Clear timeout identifier
-      func.apply(context, args); // Call the original function with correct context and args
+      clearTimeout(timeout);
+      func(...args);
     };
     clearTimeout(timeout);
     timeout = setTimeout(later, wait);
@@ -5894,16 +5646,12 @@ async function populateTagSelect(selectId = 'tag-select', containerId = 'model-t
 // Update the addTagToModel function
 async function addTagToModel(tagName, containerId) {
   const tagContainer = document.getElementById(containerId);
-  if (!tagContainer) {
-    console.error(`Tag container with ID ${containerId} not found`);
-    return;
-  }
   
-  // Check if tag already exists visually
+  // Check if tag already exists
   const existingTag = Array.from(tagContainer.children)
     .find(tag => tag.getAttribute('data-tag-name') === tagName);
   
-  if (existingTag) return; // Don't add visual duplicates
+  if (existingTag) return;
 
   // Create new tag element
   const tag = document.createElement('div');
@@ -5911,48 +5659,42 @@ async function addTagToModel(tagName, containerId) {
   tag.setAttribute('data-tag-name', tagName);
   tag.innerHTML = `
     ${tagName}
-    <span class=\"tag-remove\">×</span>
+    <span class="tag-remove">×</span>
   `;
 
   // Add remove handler with auto-save
   tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-    tag.remove(); 
-    // Auto-save the updated tags after REMOVAL
+    tag.remove();
+    // Auto-save the updated tags
     const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
       .map(t => t.getAttribute('data-tag-name'));
     
     if (containerId === 'multi-tags') {
-      // When removing, we DO want to save the resulting list for all selected models
-      // Note: This sets all selected models to have exactly the tags remaining in the UI.
-      await autoSaveMultipleModels('tags', currentTags); 
+      await autoSaveMultipleModels('tags', currentTags);
     } else {
-      // Single edit mode save
-      const filePath = getModelFilePath();
-      if (filePath) {
-        await autoSaveModel('tags', currentTags, filePath);
-      } else {
-        console.error('No file path found for saving tags');
-      }
+      const filePath = document.getElementById('model-path').value;
+      await autoSaveModel('tags', currentTags, filePath);
+    }
+    
+    // Refresh the tag select dropdown
+    if (containerId === 'multi-tags') {
+      populateTagSelect('multi-tag-select', 'multi-tags');
+    } else {
+      populateTagSelect('tag-select', 'model-tags');
     }
   });
 
-  tagContainer.appendChild(tag); // Add tag visually
+  tagContainer.appendChild(tag);
 
-  // Auto-save logic after ADDING a tag
+  // Auto-save the updated tags
+  const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
+    .map(t => t.getAttribute('data-tag-name'));
+  
   if (containerId === 'multi-tags') {
-    // For multi-edit ADD, only save the *newly added tag* to append it
-    console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-    await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
+    await autoSaveMultipleModels('tags', currentTags);
   } else {
-    // For single-edit ADD, save the full list for that model
-    const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-      .map(t => t.getAttribute('data-tag-name'));
-    const filePath = getModelFilePath();
-    if (filePath) {
-      await autoSaveModel('tags', currentTags, filePath);
-    } else {
-      console.error('No file path found for saving tags');
-    }
+    const filePath = document.getElementById('model-path').value;
+    await autoSaveModel('tags', currentTags, filePath);
   }
 }
 
@@ -6090,24 +5832,11 @@ document.querySelectorAll('.add-parent-button').forEach(button => {
 });
 
 document.querySelectorAll('.add-tag-button').forEach(button => {
-  button.addEventListener('click', async () => {
-    // Get the container ID for the tags container - we'll need this to know where to add the tag
-    const sourceContainer = button.closest('.tags-container').querySelector('.tags-list').id;
-    
-    // Use the HTML dialog instead of Electron's dialog
-    const tagDialog = document.getElementById('new-tag-dialog');
-    const newTagInput = document.getElementById('new-tag-name');
-    
-    // Clear any previous input
-    if (newTagInput) {
-      newTagInput.value = '';
-    }
-    
-    // Store the source container ID on the dialog for reference when submitting
-    tagDialog.setAttribute('data-source-container', sourceContainer);
-    
-    // Show the dialog
-    tagDialog.showModal();
+  button.addEventListener('click', () => {
+    const dialog = document.getElementById('new-tag-dialog');
+    // Store which container triggered the dialog
+    dialog.dataset.sourceContainer = button.closest('.tags-container').querySelector('.tags-list').id;
+    dialog.showModal();
   });
 });
 
@@ -6524,12 +6253,7 @@ async function generateThumbnail(file) {
       return '3d.png';
     }
 
-    // Create a temporary container for rendering
-    const tempContainer = document.createElement('div');
-    
-    // Call renderModelToPNG directly instead of renderThumbnail
-    const thumbnail = await renderModelToPNG(filePath, tempContainer, null);
-    
+    const thumbnail = await renderThumbnail(file);
     await window.electron.saveThumbnail(filePath, thumbnail);
     return thumbnail;
   } catch (error) {
@@ -6646,30 +6370,20 @@ function exitMultiEditMode() {
 
   // Remove all event listeners from model form fields
   const formFields = [
-    'multi-designer',
-    'multi-source',
-    'multi-printed', // Add printed checkbox to list
-    'multi-parent',
-    'multi-license',
-    'multi-tag-select'
+    'model-designer',
+    'model-source',
+    'model-notes',
+    'model-printed',
+    'model-parent',
+    'model-license'
   ];
 
-  // Clone and replace each field to remove event listeners
   formFields.forEach(fieldId => {
     const element = document.getElementById(fieldId);
     if (element) {
       // Clone and replace the element to remove all event listeners
       const newElement = element.cloneNode(true);
       element.parentNode.replaceChild(newElement, element);
-      
-      // Reset any specific element states
-      if (fieldId === 'multi-printed') {
-        newElement.checked = false;
-      } else if (newElement.tagName === 'SELECT') {
-        newElement.value = ''; // Reset select elements
-      } else if (newElement.tagName === 'INPUT') {
-        newElement.value = ''; // Reset text inputs
-      }
     }
   });
 
@@ -6683,24 +6397,6 @@ function exitMultiEditMode() {
   document.getElementById('model-parent').value = '';
   document.getElementById('model-license').value = '';
   document.getElementById('model-tags').innerHTML = '';
-  
-  // Clear the multi-edit tag container as well
-  const multiTagsContainer = document.getElementById('multi-tags');
-  if (multiTagsContainer) {
-    multiTagsContainer.innerHTML = '';
-  }
-  
-  // Reset the multi-tag-select dropdown
-  const multiTagSelect = document.getElementById('multi-tag-select');
-  if (multiTagSelect) {
-    // Set back to default option
-    multiTagSelect.value = '';
-    
-    // Optionally refresh the dropdown options
-    populateTagSelect('multi-tag-select', 'multi-tags');
-  }
-  
-  console.log('Exited multi-edit mode and cleared tags');
 }
 
 // Update the edit mode toggle handler
@@ -6752,21 +6448,9 @@ async function initializeApp() {
     
     console.log('1. Starting initialization sequence');
     
-    // Initialize settings inline instead of calling initializeSettings()
+    // Initialize all settings first
     console.log('2. Loading settings...');
-    try {
-      // Initialize other settings as needed
-      const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
-      if (backgroundColor) {
-        document.documentElement.style.setProperty('--model-background-color', backgroundColor);
-        const colorPicker = document.getElementById('model-background-color');
-        if (colorPicker) {
-          colorPicker.value = backgroundColor;
-        }
-      }
-    } catch (error) {
-      console.error('Error initializing settings:', error);
-    }
+    await initializeSettings();
     
     console.log('3. Checking current version...');
     const currentVersion = await window.electron.getSetting('currentVersion');
@@ -6808,7 +6492,7 @@ async function initializeApp() {
     // Only show prompt if it's a new version and not the one user previously declined
     if (latestVersion && 
         latestVersion !== currentVersion && 
-        compareVersions(latestVersion, currentVersion) > 0 && 
+        latestVersion > currentVersion && 
         latestVersion !== lastDeclinedVersion) {
       console.log('7. Update available - showing prompt');
       const shouldUpdate = await window.electron.showMessage(
@@ -6835,29 +6519,8 @@ async function initializeApp() {
     }
     
     console.log('8. Initializing UI components');
-    // Call initializeDialogHandlers directly if it's accessible
-    if (typeof initializeDialogHandlers === 'function') {
-      initializeDialogHandlers();
-    }
-    
-    // Initialize performance settings inline
-    try {
-      // Get the stored max file size value
-      const maxFileSize = await window.electron.getSetting('maxFileSizeMB');
-      if (maxFileSize) {
-        MAX_FILE_SIZE_MB = parseInt(maxFileSize);
-      }
-
-      // Set the input value if the element exists
-      const maxFileSizeInput = document.getElementById('max-file-size');
-      if (maxFileSizeInput) {
-        maxFileSizeInput.value = MAX_FILE_SIZE_MB.toString();
-      }
-    } catch (error) {
-      console.error('Error initializing performance settings:', error);
-    }
-    
-
+    initializeDialogHandlers();
+    initializePerformanceSettings();
     
     console.log('9. Initialization complete');
   } catch (error) {
@@ -6888,7 +6551,7 @@ async function initializeGrid(sortOption = 'name') {
   }
 }
 
-// Edit the DOMContentLoaded event listener to remove the call to promptPendingThumbnails
+// Keep only this single DOMContentLoaded event listener
 document.addEventListener('DOMContentLoaded', async () => {
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
@@ -6913,7 +6576,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (
       latestVersion &&
       latestVersion !== currentVersion &&
-      compareVersions(latestVersion, currentVersion) > 0 &&
+      latestVersion > currentVersion &&
       latestVersion !== lastDeclinedVersion
     ) {
       const shouldUpdate = await window.electron.showMessage(
@@ -6937,8 +6600,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Error checking for updates:', error);
   }
 
-  // Continue with normal initialization (which now includes the thumbnail prompting)
+  // Continue with normal initialization...
   await initializeApp();
+
+  // NEW: Prompt the user to render pending thumbnails (if any)
+  await promptPendingThumbnails();
 
   // (Any additional event listeners and UI initialization code below)
 });
@@ -7005,560 +6671,1330 @@ document.getElementById('delete-selected-button')?.addEventListener('click', asy
   await refreshModelDisplay();
 });
 
-// Add a semantic version comparison function at an appropriate place in the file
-function compareVersions(v1, v2) {
-  const parts1 = v1.split('.').map(Number);
-  const parts2 = v2.split('.').map(Number);
-  
-  for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-    const p1 = parts1[i] || 0;
-    const p2 = parts2[i] || 0;
+async function generateThumbnailsForModels(models) {
+    const BATCH_SIZE = 1; // Process one at a time
+    const progressDialog = document.getElementById('thumbnail-progress-dialog');
+    const progressBar = document.getElementById('thumbnail-progress-bar');
+    const progressText = document.getElementById('thumbnail-progress-text');
     
-    if (p1 < p2) return -1;
-    if (p1 > p2) return 1;
+    // Check if progress elements exist before proceeding
+    const hasProgressUI = progressDialog && progressBar && progressText;
+    
+    totalThumbnailsToGenerate = models.length;
+    generatedThumbnailsCount = 0;
+
+    try {
+      // Show progress dialog if it exists
+      if (hasProgressUI) {
+        progressDialog.showModal();
+      }
+      
+      for (let i = 0; i < models.length; i++) {
+        const model = models[i];
+        
+        try {
+          // Update progress before starting each model
+          generatedThumbnailsCount = i;
+          
+          // Only update UI elements if they exist
+          if (hasProgressUI) {
+            const progress = Math.floor((i / totalThumbnailsToGenerate) * 100);
+            progressBar.style.width = `${progress}%`;
+            progressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
+          }
+          
+          // Check for embedded thumbnail first (for 3MF files)
+          if (model.filePath.toLowerCase().endsWith('.3mf')) {
+            try {
+              const embeddedImage = await extract3MFThumbnail(model.filePath);
+              
+              // Validate that embeddedImage is a proper string containing image data
+              if (embeddedImage && typeof embeddedImage === 'string' && embeddedImage.startsWith('data:image')) {
+                await window.electron.saveThumbnail(model.filePath, embeddedImage);
+                continue; // Skip 3D rendering if we have an embedded image
+              } else if (embeddedImage && Array.isArray(embeddedImage) && embeddedImage.length > 0) {
+                // Handle case where it returns an array of images
+                const firstImage = embeddedImage[0];
+                if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
+                  await window.electron.saveThumbnail(model.filePath, firstImage);
+                  continue;
+                }
+              }
+              
+              // If we get here, the embedded image wasn't valid
+              debugLog(`No valid embedded image found in 3MF file: ${model.filePath}`);
+            } catch (embeddedError) {
+              console.error(`Error extracting embedded image from 3MF: ${model.filePath}`, embeddedError);
+              // Continue to regular thumbnail generation
+            }
+          }
+
+          // Generate thumbnail
+          try {
+            const thumbnail = await generateThumbnail(model.filePath);
+            
+            // Validate thumbnail before saving
+            if (thumbnail && typeof thumbnail === 'string' && 
+                (thumbnail.startsWith('data:image') || thumbnail === '3d.png')) {
+              await window.electron.saveThumbnail(model.filePath, thumbnail);
+            } else {
+              console.error(`Invalid thumbnail generated for ${model.filePath}:`, thumbnail);
+              // Save default thumbnail
+              await window.electron.saveThumbnail(model.filePath, '3d.png');
+            }
+          } catch (thumbnailError) {
+            console.error(`Error generating thumbnail for ${model.filePath}:`, thumbnailError);
+            // Save default thumbnail
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
+          }
+          
+          // Force cleanup after each model
+          if (typeof deepCleanThreeResources === 'function') {
+            deepCleanThreeResources();
+          }
+          
+          // Add delay between models
+          await new Promise(resolve => setTimeout(resolve, 50)); // Use a reasonable default if THUMBNAIL_GENERATION_DELAY is not defined
+          
+        } catch (error) {
+          console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
+          // Try to save a default thumbnail to prevent future attempts
+          try {
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
+          } catch (saveError) {
+            console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
+          }
+          // Continue with next model even if one fails
+        }
+      }
+
+      // Update final progress
+      if (hasProgressUI) {
+        progressBar.style.width = '100%';
+        progressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
+      }
+      
+    } catch (error) {
+      console.error('Error in thumbnail generation:', error);
+    } finally {
+      // Close the dialog if it exists and was opened
+      if (hasProgressUI && progressDialog.open) {
+        progressDialog.close();
+      }
+    }
   }
-  
-  return 0;
-}
 
-// Add this event handler after the other window.electron.on handlers
-window.electron.on('show-native-prompt', async (options) => {
-  const { title, label, placeholder } = options;
-  const value = prompt(label || 'Please enter a value:', placeholder || '');
-  
-  // Send the response back to main process
-  window.electron.send('native-prompt-response', { 
-    value: value,
-    canceled: value === null
+  // NEW: Function to prompt user to generate pending thumbnails at startup
+  async function promptPendingThumbnails() {
+    try {
+      // Get models without thumbnails using the IPC handler
+      const modelsWithoutThumbs = await window.electron.getModelsWithoutThumbnails();
+      if (modelsWithoutThumbs && modelsWithoutThumbs.length > 0) {
+        // Prompt the user with a confirm dialog
+        const userChoice = await window.electron.showMessage(
+          'Generate Thumbnails',
+          `${modelsWithoutThumbs.length} models need thumbnails. Would you like to generate them now?`,
+          ['Yes', 'No']
+        );
+        
+        if (userChoice === 'Yes') {
+          debugLog('User chose to generate pending thumbnails.');
+          await generateThumbnailsForModels(modelsWithoutThumbs);
+        } else {
+          debugLog('User skipped thumbnail generation.');
+        }
+      }
+    } catch (error) {
+      console.error('Error checking for pending thumbnails:', error);
+    }
+  }
+
+  let modelCache = new Map();
+
+  async function getModel(filePath) {
+      if (modelCache.has(filePath)) {
+          return modelCache.get(filePath);
+      }
+
+      const model = await window.electron.getModel(filePath);
+      if (model) {
+          modelCache.set(filePath, model);
+      }
+      return model;
+  }
+
+  let fileMetadataCache = new Map();
+
+  async function getFileMetadata(filePath) {
+      if (fileMetadataCache.has(filePath)) {
+          return fileMetadataCache.get(filePath);
+      }
+
+      const metadata = await fetchFileMetadata(filePath); // Assume this function fetches metadata
+      fileMetadataCache.set(filePath, metadata);
+      return metadata;
+  }
+
+  // Added helper function to reset input state
+  function resetInputState(input) {
+    input.value = '';
+    input.disabled = false;
+    input.readOnly = false;
+  }
+
+  // Add a focus event listener to repopulate all AI configuration fields
+  window.addEventListener('focus', async () => {
+    // Repopulate API Key field
+    const apiKeyEl = document.getElementById('ai-api-key');
+    if (apiKeyEl) {
+      const storedApiKey = await window.electron.getSetting('apiKey');
+      apiKeyEl.value = storedApiKey || '';
+    }
+    
+    // Repopulate API Endpoint field
+    const endpointEl = document.getElementById('ai-endpoint');
+    if (endpointEl) {
+      const storedEndpoint = await window.electron.getSetting('apiEndpoint');
+      endpointEl.value = storedEndpoint || 'https://api.openai.com/v1';
+    }
+    
+    // Repopulate AI Model field
+    const modelEl = document.getElementById('ai-model');
+    if (modelEl) {
+      const storedModel = await window.electron.getSetting('aiModel');
+      modelEl.value = storedModel || 'gpt-4o-mini';
+    }
+    
+    // Repopulate AI Service field
+    const serviceEl = document.getElementById('ai-service-select');
+    if (serviceEl) {
+      const storedService = await window.electron.getSetting('aiService');
+      serviceEl.value = storedService || 'openai';
+    }
   });
-});
 
-// Add implementation of autoSaveModel function
+  // Add this new function at the top of the file (after global variable declarations) to ensure it's defined before being used.
+
+  async function initializeSettings() {
+    try {
+      // For example, load and apply the model background color setting.
+      const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
+      if (backgroundColor) {
+        document.documentElement.style.setProperty('--model-background-color', backgroundColor);
+        const bgInput = document.getElementById('model-background-color');
+        if (bgInput) {
+          bgInput.value = backgroundColor;
+        }
+      }
+      // Add any additional settings initialization here as needed.
+    } catch (error) {
+      console.error('Error initializing settings:', error);
+    }
+  }
+
+  async function initializePerformanceSettings() {
+    try {
+      // For example, load and apply performance settings.
+      const maxFileSizeSetting = await window.electron.getSetting('maxFileSizeMB') || '50';
+      const maxFileSizeInput = document.getElementById('max-file-size');
+      if (maxFileSizeInput) {
+        maxFileSizeInput.value = maxFileSizeSetting;
+      }
+
+      // Update the global variable MAX_FILE_SIZE_MB (assuming it's declared elsewhere in the file)
+      MAX_FILE_SIZE_MB = parseInt(maxFileSizeSetting, 10);
+
+      // Add additional performance-related settings initialization as needed.
+    } catch (error) {
+      console.error('Error initializing performance settings:', error);
+    }
+  }
+
+  // Add missing function renderThumbnail to the global scope so generateThumbnail() can use it.
+  async function renderThumbnail(file) {
+    try {
+      // Determine filePath: if file is a string, use it directly; otherwise, assume it's an object with filePath property.
+      const filePath = (typeof file === 'string') ? file : file.filePath;
+      if (!filePath) {
+        throw new Error("renderThumbnail: filePath is undefined");
+      }
+      // Create a temporary container (not attached to DOM)
+      const tempContainer = document.createElement('div');
+      // Call renderModelToPNG with the filePath; no existing thumbnail provided.
+      const thumbnail = await renderModelToPNG(filePath, tempContainer, null);
+      return thumbnail;
+    } catch (error) {
+      console.error("Error in renderThumbnail:", error);
+      throw error;
+    }
+  }
+
+
+  function addContextMenuToTextInputs() {
+    const textInputs = document.querySelectorAll('input[type="text"], textarea');
+    textInputs.forEach(input => {
+      input.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const menu = new Menu();
+        menu.append(new MenuItem({ role: 'cut', label: 'Cut' }));
+        menu.append(new MenuItem({ role: 'copy', label: 'Copy' }));
+        menu.append(new MenuItem({ role: 'paste', label: 'Paste' }));
+        menu.popup({ window: remote.getCurrentWindow() });
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    addContextMenuToTextInputs();
+    // ... other initialization code
+  });
+
+  async function generateTagsForModels(models) {
+    const progressContainer = document.getElementById('tag-generation-progress-container');
+    const progressBar = document.getElementById('tag-generation-progress-bar');
+    const progressText = document.getElementById('tag-generation-progress-text');
+
+    progressContainer.classList.remove('hidden');
+    progressText.textContent = 'Generating Tags';
+
+    try {
+      for (let i = 0; i < models.length; i++) {
+        const model = models[i];
+        try {
+          // Assume generateTagsForImage is a function that generates tags for a model
+          await generateTagsForImage(model.imageData, model.model);
+        } catch (error) {
+          console.error(`Error generating tags for model ${model.id}:`, error);
+          // Optionally, you can update the UI to indicate an error for this specific model
+        }
+
+        // Update progress bar
+        const progress = ((i + 1) / models.length) * 100;
+        progressBar.style.width = `${progress}%`;
+      }
+    } finally {
+      // Hide the progress bar after completion
+      progressContainer.classList.add('hidden');
+    }
+  }
+
+  // ==================== NEW CODE: Virtual Grid Implementation ====================
+
+  // Helper function to create a DOM element for a model item
+  function createModelItem(model) {
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.dataset.filepath = model.filePath;
+
+    // Print status element
+    const printStatus = document.createElement('div');
+    printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
+    printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
+    item.appendChild(printStatus);
+
+    // Thumbnail container with fixed size
+    const thumbnailContainer = document.createElement('div');
+    thumbnailContainer.className = 'thumbnail-container';
+    const img = document.createElement('img');
+    // Use model.thumbnail if available, otherwise use fallback image
+    img.src = model.thumbnail || '3d.png';
+    img.style.width = '250px';
+    img.style.height = '250px';
+    thumbnailContainer.appendChild(img);
+    item.appendChild(thumbnailContainer);
+
+    // File info container
+    const fileInfo = document.createElement('div');
+    fileInfo.className = 'file-info';
+    
+    // File name element
+    const fileName = document.createElement('div');
+    fileName.className = 'file-name';
+    fileName.textContent = model.fileName || '';
+    fileInfo.appendChild(fileName);
+    
+    // Add designer info if available
+    if (model.designer) {
+      const designerInfo = document.createElement('div');
+      designerInfo.className = 'designer-info';
+      designerInfo.innerHTML = `<span class="directory-label">Designer:</span> ${model.designer}`;
+      fileInfo.appendChild(designerInfo);
+    }
+    
+    item.appendChild(fileInfo);
+
+    // Add click event handler for model selection
+    item.addEventListener('click', () => {
+      toggleModelSelection(item, model.filePath);
+    });
+
+    return item;
+  }
+
+  // Virtual grid function—renders only items visible in the scroll window.
+  function renderVirtualGrid(models) {
+    const container = document.querySelector('.file-grid');
+    container.innerHTML = ''; // clear existing content
+      container.style.position = 'relative';
+    container.style.overflowY = 'auto';
+
+    // Assume fixed item size (in pixels)
+    const itemWidth = 250;   // fixed model width (including margins)
+    const itemHeight = 300;  // fixed model height
+    const containerWidth = container.clientWidth;
+    // Calculate number of columns (at least 1)
+    const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
+    const rowCount = Math.ceil(models.length / columns);
+
+    // Create a spacer element of full height to allow scrolling
+    const spacer = document.createElement('div');
+    spacer.style.height = (rowCount * itemHeight) + 'px';
+    container.appendChild(spacer);
+
+    // Create an absolutely positioned element within the container to hold the items
+    const virtualContent = document.createElement('div');
+    virtualContent.style.position = 'absolute';
+    virtualContent.style.top = '0';
+    virtualContent.style.left = '0';
+    virtualContent.style.width = '100%';
+    container.appendChild(virtualContent);
+
+    // Function to (re)render only the visible rows (plus a small buffer)
+    function renderVisibleItems() {
+      const scrollTop = container.scrollTop;
+      const containerHeight = container.clientHeight;
+      const buffer = 2; // extra rows to render before and after the visible area
+      const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
+      const endRow = Math.min(rowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+  
+      // Clear and re-render only the visible items
+      virtualContent.innerHTML = '';
+      for (let row = startRow; row < endRow; row++) {
+        for (let col = 0; col < columns; col++) {
+          const index = row * columns + col;
+          if (index >= models.length) break;
+          const model = models[index];
+      const item = createModelItem(model);
+          item.style.position = 'absolute';
+          item.style.top = (row * itemHeight) + 'px';
+          item.style.left = (col * itemWidth) + 'px';
+          virtualContent.appendChild(item);
+        }
+      }
+    }
+
+    // Attach the scroll event handler to update visible items on scroll
+    container.addEventListener('scroll', renderVisibleItems);
+    // Initial render of visible items
+    renderVisibleItems();
+  }
+  // ==================== END NEW CODE ====================
+
+  async function loadModelsPage(page = 1, pageSize = 100, sortOption = 'name') {
+    try {
+      const models = await window.electron.getModelsPage({ page, pageSize, sortOption });
+      return models;
+    } catch (error) {
+      console.error('Error loading models page:', error);
+      return [];
+    }
+  }
+
+  function cleanupCaches() {
+    // Limit the thumbnail cache size to, for example, 1000 items.
+    if (thumbnailCache.size > 1000) {
+      const keys = Array.from(thumbnailCache.keys()).slice(0, 500);
+      keys.forEach(key => thumbnailCache.delete(key));
+    }
+
+    // If you have a modelCache that is only used for temporary lookups,
+    // clear it after a certain period or when a page change occurs.
+    modelCache.clear(); // or selectively remove entries
+  }
+
+  // Run cleanupCaches() every minute.
+  setInterval(cleanupCaches, 60000);
+
+  async function switchToPage(pageNumber) {
+    // Dispose of the previous data
+    currentModels = []; // assuming currentModels holds the current list of models
+    // Optionally, clear caches related to the previous page.
+    cleanupCaches();
+
+    const newModels = await loadModelsPage(pageNumber);
+    // Update your virtual grid with the new page
+    renderVirtualGrid(newModels);
+    await updateModelCounts(newModels.length);
+    // Update any pagination controls (page number labels, etc.)
+  }
+
+  // Add these constants at the top
+  const MEMORY_CLEANUP_INTERVAL = 30000; // 30 seconds
+  const MAX_CACHED_GEOMETRIES = 200;
+
+  // Add this function with other utility functions
+  function deepCleanThreeResources() {
+    if (sharedRenderer) {
+      sharedRenderer.forceContextLoss();
+      sharedRenderer.dispose();
+      sharedRenderer = null;
+    }
+    
+    // Force garbage collection
+    if (typeof gc === 'function') {
+      gc();
+      gc(); // Call twice to ensure full collection
+    }
+    
+    // Clear texture cache
+    THREE.Cache.clear();
+  }
+
+  // Add a new event listener for the clear selection button
+  document.getElementById('clear-selection-button')?.addEventListener('click', () => {
+    try {
+      // Clear all selections
+      selectedModels.clear();
+      
+      // Update UI to reflect cleared selection
+      document.querySelectorAll('.file-item').forEach(item => {
+        item.classList.remove('selected');
+      });
+      
+      // Update the selected count
+      updateSelectedCount();
+      
+      console.log('Selection cleared');
+    } catch (error) {
+      console.error('Error clearing selection:', error);
+    }
+  });
+
+
+// Add these functions at the top level
 async function autoSaveModel(field, value, filePath) {
   try {
-    if (!filePath) {
-      console.error('No file path provided for autoSaveModel');
-      return;
-    }
+    console.log(`autoSaveModel called with field: ${field}, value: ${value}, filePath: ${filePath}`);
     
     const model = await window.electron.getModel(filePath);
     if (!model) {
-      console.error(`Model not found for ${filePath}`);
+      console.error('No model found for path:', filePath);
       return;
     }
-    
-    // Update the specified field
-    model[field] = value;
-    
-    // Save the updated model
-    await window.electron.saveModel(model);
-    
-    // If this was called from the details panel, update the displayed file
-    await updateModelElement(filePath);
-    
-    return true;
-  } catch (error) {
-    console.error(`Error in autoSaveModel for field ${field}:`, error);
-    return false;
-  }
-}
 
-// Add implementation of autoSaveMultipleModels function
-async function autoSaveMultipleModels(field, value) {
-  try {
-    // No models selected
-    if (selectedModels.size === 0) {
-      console.warn('No models selected for autoSaveMultipleModels');
-      return false; // Indicate failure/no-op
+    // Ensure we have the model ID
+    if (!model.id) {
+      console.error('Model is missing ID:', model);
+      return;
     }
-    
-    // Handle designer field default value (will be reapplied next)
-    if (field === 'designer' && !value) {
-      value = 'Unknown';
-    }
-    
-    // Update all selected models
-    for (const filePath of selectedModels) {
-      const model = await window.electron.getModel(filePath);
-      if (model) {
-        // Special handling for tags - MERGE instead of replace
-        if (field === 'tags') {
-          const existingTags = Array.isArray(model.tags) ? model.tags : [];
-          const newTags = Array.isArray(value) ? value : []; 
-          // Combine, filter out duplicates, and sort
-          const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
-          model.tags = allTags;
-        } else {
-          // Handle other fields
-          model[field] = value;
-        }
-        
-        // Save the model
-        await window.electron.saveModel(model);
-        
-        // Update UI
-        await updateModelElement(filePath);
-      } else {
-        console.warn(`Could not find model for ${filePath} during autoSaveMultipleModels`);
-      }
-    }
-    
-    console.log(`Finished autoSaveMultipleModels for field ${field}.`); // Simplified log
-    return true;
-  } catch (error) {
-    console.error(`Error in autoSaveMultipleModels for field ${field}:`, error);
-    return false;
-  }
-}
 
-// Helper function to get the current model file path
-function getModelFilePath() {
-  // First try to get it from the model-path input
-  const pathInput = document.getElementById('model-path');
-  if (pathInput && pathInput.value) {
-    return pathInput.value;
-  }
-  
-  // Then try to get it from the model-details data attribute
-  const detailsPanel = document.querySelector('.model-details');
-  if (detailsPanel && detailsPanel.getAttribute('data-filepath')) {
-    return detailsPanel.getAttribute('data-filepath');
-  }
-  
-  return null;
-}
-
-// Add this code to set up event handlers for multi-edit mode controls
-function showMultiEditPanel() {
-  // Populate dropdowns with existing data - REMOVED redundant calls
-  // populateModelDesignerDropdown('', 'multi-designer');
-  // populateModelLicenseDropdown('', 'multi-license');
-  // populateParentModelDropdown('', 'multi-parent');
-  // populateTagSelect('multi-tag-select', 'multi-tags');
-  
-  // Force the checkbox to be unchecked at the start
-  const multiPrintedCheckbox = document.getElementById('multi-printed');
-  if (multiPrintedCheckbox) {
-    multiPrintedCheckbox.checked = false;
-  }
-  
-  // Reset the source input
-  const multiSourceInput = document.getElementById('multi-source');
-  if (multiSourceInput) {
-    multiSourceInput.value = '';
-  }
-  
-  // Add change handlers for multi-edit controls
-  document.getElementById('multi-designer')?.addEventListener('change', async (e) => {
-    const value = e.target.value || 'Unknown'; // Use default Unknown
-    await autoSaveMultipleModels('designer', value);
-  });
-  
-  document.getElementById('multi-parent')?.addEventListener('change', async (e) => {
-    await autoSaveMultipleModels('parentModel', e.target.value);
-  });
-  
-  document.getElementById('multi-license')?.addEventListener('change', async (e) => {
-    await autoSaveMultipleModels('license', e.target.value);
-  });
-  
-  // Use input event with debounce for the source field so it saves as user types
-  if (multiSourceInput) {
-    // First remove any existing event listeners
-    const newInput = multiSourceInput.cloneNode(true);
-    multiSourceInput.parentNode.replaceChild(newInput, multiSourceInput);
-    
-    // Add debounced input event listener
-    newInput.addEventListener('input', debounce(async function() {
-      const sourceValue = this.value.trim();
-      console.log(`Saving source value: "${sourceValue}"`);
-      await autoSaveMultipleModels('source', sourceValue);
-    }, 500));
-    
-    console.log('Multi-source input event handler attached');
-  } else {
-    console.error('Multi-source input not found');
-  }
-  
-  // Add explicit event listener for the printed checkbox
-  if (multiPrintedCheckbox) {
-    // Create a highly visible function for debugging
-    const handlePrintedChange = async function() {
-      const isChecked = this.checked;
-      console.log(`Multi-printed checkbox changed to: ${isChecked}`);
-      
-      if (selectedModels.size === 0) {
-        console.warn('No models selected for updating printed status');
-        return;
-      }
-      
-      // Use a more direct approach to update the models
-      try {
-        console.log(`Updating printed status to ${isChecked} for ${selectedModels.size} models`);
-        
-        // Process each selected model
-        for (const filePath of selectedModels) {
-          const model = await window.electron.getModel(filePath);
-          if (model) {
-            model.printed = isChecked;
-            await window.electron.saveModel(model);
-            console.log(`Updated model ${filePath} printed status to ${isChecked}`);
-            await updateModelElement(filePath);
-          }
-        }
-        
-        console.log(`Successfully updated printed status for ${selectedModels.size} models`);
-      } catch (error) {
-        console.error('Error updating printed status:', error);
-      }
+    const modelData = {
+      ...model,
+      [field]: value
     };
-    
-    // First remove any existing event listeners
-    const newCheckbox = multiPrintedCheckbox.cloneNode(true);
-    multiPrintedCheckbox.parentNode.replaceChild(newCheckbox, multiPrintedCheckbox);
-    
-    // Add event listener with both input and change events
-    newCheckbox.addEventListener('change', handlePrintedChange);
-    newCheckbox.addEventListener('click', function() {
-      console.log('Multi-printed checkbox clicked, current state:', this.checked);
-    });
-    
-    console.log('Multi-printed checkbox event handlers attached in showMultiEditPanel');
-  } else {
-    console.error('Multi-printed checkbox not found in showMultiEditPanel');
-  }
 
-  // Re-attach event listener for multi-tag-select
-  const multiTagSelect = document.getElementById('multi-tag-select');
-  if (multiTagSelect) {
-    // Clone/replace to ensure any old listeners are gone (might be redundant but safe)
-    const newMultiTagSelect = multiTagSelect.cloneNode(true);
-    multiTagSelect.parentNode.replaceChild(newMultiTagSelect, multiTagSelect);
-
-    // Add the change listener
-    newMultiTagSelect.addEventListener('change', () => {
-      const selectedTag = newMultiTagSelect.value;
-      if (selectedTag) {
-        addTagToModel(selectedTag, 'multi-tags');
-        newMultiTagSelect.value = ''; // Reset selection
+    console.log('Auto-saving model:', modelData);
+    await window.electron.saveModel(modelData);
+    console.log(`Model saved successfully for field: ${field}`);
+    
+    // Check if the updated model still matches the current filter criteria
+    const filteredModels = await window.getCombinedFilteredModels(0);
+    const stillMatchesFilter = filteredModels.some(model => model.filePath === filePath);
+    
+    if (!stillMatchesFilter) {
+      console.log(`Model ${filePath} no longer matches filter criteria, hiding element`);
+      // Hide the element in the grid
+      const fileItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(filePath)}"]`);
+      if (fileItem) {
+        fileItem.style.display = 'none';
       }
-    });
-    console.log('Multi-tag-select event handler re-attached in showMultiEditPanel');
-  } else {
-    console.error('Multi-tag-select element not found in showMultiEditPanel');
+    } else {
+      // Update just this model's element instead of refreshing everything
+      await updateModelElement(filePath);
+    }
+
+
+  } catch (error) {
+    console.error('Error auto-saving model:', error);
+    // Show an error message to the user
+    const errorMessage = document.createElement('div');
+    errorMessage.className = 'error-message';
+    errorMessage.textContent = `Failed to save: ${error.message}`;
+    
+    // Add to the model details panel
+    const detailsPanel = document.getElementById('model-details');
+    if (detailsPanel) {
+      detailsPanel.appendChild(errorMessage);
+      // Remove after 5 seconds
+      setTimeout(() => {
+        if (errorMessage.parentNode) {
+          errorMessage.parentNode.removeChild(errorMessage);
+        }
+      }, 5000);
+    }
   }
 }
 
-// Update the edit mode toggle handler to call showMultiEditPanel when entering multi-edit mode
-document.getElementById('edit-mode-toggle')?.addEventListener('click', () => {
-  isMultiSelectMode = !isMultiSelectMode;
-  const button = document.getElementById('edit-mode-toggle');
-  const multiEditPanel = document.getElementById('multi-edit-panel');
-  const detailsPanel = document.getElementById('model-details');
-
-  if (isMultiSelectMode) {
-    button.textContent = 'Exit Multi-Edit Mode';
-    button.classList.add('active');
-    multiEditPanel.classList.remove('hidden');
-    detailsPanel.classList.add('hidden');
-    showMultiEditPanel();
-  } else {
-    exitMultiEditMode();
+async function autoSaveMultipleModels(field, value) {
+  if (selectedModels.size === 0) {
+    console.warn("No models selected for multi-edit.");
+    return;
   }
-});
 
-// Add a direct event listener for the multi-printed checkbox
-document.addEventListener('DOMContentLoaded', () => {
-  // Setup multi-printed checkbox handler
-  const multiPrintedCheckbox = document.getElementById('multi-printed');
-  if (multiPrintedCheckbox) {
-    // First remove any existing listeners by cloning and replacing
-    const newCheckbox = multiPrintedCheckbox.cloneNode(true);
-    multiPrintedCheckbox.parentNode.replaceChild(newCheckbox, multiPrintedCheckbox);
-    
-    // Add the event listener to the new checkbox
-    newCheckbox.addEventListener('change', async function() {
-      const isChecked = this.checked;
-      console.log(`Multi-printed checkbox changed to: ${isChecked}`);
-      
-      if (selectedModels.size === 0) {
-        console.warn('No models selected for updating printed status');
-        return;
-      }
-      
-      try {
-        // Start transaction
-        console.log(`Updating printed status to ${isChecked} for ${selectedModels.size} models`);
-        
-        // Process each selected model
-        for (const filePath of selectedModels) {
-          const model = await window.electron.getModel(filePath);
-          if (model) {
-            model.printed = isChecked;
-            await window.electron.saveModel(model);
-            await updateModelElement(filePath);
+  console.log(`Auto-saving ${selectedModels.size} models with ${field} = ${value}`);
+  
+  // For batch processing
+  const modelDataBatch = [];
+  const filesToUpdate = [];
+  const modelsToUnselect = new Set();
+
+  // Create a single batch update if possible
+  if (['designer', 'source', 'license', 'parentModel', 'printed'].includes(field)) {
+    // First gather all models that need updating
+    const modelsToProcess = await Promise.all(
+      Array.from(selectedModels).map(async (filePath) => {
+        try {
+          const existingModel = await window.electron.getModel(filePath);
+          if (!existingModel) {
+            console.warn(`Model not found for file path: ${filePath}`);
+            return null;
           }
+          return { filePath, model: existingModel };
+        } catch (error) {
+          console.error(`Error fetching model ${filePath}:`, error);
+          return null;
+        }
+      })
+    );
+
+    // Filter out nulls
+    const validModels = modelsToProcess.filter(item => item !== null);
+    
+    // Process in a single batch if we have valid models
+    if (validModels.length > 0) {
+      // Prepare batch data
+      for (const { filePath, model } of validModels) {
+        const updateData = { ...model };
+        
+        // Handle special properties
+        if (field === 'parentModel') {
+          updateData.parentModel = value;
+        } else if (field === 'printed') {
+          updateData.printed = value;
+        } else {
+          updateData[field] = value;
         }
         
-        console.log(`Successfully updated printed status for ${selectedModels.size} models`);
-      } catch (error) {
-        console.error('Error updating printed status:', error);
+        modelDataBatch.push(updateData);
+        filesToUpdate.push(filePath);
       }
-    });
+    }
+  } else {
+    // For more complex fields like tags that may need custom handling, use the original approach
+    const updatePromises = [];
     
-    console.log('Multi-printed checkbox event listener attached');
-  } else {
-    console.error('Multi-printed checkbox not found');
-  }
+    for (const filePath of selectedModels) {
+      try {
+        const existingModel = await window.electron.getModel(filePath);
+        if (!existingModel) {
+          console.warn(`Model not found for file path: ${filePath}`);
+          continue;
+        }
 
-  // Add event listener for the Clear Selection button
-  const clearSelectionButton = document.getElementById('clear-selection-button');
-  if (clearSelectionButton) {
-    clearSelectionButton.addEventListener('click', () => {
-      console.log('Clear Selection button clicked');
-      if (isMultiSelectMode) {
-        selectedModels.clear();
-        document.querySelectorAll('.file-item.selected').forEach(item => {
-          item.classList.remove('selected');
-        });
-        updateSelectedCount(); // Update the count display
-        // Optionally hide the multi-edit panel if preferred when selection is cleared
-        // exitMultiEditMode(); // Or just hide the panel like this:
-        // document.getElementById('multi-edit-panel').classList.add('hidden'); 
-        // document.getElementById('model-details').classList.remove('hidden');
-        console.log('Selection cleared');
+        const updatedModel = { ...existingModel };
+        
+        if (field === 'tags') {
+          // Special handling for tags
+          updatedModel.tags = Array.isArray(value) ? value : [value];
+        } else {
+          updatedModel[field] = value;
+        }
+        
+        await window.electron.saveModel(updatedModel);
+        updatePromises.push(updateModelElement(filePath));
+        filesToUpdate.push(filePath);
+      } catch (error) {
+        console.error(`Error updating model ${filePath}:`, error);
       }
-    });
-    console.log('Clear Selection button event listener attached');
-  } else {
-    console.error('Clear Selection button not found');
-  }
-});
-
-// ==================== NEW CODE: Virtual Grid Implementation ====================
-
-// Helper function to create a DOM element for a model item
-function createModelItem(model) {
-  const item = document.createElement('div');
-  item.className = 'file-item';
-  item.dataset.filepath = model.filePath;
-
-  if (selectedModels.has(model.filePath)) {
-    item.classList.add('selected');
+    }
+    
+    await Promise.all(updatePromises);
   }
 
-  // Print status element
-  const printStatus = document.createElement('div');
-  printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
-  printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
-  item.appendChild(printStatus);
+  // If we have a batch to process, save it
+  if (modelDataBatch.length > 0) {
+    try {
+      console.log(`Saving batch of ${modelDataBatch.length} models...`);
+      await window.electron.saveModelBatch(modelDataBatch);
+      
+      // Update UI for all processed models
+      await Promise.all(filesToUpdate.map(filePath => updateModelElement(filePath)));
+    } catch (error) {
+      console.error('Error saving model batch:', error);
+    }
+  }
 
-  // Thumbnail container with fixed size
-  const thumbnailContainer = document.createElement('div');
-  thumbnailContainer.className = 'thumbnail-container';
+  // Check if any models need to be unselected due to filter criteria
+  const filteredModels = await window.getCombinedFilteredModels(0);
+  const filteredFilePaths = new Set(filteredModels.map(model => model.filePath));
+  
+  for (const filePath of selectedModels) {
+    if (!filteredFilePaths.has(filePath)) {
+      modelsToUnselect.add(filePath);
+    }
+  }
 
-  if (model.thumbnail) {
-    const img = document.createElement('img');
-    img.src = model.thumbnail;
-    img.style.width = '250px';
-    img.style.height = '250px';
-    thumbnailContainer.appendChild(img);
-  } else {
-    // Show placeholder/loading state
-    const img = document.createElement('img');
-    img.src = '3d.png';
-    img.style.width = '250px';
-    img.style.height = '250px';
-    // Add loading class if needed
-    thumbnailContainer.appendChild(img);
+  // Unselect models that no longer match the filter criteria
+  if (modelsToUnselect.size > 0) {
+    for (const filePath of modelsToUnselect) {
+      selectedModels.delete(filePath);
+      // Update UI to reflect unselection
+      const fileItem = document.querySelector(`.file-item[data-path="${filePath}"]`);
+      if (fileItem) {
+        fileItem.classList.remove('selected');
+      }
+    }
+    
+    // Update the multi-edit panel count or hide it if no models are selected
+    const countElement = document.getElementById('multi-edit-count');
+    if (countElement) {
+      countElement.textContent = `${selectedModels.size} model${selectedModels.size !== 1 ? 's' : ''} selected`;
+    }
+    
+    if (selectedModels.size === 0) {
+      const multiEditPanel = document.getElementById('multi-edit-panel');
+      if (multiEditPanel) {
+        multiEditPanel.classList.add('hidden');
+      }
+      isMultiSelectMode = false;
+    }
+  }
 
-    // Queue thumbnail generation if not already pending
-    if (!pendingThumbnails.has(model.filePath)) {
-      pendingThumbnails.add(model.filePath);
 
-      renderQueue.push({
-        filePath: model.filePath,
-        container: thumbnailContainer,
-        resolve: async (thumbnail) => {
-          // Update model in memory
-          model.thumbnail = thumbnail;
-          // Remove from pending set
-          pendingThumbnails.delete(model.filePath);
-          // Save to database
-          await window.electron.saveThumbnail(model.filePath, thumbnail);
+}
 
-          // Try to update any visible instances of this file in the DOM
-          try {
-            const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
-            if (visibleItem) {
-               const img = document.createElement('img');
-               img.src = thumbnail;
-               img.style.width = '250px';
-               img.style.height = '250px';
-               visibleItem.innerHTML = '';
-               visibleItem.appendChild(img);
-            }
-          } catch (e) {
-            console.error('Error updating visible thumbnail:', e);
+  // Fix the showMultiEditPanel function to properly handle the printed checkbox
+  async function showMultiEditPanel() {
+    try {
+      const multiEditPanel = document.getElementById('multi-edit-panel');
+      const detailsPanel = document.getElementById('model-details');
+
+      if (!multiEditPanel || !detailsPanel) {
+        console.error('Required panels not found');
+        return;
+      }
+
+      // Hide single edit panel
+      detailsPanel.classList.add('hidden');
+
+      // Clear form fields
+      const formFields = {
+        'multi-designer': '',
+        'multi-source': '',
+        'multi-notes': '',
+        'multi-printed': false,
+        'multi-parent': '',
+        'multi-license': '',
+        'multi-tags': ''
+      };
+
+      // Safely set form field values
+      Object.entries(formFields).forEach(([id, value]) => {
+        const element = document.getElementById(id);
+        if (element) {
+          if (element.type === 'checkbox') {
+            element.checked = value;
+          } else if (id === 'multi-tags') {
+            element.innerHTML = value;
+          } else {
+            element.value = value;
           }
-        },
-        reject: (error) => {
-          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
-          pendingThumbnails.delete(model.filePath);
         }
       });
 
-      // Trigger queue processing
-      processRenderQueue();
+      // Populate dropdowns with available options
+      await Promise.all([
+        populateModelDesignerDropdown(null, 'multi-designer'),
+        populateParentModelDropdown(null, 'multi-parent'),
+        populateModelLicenseDropdown(null, 'multi-license'),
+        populateTagSelect('multi-tag-select', 'multi-tags')
+      ]);
+
+      // Handle the printed checkbox specifically
+      const multiPrintedCheckbox = document.getElementById('multi-printed');
+      if (multiPrintedCheckbox) {
+        // Remove any existing event listeners by cloning and replacing
+        const newCheckbox = multiPrintedCheckbox.cloneNode(true);
+        multiPrintedCheckbox.parentNode.replaceChild(newCheckbox, multiPrintedCheckbox);
+        
+        // Determine initial state based on selection
+        if (selectedModels.size > 0) {
+          try {
+            // Sample up to 10 models to determine checkbox state
+            const sampleSize = Math.min(selectedModels.size, 10);
+            const samplePaths = Array.from(selectedModels).slice(0, sampleSize);
+            
+            const printedStates = await Promise.all(
+              samplePaths.map(async (filePath) => {
+                const model = await window.electron.getModel(filePath);
+                return model?.printed || false;
+              })
+            );
+            
+            // Set checkbox state based on sample
+            const allPrinted = printedStates.every(state => state === true);
+            const allNotPrinted = printedStates.every(state => state === false);
+            
+            if (allPrinted) {
+              newCheckbox.checked = true;
+            } else if (allNotPrinted) {
+              newCheckbox.checked = false;
+            } else {
+              // Mixed state - some printed, some not
+              newCheckbox.indeterminate = true;
+            }
+          } catch (error) {
+            console.error('Error determining printed state:', error);
+            newCheckbox.checked = false;
+          }
+        }
+        
+        // Add change event listener
+        newCheckbox.addEventListener('change', async (e) => {
+          console.log('Printed checkbox changed:', e.target.checked);
+          
+          // If checkbox was in indeterminate state, it becomes unchecked first
+          if (e.target.indeterminate) {
+            e.target.indeterminate = false;
+          }
+          
+          // Save the new value to all selected models
+          await autoSaveMultipleModels('printed', e.target.checked);
+        });
+      }
+
+      // Show the multi-edit panel
+      multiEditPanel.classList.remove('hidden');
+      
+      console.log('Multi-edit panel shown with', selectedModels.size, 'models selected');
+    } catch (error) {
+      console.error('Error showing multi-edit panel:', error);
     }
   }
 
-  item.appendChild(thumbnailContainer);
-
-  // File info container
-  const fileInfo = document.createElement('div');
-  fileInfo.className = 'file-info';
-
-  // File name element
-  const fileName = document.createElement('div');
-  fileName.className = 'file-name';
-  fileName.textContent = model.fileName || '';
-  fileInfo.appendChild(fileName);
-
-  // Add designer info if available
-  if (model.designer) {
-    const designerInfo = document.createElement('div');
-    designerInfo.className = 'designer-info';
-
-    const label = document.createElement('span');
-    label.className = 'directory-label';
-    label.textContent = 'Designer: ';
-
-    const value = document.createTextNode(model.designer);
-
-    designerInfo.appendChild(label);
-    designerInfo.appendChild(value);
-    fileInfo.appendChild(designerInfo);
-  }
-
-  item.appendChild(fileInfo);
-
-  // Add click event handler for model selection
-  item.addEventListener('click', (e) => {
-    // Check if ctrl or cmd key is pressed for multi-select
-    if (e.ctrlKey || e.metaKey) {
-      handleFileClick(e, model.filePath);
-    } else {
-      toggleModelSelection(item, model.filePath);
+  // Add a function to get or create a shared renderer
+  function getSharedRenderer() {
+    if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
+      // Clean up existing resources before creating new ones
+      if (sharedRenderer) {
+        debugLog('Disposing old renderer after', contextUseCount, 'uses');
+        sharedRenderer.dispose();
+        sharedRenderer = null;
+      }
+      
+      // Create a new canvas and renderer
+      const canvas = document.createElement('canvas');
+      canvas.width = 250;
+      canvas.height = 250;
+      
+      sharedRenderer = new THREE.WebGLRenderer({
+        canvas: canvas,
+        antialias: false,
+        alpha: true,
+        powerPreference: 'low-power',
+        precision: 'lowp',
+        preserveDrawingBuffer: true
+      });
+      
+      sharedRenderer.setClearColor(0x000000, 0);
+      contextUseCount = 0;
+      
+      // Add context loss handler
+      canvas.addEventListener('webglcontextlost', (event) => {
+        debugLog('WebGL context lost, preventing default');
+        event.preventDefault();
+      });
+      
+      canvas.addEventListener('webglcontextrestored', () => {
+        debugLog('WebGL context restored');
+      });
+      
+      debugLog('Created new shared renderer');
     }
-  });
-
-  // Add context menu
-  addContextMenuHandler(item, model.filePath);
-
-  return item;
-}
-
-// Virtual grid function—renders only items visible in the scroll window.
-function renderVirtualGrid(models) {
-  const container = document.querySelector('.file-grid');
-  if (!container) return;
-
-  container.innerHTML = ''; // clear existing content
-  container.style.position = 'relative';
-  container.style.overflowY = 'auto';
-
-  // Assume fixed item size (in pixels)
-  const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
-  const itemHeight = 320;  // fixed model height 300px + 20px margin
-  const containerWidth = container.clientWidth;
-
-  // Calculate number of columns (at least 1)
-  const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
-  const rowCount = Math.ceil(models.length / columns);
-
-  // Create a spacer element of full height to allow scrolling
-  const spacer = document.createElement('div');
-  spacer.style.height = (rowCount * itemHeight) + 'px';
-  spacer.style.width = '100%';
-  spacer.style.position = 'relative';
-  container.appendChild(spacer);
-
-  // Create an absolutely positioned element within the container to hold the items
-  const virtualContent = document.createElement('div');
-  virtualContent.style.position = 'absolute';
-  virtualContent.style.top = '0';
-  virtualContent.style.left = '0';
-  virtualContent.style.width = '100%';
-  virtualContent.style.height = '100%';
-  virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
-  container.appendChild(virtualContent);
-
-  // Store the resize observer to disconnect later if needed
-  if (container.resizeObserver) {
-    container.resizeObserver.disconnect();
+    
+    contextUseCount++;
+    return sharedRenderer;
   }
 
-  // Function to (re)render only the visible rows (plus a small buffer)
-  function renderVisibleItems() {
-    const scrollTop = container.scrollTop;
-    const containerHeight = container.clientHeight;
+  // Add a function to get or create a shared scene
+  function getSharedScene() {
+    if (!sharedScene) {
+      sharedScene = new THREE.Scene();
+      
+      // Add lights
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.position.set(1, 1, 1).normalize();
+      
+      sharedScene.add(ambientLight);
+      sharedScene.add(directionalLight);
+      
+      debugLog('Created new shared scene');
+    }
+    
+    // Clear any existing objects from the scene
+    while(sharedScene.children.length > 2) { // Keep the 2 lights
+      const object = sharedScene.children[sharedScene.children.length - 1];
+      sharedScene.remove(object);
+      
+      // Dispose of geometries and materials
+      if (object.geometry) {
+        object.geometry.dispose();
+      }
+      
+      if (object.material) {
+        if (Array.isArray(object.material)) {
+          object.material.forEach(material => material.dispose());
+        } else {
+          object.material.dispose();
+        }
+      }
+    }
+    
+    return sharedScene;
+  }
 
-    // Recalculate columns in case of resize
-    const currentContainerWidth = container.clientWidth;
-    const currentColumns = Math.max(Math.floor(currentContainerWidth / itemWidth), 1);
-    const currentRowCount = Math.ceil(models.length / currentColumns);
+  // Add a function to get or create a shared camera
+  function getSharedCamera() {
+    if (!sharedCamera) {
+      sharedCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+      debugLog('Created new shared camera');
+    }
+    
+    // Reset camera position
+    sharedCamera.position.set(0, 0, 5);
+    sharedCamera.lookAt(0, 0, 0);
+    
+    return sharedCamera;
+  }
 
-    // Update spacer height
-    spacer.style.height = (currentRowCount * itemHeight) + 'px';
+  // Update the renderModelToPNG function to use shared resources
+  async function renderModelToPNG(filePath, container, existingThumbnail) {
+    if (existingThumbnail) {
+      const img = document.createElement('img');
+      img.src = existingThumbnail;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return existingThumbnail;
+    }
 
-    const buffer = 2; // extra rows to render before and after the visible area
-    const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
-    const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+    let model = null;
 
-    // Clear and re-render only the visible items
-    virtualContent.innerHTML = '';
-
-    for (let row = startRow; row < endRow; row++) {
-      for (let col = 0; col < currentColumns; col++) {
-        const index = row * currentColumns + col;
-        if (index >= models.length) break;
-
-        const model = models[index];
-        const item = createModelItem(model);
-        item.style.position = 'absolute';
-        item.style.top = (row * itemHeight) + 'px';
-        item.style.left = (col * itemWidth) + 'px';
-        item.style.width = '250px'; // Explicit width matching CSS
-        item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
-
-        virtualContent.appendChild(item);
+    try {
+      // Get shared resources
+      const renderer = getSharedRenderer();
+      const scene = getSharedScene();
+      const camera = getSharedCamera();
+      
+      debugLog('Rendering model:', filePath);
+      
+      // Load the model
+      model = await loadModel(filePath);
+      if (!model) throw new Error('Failed to load model');
+      
+      // Add model to scene
+      scene.add(model);
+      
+      // Fit camera to model
+      fitCameraToObject(camera, model, scene, renderer);
+      
+      // Render the scene
+      renderer.render(scene, camera);
+      
+      // Get image data
+      const imgData = renderer.domElement.toDataURL('image/png', 0.8);
+      
+      // Create and display image
+      const img = document.createElement('img');
+      img.src = imgData;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      
+      // Remove model from scene
+      scene.remove(model);
+      
+      return imgData;
+    } catch (error) {
+      console.error('Error rendering model:', error);
+      const img = document.createElement('img');
+      img.src = '3d.png';
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return '3d.png';
+    } finally {
+      // Clean up resources
+      if (model) {
+        // Dispose of geometries and materials
+        model.traverse(child => {
+          if (child.geometry) {
+            child.geometry.dispose();
+            child.geometry = null;
+          }
+          if (child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach(material => material.dispose());
+            } else {
+              child.material.dispose();
+            }
+            child.material = null;
+          }
+        });
+        model = null;
+      }
+      
+      // Force garbage collection if available
+      if (typeof window.gc === 'function') {
+        window.gc();
       }
     }
   }
 
-  // Attach the scroll event handler to update visible items on scroll
-  container.removeEventListener('scroll', container.virtualScrollHandler);
-  container.virtualScrollHandler = renderVisibleItems;
-  container.addEventListener('scroll', renderVisibleItems);
+  // Update the processRenderQueue function to add more delay between renders
+  async function processRenderQueue() {
+    if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
+      return;
+    }
 
-  // Handle window resize
-  container.resizeObserver = new ResizeObserver(() => {
-    renderVisibleItems();
+    isProcessingQueue = true;
+    
+    try {
+      while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
+        const task = renderQueue.shift();
+        activeRenders++;
+        
+        try {
+          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
+          task.resolve(result);
+        } catch (error) {
+          console.error(`Render task failed: ${error.message}`);
+          task.reject(error);
+        } finally {
+          activeRenders--;
+          // Add a longer delay between renders to prevent context loss
+          await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
+        }
+      }
+    } finally {
+      isProcessingQueue = false;
+      if (renderQueue.length > 0) {
+        // Add a delay before processing the next batch
+        setTimeout(processRenderQueue, RENDER_DELAY);
+      }
+    }
+  }
+
+  // Add a function to clean up WebGL resources
+  function cleanupWebGLResources() {
+    if (sharedRenderer) {
+      sharedRenderer.dispose();
+      sharedRenderer = null;
+    }
+    
+    if (sharedScene) {
+      sharedScene.traverse((object) => {
+        if (object.geometry) {
+          object.geometry.dispose();
+        }
+        if (object.material) {
+          if (Array.isArray(object.material)) {
+            object.material.forEach(material => material.dispose());
+          } else {
+            object.material.dispose();
+          }
+        }
+      });
+      sharedScene = null;
+    }
+    
+    sharedCamera = null;
+    contextUseCount = 0;
+    
+    // Force garbage collection if available
+    if (typeof window.gc === 'function') {
+      window.gc();
+    }
+  }
+
+  // Add a periodic cleanup function
+  setInterval(() => {
+    if (activeRenders === 0 && renderQueue.length === 0) {
+      cleanupWebGLResources();
+    }
+  }, 60000); // Clean up every minute if idle
+
+  // Update the loadModel function to be more efficient
+  async function loadModel(filePath) {
+    return new Promise((resolve, reject) => {
+      const fileExtension = filePath.split('.').pop().toLowerCase();
+      // Properly encode the file path to handle special characters like '#'
+      const encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
+      let loader;
+      
+      if (fileExtension === 'stl') {
+        loader = new THREE.STLLoader();
+      } else if (fileExtension === '3mf') {
+        THREE.ThreeMFLoader.fflate = fflate;
+        loader = new THREE.ThreeMFLoader();
+      } else {
+        reject(new Error(`Unsupported file type: ${fileExtension}`));
+        return;
+      }
+
+      loader.load(
+        encodedFilePath,
+        (object) => {
+          try {
+            let mesh;
+            
+            // Handle STL files (geometry)
+            if (object.isBufferGeometry) {
+              const material = new THREE.MeshPhongMaterial({
+                color: 0xcccccc,
+                specular: 0x111111,
+                shininess: 200,
+                flatShading: true // Use flat shading for better performance
+              });
+              
+              // Optimize geometry
+              object.computeVertexNormals();
+              
+              mesh = new THREE.Mesh(object, material);
+              
+              if (fileExtension === 'stl') {
+                mesh.rotation.x = -Math.PI / 2;
+              }
+            } 
+            // Handle 3MF files (object)
+            else if (object.isObject3D) {
+              mesh = object;
+              
+              // Apply simple material to all meshes
+              mesh.traverse((child) => {
+                if (child.isMesh) {
+                  child.material = new THREE.MeshPhongMaterial({
+                    color: 0xcccccc,
+                    specular: 0x111111,
+                    shininess: 200,
+                    flatShading: true
+                  });
+                }
+              });
+              
+              if (fileExtension === '3mf') {
+                mesh.rotation.x = -Math.PI / 2;
+              }
+            } else {
+              reject(new Error('Unsupported object type'));
+              return;
+            }
+            
+            resolve(mesh);
+          } catch (error) {
+            console.error('Error processing loaded object:', error);
+            reject(error);
+          }
+        },
+        undefined,
+        (error) => {
+          console.error('Loader error:', error);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  // Update the fitCameraToObject function to be more efficient
+  function fitCameraToObject(camera, object, scene, renderer) {
+    const boundingBox = new THREE.Box3().setFromObject(object);
+    const size = boundingBox.getSize(new THREE.Vector3());
+    const center = boundingBox.getCenter(new THREE.Vector3());
+
+    // Position camera to fit object
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const fov = camera.fov * (Math.PI / 180);
+    let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.5;
+
+    // Update camera position to view from front-top instead of bottom
+    camera.position.set(cameraZ, cameraZ, cameraZ);
+    camera.lookAt(center);
+  }
+
+  // Add window visibility change handler to clean up resources when tab is hidden
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      // Clean up WebGL resources when tab is hidden
+      cleanupWebGLResources();
+    }
   });
-  container.resizeObserver.observe(container);
 
-  // Initial render of visible items
-  renderVisibleItems();
-}
-// ==================== END NEW CODE ====================
+  // Add window unload handler to clean up resources when page is closed
+  window.addEventListener('beforeunload', () => {
+    cleanupWebGLResources();
+  });
 
-// Change the multi-source event listener from 'change' back to 'input' with debounce
-document.getElementById('multi-source')?.addEventListener('input', debounce(async (e) => {
-  console.log(`Saving source value: "${e.target.value}"`);
-  await autoSaveMultipleModels('source', e.target.value);
-}, 500));
+  // Update the generateThumbnailsForModels function to skip models with existing thumbnails
+  async function generateThumbnailsForModels(models) {
+    const BATCH_SIZE = 1; // Process one at a time
+    const progressDialog = document.getElementById('thumbnail-progress-dialog');
+    const progressBar = document.getElementById('thumbnail-progress-bar');
+    const progressText = document.getElementById('thumbnail-progress-text');
+    
+    // Check if progress elements exist before proceeding
+    const hasProgressUI = progressDialog && progressBar && progressText;
+    
+    // Filter out models that already have thumbnails
+    const modelsNeedingThumbnails = [];
+    for (const model of models) {
+      if (!model.thumbnail) {
+        modelsNeedingThumbnails.push(model);
+      }
+    }
+    
+    if (modelsNeedingThumbnails.length === 0) {
+      debugLog('No models need thumbnails, skipping generation');
+      return;
+    }
+    
+    totalThumbnailsToGenerate = modelsNeedingThumbnails.length;
+    generatedThumbnailsCount = 0;
 
+    try {
+      // Show progress dialog if it exists
+      if (hasProgressUI) {
+        progressDialog.showModal();
+      }
+      
+      for (let i = 0; i < modelsNeedingThumbnails.length; i++) {
+        const model = modelsNeedingThumbnails[i];
+        
+        try {
+          // Update progress before starting each model
+          generatedThumbnailsCount = i;
+          
+          // Only update UI elements if they exist
+          if (hasProgressUI) {
+            const progress = Math.floor((i / totalThumbnailsToGenerate) * 100);
+            progressBar.style.width = `${progress}%`;
+            progressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
+          }
+          
+          // Check for embedded thumbnail first (for 3MF files)
+          if (model.filePath.toLowerCase().endsWith('.3mf')) {
+            try {
+              const embeddedImage = await extract3MFThumbnail(model.filePath);
+              
+              // Validate that embeddedImage is a proper string containing image data
+              if (embeddedImage && typeof embeddedImage === 'string' && embeddedImage.startsWith('data:image')) {
+                await window.electron.saveThumbnail(model.filePath, embeddedImage);
+                continue; // Skip 3D rendering if we have an embedded image
+              } else if (embeddedImage && Array.isArray(embeddedImage) && embeddedImage.length > 0) {
+                // Handle case where it returns an array of images
+                const firstImage = embeddedImage[0];
+                if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
+                  await window.electron.saveThumbnail(model.filePath, firstImage);
+                  continue;
+                }
+              }
+              
+              // If we get here, the embedded image wasn't valid
+              debugLog(`No valid embedded image found in 3MF file: ${model.filePath}`);
+            } catch (embeddedError) {
+              console.error(`Error extracting embedded image from 3MF: ${model.filePath}`, embeddedError);
+              // Continue to regular thumbnail generation
+            }
+          }
 
-window.renderFiles = renderFiles;
-window.displayModels = displayModels;
+          // Generate thumbnail
+          try {
+            const thumbnail = await generateThumbnail(model.filePath);
+            
+            // Validate thumbnail before saving
+            if (thumbnail && typeof thumbnail === 'string' && 
+                (thumbnail.startsWith('data:image') || thumbnail === '3d.png')) {
+              await window.electron.saveThumbnail(model.filePath, thumbnail);
+            } else {
+              console.error(`Invalid thumbnail generated for ${model.filePath}:`, thumbnail);
+              // Save default thumbnail
+              await window.electron.saveThumbnail(model.filePath, '3d.png');
+            }
+          } catch (thumbnailError) {
+            console.error(`Error generating thumbnail for ${model.filePath}:`, thumbnailError);
+            // Save default thumbnail
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
+          }
+          
+          // Force cleanup after each model
+          if (typeof deepCleanThreeResources === 'function') {
+            deepCleanThreeResources();
+          }
+          
+          // Add delay between models
+          await new Promise(resolve => setTimeout(resolve, 50)); // Use a reasonable default if THUMBNAIL_GENERATION_DELAY is not defined
+          
+        } catch (error) {
+          console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
+          // Try to save a default thumbnail to prevent future attempts
+          try {
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
+          } catch (saveError) {
+            console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
+          }
+          // Continue with next model even if one fails
+        }
+      }
+
+      // Update final progress
+      if (hasProgressUI) {
+        progressBar.style.width = '100%';
+        progressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
+      }
+      
+    } catch (error) {
+      console.error('Error in thumbnail generation:', error);
+    } finally {
+      // Close the dialog if it exists and was opened
+      if (hasProgressUI && progressDialog.open) {
+        progressDialog.close();
+      }
+    }
+  }
+
+  // Update the multi-license change handler to use autoSaveMultipleModels
+  document.getElementById('multi-license').addEventListener('change', async (e) => {
+    await autoSaveMultipleModels('license', e.target.value);
+  });
+
+  document.getElementById('multi-designer').addEventListener('change', async (e) => {
+    await autoSaveMultipleModels('designer', e.target.value);
+  });
+
+  // Add event listener for multi-source input
+  document.getElementById('multi-source').addEventListener('input', debounce(async (e) => {
+    await autoSaveMultipleModels('source', e.target.value);
+  }), 500); // 500ms debounce
+
+  // Add event listeners for notes fields
+  document.getElementById('model-notes')?.addEventListener('change', async (e) => {
+    const filePath = document.getElementById('model-path').value;
+    await autoSaveModel('notes', e.target.value, filePath);
+  });
+
+  document.getElementById('multi-notes')?.addEventListener('input', debounce(async (e) => {
+    await autoSaveMultipleModels('notes', e.target.value);
+  }), 500);
