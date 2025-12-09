@@ -16,11 +16,11 @@ test.describe('Application Launch', () => {
     }
     // Launch the Electron application
     app = await electron.launch({
-      args: ['.'],
-      executablePath: './node_modules/.bin/electron'
+      args: ['.']
     });
     // Get the first window that opens
     window = await app.firstWindow();
+    console.log('Window title:', await window.title());
     await window.waitForLoadState('domcontentloaded');
   });
 
