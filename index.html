@@ -104,6 +104,7 @@
           <option value="">All Types</option>
           <option value="stl">STL</option>
           <option value="3mf">3MF</option>
+          <option value="zip">ZIP</option>
         </select>
       </div>
       <div class="form-group">
@@ -673,6 +674,22 @@
         </form>
       </dialog>
 
+      <dialog id="file-type-settings-dialog" class="modal">
+        <form method="dialog">
+          <h3>File Type Settings</h3>
+          <div class="form-group">
+            <div class="checkbox-container" style="display: flex; align-items: center; justify-content: space-between;">
+              <label for="scan-zip-archives" style="flex-grow: 1;">Scan ZIP Archives</label>
+              <input type="checkbox" id="scan-zip-archives" style="flex-shrink: 0;">
+            </div>
+            <p class="setting-description" style="margin-top: 5px;">Enabling this may significantly increase scan times and CPU usage.</p>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit" id="save-file-type-settings">Save</button>
+            <button type="button" id="cancel-file-type-settings">Cancel</button>
+          </div>
+        </form>
+      </dialog>
       <dialog id="tag-manager-dialog" class="modal">
         <form method="dialog">
           <h3>Tag Manager</h3>

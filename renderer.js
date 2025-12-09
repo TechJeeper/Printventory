@@ -2819,188 +2819,70 @@ document.addEventListener('DOMContentLoaded', async () => {
   // 9. Add model loading with better resource management
   async function loadModel(filePath, options = {}) {
     try {
-      console.log('loadModel: Starting for file:', filePath);
-      const fileExtension = filePath.split('.').pop().toLowerCase();
-      
+      const fileExtension = filePath.split('|').pop().split('.').pop().toLowerCase();
+
       // For 3MF files, try to extract embedded image first
       if (fileExtension === '3mf') {
-        console.log('loadModel: Checking for embedded images in 3MF');
         try {
           const embeddedImage = await extract3MFThumbnail(filePath);
           if (embeddedImage) {
-            console.log('loadModel: Found embedded image, using that instead of 3D rendering');
-            return null; // This will trigger the fallback to use the embedded image
+            return null; // Fallback to use the embedded image
           }
         } catch (imageError) {
-          console.error('loadModel: Error checking for embedded image:', imageError);
+          console.error('Error checking for embedded image:', imageError);
         }
       }
-      
-      // Properly encode the file path to handle special characters and Windows paths
-      let encodedFilePath;
-      
-      // Check if we're running on Windows (starts with drive letter)
-      if (/^[A-Za-z]:/.test(filePath)) {
-        // For Windows paths: 
-        // 1. Convert backslashes to forward slashes
-        // 2. Add file:/// protocol
-        // 3. Properly encode special characters
-        
-        try {
-          // First normalize the path to use forward slashes
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Create URL object for proper handling - this works better for Windows paths
-          const fileUrl = new URL(`file:///${normalizedPath}`);
-          
-          // Get the properly encoded pathname from the URL
-          encodedFilePath = fileUrl.href;
-          
-          // Explicitly handle hash character in path segments
-          if (normalizedPath.includes('#')) {
-            // Replace the hash character with its URL encoding (%23)
-            // But ensure we don't double-encode anything
-            encodedFilePath = encodedFilePath.replace(/#/g, '%23');
-          }
-          
-          // Ensure other problematic characters are properly encoded
-          encodedFilePath = encodedFilePath
-            .replace(/\?/g, '%3F')
-            .replace(/\s/g, '%20')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/'/g, '%27')
-            .replace(/\[/g, '%5B')
-            .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error creating URL from file path:', error);
-          
-          // Fallback method: direct string replacement
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          encodedFilePath = `file:///${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20');
-        }
-        
-        console.log('loadModel: Encoded Windows path:', encodedFilePath);
-      } else {
-        // For non-Windows paths, use a direct encoding approach
-        try {
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Simply replace problematic characters directly
-          encodedFilePath = `file://${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20')
-              .replace(/\(/g, '%28')
-              .replace(/\)/g, '%29')
-              .replace(/'/g, '%27')
-              .replace(/\[/g, '%5B')
-              .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error encoding non-Windows file path:', error);
-          // Super simple fallback
-          encodedFilePath = `file://${filePath.replace(/#/g, '%23')}`;
-        }
-        console.log('loadModel: Encoded Unix path:', encodedFilePath);
+
+      const buffer = await window.electron.getFileData(filePath);
+      if (!buffer) {
+        throw new Error('Failed to load file data.');
       }
-      
-      // If no embedded image found, proceed with 3D loading
+      const modelData = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+
       let loader;
       if (fileExtension === 'stl') {
-        if (!THREE.STLLoader) {
-          console.error('loadModel: THREE.STLLoader not available');
-          throw new Error('THREE.STLLoader not initialized');
-        }
         loader = new THREE.STLLoader();
       } else if (fileExtension === '3mf') {
-        if (!THREE.ThreeMFLoader) {
-          console.error('loadModel: THREE.ThreeMFLoader not available');
-          throw new Error('THREE.ThreeMFLoader not initialized');
-        }
-        if (!fflate) {
-          console.error('loadModel: fflate not available');
-          throw new Error('fflate not initialized');
-        }
         THREE.ThreeMFLoader.fflate = fflate;
         loader = new THREE.ThreeMFLoader();
       } else {
         throw new Error(`Unsupported file type: ${fileExtension}`);
       }
 
-      if (!loader) {
-        throw new Error('Failed to initialize loader');
-      }
+      const object = loader.parse(modelData);
 
-      return new Promise((resolve, reject) => {
-        try {
-          loader.load(
-              encodedFilePath, // Use the encoded path instead of the original
-              (object) => {
-                try {
-                  let mesh;
-                  if (object.isBufferGeometry) {
-                    if (!THREE.MeshPhongMaterial) {
-                      console.error('loadModel: THREE.MeshPhongMaterial not available');
-                      throw new Error('THREE.MeshPhongMaterial not initialized');
-                    }
-                    const material = new THREE.MeshPhongMaterial({
-                      color: 0xcccccc,
-                      specular: 0x111111,
-                      shininess: 200
-                    });
-                    if (!THREE.Mesh) {
-                      console.error('loadModel: THREE.Mesh not available');
-                      throw new Error('THREE.Mesh not initialized');
-                    }
-                    
-                    // Proper geometry centering instead of normalization
-                    object.computeBoundingBox();
-                    object.center();
-                    object.computeVertexNormals();
-                    
-                    mesh = new THREE.Mesh(object, material);
-                    
-                    if (fileExtension === 'stl') {
-                      mesh.rotation.x = -Math.PI / 2;
-                    }
-                  } else if (object.isObject3D) {
-                    mesh = object;
-                    mesh.traverse((child) => {
-                      if (child.isMesh) {
-                        child.material = new THREE.MeshPhongMaterial({
-                          color: 0xcccccc,
-                          specular: 0x111111,
-                          shininess: 200
-                        });
-                      }
-                    });
-                    if (fileExtension === '3mf') {
-                      mesh.rotation.x = -Math.PI / 2;
-                    }
-                  } else {
-                    reject(new Error('Unsupported object type'));
-                    return;
-                  }
-                  resolve(mesh);
-                } catch (error) {
-                  console.error('loadModel: Error processing loaded object:', error);
-                  reject(error);
-                }
-              },
-              (progress) => {
-                // Progress callback
-              },
-              (error) => {
-                console.error('loadModel: Loader error:', error);
-                reject(error);
-              }
-          );
-        } catch (error) {
-          console.error('loadModel: Error in loader.load:', error);
-          reject(error);
+      let mesh;
+      if (object.isBufferGeometry) {
+        const material = new THREE.MeshPhongMaterial({
+          color: 0xcccccc,
+          specular: 0x111111,
+          shininess: 200
+        });
+        object.computeBoundingBox();
+        object.center();
+        object.computeVertexNormals();
+        mesh = new THREE.Mesh(object, material);
+        if (fileExtension === 'stl') {
+          mesh.rotation.x = -Math.PI / 2;
         }
-      });
+      } else if (object.isObject3D) {
+        mesh = object;
+        mesh.traverse((child) => {
+          if (child.isMesh) {
+            child.material = new THREE.MeshPhongMaterial({
+              color: 0xcccccc,
+              specular: 0x111111,
+              shininess: 200
+            });
+          }
+        });
+        if (fileExtension === '3mf') {
+          mesh.rotation.x = -Math.PI / 2;
+        }
+      } else {
+        throw new Error('Unsupported object type from loader');
+      }
+      return mesh;
     } catch (error) {
       console.error('loadModel error:', error);
       throw error;
@@ -3149,6 +3031,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     printStatus.className = `print-status ${file.printed ? 'printed' : ''}`;
     printStatus.textContent = file.printed ? 'Printed' : 'Not Printed';
     fileElement.appendChild(printStatus);
+
+  if (file.isZipArchive) {
+    const zipIndicator = document.createElement('div');
+    zipIndicator.className = 'zip-indicator';
+    zipIndicator.textContent = 'Zip';
+    fileElement.appendChild(zipIndicator);
+  }
 
     // Add thumbnail container
     const thumbnailContainer = document.createElement('div');
@@ -4084,6 +3973,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         })
         .catch(err => console.error('Error loading slicer path:', err));
     }
+  });
+
+  // Add this block to handle the new file type settings dialog
+  window.electron.on('open-file-type-settings', async () => {
+    const dialog = document.getElementById('file-type-settings-dialog');
+    if (dialog) {
+      try {
+        const enableZipSupport = await window.electron.getSetting('enableZipSupport');
+        const checkbox = document.getElementById('scan-zip-archives');
+        checkbox.checked = enableZipSupport === '1';
+        dialog.showModal();
+      } catch (error) {
+        console.error('Error opening file type settings:', error);
+      }
+    }
+  });
+
+  document.getElementById('save-file-type-settings')?.addEventListener('click', async () => {
+    const checkbox = document.getElementById('scan-zip-archives');
+    const enableZipSupport = checkbox.checked ? '1' : '0';
+    await window.electron.saveSetting('enableZipSupport', enableZipSupport);
+    document.getElementById('file-type-settings-dialog').close();
+  });
+
+  document.getElementById('cancel-file-type-settings')?.addEventListener('click', () => {
+    document.getElementById('file-type-settings-dialog').close();
   });
 
   // Modify the prompt handler

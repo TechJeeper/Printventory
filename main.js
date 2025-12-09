@@ -333,7 +333,8 @@ function initializeDatabase() {
         hash TEXT,
         size INTEGER,
         license TEXT,
-        modifiedDate DATETIME
+        modifiedDate DATETIME,
+        isZipArchive INTEGER DEFAULT 0
     )`);
 
     // Create tags table
@@ -459,6 +460,7 @@ function initializeDefaultSettings() {
       { key: 'ClientId', value: crypto.randomUUID() }, // Generate a unique client ID
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
+      { key: 'enableZipSupport', value: '0' }
     ];
     
     // Insert default settings if they don't exist
@@ -529,6 +531,10 @@ function createApplicationMenu() {
         {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
+        },
+        {
+          label: 'File Types',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
         }
       ]
     },
@@ -678,35 +684,30 @@ ipcMain.handle('open-file-dialog', async () => {
 
 // Update the calculateFileHash function to be more robust
 async function calculateFileHash(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
-    
-    stream.on('error', err => {
-      console.error(`Error reading file for hashing: ${filePath}`, err);
-      reject(err);
-    });
-
-    stream.on('data', chunk => {
-      try {
+  const hash = crypto.createHash('sha256');
+  if (filePath.includes('|')) {
+    const [zipPath, entryPath] = filePath.split('|');
+    try {
+      const zip = new StreamZip.async({ file: zipPath });
+      const data = await zip.entryData(entryPath);
+      await zip.close();
+      hash.update(data);
+    } catch (error) {
+      console.error(`Error hashing virtual file: ${filePath}`, error);
+      return null;
+    }
+  } else {
+    try {
+      const stream = fs.createReadStream(filePath);
+      for await (const chunk of stream) {
         hash.update(chunk);
-      } catch (err) {
-        console.error(`Error updating hash for file: ${filePath}`, err);
-        reject(err);
       }
-    });
-
-    stream.on('end', () => {
-      try {
-        const fileHash = hash.digest('hex');
-        debugLog(`Generated hash for ${filePath}: ${fileHash}`);
-        resolve(fileHash);
-      } catch (err) {
-        console.error(`Error generating final hash for file: ${filePath}`, err);
-        reject(err);
-      }
-    });
-  });
+    } catch (error) {
+      console.error(`Error hashing file: ${filePath}`, error);
+      return null;
+    }
+  }
+  return hash.digest('hex');
 }
 
 // Update the isValidFile function to get the max file size from settings
@@ -766,6 +767,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
   try {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
+    const enableZipSupport = (await db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipSupport'))?.value === '1';
     
     // First, remove any non-existent files from the scanned directory
     const removedCount = await removeNonExistentFiles(directoryPath);
@@ -778,10 +780,10 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     return new Promise((resolve, reject) => {
       // Create a worker for scanning
       const worker = new Worker(`
-        const { parentPort, workerData } = require('worker_threads');
+        const { parentPort } = require('worker_threads');
         const fs = require('fs');
         const path = require('path');
-        const crypto = require('crypto');
+        const StreamZip = require('node-stream-zip');
 
         // This function now lives inside the worker
         function isValidFile(filename, size, maxFileSize) {
@@ -791,10 +793,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
 
         async function scanDirectory(directoryPath, maxFileSize) {
           const files = [];
-          let totalFiles = 0;
           let processedFiles = 0;
 
-          // Use a stack instead of recursion for better performance
           const directoryStack = [directoryPath];
           const seenDirs = new Set();
 
@@ -813,11 +813,9 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
 
             for (const entry of entries) {
               const fullPath = path.join(currentDir, entry.name);
-              
+
               if (entry.isDirectory()) {
-                // Skip system directories and __MACOSX
-                if (entry.name.toLowerCase() === '__macosx' || 
-                    /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
+                if (entry.name.toLowerCase() === '__macosx' || /^(System Volume Information|\\$Recycle\\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
                   continue;
                 }
                 directoryStack.push(fullPath);
@@ -835,23 +833,20 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                 } catch (error) {
                     console.error(\`Error processing file \${fullPath}:\`, error);
                 }
+
                 processedFiles++;
                 if (processedFiles % 100 === 0) {
-                  parentPort.postMessage({ 
-                    type: 'progress', 
-                    processed: processedFiles 
-                  });
+                  parentPort.postMessage({ type: 'progress', processed: processedFiles });
                 }
               }
             }
           }
-
           return { files, totalFiles: processedFiles };
         }
 
-        parentPort.on('message', async ({ directoryPath, maxFileSize }) => {
+        parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipSupport }) => {
           try {
-            const result = await scanDirectory(directoryPath, maxFileSize);
+            const result = await scanDirectory(directoryPath, maxFileSize, enableZipSupport);
             parentPort.postMessage({ type: 'done', result });
           } catch (error) {
             parentPort.postMessage({ type: 'error', error: error.message });
@@ -874,14 +869,14 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             const batchSize = 100;
             const updateExisting = db.prepare(`
               UPDATE models 
-              SET size = ?, modifiedDate = ?
+              SET size = ?, modifiedDate = ?, isZipArchive = ?
               WHERE filePath = ?
             `);
             
             const insertNew = db.prepare(`
               INSERT INTO models (
-                filePath, fileName, size, modifiedDate
-              ) VALUES (?, ?, ?, ?)
+                filePath, fileName, size, modifiedDate, isZipArchive
+              ) VALUES (?, ?, ?, ?, ?)
             `);
 
             // Process files in batches
@@ -894,14 +889,15 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                 
                 if (existing) {
                   // Update existing file
-                  updateExisting.run(file.size, file.mtime.toISOString(), file.filePath);
+                  updateExisting.run(file.size, file.mtime.toISOString(), file.isZipArchive ? 1 : 0, file.filePath);
                 } else {
                   // Insert new file
                   insertNew.run(
                     file.filePath,
                     file.fileName,
                     file.size,
-                    file.mtime.toISOString()
+                    file.mtime.toISOString(),
+                    file.isZipArchive ? 1 : 0
                   );
                 }
               }
@@ -1782,48 +1778,127 @@ ipcMain.handle('purge-models', async () => {
 // Update the show-context-menu handler
 ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   const filePaths = Array.isArray(fileIdentifier) ? fileIdentifier : [fileIdentifier];
+  const isVirtual = filePaths[0].includes('|');
 
-  // In single edit mode, if exactly one file is right-clicked, instruct the renderer to select it.
   if (filePaths.length === 1) {
     event.sender.send('select-model-by-filepath', filePaths[0]);
   }
-  
-  let menuItems = [
-    {
-      label: 'Open File',
-      enabled: filePaths.length === 1,
-      click: async () => {
-        try {
-          await shell.openPath(filePaths[0]);
-        } catch (error) {
-          console.error('Error opening file:', error);
-          dialog.showMessageBox({
-            type: 'error',
-            title: 'Error',
-            message: 'Could not open file',
-            detail: error.message
-          });
+
+  let menuItems;
+
+  if (isVirtual) {
+    const [zipPath, entryPath] = filePaths[0].split('|');
+    menuItems = [
+      {
+        label: 'Open',
+        click: async () => {
+          try {
+            const tempPath = path.join(os.tmpdir(), path.basename(entryPath));
+            const zip = new StreamZip.async({ file: zipPath });
+            await zip.extract(entryPath, tempPath);
+            await zip.close();
+            shell.openPath(tempPath);
+          } catch (error) {
+            console.error('Error opening virtual file:', error);
+          }
+        }
+      },
+      {
+        label: 'Open Directory',
+        click: () => shell.showItemInFolder(zipPath)
+      },
+      {
+        label: 'Unzip',
+        click: async () => {
+          try {
+            const destDir = path.dirname(zipPath);
+            const zip = new StreamZip.async({ file: zipPath });
+            await zip.extract(entryPath, path.join(destDir, path.basename(entryPath)));
+            await zip.close();
+          } catch (error) {
+            console.error('Error extracting file:', error);
+          }
+        }
+      },
+      {
+        label: 'Remove from Library',
+        click: async () => {
+          const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePaths[0]);
+          if (model) {
+            db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+            db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+            event.sender.send('refresh-grid');
+          }
         }
       }
-    },
-    {
-      label: 'Open Directory',
-      enabled: filePaths.length === 1,
-      click: async () => {
-        try {
-          await shell.showItemInFolder(filePaths[0]);
-        } catch (error) {
-          console.error('Error opening directory:', error);
-          dialog.showMessageBox({
-            type: 'error',
-            title: 'Error',
-            message: 'Could not open directory',
-            detail: error.message
-          });
-        }
-      }
+    ];
+    // Add slicer integration for virtual models
+    const slicers = db.prepare('SELECT * FROM slicers').all();
+    if (slicers.length > 0) {
+      menuItems.splice(3, 0, {
+        label: 'Open in Slicer',
+        submenu: slicers.map(slicer => ({
+          label: slicer.name,
+          click: async () => {
+            try {
+              const tempPath = path.join(os.tmpdir(), path.basename(entryPath));
+              const zip = new StreamZip.async({ file: zipPath });
+              await zip.extract(entryPath, tempPath);
+              await zip.close();
+
+              const { exec } = require('child_process');
+              let command;
+              if (process.platform === 'darwin' && slicer.path.toLowerCase().endsWith('.app')) {
+                command = `open -a "${slicer.path}" --args "${tempPath}"`;
+              } else {
+                command = `"${slicer.path}" "${tempPath}"`;
+              }
+              exec(command);
+            } catch (error) {
+              console.error('Error opening in slicer:', error);
+            }
+          }
+        }))
+      });
     }
-  ];
+  } else {
+    menuItems = [
+      {
+        label: 'Open File',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            await shell.openPath(filePaths[0]);
+          } catch (error) {
+            console.error('Error opening file:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open file',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Open Directory',
+        enabled: filePaths.length === 1,
+        click: async () => {
+          try {
+            await shell.showItemInFolder(filePaths[0]);
+          } catch (error) {
+            console.error('Error opening directory:', error);
+            dialog.showMessageBox({
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open directory',
+              detail: error.message
+            });
+          }
+        }
+      }
+    ];
+  }
 
   // Get all configured slicers from the database
   let slicers = [];
@@ -2239,31 +2314,23 @@ function getDatabasePath() {
 
 // Add these IPC handlers
 ipcMain.handle('get3MFImages', async (event, filePath) => {
-  // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     console.log('Skipping file from __MACOSX directory:', filePath);
     return null;
   }
   try {
-    console.log('Starting to process 3MF file:', filePath);
-    
-    // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.error('File does not exist:', filePath);
-      return null;
+    let data;
+    if (filePath.includes('|')) {
+      const [zipPath, entryPath] = filePath.split('|');
+      const zip = new StreamZip.async({ file: zipPath });
+      data = await zip.entryData(entryPath);
+      await zip.close();
+    } else {
+      data = await fs.promises.readFile(filePath);
     }
-    
-    // Use JSZip to extract the 3MF file (which is a zip file)
-    console.log('Creating JSZip instance...');
+
     const zip = new JSZip();
-    
-    console.log('Reading file data...');
-    const data = await fs.promises.readFile(filePath);
-    console.log('File read successfully, size:', data.length, 'bytes');
-    
-    console.log('Loading zip contents...');
     const contents = await zip.loadAsync(data);
-    console.log('Zip contents loaded successfully');
     
     // Log all files in the 3MF
     console.log('\nContents of 3MF file:', filePath);
@@ -2939,6 +3006,28 @@ ipcMain.handle('get-file-stats', async (event, filePath) => {
   } catch (error) {
     console.error(`Error getting file stats for ${filePath}:`, error);
     throw error;
+  }
+});
+
+ipcMain.handle('get-file-data', async (event, filePath) => {
+  if (filePath.includes('|')) {
+    const [zipPath, entryPath] = filePath.split('|');
+    try {
+      const zip = new StreamZip.async({ file: zipPath });
+      const data = await zip.entryData(entryPath);
+      await zip.close();
+      return data;
+    } catch (error) {
+      console.error(`Error extracting file from zip: ${filePath}`, error);
+      return null;
+    }
+  } else {
+    try {
+      return await fs.promises.readFile(filePath);
+    } catch (error) {
+      console.error(`Error reading file: ${filePath}`, error);
+      return null;
+    }
   }
 });
 
