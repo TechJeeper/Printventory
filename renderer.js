@@ -7425,6 +7425,54 @@ function createModelItem(model) {
   fileName.textContent = model.fileName || '';
   fileInfo.appendChild(fileName);
 
+  // Add Directory info
+  const parentDirArray = model.filePath.split(/[/\\]/).slice(-2, -1);
+  const parentDir = parentDirArray[0];
+
+  const parentDirElement = document.createElement('div');
+  parentDirElement.className = 'parent-directory';
+  parentDirElement.innerHTML = `
+      <span class="directory-label">Directory:</span>
+      <a href="#" class="directory-link">${parentDir}</a>
+  `;
+
+  parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Hide any welcome or view library message.
+    const viewLibMsg = document.getElementById("view-library-message");
+    if (viewLibMsg) { viewLibMsg.style.display = "none"; }
+
+    // Set the global directory filter.
+    window.currentDirectoryFilter = parentDir;
+
+    // Instead of filtering just by directory here, trigger the combined search which applies all filters.
+    await performCombinedSearch();
+
+    // Update the filter indicator to show the active parent directory filter.
+    const filterIndicator = document.getElementById('current-filter');
+    filterIndicator.innerHTML = `
+        Showing models in directory: ${parentDir}
+        <button class="clear-filter-button">Clear Filter</button>
+      `;
+    filterIndicator.classList.add('visible');
+
+    // Attach a click handler to clear the directory filter.
+    filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
+      window.currentDirectoryFilter = "";
+      filterIndicator.innerHTML = "";
+      filterIndicator.classList.remove('visible');
+      await performCombinedSearch();
+    });
+  });
+  fileInfo.appendChild(parentDirElement);
+
+  // Add Size info
+  const fileDetails = document.createElement('div');
+  fileDetails.className = 'file-details';
+  fileDetails.innerHTML = `<span class="directory-label">Size: <span>${model.size ? formatFileSize(model.size) : ''}</span></span>`;
+  fileInfo.appendChild(fileDetails);
+
   // Add designer info if available
   if (model.designer) {
     const designerInfo = document.createElement('div');
@@ -7470,7 +7518,7 @@ function renderVirtualGrid(models) {
 
   // Assume fixed item size (in pixels)
   const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
-  const itemHeight = 320;  // fixed model height 300px + 20px margin
+  const itemHeight = 380;  // fixed model height 360px + 20px margin
   const containerWidth = container.clientWidth;
 
   // Calculate number of columns (at least 1)
