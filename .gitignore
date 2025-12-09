@@ -9,3 +9,4 @@ git_credentials
 npm_output.log
 test-results/
 app.log
+*.log
