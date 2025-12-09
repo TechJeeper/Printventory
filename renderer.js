@@ -14,7 +14,7 @@ function debugLog(...args) {
 let BATCH_SIZE = 50; // Default batch size for database operations
 let MAX_FILE_SIZE_MB = 50; // Default max file size in MB
 const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
-const MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
+const MAX_CONCURRENT_RENDERS = 4;
 
 const MAX_MODELS_IN_MEMORY = 500;
 // Add these constants at the top level of the file
@@ -5305,87 +5305,86 @@ async function processRenderQueue() {
 }
 
 async function renderModelToPNG(filePath, container, existingThumbnail) {
-  if (existingThumbnail) {
-    const img = document.createElement('img');
-    img.src = existingThumbnail;
-    img.style.width = '250px';
-    img.style.height = '250px';
-    container.innerHTML = '';
-    container.appendChild(img);
-    return existingThumbnail;
-  }
+    if (existingThumbnail) {
+      const img = document.createElement('img');
+      img.src = existingThumbnail;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return existingThumbnail;
+    }
 
-  let renderer, scene, camera, canvas;
-  let model = null; // Declare model in outer scope
+    let renderer, scene, camera, canvas, model;
 
-  try {
-    canvas = document.createElement('canvas');
-    canvas.width = 250;
-    canvas.height = 250;
-    
-    renderer = new THREE.WebGLRenderer({
+    try {
+      // Create canvas and renderer
+      canvas = document.createElement('canvas');
+      canvas.width = 250;
+      canvas.height = 250;
+      renderer = new THREE.WebGLRenderer({
         antialias: false,
         alpha: true,
         canvas: canvas,
         powerPreference: 'low-power',
-        precision: 'lowp',
-        setPixelRatio: .2,
-        setClearColor: 0x000000,
-    });
-    
-    scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-
-    renderer.setClearColor(0x000000, 0);
-    
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(1, 1, 1).normalize();
-    scene.add(ambientLight);
-    scene.add(directionalLight);
-
-    // Use loadModel function which has proper path encoding handling
-    model = await loadModel(filePath);
-    if (!model) throw new Error('Failed to load model');
-    
-    scene.add(model);
-    fitCameraToObject(camera, model, scene, renderer);
-    renderer.render(scene, camera);
-
-    const imgData = canvas.toDataURL('image/png');
-
-    const img = document.createElement('img');
-    img.src = imgData;
-    img.style.width = '250px';
-    img.style.height = '250px';
-    container.innerHTML = '';
-    container.appendChild(img);
-
-    return imgData;
-
-  } catch (error) {
-    console.error('Error rendering model:', error);
-    const img = document.createElement('img');
-    img.src = '3d.png';
-    img.style.width = '250px';
-    img.style.height = '250px';
-    container.innerHTML = '';
-    container.appendChild(img);
-    return '3d.png';
-  } finally {
-    // Cleanup code that uses model
-    if (model) {
-      model.traverse(child => {
-        if (child.geometry) {
-          child.geometry.dispose();
-          child.geometry = null;
-        }
       });
-      model = null;
+      renderer.setClearColor(0x000000, 0);
+
+      // Create scene and camera
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.position.set(1, 1, 1).normalize();
+      scene.add(ambientLight, directionalLight);
+
+      // Load model and add to scene
+      model = await loadModel(filePath);
+      if (!model) throw new Error('Failed to load model');
+      scene.add(model);
+      fitCameraToObject(camera, model, scene, renderer);
+
+      // Render the scene
+      renderer.render(scene, camera);
+      const imgData = canvas.toDataURL('image/png');
+
+      // Display the rendered image
+      const img = document.createElement('img');
+      img.src = imgData;
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+
+      return imgData;
+
+    } catch (error) {
+      console.error(`Error rendering model: ${filePath}`, error);
+      // Display a fallback image on error
+      const img = document.createElement('img');
+      img.src = '3d.png';
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return '3d.png';
+    } finally {
+      // Clean up Three.js resources
+      if (model) {
+        model.traverse(child => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach(material => material.dispose());
+            } else {
+              child.material.dispose();
+            }
+          }
+        });
+      }
+      if (renderer) renderer.dispose();
     }
-    // ... rest of cleanup code ...
   }
-}
 
 
 
@@ -7231,11 +7230,13 @@ document.addEventListener('DOMContentLoaded', () => {
     container.style.position = 'relative';
     container.style.overflowY = 'auto';
 
-    const itemWidth = 250;   // fixed model width (including margins)
-    const itemHeight = 300;  // fixed model height
+    const minItemWidth = 250;
+    const itemHeight = 400;  // Increased height to prevent overlap
+    const gap = 20;
 
     let columns = 1;
     let rowCount = 0;
+    let itemWidth = minItemWidth;
 
     // Create a spacer element of full height to allow scrolling
     const spacer = document.createElement('div');
@@ -7253,9 +7254,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderVisibleItems() {
       const scrollTop = container.scrollTop;
       const containerHeight = container.clientHeight;
-      const buffer = 2; // extra rows to render before and after the visible area
-      const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
-      const endRow = Math.min(rowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+      const buffer = 1; // extra rows to render before and after the visible area
+      const startRow = Math.max(0, Math.floor(scrollTop / (itemHeight + gap)) - buffer);
+      const endRow = Math.min(rowCount, Math.ceil((scrollTop + containerHeight) / (itemHeight + gap)) + buffer);
 
       // Clear and re-render only the visible items
       virtualContent.innerHTML = '';
@@ -7267,12 +7268,9 @@ document.addEventListener('DOMContentLoaded', () => {
           const model = models[index];
           const item = createModelItem(model);
           item.style.position = 'absolute';
-          item.style.top = (row * itemHeight) + 'px';
-          // Distribute items evenly across the width
-          const effectiveItemWidth = container.clientWidth / columns;
-          item.style.left = (col * effectiveItemWidth) + 'px';
-          // Make item width responsive to column width
-          item.style.width = effectiveItemWidth + 'px';
+          item.style.top = (row * (itemHeight + gap)) + 'px';
+          item.style.left = (col * (itemWidth + gap)) + 'px';
+          item.style.width = itemWidth + 'px';
           virtualContent.appendChild(item);
         }
       }
@@ -7280,9 +7278,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function recalculateLayoutAndRender() {
         const containerWidth = container.clientWidth;
-        columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
+        columns = Math.max(Math.floor((containerWidth + gap) / (minItemWidth + gap)), 1);
+        itemWidth = (containerWidth - (columns - 1) * gap) / columns;
         rowCount = Math.ceil(models.length / columns);
-        spacer.style.height = (rowCount * itemHeight) + 'px';
+        spacer.style.height = (rowCount * itemHeight + (rowCount - 1) * gap) + 'px';
         renderVisibleItems();
     }
 
@@ -7290,7 +7289,7 @@ document.addEventListener('DOMContentLoaded', () => {
     container.addEventListener('scroll', renderVisibleItems);
 
     // Handle window resize
-    const resizeObserver = new ResizeObserver(recalculateLayoutAndRender);
+    const resizeObserver = new ResizeObserver(debounce(recalculateLayoutAndRender, 100));
     resizeObserver.observe(container);
 
     // Initial calculation and render
