@@ -1,4 +1,7 @@
 // Add this at the very top of the file
+if (window.electron && window.electron.isTesting) {
+  window.scanAndRenderDirectory = scanAndRenderDirectory;
+}
 const DEBUG = false; // Enable debugging temporarily
 
 // Add debug logging utility function
@@ -367,7 +370,6 @@ async function showModelDetails(filePath) {
       top: detailsPanel.offsetTop - 20, // 20px padding from top
       behavior: 'smooth'
     });
-
   } catch (error) {
     console.error('Error showing model details:', error); // Keep error logging
   }
@@ -573,7 +575,7 @@ async function loadDuplicateFiles() {
           } else {
             preview.innerHTML = '<div class="error-message">No preview available</div>';
           }
-  } catch (error) {
+        } catch (error) {
           console.error('Error getting thumbnail:', error);
           preview.innerHTML = '<div class="error-message">No preview available</div>';
         }
@@ -2752,6 +2754,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         try {
           const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
+          if (result) {
+            await window.electron.saveThumbnail(task.filePath, result);
+
+            // Find the currently rendered element and update its thumbnail
+            const escapedPath = CSS.escape(task.filePath);
+            const element = document.querySelector(`.file-item[data-filepath="${escapedPath}"]`);
+            if (element) {
+              const img = element.querySelector('.thumbnail-container img');
+              if (img) {
+                img.src = result;
+                img.parentElement.classList.remove('loading');
+              }
+            }
+          }
           task.resolve(result);
         } catch (error) {
           console.error(`Render task failed: ${error.message}`);
@@ -5256,152 +5272,6 @@ async function handleFilterChange() {
   }
 }
 
-async function renderFile(file, container, skipThumbnail = false) {
-  const fileElement = document.createElement('div');
-  fileElement.className = 'file-item';
-  fileElement.dataset.filepath = file.filePath; // Use dataset for data attributes
-
-  if (selectedModels.has(file.filePath)) {
-    fileElement.classList.add('selected');
-  }
-
-  const printStatus = document.createElement('div');
-  printStatus.className = `print-status ${file.printed? 'printed': ''}`;
-  printStatus.textContent = file.printed? 'Printed': 'Not Printed';
-  fileElement.appendChild(printStatus);
-
-  const thumbnailContainer = document.createElement('div');
-  thumbnailContainer.className = 'thumbnail-container loading';
-  fileElement.appendChild(thumbnailContainer);
-
-  const fileInfo = document.createElement('div');
-  fileInfo.className = 'file-info';
-
-  const fileName = document.createElement('div');
-  fileName.className = 'file-name';
-  fileName.textContent = file.fileName;
-  fileInfo.appendChild(fileName);
-
-  const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1); // Keep this as an array for now
-  const parentDir = parentDirArray[0]; // Get the string value from the array
-  
-  const parentDirElement = document.createElement('div');
-  parentDirElement.className = 'parent-directory';
-  parentDirElement.innerHTML = `
-      <span class="directory-label">Directory:</span> 
-      <a href="#" class="directory-link">${parentDir}</a>
-  `;
-  
-  parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      // Hide any welcome or view library message.
-      const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-      
-      // Set the global directory filter.
-      window.currentDirectoryFilter = parentDir;
-      
-      // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-      await performCombinedSearch();
-      
-      // Update the filter indicator to show the active parent directory filter.
-      const filterIndicator = document.getElementById('current-filter');
-      filterIndicator.innerHTML = `
-        Showing models in directory: ${parentDir}
-        <button class="clear-filter-button">Clear Filter</button>
-      `;
-      filterIndicator.classList.add('visible');
-      
-      // Attach a click handler to clear the directory filter.
-      filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-        window.currentDirectoryFilter = "";
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
-        await performCombinedSearch();
-      });
-    });
-
-  fileInfo.appendChild(parentDirElement);
-
- 
-
-  const fileDetails = document.createElement('div');
-  fileDetails.className = 'file-details';
-  fileDetails.innerHTML = `<span class="directory-label">Size:
-    <span>${file.size? formatFileSize(file.size): ''}</span>
-  `;
-  fileInfo.appendChild(fileDetails);
-  fileElement.appendChild(fileInfo);
-
-  fileElement.addEventListener('click', () => {
-    toggleModelSelection(fileElement, file.filePath);
-  });
- // Add designer info if available
- if (file.designer) {
-  const designerInfo = document.createElement('div');
-  designerInfo.className = 'designer-info';
-  designerInfo.innerHTML = `<span class="directory-label">Designer:
-  <span>${file.designer}</span>`;
-  fileInfo.appendChild(designerInfo);
-}
-
-  if (!file.thumbnail &&!skipThumbnail) {
-    const fileExtension = file.filePath.split('.').pop().toLowerCase();
-    if (fileExtension === '3mf') {
-      try {
-        const images = await window.electron.get3MFImages(file.filePath);
-        if (images && images.length > 0) {
-          const img = document.createElement('img');
-          img.src = images;
-          img.className = 'model-thumbnail';
-          thumbnailContainer.innerHTML = '';
-          thumbnailContainer.appendChild(img);
-          thumbnailContainer.classList.remove('loading');
-          
-          await window.electron.saveThumbnail(file.filePath, images);
-          file.thumbnail = images;
-          
-          return fileElement;
-        }
-      } catch (imageError) {
-        console.error('renderFile: Error checking for embedded image:', imageError);
-      }
-    }
-
-    try {
-      const thumbnail = await new Promise((resolve, reject) => {
-        renderQueue.push({
-          filePath: file.filePath,
-          container: thumbnailContainer,
-          existingThumbnail: null,
-          resolve,
-          reject
-        });
-        processRenderQueue();
-      });
-
-      if (thumbnail) {
-        await window.electron.saveThumbnail(file.filePath, thumbnail);
-      }
-    } catch (error) {
-      console.error(`Error rendering thumbnail for ${file.fileName}:`, error);
-      thumbnailContainer.innerHTML = '<div class="error-message">Error loading model</div>';
-    }
-  } else if (file.thumbnail) { // Check if file.thumbnail exists before creating img element
-    const img = document.createElement('img');
-    img.src = file.thumbnail || '3d.png'; // Provide a default image
-    img.className = 'model-thumbnail'; // Add class for styling
-    thumbnailContainer.innerHTML = '';
-    thumbnailContainer.appendChild(img);
-    thumbnailContainer.classList.remove('loading');
-  }
-
-  addContextMenuHandler(fileElement, file.filePath);
-
-  return fileElement;
-}
-
 async function processRenderQueue() {
   if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
     return;
@@ -7252,269 +7122,181 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ==================== NEW CODE: Virtual Grid Implementation ====================
 
-// Helper function to create a DOM element for a model item
-function createModelItem(model) {
-  const item = document.createElement('div');
-  item.className = 'file-item';
-  item.dataset.filepath = model.filePath;
+  // Helper function to create a DOM element for a model item
+  function createModelItem(model) {
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.dataset.filepath = model.filePath;
 
-  if (selectedModels.has(model.filePath)) {
-    item.classList.add('selected');
-  }
+    // Print status element
+    const printStatus = document.createElement('div');
+    printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
+    printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
+    item.appendChild(printStatus);
 
-  // Print status element
-  const printStatus = document.createElement('div');
-  printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
-  printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
-  item.appendChild(printStatus);
-
-  // Thumbnail container with fixed size
-  const thumbnailContainer = document.createElement('div');
-  thumbnailContainer.className = 'thumbnail-container';
-
-  if (model.thumbnail) {
+    // Thumbnail container with fixed size
+    const thumbnailContainer = document.createElement('div');
+    thumbnailContainer.className = 'thumbnail-container';
     const img = document.createElement('img');
-    img.src = model.thumbnail;
+    img.src = '3d.png'; // Start with a placeholder
     img.style.width = '250px';
     img.style.height = '250px';
     thumbnailContainer.appendChild(img);
-  } else {
-    // Show placeholder/loading state
-    const img = document.createElement('img');
-    img.src = '3d.png';
-    img.style.width = '250px';
-    img.style.height = '250px';
-    // Add loading class if needed
-    thumbnailContainer.appendChild(img);
+    item.appendChild(thumbnailContainer);
 
-    // Queue thumbnail generation if not already pending
-    if (!pendingThumbnails.has(model.filePath)) {
-      pendingThumbnails.add(model.filePath);
-
+    // Asynchronously load the actual thumbnail
+    if (model.thumbnail) {
+      img.src = model.thumbnail;
+    } else {
+      // If no thumbnail, queue it for generation
       renderQueue.push({
         filePath: model.filePath,
         container: thumbnailContainer,
-        resolve: async (thumbnail) => {
-          // Update model in memory
-          model.thumbnail = thumbnail;
-          // Remove from pending set
-          pendingThumbnails.delete(model.filePath);
-          // Save to database
-          await window.electron.saveThumbnail(model.filePath, thumbnail);
-
-          // Try to update any visible instances of this file in the DOM
-          try {
-            const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
-            if (visibleItem) {
-               const img = document.createElement('img');
-               img.src = thumbnail;
-               img.style.width = '250px';
-               img.style.height = '250px';
-               visibleItem.innerHTML = '';
-               visibleItem.appendChild(img);
-            }
-          } catch (e) {
-            console.error('Error updating visible thumbnail:', e);
-          }
-        },
-        reject: (error) => {
-          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
-          pendingThumbnails.delete(model.filePath);
-        }
+        existingThumbnail: null,
+        resolve: () => {},
+        reject: () => {}
       });
-
-      // Trigger queue processing
       processRenderQueue();
     }
-  }
 
-  item.appendChild(thumbnailContainer);
+    // File info container
+    const fileInfo = document.createElement('div');
+    fileInfo.className = 'file-info';
 
-  // File info container
-  const fileInfo = document.createElement('div');
-  fileInfo.className = 'file-info';
+    // File name element
+    const fileName = document.createElement('div');
+    fileName.className = 'file-name';
+    fileName.textContent = model.fileName || '';
+    fileInfo.appendChild(fileName);
 
-  // File name element
-  const fileName = document.createElement('div');
-  fileName.className = 'file-name';
-  fileName.textContent = model.fileName || '';
-  fileInfo.appendChild(fileName);
+    // Add designer info if available
+    if (model.designer) {
+      const designerInfo = document.createElement('div');
+      designerInfo.className = 'designer-info';
+      designerInfo.innerHTML = `<span class="directory-label">Designer:</span> ${model.designer}`;
+      fileInfo.appendChild(designerInfo);
+    }
 
-  // Add Directory info
-  const parentDirArray = model.filePath.split(/[/\\]/).slice(-2, -1);
-  const parentDir = parentDirArray[0];
+    // Add file size
+    const fileDetails = document.createElement('div');
+    fileDetails.className = 'file-details';
+    fileDetails.innerHTML = `<span>${model.size ? formatFileSize(model.size) : ''}</span>`;
+    fileInfo.appendChild(fileDetails);
 
-  const parentDirElement = document.createElement('div');
-  parentDirElement.className = 'parent-directory';
-  parentDirElement.innerHTML = `
+    // Add parent directory
+    const parentDir = model.filePath.split(/[/\\]/).slice(-2, -1)[0];
+    const parentDirElement = document.createElement('div');
+    parentDirElement.className = 'parent-directory';
+    parentDirElement.innerHTML = `
       <span class="directory-label">Directory:</span>
       <a href="#" class="directory-link">${parentDir}</a>
-  `;
-
-  parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    // Hide any welcome or view library message.
-    const viewLibMsg = document.getElementById("view-library-message");
-    if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-
-    // Set the global directory filter.
-    window.currentDirectoryFilter = parentDir;
-
-    // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-    await performCombinedSearch();
-
-    // Update the filter indicator to show the active parent directory filter.
-    const filterIndicator = document.getElementById('current-filter');
-    filterIndicator.innerHTML = `
+    `;
+    parentDirElement.querySelector('.directory-link').addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      window.currentDirectoryFilter = parentDir;
+      await window.performCombinedSearch();
+      const filterIndicator = document.getElementById('current-filter');
+      filterIndicator.innerHTML = `
         Showing models in directory: ${parentDir}
         <button class="clear-filter-button">Clear Filter</button>
       `;
-    filterIndicator.classList.add('visible');
-
-    // Attach a click handler to clear the directory filter.
-    filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-      window.currentDirectoryFilter = "";
-      filterIndicator.innerHTML = "";
-      filterIndicator.classList.remove('visible');
-      await performCombinedSearch();
+      filterIndicator.classList.add('visible');
+      filterIndicator.querySelector('.clear-filter-button').addEventListener('click', async () => {
+        window.currentDirectoryFilter = "";
+        filterIndicator.innerHTML = "";
+        filterIndicator.classList.remove('visible');
+        await window.performCombinedSearch();
+      });
     });
-  });
-  fileInfo.appendChild(parentDirElement);
+    fileInfo.appendChild(parentDirElement);
 
-  // Add Size info
-  const fileDetails = document.createElement('div');
-  fileDetails.className = 'file-details';
-  fileDetails.innerHTML = `<span class="directory-label">Size: <span>${model.size ? formatFileSize(model.size) : ''}</span></span>`;
-  fileInfo.appendChild(fileDetails);
+    item.appendChild(fileInfo);
 
-  // Add designer info if available
-  if (model.designer) {
-    const designerInfo = document.createElement('div');
-    designerInfo.className = 'designer-info';
-
-    const label = document.createElement('span');
-    label.className = 'directory-label';
-    label.textContent = 'Designer: ';
-
-    const value = document.createTextNode(model.designer);
-
-    designerInfo.appendChild(label);
-    designerInfo.appendChild(value);
-    fileInfo.appendChild(designerInfo);
-  }
-
-  item.appendChild(fileInfo);
-
-  // Add click event handler for model selection
-  item.addEventListener('click', (e) => {
-    // Check if ctrl or cmd key is pressed for multi-select
-    if (e.ctrlKey || e.metaKey) {
-      handleFileClick(e, model.filePath);
-    } else {
+    // Add click event handler for model selection
+    item.addEventListener('click', () => {
       toggleModelSelection(item, model.filePath);
-    }
-  });
+    });
 
-  // Add context menu
-  addContextMenuHandler(item, model.filePath);
+    // Add context menu handler
+    addContextMenuHandler(item, model.filePath);
 
-  return item;
-}
-
-// Virtual grid function—renders only items visible in the scroll window.
-function renderVirtualGrid(models) {
-  const container = document.querySelector('.file-grid');
-  if (!container) return;
-
-  container.innerHTML = ''; // clear existing content
-  container.style.position = 'relative';
-  container.style.overflowY = 'auto';
-
-  // Assume fixed item size (in pixels)
-  const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
-  const itemHeight = 380;  // fixed model height 360px + 20px margin
-  const containerWidth = container.clientWidth;
-
-  // Calculate number of columns (at least 1)
-  const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
-  const rowCount = Math.ceil(models.length / columns);
-
-  // Create a spacer element of full height to allow scrolling
-  const spacer = document.createElement('div');
-  spacer.style.height = (rowCount * itemHeight) + 'px';
-  spacer.style.width = '100%';
-  spacer.style.position = 'relative';
-  container.appendChild(spacer);
-
-  // Create an absolutely positioned element within the container to hold the items
-  const virtualContent = document.createElement('div');
-  virtualContent.style.position = 'absolute';
-  virtualContent.style.top = '0';
-  virtualContent.style.left = '0';
-  virtualContent.style.width = '100%';
-  virtualContent.style.height = '100%';
-  virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
-  container.appendChild(virtualContent);
-
-  // Store the resize observer to disconnect later if needed
-  if (container.resizeObserver) {
-    container.resizeObserver.disconnect();
+    return item;
   }
 
-  // Function to (re)render only the visible rows (plus a small buffer)
-  function renderVisibleItems() {
-    const scrollTop = container.scrollTop;
-    const containerHeight = container.clientHeight;
+  // Virtual grid function—renders only items visible in the scroll window.
+  function renderVirtualGrid(models) {
+    const container = document.querySelector('.file-grid');
+    container.innerHTML = ''; // clear existing content
+    container.style.position = 'relative';
+    container.style.overflowY = 'auto';
 
-    // Recalculate columns in case of resize
-    const currentContainerWidth = container.clientWidth;
-    const currentColumns = Math.max(Math.floor(currentContainerWidth / itemWidth), 1);
-    const currentRowCount = Math.ceil(models.length / currentColumns);
+    const itemWidth = 250;   // fixed model width (including margins)
+    const itemHeight = 300;  // fixed model height
 
-    // Update spacer height
-    spacer.style.height = (currentRowCount * itemHeight) + 'px';
+    let columns = 1;
+    let rowCount = 0;
 
-    const buffer = 2; // extra rows to render before and after the visible area
-    const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
-    const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
+    // Create a spacer element of full height to allow scrolling
+    const spacer = document.createElement('div');
+    container.appendChild(spacer);
 
-    // Clear and re-render only the visible items
-    virtualContent.innerHTML = '';
+    // Create an absolutely positioned element within the container to hold the items
+    const virtualContent = document.createElement('div');
+    virtualContent.style.position = 'absolute';
+    virtualContent.style.top = '0';
+    virtualContent.style.left = '0';
+    virtualContent.style.width = '100%';
+    container.appendChild(virtualContent);
 
-    for (let row = startRow; row < endRow; row++) {
-      for (let col = 0; col < currentColumns; col++) {
-        const index = row * currentColumns + col;
-        if (index >= models.length) break;
+    // Function to (re)render only the visible rows (plus a small buffer)
+    function renderVisibleItems() {
+      const scrollTop = container.scrollTop;
+      const containerHeight = container.clientHeight;
+      const buffer = 2; // extra rows to render before and after the visible area
+      const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
+      const endRow = Math.min(rowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
 
-        const model = models[index];
-        const item = createModelItem(model);
-        item.style.position = 'absolute';
-        item.style.top = (row * itemHeight) + 'px';
-        item.style.left = (col * itemWidth) + 'px';
-        item.style.width = '250px'; // Explicit width matching CSS
-        item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
+      // Clear and re-render only the visible items
+      virtualContent.innerHTML = '';
+      for (let row = startRow; row < endRow; row++) {
+        for (let col = 0; col < columns; col++) {
+          const index = row * columns + col;
+          if (index >= models.length) break;
 
-        virtualContent.appendChild(item);
+          const model = models[index];
+          const item = createModelItem(model);
+          item.style.position = 'absolute';
+          item.style.top = (row * itemHeight) + 'px';
+          // Distribute items evenly across the width
+          const effectiveItemWidth = container.clientWidth / columns;
+          item.style.left = (col * effectiveItemWidth) + 'px';
+          // Make item width responsive to column width
+          item.style.width = effectiveItemWidth + 'px';
+          virtualContent.appendChild(item);
+        }
       }
     }
+
+    function recalculateLayoutAndRender() {
+        const containerWidth = container.clientWidth;
+        columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
+        rowCount = Math.ceil(models.length / columns);
+        spacer.style.height = (rowCount * itemHeight) + 'px';
+        renderVisibleItems();
+    }
+
+    // Attach the scroll event handler to update visible items on scroll
+    container.addEventListener('scroll', renderVisibleItems);
+
+    // Handle window resize
+    const resizeObserver = new ResizeObserver(recalculateLayoutAndRender);
+    resizeObserver.observe(container);
+
+    // Initial calculation and render
+    recalculateLayoutAndRender();
   }
-
-  // Attach the scroll event handler to update visible items on scroll
-  container.removeEventListener('scroll', container.virtualScrollHandler);
-  container.virtualScrollHandler = renderVisibleItems;
-  container.addEventListener('scroll', renderVisibleItems);
-
-  // Handle window resize
-  container.resizeObserver = new ResizeObserver(() => {
-    renderVisibleItems();
-  });
-  container.resizeObserver.observe(container);
-
-  // Initial render of visible items
-  renderVisibleItems();
-}
-// ==================== END NEW CODE ====================
+  // ==================== END NEW CODE ====================
 
 // Change the multi-source event listener from 'change' back to 'input' with debounce
 document.getElementById('multi-source')?.addEventListener('input', debounce(async (e) => {

@@ -261,7 +261,6 @@ if (!gotTheLock) {
         }
       });
 
-      createApplicationMenu();
       
       // Track application usage after initialization
       await trackAppUsage();
@@ -479,22 +478,7 @@ function initializeDefaultSettings() {
   }
 }
 
-function createWindow() {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-  mainWindow = new BrowserWindow({
-    width: Math.min(1600, width),
-    height: Math.min(1000, height),
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
-      spellcheck: false,
-      // Add these settings for clipboard access
-      sandbox: false,
-      enableWebSQL: false
-    }
-  });
-
+function createApplicationMenu() {
   const template = [
     {
       label: 'File',
@@ -628,6 +612,25 @@ function createWindow() {
 
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
+}
+
+function createWindow() {
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  mainWindow = new BrowserWindow({
+    width: Math.min(1600, width),
+    height: Math.min(1000, height),
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+      spellcheck: false,
+      // Add these settings for clipboard access
+      sandbox: false,
+      enableWebSQL: false
+    }
+  });
+
+  createApplicationMenu();
 
   mainWindow.loadFile('index.html');
 
@@ -642,134 +645,6 @@ function createWindow() {
       mainWindow.webContents.send('ping');
     }
   }, PING_INTERVAL);
-}
-
-function createApplicationMenu() {
-  const template = [
-    {
-      label: 'File',
-      submenu: [
-        {
-          label: 'Reload',
-          click: () => mainWindow.webContents.reload()
-        },
-        { type: 'separator' },
-        { role: 'quit' }
-      ]
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'pasteAndMatchStyle' },
-        { role: 'delete' },
-        { role: 'selectAll' }
-      ]
-    },
-    {
-      label: 'Settings',
-      submenu: [
-        {
-          label: 'Theme',
-          click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
-          label: 'AI Config',
-          click: () => mainWindow.webContents.send('open-ai-config')
-        },
-        {
-          label: 'Performance',
-          click: () => mainWindow.webContents.send('open-performance-settings')
-        },
-        {
-          label: 'STL Home',
-          click: () => mainWindow.webContents.send('open-stl-home')
-        },
-        {
-          label: 'Slicer Path',
-          click: () => mainWindow.webContents.send('open-slicer-settings')
-        }
-      ]
-    },
-    {
-      label: 'Tools',
-      submenu: [
-        {
-          label: 'Print Roulette',
-          click: () => mainWindow.webContents.send('start-print-roulette')
-        },
-        {
-          label: 'Backup/Restore',
-          click: () => mainWindow.webContents.send('open-backup-restore')
-        },
-        {
-          label: 'De-Dup',
-          click: () => {
-            mainWindow.webContents.send('open-dedup');
-          }
-        },
-        {
-          label: 'Tag Manager',
-          click: () => mainWindow.webContents.send('open-tag-manager')
-        },
-        { type: 'separator' },
-        {
-          label: 'Generate Missing Thumbnails',
-          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
-        },
-        {
-          label: 'Purge Models',
-          click: () => mainWindow.webContents.send('open-purge-models')
-        }
-      ]
-    },
-    {
-      label: 'Help',
-      submenu: [
-        {
-          label: 'Quick Start Guide',
-          click: () => {
-            mainWindow.webContents.send('open-guide');
-          }
-        },
-        {
-          label: 'Support Printventory',
-          click: async () => {
-            await shell.openExternal('https://printventory.com/support.html');
-          }
-        },
-        {
-          label: 'Discord',
-          click: async () => {
-            await shell.openExternal('https://discord.gg/JXcZHT77ua');
-          }
-        },
-        { type: 'separator' },
-        {
-          label: 'Debug Console',
-          click: () => mainWindow.webContents.openDevTools()
-        },
-        {
-          label: 'About',
-          click: async () => {
-            // Send event to renderer to open the about dialog
-            mainWindow.webContents.send('open-about');
-            
-            // Log for debugging
-            console.log('About menu item clicked');
-          }
-        }
-      ]
-    }
-  ];
-
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
 }
 
 ipcMain.handle('load-directory', async () => {
@@ -910,7 +785,13 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         const path = require('path');
         const StreamZip = require('node-stream-zip');
 
-        async function scanDirectory(directoryPath, maxFileSize, enableZipSupport) {
+        // This function now lives inside the worker
+        function isValidFile(filename, size, maxFileSize) {
+            const ext = path.extname(filename).toLowerCase();
+            return (ext === '.stl' || ext === '.3mf') && size <= maxFileSize;
+        }
+
+        async function scanDirectory(directoryPath, maxFileSize) {
           const files = [];
           let processedFiles = 0;
 
@@ -939,40 +820,18 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                 }
                 directoryStack.push(fullPath);
               } else {
-                const ext = path.extname(entry.name).toLowerCase();
                 try {
-                  const stats = fs.statSync(fullPath);
-                  if (stats.size > maxFileSize && ext !== '.zip') continue;
-
-                  if (ext === '.stl' || ext === '.3mf' || ext === '.obj') {
-                    files.push({
-                      filePath: fullPath,
-                      fileName: entry.name,
-                      size: stats.size,
-                      mtime: stats.mtime,
-                      isZipArchive: false
-                    });
-                  } else if (enableZipSupport && ext === '.zip') {
-                    const zip = new StreamZip.async({ file: fullPath });
-                    const zipEntries = await zip.entries();
-                    for (const zipEntry of Object.values(zipEntries)) {
-                      if (!zipEntry.isDirectory) {
-                        const zipExt = path.extname(zipEntry.name).toLowerCase();
-                        if ((zipExt === '.stl' || zipExt === '.3mf' || zipExt === '.obj') && zipEntry.size <= maxFileSize) {
-                          files.push({
-                            filePath: \`\${fullPath}|\${zipEntry.name}\`,
-                            fileName: path.basename(zipEntry.name),
-                            size: zipEntry.size,
-                            mtime: new Date(zipEntry.time),
-                            isZipArchive: true
-                          });
-                        }
-                      }
+                    const stats = fs.statSync(fullPath);
+                    if (isValidFile(entry.name, stats.size, maxFileSize)) {
+                        files.push({
+                            filePath: fullPath,
+                            fileName: entry.name,
+                            size: stats.size,
+                            mtime: stats.mtime
+                        });
                     }
-                    await zip.close();
-                  }
                 } catch (error) {
-                  console.error(\`Error processing file \${fullPath}:\`, error);
+                    console.error(\`Error processing file \${fullPath}:\`, error);
                 }
 
                 processedFiles++;
@@ -1324,7 +1183,7 @@ ipcMain.handle('get-parent-models', async () => {
 ipcMain.handle('get-all-tags', async () => {
   try {
     return db.prepare(`
-      SELECT 
+      SELECT
         t.id,
         t.name,
         COUNT(DISTINCT mt.model_id) as model_count

@@ -131,94 +131,92 @@ export function updateFilterIndicator(count) {
     message = `<div class="no-results">No models match your filters</div>`;
   } else {
     message = `<div class="filter-count">Showing ${count} models</div>`;
+  }
+
+  // Create a container for filter pills
+  if (hasActiveFilters) {
+    message += `<div class="filter-pills-container">`;
     
-    // Create a container for filter pills
-    if (hasActiveFilters) {
-      message += `<div class="filter-pills-container">`;
-      
-      // Add designer filter pill if active
-      if (designer) {
-        const displayText = designer === "__none__" ? "No designer" : `Designer: ${designer}`;
-        message += `<div class="filter-pill" data-filter-type="designer">
-          ${displayText}
-          <span class="filter-remove" data-filter-type="designer">×</span>
-        </div>`;
-      }
-      
-      // Add license filter pill if active
-      if (license) {
-        const displayText = license === "__none__" ? "No license" : `License: ${license}`;
-        message += `<div class="filter-pill" data-filter-type="license">
-          ${displayText}
-          <span class="filter-remove" data-filter-type="license">×</span>
-        </div>`;
-      }
-      
-      // Add parent model filter pill if active
-      if (parentModel) {
-        const displayText = parentModel === "__none__" ? "No parent model" : `Parent: ${parentModel}`;
-        message += `<div class="filter-pill" data-filter-type="parentModel">
-          ${displayText}
-          <span class="filter-remove" data-filter-type="parentModel">×</span>
-        </div>`;
-      }
-      
-      // Add print status filter pill if active
-      if (printStatus !== "all") {
-        const displayText = printStatus === "printed" ? "Printed" : "Not printed";
-        message += `<div class="filter-pill" data-filter-type="printStatus">
-          ${displayText}
-          <span class="filter-remove" data-filter-type="printStatus">×</span>
-        </div>`;
-      }
-      
-      // Add tag filter pill if active
-      if (tagFilter) {
-        message += `<div class="filter-pill" data-filter-type="tagFilter">
-          Tag: ${tagFilter}
-          <span class="filter-remove" data-filter-type="tagFilter">×</span>
-        </div>`;
-      }
-      
-      // Add file type filter pill if active
-      if (fileType) {
-        message += `<div class="filter-pill" data-filter-type="fileType">
-          Type: ${fileType}
-          <span class="filter-remove" data-filter-type="fileType">×</span>
-        </div>`;
-      }
-      
-      // Add search term pill if active
-      if (searchTerm) {
-        message += `<div class="filter-pill" data-filter-type="searchTerm">
-          Search: "${searchTerm}"
-          <span class="filter-remove" data-filter-type="searchTerm">×</span>
-        </div>`;
-      }
-      
-      // Add directory filter pill if active
-      if (window.currentDirectoryFilter) {
-        message += `<div class="filter-pill" data-filter-type="directory">
-          Directory: ${window.currentDirectoryFilter}
-          <span class="filter-remove" data-filter-type="directory">×</span>
-        </div>`;
-      }
-      
-      message += `</div>`;
+    // Add designer filter pill if active
+    if (designer) {
+      const displayText = designer === "__none__" ? "No designer" : `Designer: ${designer}`;
+      message += `<div class="filter-pill" data-filter-type="designer">
+        ${displayText}
+        <span class="filter-remove" data-filter-type="designer">×</span>
+      </div>`;
     }
+
+    // Add license filter pill if active
+    if (license) {
+      const displayText = license === "__none__" ? "No license" : `License: ${license}`;
+      message += `<div class="filter-pill" data-filter-type="license">
+        ${displayText}
+        <span class="filter-remove" data-filter-type="license">×</span>
+      </div>`;
+    }
+
+    // Add parent model filter pill if active
+    if (parentModel) {
+      const displayText = parentModel === "__none__" ? "No parent model" : `Parent: ${parentModel}`;
+      message += `<div class="filter-pill" data-filter-type="parentModel">
+        ${displayText}
+        <span class="filter-remove" data-filter-type="parentModel">×</span>
+      </div>`;
+    }
+
+    // Add print status filter pill if active
+    if (printStatus !== "all") {
+      const displayText = printStatus === "printed" ? "Printed" : "Not printed";
+      message += `<div class="filter-pill" data-filter-type="printStatus">
+        ${displayText}
+        <span class="filter-remove" data-filter-type="printStatus">×</span>
+      </div>`;
+    }
+
+    // Add tag filter pill if active
+    if (tagFilter) {
+      message += `<div class="filter-pill" data-filter-type="tagFilter">
+        Tag: ${tagFilter}
+        <span class="filter-remove" data-filter-type="tagFilter">×</span>
+      </div>`;
+    }
+
+    // Add file type filter pill if active
+    if (fileType) {
+      message += `<div class="filter-pill" data-filter-type="fileType">
+        Type: ${fileType}
+        <span class="filter-remove" data-filter-type="fileType">×</span>
+      </div>`;
+    }
+
+    // Add search term pill if active
+    if (searchTerm) {
+      message += `<div class="filter-pill" data-filter-type="searchTerm">
+        Search: "${searchTerm}"
+        <span class="filter-remove" data-filter-type="searchTerm">×</span>
+      </div>`;
+    }
+
+    // Add directory filter pill if active
+    if (window.currentDirectoryFilter) {
+      message += `<div class="filter-pill" data-filter-type="directory">
+        Directory: ${window.currentDirectoryFilter}
+        <span class="filter-remove" data-filter-type="directory">×</span>
+      </div>`;
+    }
+
+    message += `</div>`;
+
+    // Add clear all filters button
+    message += `<button class="clear-filter-button">Clear All Filters</button>`;
   }
   
-  // Add clear all filters button if any filters are active
   if (hasActiveFilters) {
-    message += `<button class="clear-filter-button">Clear All Filters</button>`;
-    
-    // Only show the filter indicator if there are active filters
     filterIndicator.innerHTML = message;
     filterIndicator.classList.add('visible');
   } else {
-    // Hide the filter indicator when no filters are active
-    filterIndicator.innerHTML = "";
-    filterIndicator.classList.remove('visible');
+    filterIndicator.innerHTML = `<div class="filter-count">Showing ${count} models</div>`;
+    filterIndicator.classList.add('visible');
   }
   
   // Add event listener to clear all filters button
