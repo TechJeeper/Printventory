@@ -148,8 +148,7 @@ contextBridge.exposeInMainWorld('electron', {
   commitTransaction: () => ipcRenderer.invoke('database:commit-transaction'),
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),
   getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references'),
-  showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options),
-  isTesting: process.env.JULES_TESTING === 'true'
+  showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options)
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {

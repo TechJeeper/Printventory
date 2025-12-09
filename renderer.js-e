@@ -32,7 +32,6 @@ let isScanning = false;
 
 // Add these queue-related variables
 let renderQueue = [];
-let pendingThumbnails = new Set(); // Track files currently being rendered
 let activeRenders = 0;
 let isProcessingQueue = false;
 
@@ -187,15 +186,7 @@ async function updateModelElement(filePath) {
       if (model.designer) {
         const designerInfo = document.createElement('div');
         designerInfo.className = 'designer-info';
-
-      const label = document.createElement('span');
-      label.className = 'directory-label';
-      label.textContent = 'Designer: ';
-
-      const value = document.createTextNode(model.designer);
-
-      designerInfo.appendChild(label);
-      designerInfo.appendChild(value);
+        designerInfo.innerHTML = `<span class="directory-label">Designer:</span> ${model.designer}`;
         fileInfo.appendChild(designerInfo);
       }
     }
@@ -249,34 +240,13 @@ async function showModelDetails(filePath) {
       modelDetailsHeader.insertAdjacentElement('afterend', enterMultiEditButton);
 
       // Add click handler
-      enterMultiEditButton.addEventListener('click', async () => { // Made async
+      enterMultiEditButton.addEventListener('click', () => {
         isMultiSelectMode = true;
         const multiEditPanel = document.getElementById('multi-edit-panel');
         detailsPanel.classList.add('hidden');
         multiEditPanel.classList.remove('hidden');
-        
-        // Update the other toggle button's state and text
-        const toggleButton = document.getElementById('edit-mode-toggle');
-        if (toggleButton) {
-          toggleButton.textContent = 'Exit Multi-Edit Mode';
-          toggleButton.classList.add('active');
-        }
-        
-        // *** ADDED DROPDOWN POPULATION LOGIC ***
-        try {
-          await populateModelDesignerDropdown(null, 'multi-designer');
-          await populateModelLicenseDropdown(null, 'multi-license');
-          await populateParentModelDropdown(null, 'multi-parent');
-          await populateTagSelect('multi-tag-select', 'multi-tags');
-        } catch (error) {
-          console.error('Error populating multi-edit dropdowns:', error);
-        }
-        // ****************************************
-
-        showMultiEditPanel(); // *** ADDED CALL TO ATTACH LISTENERS ***
-
-        // Scroll the multi-edit panel into view
-        multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.getElementById('edit-mode-toggle').textContent = 'Exit Multi-Edit Mode';
+        document.getElementById('edit-mode-toggle').classList.add('active');
       });
     }
 
@@ -701,27 +671,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       lastDeclinedVersion,
       isBeta 
     });
-    
-    // Only show prompt if it's a new version and not the one user previously declined
-    if (latestVersion && 
-        latestVersion !== currentVersion && 
-        latestVersion > currentVersion && 
-        latestVersion !== lastDeclinedVersion) {
-      const shouldUpdate = await window.electron.showMessage(
-        'Update Available',
-        `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
-        ['Yes', 'No']
-      );
-      
-      if (shouldUpdate === 'Yes') {
-        await window.electron.openUpdatePage(isBeta);
-      } else {
-        // Store the declined version
-        console.log('User declined update, storing version:', latestVersion);
-        await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
-      }
-    }
-
+  
     // Store the latest version after check
     await window.electron.saveSetting('latestVersion', latestVersion);
     await window.electron.saveSetting('lastUpdateCheck', new Date().toISOString());
@@ -818,45 +768,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   await populateTagFilter();
 
   // Update the edit mode toggle button listener
-  document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => { // Ensure async
+  document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => {
     isMultiSelectMode = !isMultiSelectMode;
     const button = document.getElementById('edit-mode-toggle');
     const multiEditPanel = document.getElementById('multi-edit-panel');
     const detailsPanel = document.getElementById('model-details');
     
-    if (isMultiSelectMode) {
-      button.textContent = 'Exit Multi-Edit Mode'; // Changed from Single-Edit
-      button.classList.add('active');
-      multiEditPanel.classList.remove('hidden');
-      detailsPanel.classList.add('hidden');
-      
-      // Populate dropdowns
-      try {
-        await populateModelDesignerDropdown(null, 'multi-designer');
-        await populateModelLicenseDropdown(null, 'multi-license');
-        await populateParentModelDropdown(null, 'multi-parent');
-        await populateTagSelect('multi-tag-select', 'multi-tags');
-      } catch (error) {
-        console.error('Error populating multi-edit dropdowns:', error);
-      }
-      
-      showMultiEditPanel(); // Call to attach listeners
-      
-      multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } else {
-      // Clear selection when disabling multiselect
+    // Clear selection when disabling multiselect
+    if (!isMultiSelectMode) {
       selectedModels.clear();
       document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
       multiEditPanel.classList.add('hidden');
-      // Make sure details panel is shown if nothing else is selected
-      if (selectedModels.size === 0) {
-         detailsPanel.classList.remove('hidden'); // Remove hidden class if no models selected
-         closeDetailsPanel(); // Or potentially call closeDetailsPanel if preferred
-      }
+      modelDetails.classList.remove('hidden');
       button.textContent = 'Multi-Edit Mode';
       button.classList.remove('active');
-      // Call exitMultiEditMode if needed for cleanup
-      exitMultiEditMode(); 
+    } else {
+      multiEditPanel.classList.remove('hidden');
+      modelDetails.classList.add('hidden');
+      button.textContent = 'Single-Edit Mode';
+      button.classList.add('active');
+      // Populate dropdowns
+      await populateModelDesignerDropdown(null, 'multi-designer');
+      await populateModelLicenseDropdown(null, 'multi-license');
+      await populateParentModelDropdown(null, 'multi-parent');
+      await populateTagSelect('multi-tag-select', 'multi-tags');
+      
+      // Scroll the multi-edit panel into view with smooth animation
+      multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     updateSelectedCount();
   });
@@ -891,8 +829,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const savedTag = await window.electron.saveTag(newTagName);
         // Add the new tag to the model immediately if in single edit mode
         if (!isMultiSelectMode) {
-          console.log(`Single edit mode: Adding new tag '${savedTag.name}' to model-tags`); // Added log
-          // This line should handle adding the tag visually and saving
           addTagToModel(savedTag.name, 'model-tags');
         }
         // Reset form state before closing
@@ -979,7 +915,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update the multi-save button handler
   document.getElementById('multi-save-button')?.addEventListener('click', async () => {
     try {
-      const designer = document.getElementById('multi-designer').value || 'Unknown'; // Default to Unknown
+      const designer = document.getElementById('multi-designer').value;
       const source = document.getElementById('multi-source').value;
       const parent = document.getElementById('multi-parent').value;
       const license = document.getElementById('multi-license').value;
@@ -995,17 +931,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         const modelData = {
           filePath,
-          designer, // Always include designer (now has default)
+          ...(designer && { designer }),
           ...(source && { source }),
           ...(parent && { parentModel: parent }),
           ...(license && { license }),
           printed: printed,
-          tags: tags.length > 0 ? tags : (existingModel.tags || []) // Keep tag logic simple here, merging is in auto-save
+          tags: tags.length > 0 ? tags : (existingModel.tags || [])
         };
 
         await window.electron.saveModel(modelData);
         await updateModelElement(filePath);
       }
+
 
       // Clear selection and hide multi-edit panel
       selectedModels.clear();
@@ -1416,15 +1353,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add scan directory button event listener
   document.getElementById('scan-directory-button')?.addEventListener('click', async () => {
     if (isScanning) return; // Prevent multiple scans
-    
-    // First, check if there are any active filters and clear them
-    const clearFilterButton = document.querySelector('.clear-filter-button');
-    if (clearFilterButton) {
-      console.log('Clearing filters before directory scan');
-      clearFilterButton.click(); // Programmatically trigger the clear filters action
-      // Wait a moment for the filter clearing to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
     
     const directoryPath = await window.electron.openFileDialog();
     if (!directoryPath || directoryPath.length === 0) return;
@@ -2038,11 +1966,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     
-    // Check if tag already exists visually
+    // Check if tag already exists
     const existingTag = Array.from(tagContainer.children)
       .find(tag => tag.getAttribute('data-tag-name') === tagName);
     
-    if (existingTag) return; // Don't add visual duplicates
+    if (existingTag) return;
 
     // Create new tag element
     const tag = document.createElement('div');
@@ -2050,22 +1978,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     tag.setAttribute('data-tag-name', tagName);
     tag.innerHTML = `
       ${tagName}
-      <span class=\"tag-remove\">×</span>
+      <span class="tag-remove">×</span>
     `;
 
     // Add remove handler with auto-save
     tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-      tag.remove(); 
-      // Auto-save the updated tags after REMOVAL
+      tag.remove();
+      // Auto-save the updated tags
       const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
         .map(t => t.getAttribute('data-tag-name'));
       
       if (containerId === 'multi-tags') {
-        // When removing, we DO want to save the resulting list for all selected models
-        // Note: This sets all selected models to have exactly the tags remaining in the UI.
-        await autoSaveMultipleModels('tags', currentTags); 
+        await autoSaveMultipleModels('tags', currentTags);
       } else {
-        // Single edit mode save
         const filePath = getModelFilePath();
         if (filePath) {
           await autoSaveModel('tags', currentTags, filePath);
@@ -2075,17 +2000,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
-    tagContainer.appendChild(tag); // Add tag visually
+    tagContainer.appendChild(tag);
 
-    // Auto-save logic after ADDING a tag
+    // Auto-save the updated tags
+    const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
+      .map(t => t.getAttribute('data-tag-name'));
+    
+    console.log(`Saving tags for container ${containerId}:`, currentTags);
+    
     if (containerId === 'multi-tags') {
-      // For multi-edit ADD, only save the *newly added tag* to append it
-      console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-      await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
+      await autoSaveMultipleModels('tags', currentTags);
     } else {
-      // For single-edit ADD, save the full list for that model
-      const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-        .map(t => t.getAttribute('data-tag-name'));
       const filePath = getModelFilePath();
       if (filePath) {
         await autoSaveModel('tags', currentTags, filePath);
@@ -5274,34 +5199,69 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
     return;
   }
 
-  // Use the new virtual grid implementation for better performance
-  renderVirtualGrid(files);
+  const container = document.querySelector('.file-grid');
+  container.innerHTML = '';
+
+  // Only take the first 100 models
+  const limitedFiles = viewEntireLibrary ? files : files.slice(0, MAX_MODELS_IN_MEMORY);
+
+  // Show message about limited view if there are more files and we're not viewing entire library
+  const viewLibMsg = document.getElementById("view-library-message");
+  if (viewLibMsg) {
+    if (!viewEntireLibrary && files.length > MAX_MODELS_IN_MEMORY) {
+      viewLibMsg.style.display = "block";
+      viewLibMsg.textContent = `Showing ${MAX_MODELS_IN_MEMORY} Newest Models`;
+    } else {
+      // Hide the message when viewing entire library
+      viewLibMsg.style.display = "none";
+    }
+  }
+
+  // Show progress section if needed
+  const filesWithoutThumbnails = limitedFiles.filter(file => !file.thumbnail);
+  const progressSection = document.getElementById('progress-section');
+  const progressBar = document.getElementById('progress-bar');
+  const progressText = document.getElementById('progress-text');
+
+  if (filesWithoutThumbnails.length > 0) {
+    progressSection.classList.remove('hidden');
+    progressBar.style.width = '0%';
+    progressText.textContent = `Caching thumbnails: 0 / ${filesWithoutThumbnails.length}`;
+  } else {
+    progressSection.classList.add('hidden');
+  }
+
+  let completedThumbnails = 0;
+  const batchSize = 5;
+
+  // Render files in batches
+  for (let i = 0; i < limitedFiles.length; i += batchSize) {
+    const batch = limitedFiles.slice(i, Math.min(i + batchSize, limitedFiles.length));
+    const promises = batch.map(async (file) => {
+      try {
+        const fileElement = await renderFile(file, container, skipThumbnail);
+        container.appendChild(fileElement);
+
+        if (!file.thumbnail) {
+          completedThumbnails++;
+          const progress = (completedThumbnails / filesWithoutThumbnails.length) * 100;
+          progressBar.style.width = `${progress}%`;
+          progressText.textContent = `Caching thumbnails: ${completedThumbnails} / ${filesWithoutThumbnails.length}`;
+        }
+      } catch (error) {
+        console.error('Error rendering file:', error);
+      }
+    });
+
+    await Promise.all(promises);
+    await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between batches
+  }
+
+  // Hide progress section when complete
+  progressSection.classList.add('hidden');
 
   // Update counts
   await updateModelCounts(files.length);
-
-  // Handle thumbnail generation for visible items?
-  // renderVirtualGrid handles creating items, but thumbnail generation might need to be triggered
-  // for visible items if they don't have thumbnails.
-  // Ideally, createModelItem should queue thumbnail generation if missing.
-  // Since createModelItem calls renderModelToPNG only if needed (in our updated logic? No, createModelItem uses '3d.png' default).
-  // We might want to trigger thumbnail generation for models without thumbnails in the background.
-
-  // Note: renderVirtualGrid doesn't currently trigger thumbnail generation automatically for missing thumbnails
-  // except what createModelItem does.
-  // createModelItem in the new code uses model.thumbnail || '3d.png'.
-
-  // Trigger background thumbnail generation for files without thumbnails
-  // This maintains the previous behavior but decouples it from the initial render
-  const filesWithoutThumbnails = files.filter(file => !file.thumbnail);
-  if (filesWithoutThumbnails.length > 0) {
-    // We can use the existing queue mechanism
-    filesWithoutThumbnails.forEach(file => {
-       // Only queue if we haven't already queued it?
-       // For now, let's rely on the user triggers or existing background processes.
-       // Or we can queue them here.
-    });
-  }
 }
 
 async function handleFilterChange() {
@@ -5828,10 +5788,9 @@ document.getElementById('cancel-parent-button')?.addEventListener('click', () =>
 function debounce(func, wait) {
   let timeout;
   return function executedFunction(...args) {
-    const context = this; // Store the context
     const later = () => {
-      timeout = null; // Clear timeout identifier
-      func.apply(context, args); // Call the original function with correct context and args
+      clearTimeout(timeout);
+      func(...args);
     };
     clearTimeout(timeout);
     timeout = setTimeout(later, wait);
@@ -5899,11 +5858,11 @@ async function addTagToModel(tagName, containerId) {
     return;
   }
   
-  // Check if tag already exists visually
+  // Check if tag already exists
   const existingTag = Array.from(tagContainer.children)
     .find(tag => tag.getAttribute('data-tag-name') === tagName);
   
-  if (existingTag) return; // Don't add visual duplicates
+  if (existingTag) return;
 
   // Create new tag element
   const tag = document.createElement('div');
@@ -5911,42 +5870,39 @@ async function addTagToModel(tagName, containerId) {
   tag.setAttribute('data-tag-name', tagName);
   tag.innerHTML = `
     ${tagName}
-    <span class=\"tag-remove\">×</span>
+    <span class="tag-remove">×</span>
   `;
 
   // Add remove handler with auto-save
   tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-    tag.remove(); 
-    // Auto-save the updated tags after REMOVAL
+    tag.remove();
+    // Auto-save the updated tags
     const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
       .map(t => t.getAttribute('data-tag-name'));
     
     if (containerId === 'multi-tags') {
-      // When removing, we DO want to save the resulting list for all selected models
-      // Note: This sets all selected models to have exactly the tags remaining in the UI.
-      await autoSaveMultipleModels('tags', currentTags); 
+      await autoSaveMultipleModels('tags', currentTags);
     } else {
-      // Single edit mode save
       const filePath = getModelFilePath();
       if (filePath) {
-        await autoSaveModel('tags', currentTags, filePath);
-      } else {
+      await autoSaveModel('tags', currentTags, filePath);
+    } else {
         console.error('No file path found for saving tags');
       }
     }
   });
 
-  tagContainer.appendChild(tag); // Add tag visually
+  tagContainer.appendChild(tag);
 
-  // Auto-save logic after ADDING a tag
+  // Auto-save the updated tags
+  const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
+    .map(t => t.getAttribute('data-tag-name'));
+  
+  console.log(`Saving tags for container ${containerId}:`, currentTags);
+  
   if (containerId === 'multi-tags') {
-    // For multi-edit ADD, only save the *newly added tag* to append it
-    console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-    await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
+    await autoSaveMultipleModels('tags', currentTags);
   } else {
-    // For single-edit ADD, save the full list for that model
-    const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-      .map(t => t.getAttribute('data-tag-name'));
     const filePath = getModelFilePath();
     if (filePath) {
       await autoSaveModel('tags', currentTags, filePath);
@@ -6805,27 +6761,6 @@ async function initializeApp() {
       needsUpdate: latestVersion !== currentVersion
     });
     
-    // Only show prompt if it's a new version and not the one user previously declined
-    if (latestVersion && 
-        latestVersion !== currentVersion && 
-        compareVersions(latestVersion, currentVersion) > 0 && 
-        latestVersion !== lastDeclinedVersion) {
-      console.log('7. Update available - showing prompt');
-      const shouldUpdate = await window.electron.showMessage(
-        'Update Available',
-        `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
-        ['Yes', 'No']
-      );
-      
-      console.log('Renderer - Update prompt response:', shouldUpdate);
-      if (shouldUpdate === 'Yes') {
-        await window.electron.openUpdatePage(isBeta);
-      } else {
-        // Store the declined version
-        console.log('Renderer - User declined update, storing version:', latestVersion);
-        await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
-      }
-    }
 
     // Store the latest version after check
     if (latestVersion) {
@@ -6857,7 +6792,41 @@ async function initializeApp() {
       console.error('Error initializing performance settings:', error);
     }
     
+    // Check for models without thumbnails and prompt user
+    try {
+      const modelsWithoutThumbs = await window.electron.getModelsWithoutThumbnails();
+      if (modelsWithoutThumbs && modelsWithoutThumbs.length > 0) {
+        const userChoice = await window.electron.showMessage(
+          'Generate Thumbnails',
+          `${modelsWithoutThumbs.length} models need thumbnails. Would you like to generate them now?`,
+          ['Yes', 'No']
+        );
+        
+        if (userChoice === 'Yes') {
+          console.log('User chose to generate thumbnails for', modelsWithoutThumbs.length, 'models');
+          totalThumbnailsToGenerate = modelsWithoutThumbs.length;
+          generatedThumbnailsCount = 0;
+          
+          // Update progress UI
+          const progressDialog = document.getElementById('thumbnail-progress-dialog');
+          const progressBar = document.getElementById('thumbnail-progress-bar');
+          const progressText = document.getElementById('thumbnail-progress-text');
+          
+          if (progressDialog && progressBar && progressText) {
+            progressDialog.showModal();
+            
 
+            
+            progressDialog.close();
+          } else {
+            console.error('Progress UI elements not found');
+            await window.electron.showMessage('Error', 'Failed to generate thumbnails: Progress UI elements not found');
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error checking for models without thumbnails:', error);
+    }
     
     console.log('9. Initialization complete');
   } catch (error) {
@@ -7069,27 +7038,19 @@ async function autoSaveMultipleModels(field, value) {
     // No models selected
     if (selectedModels.size === 0) {
       console.warn('No models selected for autoSaveMultipleModels');
-      return false; // Indicate failure/no-op
+      return;
     }
     
-    // Handle designer field default value (will be reapplied next)
-    if (field === 'designer' && !value) {
-      value = 'Unknown';
-    }
-    
+    // Remove transaction calls that are causing errors
     // Update all selected models
     for (const filePath of selectedModels) {
       const model = await window.electron.getModel(filePath);
       if (model) {
-        // Special handling for tags - MERGE instead of replace
+        // Special handling for tags
         if (field === 'tags') {
-          const existingTags = Array.isArray(model.tags) ? model.tags : [];
-          const newTags = Array.isArray(value) ? value : []; 
-          // Combine, filter out duplicates, and sort
-          const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
-          model.tags = allTags;
+          // Make sure we're setting an array
+          model.tags = Array.isArray(value) ? value : [];
         } else {
-          // Handle other fields
           model[field] = value;
         }
         
@@ -7098,12 +7059,10 @@ async function autoSaveMultipleModels(field, value) {
         
         // Update UI
         await updateModelElement(filePath);
-      } else {
-        console.warn(`Could not find model for ${filePath} during autoSaveMultipleModels`);
       }
     }
     
-    console.log(`Finished autoSaveMultipleModels for field ${field}.`); // Simplified log
+    console.log(`Updated ${field} to ${JSON.stringify(value)} for ${selectedModels.size} models`);
     return true;
   } catch (error) {
     console.error(`Error in autoSaveMultipleModels for field ${field}:`, error);
@@ -7130,11 +7089,11 @@ function getModelFilePath() {
 
 // Add this code to set up event handlers for multi-edit mode controls
 function showMultiEditPanel() {
-  // Populate dropdowns with existing data - REMOVED redundant calls
-  // populateModelDesignerDropdown('', 'multi-designer');
-  // populateModelLicenseDropdown('', 'multi-license');
-  // populateParentModelDropdown('', 'multi-parent');
-  // populateTagSelect('multi-tag-select', 'multi-tags');
+  // Populate dropdowns with existing data
+  populateModelDesignerDropdown('', 'multi-designer');
+  populateModelLicenseDropdown('', 'multi-license');
+  populateParentModelDropdown('', 'multi-parent');
+  populateTagSelect('multi-tag-select', 'multi-tags');
   
   // Force the checkbox to be unchecked at the start
   const multiPrintedCheckbox = document.getElementById('multi-printed');
@@ -7150,8 +7109,7 @@ function showMultiEditPanel() {
   
   // Add change handlers for multi-edit controls
   document.getElementById('multi-designer')?.addEventListener('change', async (e) => {
-    const value = e.target.value || 'Unknown'; // Use default Unknown
-    await autoSaveMultipleModels('designer', value);
+    await autoSaveMultipleModels('designer', e.target.value);
   });
   
   document.getElementById('multi-parent')?.addEventListener('change', async (e) => {
@@ -7227,44 +7185,9 @@ function showMultiEditPanel() {
   } else {
     console.error('Multi-printed checkbox not found in showMultiEditPanel');
   }
-
-  // Re-attach event listener for multi-tag-select
-  const multiTagSelect = document.getElementById('multi-tag-select');
-  if (multiTagSelect) {
-    // Clone/replace to ensure any old listeners are gone (might be redundant but safe)
-    const newMultiTagSelect = multiTagSelect.cloneNode(true);
-    multiTagSelect.parentNode.replaceChild(newMultiTagSelect, multiTagSelect);
-
-    // Add the change listener
-    newMultiTagSelect.addEventListener('change', () => {
-      const selectedTag = newMultiTagSelect.value;
-      if (selectedTag) {
-        addTagToModel(selectedTag, 'multi-tags');
-        newMultiTagSelect.value = ''; // Reset selection
-      }
-    });
-    console.log('Multi-tag-select event handler re-attached in showMultiEditPanel');
-  } else {
-    console.error('Multi-tag-select element not found in showMultiEditPanel');
-  }
 }
 
 // Update the edit mode toggle handler to call showMultiEditPanel when entering multi-edit mode
-document.getElementById('edit-mode-toggle')?.addEventListener('click', () => {
-  isMultiSelectMode = !isMultiSelectMode;
-  const button = document.getElementById('edit-mode-toggle');
-  const multiEditPanel = document.getElementById('multi-edit-panel');
-  const detailsPanel = document.getElementById('model-details');
-
-  if (isMultiSelectMode) {
-    button.textContent = 'Exit Multi-Edit Mode';
-    button.classList.add('active');
-    multiEditPanel.classList.remove('hidden');
-    detailsPanel.classList.add('hidden');
-    showMultiEditPanel();
-  } else {
-    exitMultiEditMode();
-  }
 });
 
 // Add a direct event listener for the multi-printed checkbox
@@ -7310,248 +7233,7 @@ document.addEventListener('DOMContentLoaded', () => {
   } else {
     console.error('Multi-printed checkbox not found');
   }
-
-  // Add event listener for the Clear Selection button
-  const clearSelectionButton = document.getElementById('clear-selection-button');
-  if (clearSelectionButton) {
-    clearSelectionButton.addEventListener('click', () => {
-      console.log('Clear Selection button clicked');
-      if (isMultiSelectMode) {
-        selectedModels.clear();
-        document.querySelectorAll('.file-item.selected').forEach(item => {
-          item.classList.remove('selected');
-        });
-        updateSelectedCount(); // Update the count display
-        // Optionally hide the multi-edit panel if preferred when selection is cleared
-        // exitMultiEditMode(); // Or just hide the panel like this:
-        // document.getElementById('multi-edit-panel').classList.add('hidden'); 
-        // document.getElementById('model-details').classList.remove('hidden');
-        console.log('Selection cleared');
-      }
-    });
-    console.log('Clear Selection button event listener attached');
-  } else {
-    console.error('Clear Selection button not found');
-  }
 });
-
-// ==================== NEW CODE: Virtual Grid Implementation ====================
-
-// Helper function to create a DOM element for a model item
-function createModelItem(model) {
-  const item = document.createElement('div');
-  item.className = 'file-item';
-  item.dataset.filepath = model.filePath;
-
-  if (selectedModels.has(model.filePath)) {
-    item.classList.add('selected');
-  }
-
-  // Print status element
-  const printStatus = document.createElement('div');
-  printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
-  printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
-  item.appendChild(printStatus);
-
-  // Thumbnail container with fixed size
-  const thumbnailContainer = document.createElement('div');
-  thumbnailContainer.className = 'thumbnail-container';
-
-  if (model.thumbnail) {
-    const img = document.createElement('img');
-    img.src = model.thumbnail;
-    img.style.width = '250px';
-    img.style.height = '250px';
-    thumbnailContainer.appendChild(img);
-  } else {
-    // Show placeholder/loading state
-    const img = document.createElement('img');
-    img.src = '3d.png';
-    img.style.width = '250px';
-    img.style.height = '250px';
-    // Add loading class if needed
-    thumbnailContainer.appendChild(img);
-
-    // Queue thumbnail generation if not already pending
-    if (!pendingThumbnails.has(model.filePath)) {
-      pendingThumbnails.add(model.filePath);
-
-      renderQueue.push({
-        filePath: model.filePath,
-        container: thumbnailContainer,
-        resolve: async (thumbnail) => {
-          // Update model in memory
-          model.thumbnail = thumbnail;
-          // Remove from pending set
-          pendingThumbnails.delete(model.filePath);
-          // Save to database
-          await window.electron.saveThumbnail(model.filePath, thumbnail);
-
-          // Try to update any visible instances of this file in the DOM
-          try {
-            const visibleItem = document.querySelector(`.file-item[data-filepath="${CSS.escape(model.filePath)}"] .thumbnail-container`);
-            if (visibleItem) {
-               const img = document.createElement('img');
-               img.src = thumbnail;
-               img.style.width = '250px';
-               img.style.height = '250px';
-               visibleItem.innerHTML = '';
-               visibleItem.appendChild(img);
-            }
-          } catch (e) {
-            console.error('Error updating visible thumbnail:', e);
-          }
-        },
-        reject: (error) => {
-          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
-          pendingThumbnails.delete(model.filePath);
-        }
-      });
-
-      // Trigger queue processing
-      processRenderQueue();
-    }
-  }
-
-  item.appendChild(thumbnailContainer);
-
-  // File info container
-  const fileInfo = document.createElement('div');
-  fileInfo.className = 'file-info';
-
-  // File name element
-  const fileName = document.createElement('div');
-  fileName.className = 'file-name';
-  fileName.textContent = model.fileName || '';
-  fileInfo.appendChild(fileName);
-
-  // Add designer info if available
-  if (model.designer) {
-    const designerInfo = document.createElement('div');
-    designerInfo.className = 'designer-info';
-
-    const label = document.createElement('span');
-    label.className = 'directory-label';
-    label.textContent = 'Designer: ';
-
-    const value = document.createTextNode(model.designer);
-
-    designerInfo.appendChild(label);
-    designerInfo.appendChild(value);
-    fileInfo.appendChild(designerInfo);
-  }
-
-  item.appendChild(fileInfo);
-
-  // Add click event handler for model selection
-  item.addEventListener('click', (e) => {
-    // Check if ctrl or cmd key is pressed for multi-select
-    if (e.ctrlKey || e.metaKey) {
-      handleFileClick(e, model.filePath);
-    } else {
-      toggleModelSelection(item, model.filePath);
-    }
-  });
-
-  // Add context menu
-  addContextMenuHandler(item, model.filePath);
-
-  return item;
-}
-
-// Virtual grid function—renders only items visible in the scroll window.
-function renderVirtualGrid(models) {
-  const container = document.querySelector('.file-grid');
-  if (!container) return;
-
-  container.innerHTML = ''; // clear existing content
-  container.style.position = 'relative';
-  container.style.overflowY = 'auto';
-
-  // Assume fixed item size (in pixels)
-  const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
-  const itemHeight = 320;  // fixed model height 300px + 20px margin
-  const containerWidth = container.clientWidth;
-
-  // Calculate number of columns (at least 1)
-  const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
-  const rowCount = Math.ceil(models.length / columns);
-
-  // Create a spacer element of full height to allow scrolling
-  const spacer = document.createElement('div');
-  spacer.style.height = (rowCount * itemHeight) + 'px';
-  spacer.style.width = '100%';
-  spacer.style.position = 'relative';
-  container.appendChild(spacer);
-
-  // Create an absolutely positioned element within the container to hold the items
-  const virtualContent = document.createElement('div');
-  virtualContent.style.position = 'absolute';
-  virtualContent.style.top = '0';
-  virtualContent.style.left = '0';
-  virtualContent.style.width = '100%';
-  virtualContent.style.height = '100%';
-  virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
-  container.appendChild(virtualContent);
-
-  // Store the resize observer to disconnect later if needed
-  if (container.resizeObserver) {
-    container.resizeObserver.disconnect();
-  }
-
-  // Function to (re)render only the visible rows (plus a small buffer)
-  function renderVisibleItems() {
-    const scrollTop = container.scrollTop;
-    const containerHeight = container.clientHeight;
-
-    // Recalculate columns in case of resize
-    const currentContainerWidth = container.clientWidth;
-    const currentColumns = Math.max(Math.floor(currentContainerWidth / itemWidth), 1);
-    const currentRowCount = Math.ceil(models.length / currentColumns);
-
-    // Update spacer height
-    spacer.style.height = (currentRowCount * itemHeight) + 'px';
-
-    const buffer = 2; // extra rows to render before and after the visible area
-    const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
-    const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
-
-    // Clear and re-render only the visible items
-    virtualContent.innerHTML = '';
-
-    for (let row = startRow; row < endRow; row++) {
-      for (let col = 0; col < currentColumns; col++) {
-        const index = row * currentColumns + col;
-        if (index >= models.length) break;
-
-        const model = models[index];
-        const item = createModelItem(model);
-        item.style.position = 'absolute';
-        item.style.top = (row * itemHeight) + 'px';
-        item.style.left = (col * itemWidth) + 'px';
-        item.style.width = '250px'; // Explicit width matching CSS
-        item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
-
-        virtualContent.appendChild(item);
-      }
-    }
-  }
-
-  // Attach the scroll event handler to update visible items on scroll
-  container.removeEventListener('scroll', container.virtualScrollHandler);
-  container.virtualScrollHandler = renderVisibleItems;
-  container.addEventListener('scroll', renderVisibleItems);
-
-  // Handle window resize
-  container.resizeObserver = new ResizeObserver(() => {
-    renderVisibleItems();
-  });
-  container.resizeObserver.observe(container);
-
-  // Initial render of visible items
-  renderVisibleItems();
-}
-// ==================== END NEW CODE ====================
 
 // Change the multi-source event listener from 'change' back to 'input' with debounce
 document.getElementById('multi-source')?.addEventListener('input', debounce(async (e) => {
@@ -7560,5 +7242,3 @@ document.getElementById('multi-source')?.addEventListener('input', debounce(asyn
 }, 500));
 
 
-window.renderFiles = renderFiles;
-window.displayModels = displayModels;

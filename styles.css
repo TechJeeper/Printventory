@@ -1175,22 +1175,6 @@ header {
   background-color: rgba(255, 255, 255, 0.3);
 }
 
-#file-type-settings-dialog .checkbox-container {
-  display: flex;
-  flex-direction: row !important;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 8px 10px;
-  margin-bottom: 5px;
-}
-
-#file-type-settings-dialog .setting-description {
-  color: #888;
-  font-size: 0.9em;
-  margin-top: 0;
-}
-
 #new-tag-manager-name {
   flex: 1;
   padding: 8px;
@@ -1515,18 +1499,6 @@ header {
 
 .print-status.printed {
   background: rgba(46, 204, 113, 0.9);
-}
-
-.zip-indicator {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  background: rgba(255, 165, 0, 0.9);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #fff;
-  z-index: 2;
 }
 
 .setting-description {
