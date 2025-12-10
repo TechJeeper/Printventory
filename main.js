@@ -2367,7 +2367,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     return null;
   }
   try {
-    console.log('Starting to process 3MF file:', filePath);
+    debugLog('Starting to process 3MF file:', filePath);
     
     // Check if file exists
     if (!fs.existsSync(filePath)) {
@@ -2375,78 +2375,76 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       return null;
     }
     
-    // Use JSZip to extract the 3MF file (which is a zip file)
-    console.log('Creating JSZip instance...');
-    const zip = new JSZip();
-    
-    console.log('Reading file data...');
     const data = await fs.promises.readFile(filePath);
-    console.log('File read successfully, size:', data.length, 'bytes');
-    
-    console.log('Loading zip contents...');
+    const zip = new JSZip();
     const contents = await zip.loadAsync(data);
-    console.log('Zip contents loaded successfully');
     
-    // Log all files in the 3MF
-    console.log('\nContents of 3MF file:', filePath);
-    console.log('Number of files in archive:', Object.keys(contents.files).length);
-    console.log('All files in archive:');
-    Object.keys(contents.files).forEach(filename => {
-      const file = contents.files[filename];
-      console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
-    });
-    
-    // Look for plate_1.png in the Metadata directory, trying different case variations
-    const possiblePaths = [
-      'Metadata/plate_1.png',
-      'metadata/plate_1.png',
-      '/Metadata/plate_1.png',
-      '/metadata/plate_1.png'
-    ];
-
-    // Try each possible path
-    console.log('\nSearching for plate_1.png...');
-    for (const path of possiblePaths) {
-      console.log('Checking for:', path);
-      const plateImage = contents.files[path];
-      if (plateImage) {
-        console.log('Found plate_1.png at:', path);
-        const imageData = await plateImage.async('base64');
-        console.log('Successfully extracted plate_1.png data');
-        return [`data:image/png;base64,${imageData}`];
-      }
-    }
-    
-    // If plate_1.png wasn't found, look for any images in the Metadata directory first
-    console.log('\nLooking for any images in Metadata directory...');
     const imageFiles = [];
+
+    // --- Search Strategy ---
+
+    // 1. Prioritize images in a "Metadata" directory.
+    const metadataImages = [];
     for (const [path, file] of Object.entries(contents.files)) {
-      // Check if file is in Metadata directory first
-      if (path.toLowerCase().includes('metadata/') && path.match(/\.(png|jpe?g|gif)$/i)) {
-        console.log('Found image in Metadata:', path);
-        const imageData = await file.async('base64');
-        imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
+      if (path.toLowerCase().includes('metadata/') && !file.dir && /\.(png|jpe?g)$/i.test(path)) {
+        metadataImages.push({ path, file });
       }
     }
 
-    // If no images found in Metadata, look elsewhere in the 3MF
+    if (metadataImages.length > 0) {
+      // If images are found in Metadata, sort them to find the best candidate.
+      // A common convention is a file named "thumbnail.png" or similar.
+      metadataImages.sort((a, b) => {
+        const aName = a.path.toLowerCase();
+        const bName = b.path.toLowerCase();
+        if (aName.includes('thumbnail')) return -1;
+        if (bName.includes('thumbnail')) return 1;
+        if (aName.includes('preview')) return -1;
+        if (bName.includes('preview')) return 1;
+        return aName.localeCompare(bName); // Fallback to alphabetical sort
+      });
+
+      // Process the best candidate from the metadata folder.
+      const bestImage = metadataImages[0];
+      const imageData = await bestImage.file.async('base64');
+      const extension = path.extname(bestImage.path).substring(1);
+      imageFiles.push(`data:image/${extension};base64,${imageData}`);
+    }
+
+    // 2. If no images were found in Metadata, search the entire archive.
     if (imageFiles.length === 0) {
-      console.log('\nLooking for images anywhere in 3MF...');
+      const allImages = [];
       for (const [path, file] of Object.entries(contents.files)) {
-        if (path.match(/\.(png|jpe?g|gif)$/i)) {
-          console.log('Found image:', path);
-          const imageData = await file.async('base64');
-          imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
+        if (!file.dir && /\.(png|jpe?g)$/i.test(path)) {
+          allImages.push({ path, file });
         }
       }
+
+      if (allImages.length > 0) {
+        // Sort all found images using the same logic as above.
+        allImages.sort((a, b) => {
+          const aName = a.path.toLowerCase();
+          const bName = b.path.toLowerCase();
+          if (aName.includes('thumbnail')) return -1;
+          if (bName.includes('thumbnail')) return 1;
+          if (aName.includes('preview')) return -1;
+          if (bName.includes('preview')) return 1;
+          return aName.localeCompare(bName);
+        });
+
+        // Process the best candidate from the entire archive.
+        const bestImage = allImages[0];
+        const imageData = await bestImage.file.async('base64');
+        const extension = path.extname(bestImage.path).substring(1);
+        imageFiles.push(`data:image/${extension};base64,${imageData}`);
+      }
     }
     
-    console.log('\nFound total images:', imageFiles.length);
-    return imageFiles;
+    debugLog(`Found ${imageFiles.length} suitable image(s) in 3MF file:`, filePath);
+    return imageFiles.length > 0 ? imageFiles : null;
+
   } catch (error) {
-    console.error('Error reading 3MF images:', error);
-    console.error('Error details:', error.message);
-    console.error('Error stack:', error.stack);
+    console.error(`Error reading 3MF images for ${filePath}:`, error);
     return null;
   }
 });

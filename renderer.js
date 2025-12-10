@@ -2806,20 +2806,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('loadModel: Starting for file:', filePath);
       const fileExtension = filePath.split('.').pop().toLowerCase();
       
-      // For 3MF files, try to extract embedded image first
-      if (fileExtension === '3mf') {
-        console.log('loadModel: Checking for embedded images in 3MF');
-        try {
-          const embeddedImage = await extract3MFThumbnail(filePath);
-          if (embeddedImage) {
-            console.log('loadModel: Found embedded image, using that instead of 3D rendering');
-            return null; // This will trigger the fallback to use the embedded image
-          }
-        } catch (imageError) {
-          console.error('loadModel: Error checking for embedded image:', imageError);
-        }
-      }
-      
       // Properly encode the file path to handle special characters and Windows paths
       let encodedFilePath;
       
@@ -4190,6 +4176,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       for (let i = 0; i < models.length; i++) {
         const model = models[i];
+        let thumbnail = null;
         
         try {
           // Update progress before starting each model
@@ -4202,50 +4189,37 @@ document.addEventListener('DOMContentLoaded', async () => {
             progressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
           }
           
-          // Check for embedded thumbnail first (for 3MF files)
+          // 1. Try to get embedded thumbnail for 3MF
           if (model.filePath.toLowerCase().endsWith('.3mf')) {
             try {
-              const embeddedImage = await extract3MFThumbnail(model.filePath);
-              
-              // Validate that embeddedImage is a proper string containing image data
-              if (embeddedImage && typeof embeddedImage === 'string' && embeddedImage.startsWith('data:image')) {
-                await window.electron.saveThumbnail(model.filePath, embeddedImage);
-                continue; // Skip 3D rendering if we have an embedded image
-              } else if (embeddedImage && Array.isArray(embeddedImage) && embeddedImage.length > 0) {
-                // Handle case where it returns an array of images
-                const firstImage = embeddedImage[0];
+              const embeddedImages = await extract3MFThumbnail(model.filePath);
+              if (embeddedImages && embeddedImages.length > 0) {
+                const firstImage = embeddedImages[0];
                 if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
-                  await window.electron.saveThumbnail(model.filePath, firstImage);
-                  continue;
+                  thumbnail = firstImage;
                 }
               }
-              
-              // If we get here, the embedded image wasn't valid
-              debugLog(`No valid embedded image found in 3MF file: ${model.filePath}`);
             } catch (embeddedError) {
               console.error(`Error extracting embedded image from 3MF: ${model.filePath}`, embeddedError);
-              // Continue to regular thumbnail generation
             }
           }
 
-          // Generate thumbnail
-          try {
-            const thumbnail = await generateThumbnail(model.filePath);
-            
-            // Validate thumbnail before saving
-            if (thumbnail && typeof thumbnail === 'string' && 
-                (thumbnail.startsWith('data:image') || thumbnail === '3d.png')) {
-              await window.electron.saveThumbnail(model.filePath, thumbnail);
-            } else {
-              console.error(`Invalid thumbnail generated for ${model.filePath}:`, thumbnail);
-              // Save default thumbnail
-              await window.electron.saveThumbnail(model.filePath, '3d.png');
+          // 2. If no embedded thumbnail, try 3D rendering
+          if (!thumbnail) {
+            try {
+              thumbnail = await generateThumbnail(model.filePath);
+            } catch (renderError) {
+              console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
             }
-          } catch (thumbnailError) {
-            console.error(`Error generating thumbnail for ${model.filePath}:`, thumbnailError);
-            // Save default thumbnail
-            await window.electron.saveThumbnail(model.filePath, '3d.png');
           }
+
+          // 3. Validate and fallback to default if necessary
+          if (!thumbnail || typeof thumbnail !== 'string' || !thumbnail.startsWith('data:image')) {
+            thumbnail = '3d.png';
+          }
+
+          // 4. Save whatever thumbnail we ended up with
+          await window.electron.saveThumbnail(model.filePath, thumbnail);
           
           // Force cleanup after each model
           if (typeof deepCleanThreeResources === 'function') {
@@ -4253,7 +4227,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
           
           // Add delay between models
-          await new Promise(resolve => setTimeout(resolve, 50)); // Use a reasonable default if THUMBNAIL_GENERATION_DELAY is not defined
+          await new Promise(resolve => setTimeout(resolve, 50));
           
         } catch (error) {
           console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
@@ -4263,7 +4237,6 @@ document.addEventListener('DOMContentLoaded', async () => {
           } catch (saveError) {
             console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
           }
-          // Continue with next model even if one fails
         }
       }
 
