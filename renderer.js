@@ -3498,16 +3498,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add at the top of renderer.js
-  const DEBUG = true; // Enable debugging temporarily
-
-  // Add inside initializeAboutDialog()
-  console.log('About dialog elements:', {
-    dialog: document.getElementById('about-dialog'),
-    version: document.getElementById('about-version'),
-    betaOptIn: document.getElementById('beta-opt-in'),
-    checkUpdates: document.getElementById('check-updates-button')
-  });
 
   // Update the grid initialization function
   async function initializeGrid(sortOption = 'name') {

@@ -9,7 +9,6 @@ const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
 const ua = require('universal-analytics');
-const StreamZip = require('node-stream-zip');
 
 // Create an analytics wrapper for GA4
 const analytics = {
@@ -2366,7 +2365,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   console.log(`[DEBUG] get3MFImages: Start processing ${filePath}`);
 
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
-    console.log('Skipping file from __MACOSX directory:', filePath);
+    debugLog('Skipping file from __MACOSX directory:', filePath);
     return null;
   }
 
@@ -2375,45 +2374,20 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     return null;
   }
 
-  const zip = new StreamZip.async({ file: filePath });
-
   try {
-    const entries = await zip.entries();
-    const metadataImages = [];
-    const allImages = [];
+    const data = await fs.promises.readFile(filePath);
+    const zip = await JSZip.loadAsync(data);
+    const images = [];
 
-    for (const entry of Object.values(entries)) {
-      if (!entry.isDirectory && /\.(png|jpe?g)$/i.test(entry.name)) {
-        if (entry.name.toLowerCase().includes('metadata/')) {
-          metadataImages.push(entry);
-        }
-        allImages.push(entry);
+    zip.forEach((relativePath, file) => {
+      if (!file.dir && /\.(png|jpe?g)$/i.test(relativePath)) {
+        images.push({ name: relativePath, file: file });
       }
-    }
+    });
 
-    let bestEntry = null;
-    if (metadataImages.length > 0) {
-      metadataImages.sort((a, b) => {
-        const aName = a.name.toLowerCase();
-        const bName = b.name.toLowerCase();
-        if (aName.includes('thumbnail')) return -1;
-        if (bName.includes('thumbnail')) return 1;
-        if (aName.includes('preview')) return -1;
-        if (bName.includes('preview')) return 1;
-        return aName.localeCompare(bName);
-      });
-      bestEntry = metadataImages[0];
-    } else if (allImages.length > 0) {
-      allImages.sort((a, b) => {
-        const aName = a.name.toLowerCase();
-        const bName = b.name.toLowerCase();
-        if (aName.includes('thumbnail')) return -1;
-        if (bName.includes('thumbnail')) return 1;
-        if (aName.includes('preview')) return -1;
-        if (bName.includes('preview')) return 1;
-        return aName.localeCompare(bName);
-      });
-      bestEntry = allImages[0];
+    if (images.length === 0) {
+      debugLog(`[DEBUG] get3MFImages: No embedded image found for ${filePath}. Took ${Date.now() - startTime}ms.`);
+      return null;
     }
 
     if (bestEntry) {
@@ -2433,8 +2407,6 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     const endTime = Date.now();
     console.log(`[DEBUG] get3MFImages: Error processing ${filePath}. Took ${endTime - startTime}ms.`);
     return null;
-  } finally {
-    await zip.close();
   }
 });
 
