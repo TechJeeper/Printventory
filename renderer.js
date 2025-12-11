@@ -2554,6 +2554,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Update the renderModelToPNG function to check file size before attempting to render
   async function renderModelToPNG(filePath, container, existingThumbnail) {
+    const startTime = Date.now();
+    console.log(`[DEBUG] renderModelToPNG: Start rendering ${filePath}`);
     if (existingThumbnail) {
       const img = document.createElement('img');
       img.src = existingThumbnail;
@@ -2622,6 +2624,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       container.appendChild(img);
       return '3d.png';
     } finally {
+      const endTime = Date.now();
+      console.log(`[DEBUG] renderModelToPNG: Finished rendering ${filePath}. Took ${endTime - startTime}ms.`);
       // Cleanup code that uses model
       if (model) {
         model.traverse(child => {
@@ -2802,6 +2806,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 9. Add model loading with better resource management
   async function loadModel(filePath, options = {}) {
+    const startTime = Date.now();
+    console.log(`[DEBUG] loadModel: Start loading ${filePath}`);
     try {
       console.log('loadModel: Starting for file:', filePath);
       const fileExtension = filePath.split('.').pop().toLowerCase();
@@ -2974,6 +2980,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (error) {
       console.error('loadModel error:', error);
       throw error;
+    } finally {
+      const endTime = Date.now();
+      console.log(`[DEBUG] loadModel: Finished loading ${filePath}. Took ${endTime - startTime}ms.`);
     }
   }
 
@@ -4157,6 +4166,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Add function for generating thumbnails for multiple models
   async function generateThumbnailsForModels(models) {
+    console.log(`[DEBUG] generateThumbnailsForModels: Starting thumbnail generation for ${models.length} models.`);
     const BATCH_SIZE = 1; // Process one at a time
     const progressDialog = document.getElementById('thumbnail-progress-dialog');
     const progressBar = document.getElementById('thumbnail-progress-bar');
@@ -4191,13 +4201,17 @@ document.addEventListener('DOMContentLoaded', async () => {
           
           // 1. Try to get embedded thumbnail for 3MF
           if (model.filePath.toLowerCase().endsWith('.3mf')) {
+            console.log(`[DEBUG] generateThumbnailsForModels: Attempting to extract embedded thumbnail for ${model.filePath}`);
             try {
               const embeddedImages = await extract3MFThumbnail(model.filePath);
               if (embeddedImages && embeddedImages.length > 0) {
                 const firstImage = embeddedImages[0];
                 if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
                   thumbnail = firstImage;
+                  console.log(`[DEBUG] generateThumbnailsForModels: Found embedded thumbnail for ${model.filePath}`);
                 }
+              } else {
+                console.log(`[DEBUG] generateThumbnailsForModels: No embedded thumbnail found for ${model.filePath}. Falling back to 3D rendering.`);
               }
             } catch (embeddedError) {
               console.error(`Error extracting embedded image from 3MF: ${model.filePath}`, embeddedError);
@@ -4206,6 +4220,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           // 2. If no embedded thumbnail, try 3D rendering
           if (!thumbnail) {
+            console.log(`[DEBUG] generateThumbnailsForModels: Rendering 3D model for ${model.filePath}`);
             try {
               thumbnail = await generateThumbnail(model.filePath);
             } catch (renderError) {

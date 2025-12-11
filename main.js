@@ -2362,6 +2362,9 @@ function getDatabasePath() {
 
 // Add these IPC handlers
 ipcMain.handle('get3MFImages', async (event, filePath) => {
+  const startTime = Date.now();
+  console.log(`[DEBUG] get3MFImages: Start processing ${filePath}`);
+
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     console.log('Skipping file from __MACOSX directory:', filePath);
     return null;
@@ -2416,12 +2419,19 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     if (bestEntry) {
       const imageData = await zip.entryData(bestEntry);
       const extension = path.extname(bestEntry.name).substring(1);
-      return [`data:image/${extension};base64,${imageData.toString('base64')}`];
+      const result = [`data:image/${extension};base64,${imageData.toString('base64')}`];
+      const endTime = Date.now();
+      console.log(`[DEBUG] get3MFImages: Found embedded image for ${filePath} in ${endTime - startTime}ms.`);
+      return result;
     }
 
+    const endTime = Date.now();
+    console.log(`[DEBUG] get3MFImages: No embedded image found for ${filePath}. Took ${endTime - startTime}ms.`);
     return null;
   } catch (error) {
     console.error(`Error reading 3MF images for ${filePath}:`, error);
+    const endTime = Date.now();
+    console.log(`[DEBUG] get3MFImages: Error processing ${filePath}. Took ${endTime - startTime}ms.`);
     return null;
   } finally {
     await zip.close();
