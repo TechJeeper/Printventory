@@ -196,7 +196,7 @@ const { version } = require('./package.json');
 
 let isDev = !app.isPackaged;
 
-const DEBUG = false; // Set to true for development/debugging
+const DEBUG = true; // Set to true for development/debugging
 const PING_INTERVAL = 30000; // 30 seconds
 
 function debugLog(...args) {
@@ -2362,7 +2362,7 @@ function getDatabasePath() {
 // Add these IPC handlers
 ipcMain.handle('get3MFImages', async (event, filePath) => {
   const startTime = Date.now();
-  debugLog(`[DEBUG] get3MFImages: Start processing ${filePath}`);
+  console.log(`[DEBUG] get3MFImages: Start processing ${filePath}`);
 
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     debugLog('Skipping file from __MACOSX directory:', filePath);
@@ -2390,34 +2390,22 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       return null;
     }
 
-    // Prioritize images in a "Metadata" folder
-    let preferredImages = images.filter(img => img.name.toLowerCase().includes('metadata/'));
-    if (preferredImages.length === 0) {
-      preferredImages = images; // Fallback to all images if none in Metadata
+    if (bestEntry) {
+      const imageData = await zip.entryData(bestEntry);
+      const extension = path.extname(bestEntry.name).substring(1);
+      const result = [`data:image/${extension};base64,${imageData.toString('base64')}`];
+      const endTime = Date.now();
+      console.log(`[DEBUG] get3MFImages: Found embedded image for ${filePath} in ${endTime - startTime}ms.`);
+      return result;
     }
 
-    // Sort to find the best candidate (e.g., "thumbnail" or "preview")
-    preferredImages.sort((a, b) => {
-      const aName = a.name.toLowerCase();
-      const bName = b.name.toLowerCase();
-      if (aName.includes('thumbnail')) return -1;
-      if (bName.includes('thumbnail')) return 1;
-      if (aName.includes('preview')) return -1;
-      if (bName.includes('preview')) return 1;
-      return aName.localeCompare(bName);
-    });
-
-    const bestImage = preferredImages[0];
-    const imageData = await bestImage.file.async('base64');
-    const extension = path.extname(bestImage.name).substring(1);
-    const result = [`data:image/${extension};base64,${imageData}`];
-
-    debugLog(`[DEBUG] get3MFImages: Found embedded image for ${filePath} in ${Date.now() - startTime}ms.`);
-    return result;
-
+    const endTime = Date.now();
+    console.log(`[DEBUG] get3MFImages: No embedded image found for ${filePath}. Took ${endTime - startTime}ms.`);
+    return null;
   } catch (error) {
-    console.error(`Error reading 3MF images for ${filePath} with JSZip:`, error);
-    debugLog(`[DEBUG] get3MFImages: Error processing ${filePath}. Took ${Date.now() - startTime}ms.`);
+    console.error(`Error reading 3MF images for ${filePath}:`, error);
+    const endTime = Date.now();
+    console.log(`[DEBUG] get3MFImages: Error processing ${filePath}. Took ${endTime - startTime}ms.`);
     return null;
   }
 });
