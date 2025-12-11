@@ -63,6 +63,8 @@
 
 		parse( data ) {
 
+			const startTime = Date.now();
+			console.log(`[DEBUG] 3MFLoader.parse: Start parsing 3MF data.`);
 			const scope = this;
 			const textureLoader = new THREE.TextureLoader( this.manager );
 
@@ -1326,7 +1328,10 @@
 
 			const data3mf = loadDocument( data );
 			const objects = buildObjects( data3mf );
-			return build( objects, data3mf );
+			const result = build( objects, data3mf );
+			const endTime = Date.now();
+			console.log(`[DEBUG] 3MFLoader.parse: Finished parsing. Took ${endTime - startTime}ms.`);
+			return result;
 
 		}
 
