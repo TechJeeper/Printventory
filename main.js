@@ -9,6 +9,7 @@ const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
 const ua = require('universal-analytics');
+const StreamZip = require('node-stream-zip');
 
 // Create an analytics wrapper for GA4
 const analytics = {
@@ -2361,91 +2362,69 @@ function getDatabasePath() {
 
 // Add these IPC handlers
 ipcMain.handle('get3MFImages', async (event, filePath) => {
-  // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     console.log('Skipping file from __MACOSX directory:', filePath);
     return null;
   }
+
+  if (!fs.existsSync(filePath)) {
+    console.error('File does not exist:', filePath);
+    return null;
+  }
+
+  const zip = new StreamZip.async({ file: filePath });
+
   try {
-    debugLog('Starting to process 3MF file:', filePath);
-    
-    // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.error('File does not exist:', filePath);
-      return null;
-    }
-    
-    const data = await fs.promises.readFile(filePath);
-    const zip = new JSZip();
-    const contents = await zip.loadAsync(data);
-    
-    const imageFiles = [];
-
-    // --- Search Strategy ---
-
-    // 1. Prioritize images in a "Metadata" directory.
+    const entries = await zip.entries();
     const metadataImages = [];
-    for (const [path, file] of Object.entries(contents.files)) {
-      if (path.toLowerCase().includes('metadata/') && !file.dir && /\.(png|jpe?g)$/i.test(path)) {
-        metadataImages.push({ path, file });
+    const allImages = [];
+
+    for (const entry of Object.values(entries)) {
+      if (!entry.isDirectory && /\.(png|jpe?g)$/i.test(entry.name)) {
+        if (entry.name.toLowerCase().includes('metadata/')) {
+          metadataImages.push(entry);
+        }
+        allImages.push(entry);
       }
     }
 
+    let bestEntry = null;
     if (metadataImages.length > 0) {
-      // If images are found in Metadata, sort them to find the best candidate.
-      // A common convention is a file named "thumbnail.png" or similar.
       metadataImages.sort((a, b) => {
-        const aName = a.path.toLowerCase();
-        const bName = b.path.toLowerCase();
+        const aName = a.name.toLowerCase();
+        const bName = b.name.toLowerCase();
         if (aName.includes('thumbnail')) return -1;
         if (bName.includes('thumbnail')) return 1;
         if (aName.includes('preview')) return -1;
         if (bName.includes('preview')) return 1;
-        return aName.localeCompare(bName); // Fallback to alphabetical sort
+        return aName.localeCompare(bName);
       });
-
-      // Process the best candidate from the metadata folder.
-      const bestImage = metadataImages[0];
-      const imageData = await bestImage.file.async('base64');
-      const extension = path.extname(bestImage.path).substring(1);
-      imageFiles.push(`data:image/${extension};base64,${imageData}`);
+      bestEntry = metadataImages[0];
+    } else if (allImages.length > 0) {
+      allImages.sort((a, b) => {
+        const aName = a.name.toLowerCase();
+        const bName = b.name.toLowerCase();
+        if (aName.includes('thumbnail')) return -1;
+        if (bName.includes('thumbnail')) return 1;
+        if (aName.includes('preview')) return -1;
+        if (bName.includes('preview')) return 1;
+        return aName.localeCompare(bName);
+      });
+      bestEntry = allImages[0];
     }
 
-    // 2. If no images were found in Metadata, search the entire archive.
-    if (imageFiles.length === 0) {
-      const allImages = [];
-      for (const [path, file] of Object.entries(contents.files)) {
-        if (!file.dir && /\.(png|jpe?g)$/i.test(path)) {
-          allImages.push({ path, file });
-        }
-      }
-
-      if (allImages.length > 0) {
-        // Sort all found images using the same logic as above.
-        allImages.sort((a, b) => {
-          const aName = a.path.toLowerCase();
-          const bName = b.path.toLowerCase();
-          if (aName.includes('thumbnail')) return -1;
-          if (bName.includes('thumbnail')) return 1;
-          if (aName.includes('preview')) return -1;
-          if (bName.includes('preview')) return 1;
-          return aName.localeCompare(bName);
-        });
-
-        // Process the best candidate from the entire archive.
-        const bestImage = allImages[0];
-        const imageData = await bestImage.file.async('base64');
-        const extension = path.extname(bestImage.path).substring(1);
-        imageFiles.push(`data:image/${extension};base64,${imageData}`);
-      }
+    if (bestEntry) {
+      const imageData = await zip.entryData(bestEntry);
+      const extension = path.extname(bestEntry.name).substring(1);
+      return [`data:image/${extension};base64,${imageData.toString('base64')}`];
     }
-    
-    debugLog(`Found ${imageFiles.length} suitable image(s) in 3MF file:`, filePath);
-    return imageFiles.length > 0 ? imageFiles : null;
 
+    return null;
   } catch (error) {
     console.error(`Error reading 3MF images for ${filePath}:`, error);
     return null;
+  } finally {
+    await zip.close();
   }
 });
 
