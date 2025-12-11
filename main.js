@@ -197,7 +197,7 @@ const { version } = require('./package.json');
 
 let isDev = !app.isPackaged;
 
-const DEBUG = false; // Set to true for development/debugging
+const DEBUG = true; // Set to true for development/debugging
 const PING_INTERVAL = 30000; // 30 seconds
 
 function debugLog(...args) {

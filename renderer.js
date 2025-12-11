@@ -1,5 +1,5 @@
 // Add this at the very top of the file
-const DEBUG = false; // Enable debugging temporarily
+const DEBUG = true; // Enable debugging temporarily
 
 // Add debug logging utility function
 function debugLog(...args) {
