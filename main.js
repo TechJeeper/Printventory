@@ -194,9 +194,16 @@ const analytics = {
 // Near the top of the file, add this line
 const { version } = require('./package.json');
 
-let isDev = !app.isPackaged;
+let isDev = false;
+try {
+  const electronIsDev = require('electron-is-dev');
+  isDev = electronIsDev;
+} catch (error) {
+  // If electron-is-dev is not available, determine dev mode through other means
+  isDev = process.env.NODE_ENV === 'development' || /[\\/]electron/i.test(process.execPath);
+}
 
-const DEBUG = true; // Set to true for development/debugging
+const DEBUG = false; // Set to true for development/debugging
 const PING_INTERVAL = 30000; // 30 seconds
 
 function debugLog(...args) {
@@ -265,9 +272,6 @@ if (!gotTheLock) {
       
       // Track application usage after initialization
       await trackAppUsage();
-
-      // Start checking for missing hashes in the background
-      checkAndCalculateMissingHashes().catch(console.error);
     } catch (error) {
       console.error('Error during app initialization:', error);
       dialog.showErrorBox('Startup Error', 'Failed to start application properly.');
@@ -319,59 +323,61 @@ function initializeDatabase() {
     // Enable foreign keys
     db.pragma('foreign_keys = ON');
     
-    // Create tables in sequence (better-sqlite3 is synchronous)
-    // Create models table
-    db.exec(`CREATE TABLE IF NOT EXISTS models (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        filePath TEXT UNIQUE,
-        fileName TEXT,
-        designer TEXT,
-        source TEXT,
-        notes TEXT,
-        printed INTEGER,
-        thumbnail TEXT,
-        parentModel TEXT,
-        hash TEXT,
-        size INTEGER,
-        license TEXT,
-        modifiedDate DATETIME
-    )`);
+    // Create tables in sequence
+    db.transaction(() => {
+      // Create models table
+      db.prepare(`CREATE TABLE IF NOT EXISTS models (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          filePath TEXT UNIQUE,
+          fileName TEXT,
+          designer TEXT,
+          source TEXT,
+          notes TEXT,
+          printed INTEGER,
+          thumbnail TEXT,
+          parentModel TEXT,
+          hash TEXT,
+          size INTEGER,
+          license TEXT,
+          modifiedDate DATETIME
+      )`).run();
 
-    // Create tags table
-    db.exec(`CREATE TABLE IF NOT EXISTS tags (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE
-    )`);
+      // Create tags table
+      db.prepare(`CREATE TABLE IF NOT EXISTS tags (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE
+      )`).run();
 
-    // Create model_tags table
-    db.exec(`CREATE TABLE IF NOT EXISTS model_tags (
-        model_id INTEGER,
-        tag_id INTEGER,
-        FOREIGN KEY(model_id) REFERENCES models(id),
-        FOREIGN KEY(tag_id) REFERENCES tags(id),
-        PRIMARY KEY(model_id, tag_id)
-    )`);
-    
-    // Create settings table
-    db.exec(`CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )`);
-    
-    // Create slicers table
-    db.exec(`CREATE TABLE IF NOT EXISTS slicers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        path TEXT NOT NULL
-    )`);
-    
-    // Create indexes for better performance
-    db.exec('CREATE INDEX IF NOT EXISTS idx_models_filepath ON models(filePath)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_models_filename ON models(fileName)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_models_designer ON models(designer)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)');
+      // Create model_tags table
+      db.prepare(`CREATE TABLE IF NOT EXISTS model_tags (
+          model_id INTEGER,
+          tag_id INTEGER,
+          FOREIGN KEY(model_id) REFERENCES models(id),
+          FOREIGN KEY(tag_id) REFERENCES tags(id),
+          PRIMARY KEY(model_id, tag_id)
+      )`).run();
+      
+      // Create settings table
+      db.prepare(`CREATE TABLE IF NOT EXISTS settings (
+          key TEXT PRIMARY KEY,
+          value TEXT
+      )`).run();
+      
+      // Create slicers table
+      db.prepare(`CREATE TABLE IF NOT EXISTS slicers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL
+      )`).run();
+      
+      // Create indexes for better performance
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_filepath ON models(filePath)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_filename ON models(fileName)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_designer ON models(designer)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)').run();
+    })();
     
     // Repair model_tags table to fix any foreign key issues
     repairModelTagsTable();
@@ -444,7 +450,7 @@ function initializeDefaultSettings() {
     // Check if settings table exists
     const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get();
     if (!tableExists) {
-      db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)');
+      db.prepare('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)').run();
     }
 
     // Define default settings
@@ -492,6 +498,7 @@ function createWindow() {
       enableWebSQL: false
     }
   });
+  mainWindow.webContents.openDevTools()
 
   const template = [
     {
@@ -571,8 +578,8 @@ function createWindow() {
         },
         { type: 'separator' },
         {
-          label: 'Generate Missing Thumbnails',
-          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
+          label: 'Regenerate Thumbnails',
+          click: () => mainWindow.webContents.send('regenerate-thumbnails')
         },
         {
           label: 'Purge Models',
@@ -713,8 +720,8 @@ function createApplicationMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Generate Missing Thumbnails',
-          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
+          label: 'Regenerate Thumbnails',
+          click: () => mainWindow.webContents.send('regenerate-thumbnails')
         },
         {
           label: 'Purge Models',
@@ -908,6 +915,37 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         const path = require('path');
         const crypto = require('crypto');
 
+        async function calculateFileHash(filePath) {
+          return new Promise((resolve, reject) => {
+            const hash = crypto.createHash('sha256');
+            const stream = fs.createReadStream(filePath);
+            
+            stream.on('error', err => {
+              console.error(\`Error reading file for hashing: \${filePath}\`, err);
+              reject(err);
+            });
+
+            stream.on('data', chunk => {
+              try {
+                hash.update(chunk);
+              } catch (err) {
+                console.error(\`Error updating hash for file: \${filePath}\`, err);
+                reject(err);
+              }
+            });
+
+            stream.on('end', () => {
+              try {
+                const fileHash = hash.digest('hex');
+                resolve(fileHash);
+              } catch (err) {
+                console.error(\`Error generating final hash for file: \${filePath}\`, err);
+                reject(err);
+              }
+            });
+          });
+        }
+
         async function scanDirectory(directoryPath, maxFileSize) {
           const files = [];
           let totalFiles = 0;
@@ -946,11 +984,21 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                   try {
                     const stats = fs.statSync(fullPath);
                     if (stats.size <= maxFileSize) {
+                      // Calculate hash for the file
+                      let fileHash = null;
+                      try {
+                        fileHash = await calculateFileHash(fullPath);
+                      } catch (hashError) {
+                        console.error(\`Error calculating hash for \${fullPath}:\`, hashError);
+                        // Continue without hash if calculation fails
+                      }
+                      
                       files.push({
                         filePath: fullPath,
                         fileName: entry.name,
                         size: stats.size,
-                        mtime: stats.mtime
+                        mtime: stats.mtime,
+                        hash: fileHash
                       });
                     }
                   } catch (error) {
@@ -993,58 +1041,82 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
           
           try {
             // Process files in larger batches for better performance
-            const batchSize = 100;
+            const batchSize = 100; // Increased batch size
             const updateExisting = db.prepare(`
               UPDATE models 
-              SET size = ?, modifiedDate = ?
+              SET hash = ?, size = ?, modifiedDate = ?
               WHERE filePath = ?
             `);
             
             const insertNew = db.prepare(`
               INSERT INTO models (
-                filePath, fileName, size, modifiedDate
-              ) VALUES (?, ?, ?, ?)
+                filePath, fileName, hash, size, modifiedDate
+              ) VALUES (?, ?, ?, ?, ?)
             `);
 
-            // Process files in batches
-            for (let i = 0; i < files.length; i += batchSize) {
-              const batch = files.slice(i, i + batchSize);
-              
-              // Process each file in the batch
-              for (const file of batch) {
-                const existing = db.prepare('SELECT filePath FROM models WHERE filePath = ?').get(file.filePath);
+            // Use a transaction for better performance
+            db.transaction(() => {
+              for (let i = 0; i < files.length; i += batchSize) {
+                const batch = files.slice(i, i + batchSize);
                 
-                if (existing) {
-                  // Update existing file
-                  updateExisting.run(file.size, file.mtime.toISOString(), file.filePath);
-                } else {
-                  // Insert new file
-                  insertNew.run(
-                    file.filePath,
-                    file.fileName,
-                    file.size,
-                    file.mtime.toISOString()
-                  );
+                for (const file of batch) {
+                  const exists = db.prepare('SELECT 1 FROM models WHERE filePath = ?').get(file.filePath);
+                  
+                  if (exists) {
+                    updateExisting.run(
+                      file.hash || '',
+                      file.size,
+                      file.mtime.toISOString(),
+                      file.filePath
+                    );
+                  } else {
+                    insertNew.run(
+                      file.filePath,
+                      file.fileName,
+                      file.hash || '',
+                      file.size,
+                      file.mtime.toISOString()
+                    );
+                  }
                 }
+                
+                // Send batch progress to renderer
+                event.sender.send('db-progress', {
+                  total: files.length,
+                  processed: Math.min(i + batchSize, files.length)
+                });
               }
-            }
+            })();
 
-            // Start calculating hashes for new files in the background
-            checkAndCalculateMissingHashes().catch(console.error);
-
-            resolve({ success: true, totalFiles });
+            worker.terminate();
+            resolve({ files, totalFiles });
           } catch (error) {
-            console.error('Error processing scanned files:', error);
+            worker.terminate();
             reject(error);
           }
         } else if (message.type === 'error') {
+          worker.terminate();
           reject(new Error(message.error));
+        }
+      });
+
+      // Handle worker errors
+      worker.on('error', (error) => {
+        worker.terminate();
+        reject(error);
+      });
+
+      // Handle worker exit
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          reject(new Error(`Worker stopped with exit code ${code}`));
         }
       });
 
       // Start the worker
       worker.postMessage({ directoryPath, maxFileSize });
     });
+
   } catch (error) {
     console.error('Error in scan-directory handler:', error);
     throw error;
@@ -1164,138 +1236,6 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
   }
 });
 
-ipcMain.handle('get-models-filtered', async (event, filters) => {
-  try {
-    const {
-      sortOption = "date-desc",
-      limit = 0,
-      offset = 0,
-      designer,
-      license,
-      parentModel,
-      printed,
-      tag,
-      fileType,
-      search,
-      directory
-    } = filters;
-
-    let query = `SELECT DISTINCT m.* FROM models m`;
-    const params = [];
-    const conditions = [];
-
-    // Join tags if filtering by tag
-    if (tag) {
-      query += ` JOIN model_tags mt ON m.id = mt.model_id JOIN tags t ON mt.tag_id = t.id`;
-      conditions.push(`t.name = ?`);
-      params.push(tag);
-    }
-
-    // Apply other filters
-    if (designer) {
-      if (designer === "__none__") {
-        conditions.push(`(m.designer IS NULL OR m.designer = '')`);
-      } else {
-        conditions.push(`m.designer = ?`);
-        params.push(designer);
-      }
-    }
-
-    if (license) {
-      if (license === "__none__") {
-        conditions.push(`(m.license IS NULL OR m.license = '' OR m.license = 'null' OR m.license = 'undefined')`);
-      } else {
-        conditions.push(`m.license = ?`);
-        params.push(license);
-      }
-    }
-
-    if (parentModel) {
-      if (parentModel === "__none__") {
-        conditions.push(`(m.parentModel IS NULL OR m.parentModel = '' OR m.parentModel = 'null' OR m.parentModel = 'undefined')`);
-      } else {
-        conditions.push(`m.parentModel = ?`);
-        params.push(parentModel);
-      }
-    }
-
-    if (printed !== undefined && printed !== "all") {
-      if (printed === "printed") {
-        conditions.push(`m.printed = 1`);
-      } else if (printed === "not-printed") {
-        conditions.push(`(m.printed = 0 OR m.printed IS NULL)`);
-      }
-    }
-
-    if (fileType) {
-      conditions.push(`lower(m.fileName) LIKE ?`);
-      params.push(`%.${fileType.toLowerCase()}`);
-    }
-
-    if (directory) {
-      // Normalize slashes for directory comparison - this is tricky in SQL directly without extensions
-      // We'll use a LIKE clause assuming standard path separators or normalized ones in DB
-      // Better to rely on the application code to ensure DB paths are consistent or use a looser match
-      // For now, we'll try to match the path ending with the directory name before the filename
-      // This is an approximation. A robust solution might need a custom SQLite function.
-      // But based on current memory, paths in DB might vary.
-      // Let's stick to a simple LIKE for now as a starting point.
-      conditions.push(`(m.filePath LIKE ? OR m.filePath LIKE ?)`);
-      params.push(`%/${directory}/%`);
-      params.push(`%\\${directory}\\%`);
-    }
-
-    if (search) {
-      const searchPattern = `%${search}%`;
-      conditions.push(`(m.fileName LIKE ? OR m.designer LIKE ? OR m.notes LIKE ? OR m.parentModel LIKE ? OR m.source LIKE ?)`);
-      params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
-    }
-
-    if (conditions.length > 0) {
-      query += ` WHERE ` + conditions.join(' AND ');
-    }
-
-    // Add sorting
-    let orderClause = "";
-    switch (sortOption) {
-      case "name-asc":
-        orderClause = "ORDER BY m.fileName ASC";
-        break;
-      case "name-desc":
-        orderClause = "ORDER BY m.fileName DESC";
-        break;
-      case "size-asc":
-        orderClause = "ORDER BY m.size ASC";
-        break;
-      case "size-desc":
-        orderClause = "ORDER BY m.size DESC";
-        break;
-      case "date-asc":
-        orderClause = "ORDER BY m.modifiedDate ASC";
-        break;
-      case "date-desc":
-      default:
-        orderClause = "ORDER BY m.modifiedDate DESC";
-        break;
-    }
-    query += ` ${orderClause}`;
-
-    // Add limit/offset
-    if (limit > 0) {
-      query += ` LIMIT ? OFFSET ?`;
-      params.push(limit, offset);
-    }
-
-    console.log('Executing filtered query:', query, params);
-    const models = db.prepare(query).all(...params);
-    return models;
-
-  } catch (error) {
-    console.error("Error in getModelsFiltered IPC:", error);
-    return [];
-  }
-});
-
 ipcMain.handle('get-parent-models', async () => {
   try {
     const rows = db.prepare("SELECT DISTINCT parentModel FROM models WHERE parentModel IS NOT NULL AND parentModel != ''").all();
@@ -1382,7 +1322,7 @@ ipcMain.handle('save-setting', async (event, key, value) => {
       // Force a sync to disk to ensure the change is persisted
       db.pragma('synchronous = FULL');
       db.pragma('journal_mode = WAL');
-      db.pragma('wal_checkpoint(FULL)');
+      db.prepare('PRAGMA wal_checkpoint(FULL)').run();
     }
     
     return true;
@@ -1962,11 +1902,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     console.error('Error getting slicers:', error);
   }
   
-  // Add "Open in Slicer" submenu if there are configured slicers
-  if (slicers.length > 0) {
+  // Add "Open in Slicer" submenu if there are configured slicers and only one file is selected
+  if (slicers.length > 0 && filePaths.length === 1) {
     const slicerSubmenu = {
       label: 'Open in Slicer',
-      enabled: filePaths.length === 1, // Add this line to disable when multiple files are selected
       submenu: slicers.map(slicer => ({
         label: slicer.name,
         click: async () => {
@@ -2361,51 +2300,101 @@ function getDatabasePath() {
 
 // Add these IPC handlers
 ipcMain.handle('get3MFImages', async (event, filePath) => {
-  const startTime = Date.now();
-  console.log(`[DEBUG] get3MFImages: Start processing ${filePath}`);
-
+  // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
-    debugLog('Skipping file from __MACOSX directory:', filePath);
+    console.log('Skipping file from __MACOSX directory:', filePath);
     return null;
   }
-
-  if (!fs.existsSync(filePath)) {
-    console.error('File does not exist:', filePath);
-    return null;
-  }
-
   try {
-    const data = await fs.promises.readFile(filePath);
-    const zip = await JSZip.loadAsync(data);
-    const images = [];
-
-    zip.forEach((relativePath, file) => {
-      if (!file.dir && /\.(png|jpe?g)$/i.test(relativePath)) {
-        images.push({ name: relativePath, file: file });
-      }
-    });
-
-    if (images.length === 0) {
-      debugLog(`[DEBUG] get3MFImages: No embedded image found for ${filePath}. Took ${Date.now() - startTime}ms.`);
+    console.log('Starting to process 3MF file:', filePath);
+    
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      console.error('File does not exist:', filePath);
       return null;
     }
+    
+    // Use JSZip to extract the 3MF file (which is a zip file)
+    console.log('Creating JSZip instance...');
+    const zip = new JSZip();
+    
+    console.log('Reading file data...');
+    const data = await fs.promises.readFile(filePath);
+    console.log('File read successfully, size:', data.length, 'bytes');
+    
+    console.log('Loading zip contents...');
+    const contents = await zip.loadAsync(data);
+    console.log('Zip contents loaded successfully');
+    
+    // Log all files in the 3MF
+    console.log('\nContents of 3MF file:', filePath);
+    console.log('Number of files in archive:', Object.keys(contents.files).length);
+    console.log('All files in archive:');
+    Object.keys(contents.files).forEach(filename => {
+      const file = contents.files[filename];
+      console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
+    });
+    
+    // Look for plate_1.png in the Metadata directory, trying different case variations
+    const possiblePaths = [
+      'Metadata/plate_1.png',
+      'metadata/plate_1.png',
+      '/Metadata/plate_1.png',
+      '/metadata/plate_1.png'
+    ];
 
-    if (bestEntry) {
-      const imageData = await zip.entryData(bestEntry);
-      const extension = path.extname(bestEntry.name).substring(1);
-      const result = [`data:image/${extension};base64,${imageData.toString('base64')}`];
-      const endTime = Date.now();
-      console.log(`[DEBUG] get3MFImages: Found embedded image for ${filePath} in ${endTime - startTime}ms.`);
-      return result;
+    // Try each possible path
+    console.log('\nSearching for plate_1.png...');
+    for (const path of possiblePaths) {
+      console.log('Checking for:', path);
+      const plateImage = contents.files[path];
+      if (plateImage) {
+        console.log('Found plate_1.png at:', path);
+        const imageData = await plateImage.async('base64');
+        console.log('Successfully extracted plate_1.png data');
+        return [`data:image/png;base64,${imageData}`];
+      }
+    }
+    
+    // Helper to check if file is an image and not a system file
+    const isImage = (path) => {
+      const normalized = path.replace(/\\/g, '/');
+      // Skip Mac/System files
+      if (normalized.includes('__MACOSX/') || normalized.split('/').pop().startsWith('._')) return false;
+      return normalized.match(/\.(png|jpe?g|gif|webp)$/i);
+    };
+
+    // If plate_1.png wasn't found, look for any images in the Metadata directory first
+    console.log('\nLooking for any images in Metadata directory...');
+    const imageFiles = [];
+    for (const [path, file] of Object.entries(contents.files)) {
+      // Check if file is in Metadata directory first
+      const normalizedPath = path.replace(/\\/g, '/');
+      if (normalizedPath.toLowerCase().includes('metadata/') && isImage(path)) {
+        console.log('Found image in Metadata:', path);
+        const imageData = await file.async('base64');
+        imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
+      }
     }
 
-    const endTime = Date.now();
-    console.log(`[DEBUG] get3MFImages: No embedded image found for ${filePath}. Took ${endTime - startTime}ms.`);
-    return null;
+    // If no images found in Metadata, look elsewhere in the 3MF
+    if (imageFiles.length === 0) {
+      console.log('\nLooking for images anywhere in 3MF...');
+      for (const [path, file] of Object.entries(contents.files)) {
+        if (isImage(path)) {
+          console.log('Found image:', path);
+          const imageData = await file.async('base64');
+          imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
+        }
+      }
+    }
+    
+    console.log('\nFound total images:', imageFiles.length);
+    return imageFiles;
   } catch (error) {
-    console.error(`Error reading 3MF images for ${filePath}:`, error);
-    const endTime = Date.now();
-    console.log(`[DEBUG] get3MFImages: Error processing ${filePath}. Took ${endTime - startTime}ms.`);
+    console.error('Error reading 3MF images:', error);
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
     return null;
   }
 });
@@ -2468,66 +2457,58 @@ ipcMain.handle('get-duplicates', async () => {
   }
 });
 
-// Add a new IPC handler to check if hash generation is in progress
-ipcMain.handle('is-generating-hashes', async () => {
+// Add IPC handler to calculate missing hashes
+ipcMain.handle('calculate-missing-hashes', async (event) => {
   try {
-    // Check if there are any files without hashes (NULL or empty)
-    const row = db.prepare("SELECT COUNT(*) AS count FROM models WHERE hash IS NULL OR hash = ''").get();
-    return row.count > 0;
-  } catch (error) {
-    console.error('Error checking hash generation status:', error);
-    return false;
-  }
-});
+    // Get all models with missing hashes
+    const modelsWithMissingHashes = db.prepare(`
+      SELECT filePath, fileName, size 
+      FROM models 
+      WHERE hash IS NULL OR hash = ''
+    `).all();
 
-// Add a new IPC handler to get count of models without hash
-ipcMain.handle('getModelsWithoutHash', async () => {
-  try {
-    const row = db.prepare("SELECT COUNT(*) AS count FROM models WHERE hash IS NULL OR hash = ''").get();
-    return row.count;
-  } catch (error) {
-    console.error('Error counting models without hash:', error);
-    return 0;
-  }
-});
+    console.log(`Found ${modelsWithMissingHashes.length} models with missing hashes`);
 
-// Add a new IPC handler to generate missing hashes
-ipcMain.handle('generateMissingHashes', async (event) => {
-  try {
-    // Get all models without hash
-    const models = db.prepare("SELECT id, filePath FROM models WHERE hash IS NULL OR hash = ''").all();
-    const total = models.length;
-    let processed = 0;
-    
-    for (const model of models) {
-      try {
-        // Check if file exists
-        if (!fs.existsSync(model.filePath)) {
-          console.warn(`File not found for hash generation: ${model.filePath}`);
-          processed++;
-          continue;
-        }
-        
-        // Generate hash
-        const hash = await calculateFileHash(model.filePath);
-        
-        // Update the database
-        db.prepare("UPDATE models SET hash = ? WHERE id = ?").run(hash, model.id);
-        
-        // Send progress update
-        processed++;
-        event.sender.send('hash-generation-progress', { processed, total });
-        
-      } catch (err) {
-        console.error(`Error generating hash for ${model.filePath}:`, err);
-        processed++;
-      }
+    if (modelsWithMissingHashes.length === 0) {
+      return { calculated: 0, total: 0 };
     }
-    
-    return true;
+
+    let calculatedCount = 0;
+    const updateHash = db.prepare('UPDATE models SET hash = ? WHERE filePath = ?');
+
+    // Calculate hashes in batches to avoid blocking
+    const batchSize = 10;
+    for (let i = 0; i < modelsWithMissingHashes.length; i += batchSize) {
+      const batch = modelsWithMissingHashes.slice(i, i + batchSize);
+      
+      for (const model of batch) {
+        try {
+          if (fs.existsSync(model.filePath)) {
+            const hash = await calculateFileHash(model.filePath);
+            updateHash.run(hash, model.filePath);
+            calculatedCount++;
+          } else {
+            console.warn(`File no longer exists: ${model.filePath}`);
+          }
+        } catch (error) {
+          console.error(`Error calculating hash for ${model.filePath}:`, error);
+        }
+      }
+
+      // Send progress update
+      event.sender.send('hash-calculation-progress', {
+        calculated: calculatedCount,
+        total: modelsWithMissingHashes.length
+      });
+
+      // Small delay to prevent blocking
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    return { calculated: calculatedCount, total: modelsWithMissingHashes.length };
   } catch (error) {
-    console.error('Error generating missing hashes:', error);
-    return false;
+    console.error('Error calculating missing hashes:', error);
+    throw error;
   }
 });
 
@@ -2545,25 +2526,13 @@ ipcMain.handle('getThumbnail', async (event, filePath) => {
 // Update the checkForUpdates function to track user's response
 async function checkForUpdates(isBeta = false) {
   try {
-    // Check if user has opted in to beta versions
-    if (!isBeta) {
-      const betaOptIn = db.prepare('SELECT value FROM settings WHERE key = ?').get('betaOptIn');
-      isBeta = betaOptIn && betaOptIn.value === 'true';
-    }
-
-    // Check if version check has been performed on startup
+    // First check if we've already shown update dialog this session
     const versionCheckPerformed = db.prepare('SELECT value FROM settings WHERE key = ?').get('versionCheckPerformedOnStartup');
-    const startupCheck = !versionCheckPerformed || versionCheckPerformed.value === 'false';
-
-    // Only continue if this is a startup check or forced check (when isBeta is explicitly passed)
-    if (!startupCheck && isBeta === false) {
-      return;
+    if (versionCheckPerformed && versionCheckPerformed.value === 'true') {
+      console.log('Version check already performed this session, skipping');
+      return null;
     }
 
-    // Set flag that check has been performed
-    db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('true', 'versionCheckPerformedOnStartup');
-
-    // Rest of update checking code...
     return new Promise((resolve, reject) => {
       const versionUrl = isBeta ? 
         'https://printventory.com/beta.version' : 
@@ -2580,22 +2549,12 @@ async function checkForUpdates(isBeta = false) {
           // Validate version format (e.g., "0.6.0")
           if (/^\d+\.\d+(\.\d+)?$/.test(version)) {
             console.log('Main Process - Valid version format received:', version);
-            
             // Update the database with the latest version
             try {
               db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(version, 'latestVersion');
               db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(new Date().toISOString(), 'lastUpdateCheck');
-              
-              // Get current app version
-              const currentVersion = app.getVersion();
-              console.log('Current version:', currentVersion, 'Latest version:', version);
-              
-              // If the versions are different, reset the versionCheckPerformedOnStartup flag
-              if (version !== currentVersion) {
-                console.log('New version available, resetting version check flag');
-                db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('false', 'versionCheckPerformedOnStartup');
-              }
-              
+              // Mark that we've performed the version check
+              db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('true', 'versionCheckPerformedOnStartup');
               console.log('Database updated with latest version:', version);
             } catch (dbError) {
               console.error('Error updating version in database:', dbError);
@@ -2820,24 +2779,11 @@ function getSettings() {
 ipcMain.handle('get-models-without-thumbnails', async () => {
   try {
     const modelsWithoutThumbnails = db.prepare(`
-      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = ''
+      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
     `).all();
     return modelsWithoutThumbnails;
   } catch (error) {
     console.error('Error fetching models without thumbnails:', error);
-    return [];
-  }
-});
-
-// Add new function to get models with missing or default thumbnails (for "Generate Missing Thumbnails" menu option)
-ipcMain.handle('get-models-with-default-thumbnails', async () => {
-  try {
-    const modelsWithDefaultThumbnails = db.prepare(`
-      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
-    `).all();
-    return modelsWithDefaultThumbnails;
-  } catch (error) {
-    console.error('Error fetching models with default thumbnails:', error);
     return [];
   }
 });
@@ -3126,123 +3072,28 @@ async function saveModelBatch(modelDataBatch) {
       return false;
     }
 
-    console.log(`Processing batch of ${modelDataBatch.length} models`);
-
-    // Enable foreign key constraints
-    db.pragma('foreign_keys = ON');
-
     // Begin a transaction for better performance
     const transaction = db.transaction(() => {
-      // Prepare statements we'll need
-      const getModelStmt = db.prepare('SELECT id FROM models WHERE filePath = ?');
-      
-      const updateStmt = db.prepare(`
-        UPDATE models SET 
-          fileName = COALESCE(?, fileName),
-          designer = COALESCE(?, designer),
-          source = COALESCE(?, source),
-          notes = COALESCE(?, notes),
-          printed = COALESCE(?, printed),
-          parentModel = COALESCE(?, parentModel),
-          license = COALESCE(?, license)
-        WHERE id = ?
+      const stmt = db.prepare(`
+        INSERT OR IGNORE INTO models 
+        (filePath, fileName, hash, size, modifiedDate, dateAdded) 
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
       
-      const insertStmt = db.prepare(`
-        INSERT OR IGNORE INTO models (
-          filePath, fileName, designer, source, notes, printed, parentModel, license
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      
-      // Process each model
       for (const modelData of modelDataBatch) {
-        const {
-          filePath,
-          fileName,
-          designer,
-          source,
-          notes,
-          printed,
-          parentModel,
-          license,
-          tags
-        } = modelData;
-        
-        if (!filePath) {
-          console.warn('Skipping model with missing filePath');
-          continue;
-        }
-        
-        // Check if model exists
-        const existingModel = getModelStmt.get(filePath);
-        
-        if (existingModel) {
-          // Update existing model
-          updateStmt.run(
-            fileName || null,
-            designer || null,
-            source || null,
-            notes || null,
-            printed !== undefined ? (printed ? 1 : 0) : null,
-            parentModel || null,
-            license || null,
-            existingModel.id
-          );
-          
-          // Handle tags if provided
-          if (tags && Array.isArray(tags) && tags.length > 0) {
-            // Process tags for this model
-            processTags(existingModel.id, tags);
-          }
-        } else {
-          // Insert new model
-          const result = insertStmt.run(
-            filePath,
-            fileName || path.basename(filePath),
-            designer || null,
-            source || null,
-            notes || null,
-            printed !== undefined ? (printed ? 1 : 0) : 0,
-            parentModel || null,
-            license || null
-          );
-          
-          // Handle tags if provided
-          if (tags && Array.isArray(tags) && tags.length > 0) {
-            // Process tags for this model
-            processTags(result.lastInsertRowid, tags);
-          }
-        }
+        const dateAdded = new Date().toISOString();
+        stmt.run(
+          modelData.filePath,
+          modelData.fileName,
+          modelData.hash || '',
+          modelData.size || 0,
+          modelData.modifiedDate || dateAdded,
+          dateAdded
+        );
       }
     });
     
-    // Helper function to process tags within the transaction
-    function processTags(modelId, tags) {
-      // First remove existing tags
-      db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
-      
-      // Process each tag
-      for (const tagName of tags) {
-        if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
-          const trimmedTagName = tagName.trim();
-          
-          // Ensure tag exists
-          db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
-          
-          // Get tag ID
-          const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
-          
-          if (tagRow && tagRow.id) {
-            // Create relationship
-            db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
-          }
-        }
-      }
-    }
-    
-    // Execute the transaction
     transaction();
-    console.log('Batch processing completed successfully');
     return true;
   } catch (error) {
     console.error('Error saving model batch:', error);
@@ -3476,11 +3327,11 @@ function ensureSlicersTableExists() {
       console.log('Slicers table does not exist. Creating it...');
       
       // Create the slicers table
-      db.exec(`CREATE TABLE IF NOT EXISTS slicers (
+      db.prepare(`CREATE TABLE IF NOT EXISTS slicers (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
           path TEXT NOT NULL
-      )`);
+      )`).run();
       
       console.log('Slicers table created successfully');
     } else {
@@ -3541,105 +3392,4 @@ ipcMain.handle('check-collect-usage', async (event) => {
     console.error('Error checking CollectUsage setting:', error);
     return null;
   }
-});
-
-// Add a function to check and calculate missing hashes
-async function checkAndCalculateMissingHashes() {
-  try {
-    // Get all files without hashes
-    const filesWithoutHash = db.prepare(`
-      SELECT filePath, fileName, size 
-      FROM models 
-      WHERE hash IS NULL OR hash = ''
-    `).all();
-
-    if (filesWithoutHash.length === 0) {
-      return;
-    }
-
-    console.log(`Found ${filesWithoutHash.length} files without hashes. Calculating in background...`);
-
-    // Process files in batches to avoid overwhelming the system
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < filesWithoutHash.length; i += BATCH_SIZE) {
-      const batch = filesWithoutHash.slice(i, i + BATCH_SIZE);
-      
-      // Process each batch in parallel
-      await Promise.all(batch.map(async (file) => {
-        try {
-          // Check if file still exists
-          if (!fs.existsSync(file.filePath)) {
-            // Remove from database if file no longer exists
-            db.prepare('DELETE FROM models WHERE filePath = ?').run(file.filePath);
-            return;
-          }
-
-          const hash = await calculateFileHash(file.filePath);
-          
-          // Update the database with the new hash
-          db.prepare(`
-            UPDATE models 
-            SET hash = ? 
-            WHERE filePath = ?
-          `).run(hash, file.filePath);
-
-          console.log(`Calculated hash for ${file.filePath}`);
-        } catch (error) {
-          console.error(`Error calculating hash for ${file.filePath}:`, error);
-        }
-      }));
-
-      // Small delay between batches to prevent system overload
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-  } catch (error) {
-    console.error('Error in checkAndCalculateMissingHashes:', error);
-  }
-}
-
-// Modify the app ready event to include the hash check
-app.whenReady().then(async () => {
-  // ... existing ready event code ...
-
-  // Start checking for missing hashes in the background
-  checkAndCalculateMissingHashes().catch(console.error);
-});
-
-// Add this near the other ipcMain handlers
-ipcMain.handle('show-input-dialog', async (event, options) => {
-  const { title, label, placeholder } = options;
-  
-  // Get focused window or create a new one if none exists
-  const focusedWindow = BrowserWindow.getFocusedWindow() || mainWindow;
-  
-  // Create a simple prompt dialog with a text input
-  const { response, checkboxChecked } = await dialog.showMessageBox(focusedWindow, {
-    title: title || 'Input',
-    message: label || 'Please enter a value:',
-    detail: 'Type your input below:',
-    buttons: ['OK', 'Cancel'],
-    defaultId: 0,
-    cancelId: 1,
-    type: 'question',
-    customPromptInput: true // Not a standard option, but will be handled in the renderer
-  });
-  
-  if (response === 0) {
-    // User clicked OK
-    // Send a request to the renderer process to show a native JavaScript prompt
-    return new Promise((resolve) => {
-      event.sender.send('show-native-prompt', { title, label, placeholder });
-      
-      // Set up a one-time listener for the response
-      ipcMain.once('native-prompt-response', (_event, result) => {
-        resolve(result);
-      });
-    });
-  }
-  
-  // User clicked Cancel
-  return { 
-    value: null, 
-    canceled: true 
-  };
 });
