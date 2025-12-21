@@ -2356,14 +2356,6 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       }
     }
     
-    // Helper to check if file is an image and not a system file
-    const isImage = (path) => {
-      const normalized = path.replace(/\\/g, '/');
-      // Skip Mac/System files
-      if (normalized.includes('__MACOSX/') || normalized.split('/').pop().startsWith('._')) return false;
-      return normalized.match(/\.(png|jpe?g|gif|webp)$/i);
-    };
-
     // If plate_1.png wasn't found, look for any images in the Metadata directory first
     console.log('\nLooking for any images in Metadata directory...');
     const imageFiles = [];
@@ -2372,7 +2364,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       if (path.toLowerCase().includes('metadata/') && path.match(/\.(png|jpe?g|gif|webp)$/i)) {
         console.log('Found image in Metadata:', path);
         const imageData = await file.async('base64');
-        imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
+        imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
       }
     }
 
@@ -2383,7 +2375,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
         if (path.match(/\.(png|jpe?g|gif|webp)$/i)) {
           console.log('Found image:', path);
           const imageData = await file.async('base64');
-          imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
+          imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
         }
       }
     }
