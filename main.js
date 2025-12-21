@@ -2369,8 +2369,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     const imageFiles = [];
     for (const [path, file] of Object.entries(contents.files)) {
       // Check if file is in Metadata directory first
-      const normalizedPath = path.replace(/\\/g, '/');
-      if (normalizedPath.toLowerCase().includes('metadata/') && isImage(path)) {
+      if (path.toLowerCase().includes('metadata/') && path.match(/\.(png|jpe?g|gif|webp)$/i)) {
         console.log('Found image in Metadata:', path);
         const imageData = await file.async('base64');
         imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
@@ -2381,7 +2380,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     if (imageFiles.length === 0) {
       console.log('\nLooking for images anywhere in 3MF...');
       for (const [path, file] of Object.entries(contents.files)) {
-        if (isImage(path)) {
+        if (path.match(/\.(png|jpe?g|gif|webp)$/i)) {
           console.log('Found image:', path);
           const imageData = await file.async('base64');
           imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
