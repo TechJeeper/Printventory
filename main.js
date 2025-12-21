@@ -2335,27 +2335,6 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
     });
     
-    // Look for plate_1.png in the Metadata directory, trying different case variations
-    const possiblePaths = [
-      'Metadata/plate_1.png',
-      'metadata/plate_1.png',
-      '/Metadata/plate_1.png',
-      '/metadata/plate_1.png'
-    ];
-
-    // Try each possible path
-    console.log('\nSearching for plate_1.png...');
-    for (const path of possiblePaths) {
-      console.log('Checking for:', path);
-      const plateImage = contents.files[path];
-      if (plateImage) {
-        console.log('Found plate_1.png at:', path);
-        const imageData = await plateImage.async('base64');
-        console.log('Successfully extracted plate_1.png data');
-        return [`data:image/png;base64,${imageData}`];
-      }
-    }
-    
     // Helper to check if file is an image and not a system file
     const isImage = (path) => {
       const normalized = path.replace(/\\/g, '/');
@@ -2364,32 +2343,71 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       return normalized.match(/\.(png|jpe?g|gif|webp)$/i);
     };
 
-    // If plate_1.png wasn't found, look for any images in the Metadata directory first
-    console.log('\nLooking for any images in Metadata directory...');
-    const imageFiles = [];
+    // Helper to calculate score for an image to determine priority
+    const calculateScore = (path, size) => {
+      let score = 0;
+      const lowerPath = path.toLowerCase();
+      const fileName = path.split('/').pop().toLowerCase();
+
+      // 1. Camera photos (highest priority) - specific patterns
+      if (fileName.match(/^dsc/)) score += 100; // Nikon/Sony
+      if (fileName.match(/^img/)) score += 100; // Canon/generic
+      if (fileName.match(/^pxl/)) score += 100; // Pixel
+      if (fileName.match(/^\d{8}_\d{6}/)) score += 100; // Android date format
+
+      // 2. Metadata/Generated thumbnails (lower priority)
+      if (lowerPath.includes('metadata')) score -= 50;
+      if (fileName.includes('thumbnail')) score -= 20;
+      if (fileName.includes('plate')) score -= 30; // Slicer plate images
+      if (fileName.includes('preview')) score -= 10;
+
+      // 3. File size (preference for larger, likely higher res images)
+      // Cap size bonus at 50 points (assuming size is in bytes)
+      // Use 0 if size is undefined
+      const safeSize = size || 0;
+      score += Math.min(safeSize / 1024, 50);
+
+      // 4. Prefer webp/jpg over png (often photos vs generated)
+      if (fileName.endsWith('.webp') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) {
+        score += 10;
+      }
+
+      return score;
+    };
+
+    // Scan all images in the archive
+    console.log('\nScanning all images in 3MF archive...');
+    const allImages = [];
+
     for (const [path, file] of Object.entries(contents.files)) {
-      // Check if file is in Metadata directory first
-      const normalizedPath = path.replace(/\\/g, '/');
-      if (normalizedPath.toLowerCase().includes('metadata/') && isImage(path)) {
-        console.log('Found image in Metadata:', path);
-        const imageData = await file.async('base64');
-        imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
+      if (isImage(path) && !file.dir) {
+        // Try to get uncompressed size if available, otherwise 0
+        const size = (file._data && file._data.uncompressedSize) || 0;
+        const score = calculateScore(path, size);
+        console.log(`Found image: ${path} (Score: ${score})`);
+
+        allImages.push({
+          path,
+          file,
+          score
+        });
       }
     }
 
-    // If no images found in Metadata, look elsewhere in the 3MF
-    if (imageFiles.length === 0) {
-      console.log('\nLooking for images anywhere in 3MF...');
-      for (const [path, file] of Object.entries(contents.files)) {
-        if (isImage(path)) {
-          console.log('Found image:', path);
-          const imageData = await file.async('base64');
-          imageFiles.push(`data:image/${path.split('.').pop().toLowerCase()};base64,${imageData}`);
-        }
-      }
+    // Sort images by score descending
+    allImages.sort((a, b) => b.score - a.score);
+
+    // Extract top images
+    const imageFiles = [];
+    const maxImagesToExtract = 5; // Limit to top 5 to save memory
+
+    for (const imgObj of allImages.slice(0, maxImagesToExtract)) {
+      console.log(`Extracting: ${imgObj.path} (Score: ${imgObj.score})`);
+      const imageData = await imgObj.file.async('base64');
+      imageFiles.push(`data:image/${imgObj.path.split('.').pop().toLowerCase()};base64,${imageData}`);
     }
     
-    console.log('\nFound total images:', imageFiles.length);
+    console.log('\nExtracted total images:', imageFiles.length);
     return imageFiles;
   } catch (error) {
     console.error('Error reading 3MF images:', error);
