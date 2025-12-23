@@ -6491,6 +6491,23 @@ async function generateThumbnail(file) {
       throw new Error("generateThumbnail: filePath is undefined");
     }
 
+    // 1. Try to get embedded thumbnail for 3MF
+    if (filePath.toLowerCase().endsWith('.3mf')) {
+        try {
+            const images = await extract3MFThumbnail(filePath);
+            if (images && images.length > 0) {
+                const firstImage = images[0];
+                if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
+                    // Save to database
+                    await window.electron.saveThumbnail(filePath, firstImage);
+                    return firstImage;
+                }
+            }
+        } catch (e) {
+            console.error('Error extracting 3MF thumbnail:', e);
+        }
+    }
+
     // Use the exposed function to get file stats
     const stats = await window.electron.getFileStats(filePath);
     const fileSizeInMB = stats.size / (1024 * 1024);
