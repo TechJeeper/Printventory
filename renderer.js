@@ -8379,8 +8379,8 @@ function renderVirtualGrid(models) {
       currentVerticalGap = 24;
       currentHorizontalGap = 24;
     } else {
-      // Detailed view: no gap between rows
-      currentVerticalGap = 0;
+      // Detailed view: gap between rows
+      currentVerticalGap = 20;
       currentHorizontalGap = 20;
     }
     
@@ -8421,14 +8421,9 @@ function renderVirtualGrid(models) {
           }
         }
 
-        // Update spacer height - for detailed view, no gap between rows
+        // Update spacer height
         let currentTotalHeight;
-        if (currentGridView === 'detailed') {
-          // Detailed view: rows touch each other, no gaps
-          currentTotalHeight = (currentRowCount * itemHeight) + (paddingVertical * 2);
-        } else {
-          currentTotalHeight = (currentRowCount * itemHeight) + ((currentRowCount - 1) * currentVerticalGap) + (paddingVertical * 2);
-        }
+        currentTotalHeight = (currentRowCount * itemHeight) + ((currentRowCount - 1) * currentVerticalGap) + (paddingVertical * 2);
         spacer.style.height = currentTotalHeight + 'px';
 
         const buffer = 2; // extra rows to render before and after the visible area
@@ -8467,13 +8462,9 @@ function renderVirtualGrid(models) {
             const existingItem = virtualContent.querySelector(`[data-index="${index}"]`);
             if (existingItem) {
               // Update position if needed (in case of resize)
-              // For detailed view, rows touch each other (no gap)
+              // Calculate top position
               let topPosition;
-              if (currentGridView === 'detailed') {
-                topPosition = paddingVertical + (row * itemHeight);
-              } else {
-                topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
-              }
+              topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
               
               existingItem.style.top = topPosition + 'px';
               if (currentGridView === 'list') {
@@ -8499,13 +8490,9 @@ function renderVirtualGrid(models) {
             const item = createModelItem(model, currentGridView);
             item.dataset.index = index;
             item.style.position = 'absolute';
-            // Calculate top position - for detailed view, rows touch each other (no gap)
+            // Calculate top position
             let topPosition;
-            if (currentGridView === 'detailed') {
-              topPosition = paddingVertical + (row * itemHeight);
-            } else {
-              topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
-            }
+            topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
             
             item.style.top = topPosition + 'px';
             if (currentGridView === 'list') {
