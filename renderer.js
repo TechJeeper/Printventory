@@ -14,10 +14,10 @@ const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
 const MAX_CONCURRENT_RENDERS = 1; // Reduce from 5 to 1 to prevent context loss
 
 const MAX_MODELS_IN_MEMORY = 500;
-// Add these constants at the top level of the file
 const PAGE_SIZE = 100; // Number of models to keep in memory
 let allFilteredModels = []; // Store all filtered models (references only)
 let visibleModels = []; // Store currently visible models (full data)
+let currentGridView = 'detailed'; // Current grid view mode: 'list', 'preview', 'detailed'
 let currentPage = 0;
 let isVirtualScrolling = false; // Flag to track if virtual scrolling is active
 
@@ -47,6 +47,251 @@ let autoStartedRendering = false;
 let thumbnailCache = new Map();
 let sharedRenderer = null;
 let renderContext = null;
+
+// Define loadModel function at top level so it's available immediately (before DOMContentLoaded)
+// Helper function to parse zip path format
+function parseZipPath(filePath) {
+  if (filePath.includes('::')) {
+    const [zipPath, entryPath] = filePath.split('::');
+    return { zipPath, entryPath, isZipEntry: true };
+  }
+  return { zipPath: filePath, entryPath: null, isZipEntry: false };
+}
+
+async function loadModel(filePath, options = {}) {
+  const startTime = Date.now();
+  console.log(`[DEBUG] loadModel: Start loading ${filePath}`);
+  try {
+    console.log('loadModel: Starting for file:', filePath);
+    
+    // Check if this is a zip entry
+    const pathInfo = parseZipPath(filePath);
+    let actualFilePath = filePath;
+    let tempFilePath = null;
+    
+    if (pathInfo.isZipEntry) {
+      console.log(`[DEBUG] loadModel: Detected zip entry, extracting to temp file`);
+      try {
+        // Extract to temp file
+        actualFilePath = await window.electron.extractModelFromZip(filePath);
+        tempFilePath = actualFilePath;
+        console.log(`[DEBUG] loadModel: Extracted to temp file: ${actualFilePath}`);
+      } catch (error) {
+        console.error(`[DEBUG] loadModel: Error extracting zip entry: ${error}`);
+        throw new Error(`Failed to extract model from zip: ${error.message}`);
+      }
+    }
+    
+    const fileExtension = actualFilePath.split('.').pop().toLowerCase();
+    
+    // For 3MF files, check for embedded images BEFORE 3D loading
+    // NOTE: This is a safety check - renderModelToPNG should have already checked
+    // and returned early if embedded images exist. This prevents unnecessary 3D loading.
+    if (fileExtension === '3mf') {
+      console.log(`[DEBUG] loadModel: Checking for embedded images in 3MF: ${actualFilePath}`);
+      try {
+        const images = await window.electron.get3MFImages(pathInfo.isZipEntry ? filePath : actualFilePath);
+        if (images && images.length > 0) {
+          console.log(`[DEBUG] loadModel: WARNING - Found embedded image in 3MF but loadModel was still called for ${filePath}`);
+          console.log(`[DEBUG] loadModel: Returning null to skip 3D loading - embedded image should be used instead`);
+          // Note: Temp file cleanup handled by OS
+          // Return null to skip 3D loading - embedded image should be used instead
+          return null;
+        } else {
+          console.log(`[DEBUG] loadModel: No embedded images found, proceeding with 3D loading for ${filePath}`);
+        }
+      } catch (imageError) {
+        console.error(`[DEBUG] loadModel: Error checking for embedded image: ${imageError}`);
+        // Continue with 3D loading if there's an error checking for images
+      }
+    }
+    
+    // Properly encode the file path to handle special characters and Windows paths
+    let encodedFilePath;
+    
+    // Check if we're running on Windows (starts with drive letter)
+    if (/^[A-Za-z]:/.test(actualFilePath)) {
+      // For Windows paths: 
+      // 1. Convert backslashes to forward slashes
+      // 2. Add file:/// protocol
+      // 3. Properly encode special characters
+      
+      try {
+        // First normalize the path to use forward slashes
+        const normalizedPath = actualFilePath.replace(/\\/g, '/');
+        
+        // Create URL object for proper handling - this works better for Windows paths
+        const fileUrl = new URL(`file:///${normalizedPath}`);
+        
+        // Get the properly encoded pathname from the URL
+        encodedFilePath = fileUrl.href;
+        
+        // Explicitly handle hash character in path segments
+        if (normalizedPath.includes('#')) {
+          // Replace the hash character with its URL encoding (%23)
+          // But ensure we don't double-encode anything
+          encodedFilePath = encodedFilePath.replace(/#/g, '%23');
+        }
+        
+        // Ensure other problematic characters are properly encoded
+        encodedFilePath = encodedFilePath
+          .replace(/\?/g, '%3F')
+          .replace(/\s/g, '%20')
+          .replace(/\(/g, '%28')
+          .replace(/\)/g, '%29')
+          .replace(/'/g, '%27')
+          .replace(/\[/g, '%5B')
+          .replace(/\]/g, '%5D');
+      } catch (error) {
+        console.error('Error creating URL from file path:', error);
+        
+        // Fallback method: direct string replacement
+        const normalizedPath = actualFilePath.replace(/\\/g, '/');
+        encodedFilePath = `file:///${normalizedPath}`
+            .replace(/#/g, '%23')
+            .replace(/\s/g, '%20');
+      }
+      
+      console.log('loadModel: Encoded Windows path:', encodedFilePath);
+    } else {
+      // For non-Windows paths, use a direct encoding approach
+      try {
+        const normalizedPath = actualFilePath.replace(/\\/g, '/');
+        
+        // Simply replace problematic characters directly
+        encodedFilePath = `file://${normalizedPath}`
+            .replace(/#/g, '%23')
+            .replace(/\s/g, '%20')
+            .replace(/\(/g, '%28')
+            .replace(/\)/g, '%29')
+            .replace(/'/g, '%27')
+            .replace(/\[/g, '%5B')
+            .replace(/\]/g, '%5D');
+      } catch (error) {
+        console.error('Error encoding non-Windows file path:', error);
+        // Super simple fallback
+        encodedFilePath = `file://${actualFilePath.replace(/#/g, '%23')}`;
+      }
+      console.log('loadModel: Encoded Unix path:', encodedFilePath);
+    }
+    
+    // If no embedded image found, proceed with 3D loading
+    let loader;
+    if (fileExtension === 'stl') {
+      if (!THREE.STLLoader) {
+        console.error('loadModel: THREE.STLLoader not available');
+        throw new Error('THREE.STLLoader not initialized');
+      }
+      loader = new THREE.STLLoader();
+    } else if (fileExtension === '3mf') {
+      if (!THREE.ThreeMFLoader) {
+        console.error('loadModel: THREE.ThreeMFLoader not available');
+        throw new Error('THREE.ThreeMFLoader not initialized');
+      }
+      if (!fflate) {
+        console.error('loadModel: fflate not available');
+        throw new Error('fflate not initialized');
+      }
+      THREE.ThreeMFLoader.fflate = fflate;
+      loader = new THREE.ThreeMFLoader();
+    } else {
+      throw new Error(`Unsupported file type: ${fileExtension}`);
+    }
+
+    if (!loader) {
+      throw new Error('Failed to initialize loader');
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        loader.load(
+            encodedFilePath, // Use the encoded path instead of the original
+            (object) => {
+              try {
+                let mesh;
+                if (object.isBufferGeometry) {
+                  if (!THREE.MeshPhongMaterial) {
+                    console.error('loadModel: THREE.MeshPhongMaterial not available');
+                    throw new Error('THREE.MeshPhongMaterial not initialized');
+                  }
+                  const material = new THREE.MeshPhongMaterial({
+                    color: 0xcccccc,
+                    specular: 0x111111,
+                    shininess: 200
+                  });
+                  if (!THREE.Mesh) {
+                    console.error('loadModel: THREE.Mesh not available');
+                    throw new Error('THREE.Mesh not initialized');
+                  }
+                  
+                  // Proper geometry centering instead of normalization
+                  object.computeBoundingBox();
+                  object.center();
+                  object.computeVertexNormals();
+                  
+                  mesh = new THREE.Mesh(object, material);
+                  
+                  if (fileExtension === 'stl') {
+                    mesh.rotation.x = -Math.PI / 2;
+                  }
+                } else if (object.isObject3D) {
+                  mesh = object;
+                  mesh.traverse((child) => {
+                    if (child.isMesh) {
+                      child.material = new THREE.MeshPhongMaterial({
+                        color: 0xcccccc,
+                        specular: 0x111111,
+                        shininess: 200
+                      });
+                    }
+                  });
+                  if (fileExtension === '3mf') {
+                    mesh.rotation.x = -Math.PI / 2;
+                  }
+                } else {
+                  reject(new Error('Unsupported object type'));
+                  return;
+                }
+                resolve(mesh);
+              } catch (error) {
+                console.error('loadModel: Error processing loaded object:', error);
+                // Note: Temp file cleanup handled by OS
+                reject(error);
+              }
+            },
+            (progress) => {
+              // Progress callback
+            },
+            (error) => {
+              console.error('loadModel: Loader error:', error);
+              // Clean up temp file on error
+              if (tempFilePath) {
+                window.electron.deleteTempFile?.(tempFilePath).catch(cleanupError => {
+                  console.error('Error cleaning up temp file:', cleanupError);
+                });
+              }
+              reject(error);
+            }
+        );
+      } catch (error) {
+        console.error('loadModel: Error in loader.load:', error);
+        // Note: Temp file cleanup handled by OS
+        reject(error);
+      }
+    });
+  } catch (error) {
+    console.error('loadModel error:', error);
+    throw error;
+  } finally {
+    const endTime = Date.now();
+    console.log(`[DEBUG] loadModel: Finished loading ${filePath}. Took ${endTime - startTime}ms.`);
+    // Note: Temp file cleanup is handled by OS or on next extraction
+    // We don't delete immediately as the file may still be in use by Three.js
+  }
+}
+
+// Make loadModel available globally
+window.loadModel = loadModel;
 
 // Add these variables at the top
 let totalThumbnailsToGenerate = 0;
@@ -85,8 +330,21 @@ async function updateModelCounts(viewCount) {
 // Add this new function to update individual model elements
 async function updateModelElement(filePath) {
   try {
+    // Small delay to ensure database is updated
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
     const model = await window.electron.getModel(filePath);
-    if (!model) return;
+    if (!model) {
+      console.warn('updateModelElement: Model not found for', filePath);
+      return;
+    }
+    console.log('updateModelElement: Updating element for', filePath, 'with model data:', {
+      designer: model.designer,
+      source: model.source,
+      parentModel: model.parentModel,
+      license: model.license,
+      tags: model.tags
+    });
 
     // Check current filter values
     const designer = document.getElementById('designer-select').value;
@@ -134,9 +392,14 @@ async function updateModelElement(filePath) {
     // Find existing element using the escaped path
     const existingElement = document.querySelector(`.file-item[data-filepath="${escapedPath}"]`);
     if (!existingElement) {
+      console.warn('updateModelElement: Element not found for path:', filePath);
       debugLog('Element not found for path:', filePath);
       return;
     }
+    
+    // Check if we're in detailed view
+    const isDetailedView = existingElement.classList.contains('file-item-detailed');
+    console.log('updateModelElement: isDetailedView?', isDetailedView);
 
     // If the model no longer matches the current filters, hide it
     if (!shouldBeVisible) {
@@ -176,28 +439,221 @@ async function updateModelElement(filePath) {
       existingElement.appendChild(statusElement);
     }
     
-    // Update designer info if available
+    // Remove any existing designer info elements that might have been added (redundant with metadata)
+    // Designer is already shown in the metadata section, so we don't need it here
     const fileInfo = existingElement.querySelector('.file-info');
     if (fileInfo) {
-      // Remove any existing designer info elements to prevent duplicates
       const existingDesignerElements = fileInfo.querySelectorAll('.designer-info');
       existingDesignerElements.forEach(el => el.remove());
-      
-      // Add designer info if available
-      if (model.designer) {
-        const designerInfo = document.createElement('div');
-        designerInfo.className = 'designer-info';
-
-      const label = document.createElement('span');
-      label.className = 'directory-label';
-      label.textContent = 'Designer: ';
-
-      const value = document.createTextNode(model.designer);
-
-      designerInfo.appendChild(label);
-      designerInfo.appendChild(value);
-        fileInfo.appendChild(designerInfo);
+    }
+    
+    // Update metadata in detailed view grid (only if in detailed view)
+    const metadataContainer = existingElement.querySelector('.metadata-container');
+    console.log('updateModelElement: metadataContainer found?', !!metadataContainer, 'isDetailedView?', isDetailedView, 'element classes:', existingElement.className);
+    
+    // Also check if the current view mode is detailed (in case class check fails)
+    const currentViewIsDetailed = currentGridView === 'detailed';
+    console.log('updateModelElement: currentGridView is detailed?', currentViewIsDetailed);
+    
+    if (metadataContainer && (isDetailedView || currentViewIsDetailed)) {
+      // Update designer
+      const designerItem = metadataContainer.querySelector('.designer-item');
+      console.log('updateModelElement: designerItem found?', !!designerItem);
+      if (designerItem) {
+        const designerValue = (model.designer && model.designer.trim()) ? model.designer.trim() : '';
+        const hasDesigner = designerValue && designerValue !== '';
+        console.log('updateModelElement: designerValue =', designerValue, 'hasDesigner =', hasDesigner);
+        let designerValueSpan = designerItem.querySelector('.metadata-value.designer-info');
+        console.log('updateModelElement: designerValueSpan found?', !!designerValueSpan);
+        if (!designerValueSpan) {
+          // If the span doesn't exist, create it
+          console.log('Creating missing designer value span');
+          designerValueSpan = document.createElement('span');
+          designerValueSpan.className = 'metadata-value designer-info';
+          designerValueSpan.style.display = 'inline-block';
+          // Find the icon and insert after it
+          const iconSpan = designerItem.querySelector('.metadata-icon');
+          if (iconSpan) {
+            // Insert after the icon
+            if (iconSpan.nextSibling) {
+              iconSpan.parentNode.insertBefore(designerValueSpan, iconSpan.nextSibling);
+            } else {
+              iconSpan.parentNode.appendChild(designerValueSpan);
+            }
+          } else {
+            designerItem.appendChild(designerValueSpan);
+          }
+        }
+        if (designerValueSpan) {
+          designerValueSpan.textContent = hasDesigner ? designerValue : '—';
+          designerValueSpan.style.color = hasDesigner ? '#ccc' : '#666';
+          console.log('updateModelElement: Updated designer to', designerValueSpan.textContent);
+        }
+        // Update clickability
+        if (hasDesigner) {
+          designerItem.style.cursor = 'pointer';
+          designerItem.classList.add('clickable-metadata');
+          // Re-add click handler
+          designerItem.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const designerSelect = document.getElementById('designer-select');
+            if (designerSelect) {
+              designerSelect.value = designerValue;
+              if (typeof window.performCombinedSearch === 'function') {
+                await window.performCombinedSearch();
+              }
+            }
+          };
+        } else {
+          designerItem.style.cursor = 'default';
+          designerItem.classList.remove('clickable-metadata');
+          designerItem.onclick = null;
+        }
       }
+      
+      // Update source
+      const sourceItem = metadataContainer.querySelector('.source-item');
+      if (sourceItem) {
+        const sourceValue = model.source || '';
+        let sourceValueSpan = sourceItem.querySelector('.metadata-value.source-info');
+        if (!sourceValueSpan) {
+          // Create the span if it doesn't exist
+          sourceValueSpan = document.createElement('span');
+          sourceValueSpan.className = 'metadata-value source-info';
+          const iconSpan = sourceItem.querySelector('.metadata-icon');
+          if (iconSpan) {
+            iconSpan.parentNode.insertBefore(sourceValueSpan, iconSpan.nextSibling);
+          } else {
+            sourceItem.appendChild(sourceValueSpan);
+          }
+        }
+        if (sourceValueSpan) {
+          sourceValueSpan.textContent = sourceValue || '—';
+          sourceValueSpan.style.color = sourceValue ? '#ccc' : '#666';
+          console.log('updateModelElement: Updated source to', sourceValueSpan.textContent);
+        }
+      } else {
+        console.warn('Source item not found in metadata container');
+      }
+      
+      // Update parent model
+      const parentItem = metadataContainer.querySelector('.parent-item');
+      if (parentItem) {
+        const parentValue = model.parentModel || '';
+        let parentValueSpan = parentItem.querySelector('.metadata-value.parent-info');
+        if (!parentValueSpan) {
+          // Create the span if it doesn't exist
+          parentValueSpan = document.createElement('span');
+          parentValueSpan.className = 'metadata-value parent-info';
+          const iconSpan = parentItem.querySelector('.metadata-icon');
+          if (iconSpan) {
+            iconSpan.parentNode.insertBefore(parentValueSpan, iconSpan.nextSibling);
+          } else {
+            parentItem.appendChild(parentValueSpan);
+          }
+        }
+        if (parentValueSpan) {
+          parentValueSpan.textContent = parentValue || '—';
+          parentValueSpan.style.color = parentValue ? '#ccc' : '#666';
+          console.log('updateModelElement: Updated parentModel to', parentValueSpan.textContent);
+        }
+        // Update clickability
+        if (parentValue) {
+          parentItem.style.cursor = 'pointer';
+          parentItem.classList.add('clickable-metadata');
+          // Re-add click handler
+          parentItem.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const parentSelect = document.getElementById('parent-select');
+            if (parentSelect) {
+              parentSelect.value = parentValue;
+              if (typeof window.performCombinedSearch === 'function') {
+                await window.performCombinedSearch();
+              }
+            }
+          };
+        } else {
+          parentItem.style.cursor = 'default';
+          parentItem.classList.remove('clickable-metadata');
+          parentItem.onclick = null;
+        }
+      }
+      
+      // Update license
+      const licenseItem = metadataContainer.querySelector('.license-item');
+      if (licenseItem) {
+        const licenseValue = model.license || '';
+        let licenseValueSpan = licenseItem.querySelector('.metadata-value.license-info');
+        if (!licenseValueSpan) {
+          // Create the span if it doesn't exist
+          licenseValueSpan = document.createElement('span');
+          licenseValueSpan.className = 'metadata-value license-info';
+          const iconSpan = licenseItem.querySelector('.metadata-icon');
+          if (iconSpan) {
+            iconSpan.parentNode.insertBefore(licenseValueSpan, iconSpan.nextSibling);
+          } else {
+            licenseItem.appendChild(licenseValueSpan);
+          }
+        }
+        if (licenseValueSpan) {
+          licenseValueSpan.textContent = licenseValue || '—';
+          licenseValueSpan.style.color = licenseValue ? '#ccc' : '#666';
+          console.log('updateModelElement: Updated license to', licenseValueSpan.textContent);
+        }
+        // Update clickability
+        if (licenseValue) {
+          licenseItem.style.cursor = 'pointer';
+          licenseItem.classList.add('clickable-metadata');
+          // Re-add click handler
+          licenseItem.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const licenseSelect = document.getElementById('license-select');
+            if (licenseSelect) {
+              licenseSelect.value = licenseValue;
+              if (typeof window.performCombinedSearch === 'function') {
+                await window.performCombinedSearch();
+              }
+            }
+          };
+        } else {
+          licenseItem.style.cursor = 'default';
+          licenseItem.classList.remove('clickable-metadata');
+          licenseItem.onclick = null;
+        }
+      }
+      
+      // Update tags
+      const tagsItem = metadataContainer.querySelector('.tags-item');
+      if (tagsItem) {
+        let tagsDisplay = '';
+        if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
+          tagsDisplay = model.tags.map(t => t.name || t).join(', ');
+        } else if (model.id) {
+          // Load tags asynchronously if not present
+          window.electron.getModelTags(model.id).then(tags => {
+            if (tags && tags.length > 0) {
+              const tagsText = tags.map(t => t.name || t).join(', ');
+              const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
+              if (tagsValueSpan) {
+                tagsValueSpan.textContent = tagsText;
+                tagsValueSpan.style.color = '#ccc';
+              }
+            }
+          }).catch(err => console.error('Error loading tags:', err));
+        }
+        const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
+        if (tagsValueSpan) {
+          tagsValueSpan.textContent = tagsDisplay || '—';
+          tagsValueSpan.style.color = tagsDisplay ? '#ccc' : '#666';
+        } else {
+          console.warn('Tags value span not found in tags item');
+        }
+      }
+    } else {
+      console.warn('Metadata container not found for element:', existingElement);
     }
     
     // Make sure selection state is preserved
@@ -290,6 +746,25 @@ async function showModelDetails(filePath) {
       populateParentModelDropdown(model.parentModel)
     ]);
 
+    // Immediately set the designer value after population (before cloning)
+    // This ensures the value is set on the populated dropdown
+    const designerValueToSet = model.designer || '';
+    if (designerValueToSet) {
+      const designerSelect = document.getElementById('model-designer');
+      if (designerSelect) {
+        // Ensure the option exists
+        const optionExists = Array.from(designerSelect.options).some(opt => opt.value === designerValueToSet);
+        if (!optionExists) {
+          const option = document.createElement('option');
+          option.value = designerValueToSet;
+          option.textContent = designerValueToSet;
+          designerSelect.appendChild(option);
+        }
+        designerSelect.value = designerValueToSet;
+        console.log('Set designer before cloning:', designerSelect.value);
+      }
+    }
+
     // Add auto-save event listeners for all fields
     const fields = {
       'model-printed': { type: 'checkbox', field: 'printed' },
@@ -300,14 +775,123 @@ async function showModelDetails(filePath) {
       'model-parent': { type: 'select', field: 'parentModel' }
     };
 
+    // Store the values before cloning
+    const storedValues = {
+      'model-path': model.filePath || '',
+      'model-name': model.fileName || '',
+      'model-designer': model.designer || '',
+      'model-source': model.source || '',
+      'model-notes': model.notes || '',
+      'model-printed': Boolean(model.printed),
+      'model-parent': model.parentModel || '',
+      'model-license': model.license || ''
+    };
+
     // Remove any existing event listeners by cloning and replacing elements
+    // BUT skip cloning the designer dropdown to preserve its value
     Object.keys(fields).forEach(id => {
       const element = document.getElementById(id);
       if (element) {
-        const newElement = element.cloneNode(true);
-        element.parentNode.replaceChild(newElement, element);
+        // Store the current value before cloning
+        if (element.type === 'checkbox') {
+          storedValues[id] = element.checked;
+        } else {
+          storedValues[id] = element.value;
+        }
+        
+        // For designer dropdown, preserve value more carefully
+        if (id === 'model-designer') {
+          // Store the value before cloning
+          const currentValue = element.value || storedValues[id] || model.designer || '';
+          console.log('Designer value before clone:', currentValue);
+          const newElement = element.cloneNode(true);
+          element.parentNode.replaceChild(newElement, element);
+          // Immediately restore the value and ensure option exists
+          if (currentValue) {
+            // Check if option exists
+            const optionExists = Array.from(newElement.options).some(opt => opt.value === currentValue);
+            if (!optionExists) {
+              const option = document.createElement('option');
+              option.value = currentValue;
+              option.textContent = currentValue;
+              newElement.appendChild(option);
+            }
+            newElement.value = currentValue;
+            console.log('Designer value after clone:', newElement.value);
+          }
+        } else {
+          const newElement = element.cloneNode(true);
+          element.parentNode.replaceChild(newElement, element);
+        }
       }
     });
+
+    // Set form values AFTER cloning (to ensure they're set on the new elements)
+    // Use a small delay to ensure DOM is ready
+    await new Promise(resolve => setTimeout(resolve, 10));
+    
+    document.getElementById('model-path').value = storedValues['model-path'];
+    document.getElementById('model-name').value = storedValues['model-name'];
+    
+    // For dropdowns, ensure the option exists before setting value
+    const designerSelect = document.getElementById('model-designer');
+    if (designerSelect) {
+      const designerValue = storedValues['model-designer'] || model.designer || '';
+      console.log('Setting designer value:', designerValue, 'Current value:', designerSelect.value);
+      
+      if (designerValue) {
+        // Check if the option exists, if not add it
+        const optionExists = Array.from(designerSelect.options).some(opt => opt.value === designerValue);
+        console.log('Designer option exists?', optionExists);
+        
+        if (!optionExists) {
+          const option = document.createElement('option');
+          option.value = designerValue;
+          option.textContent = designerValue;
+          designerSelect.appendChild(option);
+          console.log('Added designer option:', designerValue);
+        }
+        
+        // Set the value
+        designerSelect.value = designerValue;
+        console.log('Set designer value to:', designerSelect.value);
+        
+        // Force a change event to ensure it's registered
+        designerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        designerSelect.value = '';
+      }
+    } else {
+      console.warn('Designer select element not found after cloning');
+    }
+    
+    const licenseSelect = document.getElementById('model-license');
+    if (licenseSelect && storedValues['model-license']) {
+      const optionExists = Array.from(licenseSelect.options).some(opt => opt.value === storedValues['model-license']);
+      if (!optionExists && storedValues['model-license']) {
+        const option = document.createElement('option');
+        option.value = storedValues['model-license'];
+        option.textContent = storedValues['model-license'];
+        licenseSelect.appendChild(option);
+      }
+      licenseSelect.value = storedValues['model-license'];
+    }
+    
+    const parentSelect = document.getElementById('model-parent');
+    if (parentSelect && storedValues['model-parent']) {
+      const optionExists = Array.from(parentSelect.options).some(opt => opt.value === storedValues['model-parent']);
+      if (!optionExists && storedValues['model-parent']) {
+        const option = document.createElement('option');
+        option.value = storedValues['model-parent'];
+        option.textContent = storedValues['model-parent'];
+        parentSelect.appendChild(option);
+      }
+      parentSelect.value = storedValues['model-parent'];
+    }
+    
+    document.getElementById('model-source').value = storedValues['model-source'];
+    document.getElementById('model-notes').value = storedValues['model-notes'];
+    document.getElementById('model-printed').checked = storedValues['model-printed'];
 
     // Add new event listeners
     Object.entries(fields).forEach(([id, config]) => {
@@ -327,16 +911,6 @@ async function showModelDetails(filePath) {
         element.addEventListener('change', handler);
       }
     });
-
-    // Set form values
-    document.getElementById('model-path').value = model.filePath || '';
-    document.getElementById('model-name').value = model.fileName || '';
-    document.getElementById('model-designer').value = model.designer || '';
-    document.getElementById('model-source').value = model.source || '';
-    document.getElementById('model-notes').value = model.notes || '';
-    document.getElementById('model-printed').checked = Boolean(model.printed);
-    document.getElementById('model-parent').value = model.parentModel || '';
-    document.getElementById('model-license').value = model.license || '';
 
     // Load tags if they exist
     if (model.tags && Array.isArray(model.tags)) {
@@ -682,6 +1256,63 @@ document.addEventListener('DOMContentLoaded', async () => {
     await window.electron.saveSetting('hasRunBefore', 'true');
   }
 
+  // Load saved grid view preference
+  const savedView = await window.electron.getSetting('gridView');
+  if (savedView && ['list', 'preview', 'detailed'].includes(savedView)) {
+    // Map old 'small' to 'preview' for backward compatibility
+    if (savedView === 'small') {
+      currentGridView = 'preview';
+    } else {
+      currentGridView = savedView;
+    }
+  }
+  
+  // Initialize view selector buttons
+  const viewButtons = document.querySelectorAll('.view-button');
+  // First, remove active class from all buttons
+  viewButtons.forEach(btn => btn.classList.remove('active'));
+  // Then, add active class only to the button matching the current view
+  viewButtons.forEach(button => {
+    const view = button.dataset.view;
+    if (view === currentGridView) {
+      button.classList.add('active');
+    }
+    button.addEventListener('click', async () => {
+      // Remove active class from all buttons
+      viewButtons.forEach(btn => btn.classList.remove('active'));
+      // Add active class to clicked button
+      button.classList.add('active');
+      // Update current view
+      currentGridView = view;
+      // Save preference
+      await window.electron.saveSetting('gridView', view);
+      // Force clear the grid to ensure new view is applied
+      const container = document.querySelector('.file-grid');
+      if (container) {
+        container.innerHTML = '';
+        container.currentModels = null;
+        container.isRendering = false;
+      }
+      // Re-render grid with new view, preserving current filters
+      // Use performCombinedSearch to maintain filters when switching views
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      } else {
+        // Fallback if search.js hasn't loaded yet
+        const currentModels = container?.currentModels || [];
+        if (currentModels.length > 0) {
+          renderVirtualGrid(currentModels);
+        } else {
+          // If no models in memory, reload from database with current filters
+          const sortSelect = document.getElementById('sort-select');
+          const sortOption = sortSelect ? sortSelect.value : 'date-desc';
+          const models = await window.electron.getAllModels(sortOption, 0);
+          await renderFiles(models);
+        }
+      }
+    });
+  });
+  
   // Proceed to check for updates and initialize the application
   debugLog('DOM fully loaded and parsed');
   console.log('Checking for updates on startup...');
@@ -968,6 +1599,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Save the model with tags
       await window.electron.saveModel(modelData);
+      // Update the model element in the grid
+      await updateModelElement(filePath);
       // Reapply filters and refresh view
       await refreshModelDisplay();
 
@@ -1920,16 +2553,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add this near the top where other event listeners are initialized
-  document.getElementById('sort-select').addEventListener('change', async (e) => {
-    const sortOption = e.target.value;
-    const models = await window.electron.getAllModels(sortOption);
-  });
-
-  // Update the initial load and any other places where getAllModels is called
-  // to include the current sort option
-  const sortSelect = document.getElementById('sort-select');
-  const models = await window.electron.getAllModels(sortSelect.value);
+  // Sort-select handler is now managed by search.js via initializeCombinedSearch()
+  // which properly calls performCombinedSearch() to re-render with filters preserved
 
   // Add this near the top of the file with other initialization code
   window.electron.onRefreshGrid(async () => {
@@ -2030,70 +2655,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Update the addTag function
-  async function addTagToModel(tagName, containerId) {
-    const tagContainer = document.getElementById(containerId);
-    if (!tagContainer) {
-      console.error(`Tag container with ID ${containerId} not found`);
-      return;
-    }
-    
-    // Check if tag already exists visually
-    const existingTag = Array.from(tagContainer.children)
-      .find(tag => tag.getAttribute('data-tag-name') === tagName);
-    
-    if (existingTag) return; // Don't add visual duplicates
-
-    // Create new tag element
-    const tag = document.createElement('div');
-    tag.className = 'tag';
-    tag.setAttribute('data-tag-name', tagName);
-    tag.innerHTML = `
-      ${tagName}
-      <span class=\"tag-remove\">×</span>
-    `;
-
-    // Add remove handler with auto-save
-    tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-      tag.remove(); 
-      // Auto-save the updated tags after REMOVAL
-      const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-        .map(t => t.getAttribute('data-tag-name'));
-      
-      if (containerId === 'multi-tags') {
-        // When removing, we DO want to save the resulting list for all selected models
-        // Note: This sets all selected models to have exactly the tags remaining in the UI.
-        await autoSaveMultipleModels('tags', currentTags); 
-      } else {
-        // Single edit mode save
-        const filePath = getModelFilePath();
-        if (filePath) {
-          await autoSaveModel('tags', currentTags, filePath);
-        } else {
-          console.error('No file path found for saving tags');
-        }
-      }
-    });
-
-    tagContainer.appendChild(tag); // Add tag visually
-
-    // Auto-save logic after ADDING a tag
-    if (containerId === 'multi-tags') {
-      // For multi-edit ADD, only save the *newly added tag* to append it
-      console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-      await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
-    } else {
-      // For single-edit ADD, save the full list for that model
-      const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
-        .map(t => t.getAttribute('data-tag-name'));
-      const filePath = getModelFilePath();
-      if (filePath) {
-        await autoSaveModel('tags', currentTags, filePath);
-      } else {
-        console.error('No file path found for saving tags');
-      }
-    }
-  }
+  // NOTE: addTagToModel is defined at top level (line ~5637) - duplicate removed
 
   // Make sure the add-tag-button event listener is updated
 
@@ -2532,12 +3094,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function extract3MFThumbnail(filePath) {
     try {
+      console.log(`[DEBUG] extract3MFThumbnail: Extracting images from ${filePath}`);
       const images = await window.electron.get3MFImages(filePath);
-      return images && images.length > 0? images: null; // Concise return
+      if (images && images.length > 0) {
+        console.log(`[DEBUG] extract3MFThumbnail: Found ${images.length} image(s) in 3MF file`);
+        return images; // Return array of images
+      } else {
+        console.log(`[DEBUG] extract3MFThumbnail: No images found in 3MF file`);
+        return null;
+      }
     } catch (error) {
       console.error('extract3MFThumbnail error:', error);
-      // Consider re-throwing the error if you want the calling function to handle it:
-      // throw error; 
       return null; // Or return null to indicate failure
     }
   }
@@ -2552,94 +3119,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Update the renderModelToPNG function to check file size before attempting to render
-  async function renderModelToPNG(filePath, container, existingThumbnail) {
-    const startTime = Date.now();
-    console.log(`[DEBUG] renderModelToPNG: Start rendering ${filePath}`);
-    if (existingThumbnail) {
-      const img = document.createElement('img');
-      img.src = existingThumbnail;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return existingThumbnail;
-    }
-
-    let renderer, scene, camera, canvas;
-    let model = null; // Declare model in outer scope
-
-    try {
-      canvas = document.createElement('canvas');
-      canvas.width = 250;
-      canvas.height = 250;
-      
-      renderer = new THREE.WebGLRenderer({
-          antialias: false,
-          alpha: true,
-          canvas: canvas,
-          powerPreference: 'low-power',
-          precision: 'lowp',
-          setPixelRatio: .2,
-          setClearColor: 0x000000,
-      });
-      
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-
-      renderer.setClearColor(0x000000, 0);
-      
-      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-      directionalLight.position.set(1, 1, 1).normalize();
-      scene.add(ambientLight);
-      scene.add(directionalLight);
-
-      // Use loadModel function which has proper path encoding handling
-      model = await loadModel(filePath);
-      if (!model) throw new Error('Failed to load model');
-      
-      scene.add(model);
-      fitCameraToObject(camera, model, scene, renderer);
-      renderer.render(scene, camera);
-
-      const imgData = canvas.toDataURL('image/png');
-
-      const img = document.createElement('img');
-      img.src = imgData;
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-
-      return imgData;
-
-    } catch (error) {
-      console.error('Error rendering model:', error);
-      const img = document.createElement('img');
-      img.src = '3d.png';
-      img.style.width = '250px';
-      img.style.height = '250px';
-      container.innerHTML = '';
-      container.appendChild(img);
-      return '3d.png';
-    } finally {
-      const endTime = Date.now();
-      console.log(`[DEBUG] renderModelToPNG: Finished rendering ${filePath}. Took ${endTime - startTime}ms.`);
-      // Cleanup code that uses model
-      if (model) {
-        model.traverse(child => {
-          if (child.geometry) {
-            child.geometry.dispose();
-            child.geometry = null;
-          }
-        });
-        model = null;
-      }
-      // ... rest of cleanup code ...
-    }
-  }
-  
+  // NOTE: renderModelToPNG is defined at top level (line ~5462) - duplicate removed
   
   function displayThumbnail(thumbnail, container, size) {
     const img = document.createElement('img');
@@ -2741,39 +3221,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   
 
-  // 7. Optimize the render queue processing
-  async function processRenderQueue() {
-    if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
-      return;
-    }
-
-    isProcessingQueue = true;
-    
-    try {
-      while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
-        const task = renderQueue.shift();
-        activeRenders++;
-        
-        try {
-          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
-          task.resolve(result);
-        } catch (error) {
-          console.error(`Render task failed: ${error.message}`);
-          // Retry once after longer delay
-          setTimeout(() => renderQueue.push(task), 2000);
-        } finally {
-          activeRenders--;
-          await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
-        }
-      }
-    } finally {
-      isProcessingQueue = false;
-      if (renderQueue.length > 0) {
-        setTimeout(processRenderQueue, 100);
-      }
-    }
-  }
-
+  // NOTE: processRenderQueue is defined at top level (line ~5316) - duplicate removed
+  
   // 8. Add memory management
   function cleanupMemory() {
     if (thumbnailCache.size > 1000) { // Limit cache size
@@ -2804,280 +3253,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     THREE.Cache.clear();
   }
 
-  // 9. Add model loading with better resource management
-  async function loadModel(filePath, options = {}) {
-    const startTime = Date.now();
-    console.log(`[DEBUG] loadModel: Start loading ${filePath}`);
-    try {
-      console.log('loadModel: Starting for file:', filePath);
-      const fileExtension = filePath.split('.').pop().toLowerCase();
-      
-      // Properly encode the file path to handle special characters and Windows paths
-      let encodedFilePath;
-      
-      // Check if we're running on Windows (starts with drive letter)
-      if (/^[A-Za-z]:/.test(filePath)) {
-        // For Windows paths: 
-        // 1. Convert backslashes to forward slashes
-        // 2. Add file:/// protocol
-        // 3. Properly encode special characters
-        
-        try {
-          // First normalize the path to use forward slashes
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Create URL object for proper handling - this works better for Windows paths
-          const fileUrl = new URL(`file:///${normalizedPath}`);
-          
-          // Get the properly encoded pathname from the URL
-          encodedFilePath = fileUrl.href;
-          
-          // Explicitly handle hash character in path segments
-          if (normalizedPath.includes('#')) {
-            // Replace the hash character with its URL encoding (%23)
-            // But ensure we don't double-encode anything
-            encodedFilePath = encodedFilePath.replace(/#/g, '%23');
-          }
-          
-          // Ensure other problematic characters are properly encoded
-          encodedFilePath = encodedFilePath
-            .replace(/\?/g, '%3F')
-            .replace(/\s/g, '%20')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/'/g, '%27')
-            .replace(/\[/g, '%5B')
-            .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error creating URL from file path:', error);
-          
-          // Fallback method: direct string replacement
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          encodedFilePath = `file:///${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20');
-        }
-        
-        console.log('loadModel: Encoded Windows path:', encodedFilePath);
-      } else {
-        // For non-Windows paths, use a direct encoding approach
-        try {
-          const normalizedPath = filePath.replace(/\\/g, '/');
-          
-          // Simply replace problematic characters directly
-          encodedFilePath = `file://${normalizedPath}`
-              .replace(/#/g, '%23')
-              .replace(/\s/g, '%20')
-              .replace(/\(/g, '%28')
-              .replace(/\)/g, '%29')
-              .replace(/'/g, '%27')
-              .replace(/\[/g, '%5B')
-              .replace(/\]/g, '%5D');
-        } catch (error) {
-          console.error('Error encoding non-Windows file path:', error);
-          // Super simple fallback
-          encodedFilePath = `file://${filePath.replace(/#/g, '%23')}`;
-        }
-        console.log('loadModel: Encoded Unix path:', encodedFilePath);
-      }
-      
-      // If no embedded image found, proceed with 3D loading
-      let loader;
-      if (fileExtension === 'stl') {
-        if (!THREE.STLLoader) {
-          console.error('loadModel: THREE.STLLoader not available');
-          throw new Error('THREE.STLLoader not initialized');
-        }
-        loader = new THREE.STLLoader();
-      } else if (fileExtension === '3mf') {
-        if (!THREE.ThreeMFLoader) {
-          console.error('loadModel: THREE.ThreeMFLoader not available');
-          throw new Error('THREE.ThreeMFLoader not initialized');
-        }
-        if (!fflate) {
-          console.error('loadModel: fflate not available');
-          throw new Error('fflate not initialized');
-        }
-        THREE.ThreeMFLoader.fflate = fflate;
-        loader = new THREE.ThreeMFLoader();
-      } else {
-        throw new Error(`Unsupported file type: ${fileExtension}`);
-      }
-
-      if (!loader) {
-        throw new Error('Failed to initialize loader');
-      }
-
-      return new Promise((resolve, reject) => {
-        try {
-          loader.load(
-              encodedFilePath, // Use the encoded path instead of the original
-              (object) => {
-                try {
-                  let mesh;
-                  if (object.isBufferGeometry) {
-                    if (!THREE.MeshPhongMaterial) {
-                      console.error('loadModel: THREE.MeshPhongMaterial not available');
-                      throw new Error('THREE.MeshPhongMaterial not initialized');
-                    }
-                    const material = new THREE.MeshPhongMaterial({
-                      color: 0xcccccc,
-                      specular: 0x111111,
-                      shininess: 200
-                    });
-                    if (!THREE.Mesh) {
-                      console.error('loadModel: THREE.Mesh not available');
-                      throw new Error('THREE.Mesh not initialized');
-                    }
-                    
-                    // Proper geometry centering instead of normalization
-                    object.computeBoundingBox();
-                    object.center();
-                    object.computeVertexNormals();
-                    
-                    mesh = new THREE.Mesh(object, material);
-                    
-                    if (fileExtension === 'stl') {
-                      mesh.rotation.x = -Math.PI / 2;
-                    }
-                  } else if (object.isObject3D) {
-                    mesh = object;
-                    mesh.traverse((child) => {
-                      if (child.isMesh) {
-                        child.material = new THREE.MeshPhongMaterial({
-                          color: 0xcccccc,
-                          specular: 0x111111,
-                          shininess: 200
-                        });
-                      }
-                    });
-                    if (fileExtension === '3mf') {
-                      mesh.rotation.x = -Math.PI / 2;
-                    }
-                  } else {
-                    reject(new Error('Unsupported object type'));
-                    return;
-                  }
-                  resolve(mesh);
-                } catch (error) {
-                  console.error('loadModel: Error processing loaded object:', error);
-                  reject(error);
-                }
-              },
-              (progress) => {
-                // Progress callback
-              },
-              (error) => {
-                console.error('loadModel: Loader error:', error);
-                reject(error);
-              }
-          );
-        } catch (error) {
-          console.error('loadModel: Error in loader.load:', error);
-          reject(error);
-        }
-      });
-    } catch (error) {
-      console.error('loadModel error:', error);
-      throw error;
-    } finally {
-      const endTime = Date.now();
-      console.log(`[DEBUG] loadModel: Finished loading ${filePath}. Took ${endTime - startTime}ms.`);
-    }
-  }
+  // NOTE: loadModel is now defined at top level (line ~50) - duplicate removed
 
 
 
-  // Add a helper function to refresh the model display
-  async function refreshModelDisplay() {
-    try {
-      // Get current filter values
-      const designer = document.getElementById('designer-select').value;
-      const license = document.getElementById('license-select').value;
-      const parentModel = document.getElementById('parent-select').value;
-      const printStatus = document.getElementById('printed-select').value;
-      const tagFilter = document.getElementById('tag-filter').value;
-      const sortOption = document.getElementById('sort-select').value;
-      const fileType = document.getElementById('filetype-select').value; // Add this line
-      const searchInput = document.getElementById("search-filter-input");
-      const searchTerm = searchInput ? searchInput.value.trim() : "";
-
-      // If any filter is active or a search term is entered, hide the view library message.
-      if (designer || license || parentModel || printStatus !== "all" || tagFilter || fileType || searchTerm) {
-        const viewLibMsg = document.getElementById("view-library-message");
-        if (viewLibMsg) {
-          viewLibMsg.style.display = "none";
-        }
-      }
-      
-      // Update filter dropdowns without clearing selections
-
-      
-      // Restore filter selections
-      document.getElementById('designer-select').value = designer;
-      document.getElementById('license-select').value = license;
-      document.getElementById('parent-select').value = parentModel;
-      document.getElementById('printed-select').value = printStatus;
-      document.getElementById('tag-filter').value = tagFilter;
-      document.getElementById('filetype-select').value = fileType; // Add this line
-
-      // Get all models with current sort option
-      let models = await window.electron.getAllModels(sortOption, 0);
-
-      // Add file type filter
-      if (fileType) {
-        models = models.filter(model => 
-          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-        );
-      }
-
-      // Apply filters
-      if (designer) {
-        if (designer === '__none__') {
-          models = models.filter(model => !model.designer || model.designer.trim() === '');
-        } else {
-          models = models.filter(model =>
-            model.designer &&
-            model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
-          );
-        }
-      }
-      if (license) {
-        if (license === '__none__') {
-          models = models.filter(model => !model.license || model.license.trim() === '');
-        } else {
-          models = models.filter(model => model.license === license);
-        }
-      }
-      if (parentModel) {
-        if (parentModel === '__none__') {
-          models = models.filter(model => !model.parentModel || model.parentModel.trim() === '');
-        } else {
-          models = models.filter(model => model.parentModel === parentModel);
-        }
-      }
-      if (printStatus === 'printed') {
-        models = models.filter(model => model.printed);
-      } else if (printStatus === 'not-printed') {
-        models = models.filter(model => !model.printed);
-      }
-      if (tagFilter) {
-        models = await Promise.all(models.map(async (model) => {
-          const modelTags = await window.electron.getModelTags(model.id);
-          if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
-            return model;
-          }
-          return null;
-        }));
-        models = models.filter(model => model !== null);
-      }
-
-      // Display filtered models
-      await displayModels(models);
-    } catch (error) {
-      console.error('Error refreshing model display:', error);
-    }
-  }
+  // NOTE: refreshModelDisplay is defined at top level (line ~5093) - duplicate removed
 
   // Add this function to handle closing the details panel
   function closeDetailsPanel() {
@@ -3112,129 +3292,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Update the renderFile function to use the new click handler
-  async function renderFile(file, container, skipThumbnail = false) {
-    const fileElement = document.createElement('div');
-    fileElement.className = 'file-item';
-    fileElement.dataset.filepath = file.filePath;
- 
-    // Maintain selection state if this file was previously selected
-    if (selectedModels.has(file.filePath)) {
-      fileElement.classList.add('selected');
-    }
-
-    // Add print status indicator
-    const printStatus = document.createElement('div');
-    printStatus.className = `print-status ${file.printed ? 'printed' : ''}`;
-    printStatus.textContent = file.printed ? 'Printed' : 'Not Printed';
-    fileElement.appendChild(printStatus);
-
-    // Add thumbnail container
-    const thumbnailContainer = document.createElement('div');
-    thumbnailContainer.className = 'thumbnail-container loading';
-    fileElement.appendChild(thumbnailContainer);
-
-
-
-
-    directoryElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      // Hide any welcome or view library message.
-      const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-      
-      // Set the global directory filter.
-      window.currentDirectoryFilter = parentDir;
-      
-      // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-      await performCombinedSearch();
-      
-      // Update the filter indicator to show the active parent directory filter.
-      const filterIndicator = document.getElementById('current-filter');
-      filterIndicator.innerHTML = `
-        Showing models in directory: ${parentDir}
-        <button class="clear-filter-button">Clear Filter</button>
-      `;
-      filterIndicator.classList.add('visible');
-      
-      // Attach a click handler to clear the directory filter.
-      filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-        window.currentDirectoryFilter = "";
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
-        await performCombinedSearch();
-      });
-    });
-
-    fileInfo.appendChild(directoryElement);
-
-    const fileDetails = document.createElement('div');
-    fileDetails.className = 'file-details';
-    fileDetails.innerHTML = `
-      <span>${file.designer || 'Unknown'}</span>
-      <span>${file.size ? formatFileSize(file.size) : ''}</span>
-    `;
-    fileInfo.appendChild(fileDetails);
-    fileElement.appendChild(fileInfo);
-
-    // Add click handler
-    fileElement.addEventListener('click', () => {
-      toggleModelSelection(fileElement, file.filePath);
-    });
-
-    // Handle thumbnail rendering
-    const model = await window.electron.getModel(file.filePath);
-    skipThumbnail = model && model.thumbnail ? true : false;
-    if (!skipThumbnail) {
-      try {
-        const fileExtension = file.filePath.split('.').pop().toLowerCase();
-        if (fileExtension === '3mf') {
-          const images = await window.electron.get3MFImages(file.filePath);
-          if (images && images.length > 0) {
-            const img = document.createElement('img');
-            img.src = images[0];
-            img.className = 'model-thumbnail';
-            thumbnailContainer.innerHTML = '';
-            thumbnailContainer.appendChild(img);
-            thumbnailContainer.classList.remove('loading');
-            await window.electron.saveThumbnail(file.filePath, images[0]);
-            file.thumbnail = images[0];
-            return fileElement;
-          }
-        }
-
-        const thumbnail = await new Promise((resolve, reject) => {
-          renderQueue.push({
-            filePath: file.filePath,
-            container: thumbnailContainer,
-            existingThumbnail: null,
-            resolve,
-            reject
-          });
-          processRenderQueue();
-        });
-
-        if (thumbnail) {
-          await window.electron.saveThumbnail(file.filePath, thumbnail);
-        }
-      } catch (error) {
-        console.error(`Error rendering thumbnail for ${file.fileName}:`, error);
-        thumbnailContainer.innerHTML = '<div class="error-message">Error loading model</div>';
-      }
-    } else {
-      const img = document.createElement('img');
-      img.src = file.thumbnail || '3d.png';
-      thumbnailContainer.innerHTML = '';
-      thumbnailContainer.appendChild(img);
-    }
-    thumbnailContainer.classList.remove('loading');
-
-    // Add context menu handler
-    addContextMenuHandler(fileElement, file.filePath);
-
-    return fileElement;
-  }
+  // NOTE: renderFile is defined at top level (line ~5046) - duplicate removed
 
   // Add this function to filter by directory
   async function filterByDirectory(directoryPath) {
@@ -3499,33 +3557,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
 
-  // Update the grid initialization function
-  async function initializeGrid(sortOption = 'name') {
-    console.log('Initializing grid with sort option:', sortOption);
-    
-    // Add event listener for sort dropdown
-    const sortSelect = document.getElementById('sort-select');
-    if (sortSelect) {
-      // Remove any existing event listeners by cloning and replacing
-      const newSortSelect = sortSelect.cloneNode(true);
-      sortSelect.parentNode.replaceChild(newSortSelect, sortSelect);
-      
-      newSortSelect.addEventListener('change', async (e) => {
-        console.log('Sort option changed to:', e.target.value);
-        
-        // Get all models with the new sort option
-        const models = await window.electron.getAllModels(e.target.value);
-        
-        // Completely refresh the grid with the new sort order
-        await renderFiles(models, false, true);
-        
-        // Update model counts
-        await updateModelCounts();
-      });
-    }
-    
-    // ... existing code ...
-  }
+  // NOTE: initializeGrid is defined at top level (line ~6635) - duplicate removed
 
   // Add this function to handle clearing the directory filter
   async function clearDirectoryFilter() {
@@ -3797,6 +3829,38 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('cancel-ai-config')?.addEventListener('click', () => {
     document.getElementById('ai-config-dialog').close();
+  });
+
+  // File Type Settings dialog handlers
+  window.electron.on('open-file-type-settings', async () => {
+    const dialog = document.getElementById('file-type-settings-dialog');
+    if (!dialog) {
+      console.error('file-type-settings-dialog element not found.');
+      return;
+    }
+    
+    // Load current setting
+    const enableZipArchives = await window.electron.getSetting('enableZipArchives');
+    const checkbox = document.getElementById('enable-zip-archives');
+    if (checkbox) {
+      checkbox.checked = enableZipArchives === '1';
+    }
+    
+    dialog.showModal();
+  });
+
+  document.getElementById('save-file-type-settings')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const checkbox = document.getElementById('enable-zip-archives');
+    const enableZipArchives = checkbox?.checked ? '1' : '0';
+    
+    await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+    
+    document.getElementById('file-type-settings-dialog').close();
+  });
+
+  document.getElementById('cancel-file-type-settings')?.addEventListener('click', () => {
+    document.getElementById('file-type-settings-dialog').close();
   });
 
   // Listen for the 'tags-generated' event from the main process
@@ -4198,7 +4262,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const firstImage = embeddedImages[0];
                 if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
                   thumbnail = firstImage;
-                  console.log(`[DEBUG] generateThumbnailsForModels: Found embedded thumbnail for ${model.filePath}`);
+                  console.log(`[DEBUG] generateThumbnailsForModels: SUCCESS - Using embedded thumbnail for ${model.filePath}`);
+                  console.log(`[DEBUG] generateThumbnailsForModels: Image type: ${firstImage.substring(5, firstImage.indexOf(';'))}`);
+                } else {
+                  console.log(`[DEBUG] generateThumbnailsForModels: Invalid image format for ${model.filePath}. First image type: ${typeof firstImage}`);
                 }
               } else {
                 console.log(`[DEBUG] generateThumbnailsForModels: No embedded thumbnail found for ${model.filePath}. Falling back to 3D rendering.`);
@@ -4495,7 +4562,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (parentModel && model.parentModel !== parentModel) return false;
     if (printStatus === 'printed' && !model.printed) return false;
     if (printStatus === 'not-printed' && model.printed) return false;
-    if (fileType && !model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
+    if (fileType) {
+      if (fileType.toLowerCase() === 'zip') {
+        // For zip filter, show all models inside ZIP archives (entries with :: separator)
+        if (!model.filePath || !model.filePath.includes('::')) return false;
+      } else {
+        if (!model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)) return false;
+      }
+    }
     
     // Handle tag filter
     if (tagFilter) {
@@ -4535,7 +4609,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const row = Math.floor(absoluteIndex / columns);
       const col = absoluteIndex % columns;
       
-      const item = createModelItem(model);
+      const item = createModelItem(model, currentGridView);
       item.style.position = 'absolute';
       item.style.top = `${row * 300}px`; // 300px height per item
       item.style.left = `${col * (containerWidth / columns)}px`;
@@ -4707,110 +4781,8 @@ function toggleModelSelection(fileElement, filePath) {
   }
 }
 
-// Add helper functions before they're used
-async function loadModel(filePath) {
-  return new Promise((resolve, reject) => {
-    const fileExtension = filePath.split('.').pop().toLowerCase();
-    
-    // Properly encode the file path to handle special characters and Windows paths
-    let encodedFilePath;
-    
-    // Check if we're running on Windows (starts with drive letter)
-    if (/^[A-Za-z]:/.test(filePath)) {
-      // For Windows paths: 
-      // 1. Convert backslashes to forward slashes
-      // 2. Add file:/// protocol
-      // 3. Properly encode special characters
-      const normalizedPath = filePath.replace(/\\/g, '/');
-      
-      // Make sure to encode the URL properly, handling special characters
-      encodedFilePath = `file:///${normalizedPath}`;
-      // Encode special characters but preserve the file:/// and path structure
-      encodedFilePath = encodedFilePath.replace(/#/g, '%23')
-                                      .replace(/\?/g, '%3F')
-                                      .replace(/\s/g, '%20');
-    } else {
-      // For non-Windows paths, use standard URL encoding
-      encodedFilePath = encodeURI(filePath).replace(/#/g, '%23');
-    }
-    
-    let loader;
-    
-    if (fileExtension === 'stl') {
-      loader = new THREE.STLLoader();
-    } else if (fileExtension === '3mf') {
-      THREE.ThreeMFLoader.fflate = fflate;
-      loader = new THREE.ThreeMFLoader();
-    } else {
-      reject(new Error(`Unsupported file type: ${fileExtension}`));
-      return;
-    }
-
-    // Log the encoded path for debugging
-    console.log('Loading model from encoded path:', encodedFilePath);
-
-    loader.load(
-      encodedFilePath,
-      (object) => {
-        try {
-          let mesh;
-          
-          // Handle STL files (geometry)
-          if (object.isBufferGeometry) {
-            const material = new THREE.MeshPhongMaterial({
-              color: 0xcccccc,
-              specular: 0x111111,
-              shininess: 200,
-              flatShading: true // Use flat shading for better performance
-            });
-            
-            // Optimize geometry
-            object.computeVertexNormals();
-            
-            mesh = new THREE.Mesh(object, material);
-            
-            if (fileExtension === 'stl') {
-              mesh.rotation.x = -Math.PI / 2;
-            }
-          } 
-          // Handle 3MF files (object)
-          else if (object.isObject3D) {
-            mesh = object;
-            
-            // Apply simple material to all meshes
-            mesh.traverse((child) => {
-              if (child.isMesh) {
-                child.material = new THREE.MeshPhongMaterial({
-                  color: 0xcccccc,
-                  specular: 0x111111,
-                  shininess: 200,
-                  flatShading: true
-                });
-              }
-            });
-            
-            if (fileExtension === '3mf') {
-              mesh.rotation.x = -Math.PI / 2;
-            }
-          } else {
-            reject(new Error('Unsupported object type'));
-            return;
-          }
-          
-          resolve(mesh);
-        } catch (error) {
-          console.error('Error processing loaded object:', error);
-          reject(error);
-        }
-      },
-      undefined,
-      (error) => {
-        console.error('Loader error:', error);
-        reject(error);
-      }
-    );
-  });
-}
+// NOTE: loadModel function is defined earlier in the file (around line 2840)
+// This duplicate has been removed to use the enhanced version that checks for embedded images
 
 function fitCameraToObject(camera, object, scene, renderer) {
   const boundingBox = new THREE.Box3().setFromObject(scene);
@@ -5041,8 +5013,11 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
                 try {
                   const images = await window.electron.get3MFImages(file.filePath);
                   if (images && images.length > 0) {
-                    thumbnail = images;
+                    thumbnail = images[0]; // Use first image, not the array
+                    console.log(`[DEBUG] Using embedded image from 3MF: ${file.filePath}`);
                     await window.electron.saveThumbnail(file.filePath, thumbnail);
+                  } else {
+                    console.log(`[DEBUG] No embedded images found in 3MF: ${file.filePath}`);
                   }
                 } catch (imageError) {
                   console.error('Error checking for embedded image:', imageError);
@@ -5161,9 +5136,16 @@ async function refreshModelDisplay() {
 
     // Add file type filter
     if (fileType) {
-      models = models.filter(model => 
-        model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-      );
+      if (fileType.toLowerCase() === 'zip') {
+        // For zip filter, show all models inside ZIP archives (entries with :: separator)
+        models = models.filter(model => 
+          model.filePath && model.filePath.includes('::')
+        );
+      } else {
+        models = models.filter(model => 
+          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
+        );
+      }
     }
 
     // Apply filters
@@ -5342,11 +5324,33 @@ async function renderFile(file, container, skipThumbnail = false) {
 
   const fileName = document.createElement('div');
   fileName.className = 'file-name';
-  fileName.textContent = file.fileName;
+  
+  // Check if this is a zip entry
+  const isZipEntry = file.filePath.includes('::');
+  if (isZipEntry) {
+    const zipBadge = document.createElement('span');
+    zipBadge.className = 'zip-badge';
+    zipBadge.textContent = 'ZIP';
+    zipBadge.title = 'This model is inside a ZIP archive';
+    zipBadge.style.cssText = 'background: #4a90e2; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; margin-right: 6px;';
+    fileName.appendChild(zipBadge);
+  }
+  
+  const fileNameText = document.createElement('span');
+  fileNameText.textContent = file.fileName;
+  fileName.appendChild(fileNameText);
   fileInfo.appendChild(fileName);
 
-  const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1); // Keep this as an array for now
-  const parentDir = parentDirArray[0]; // Get the string value from the array
+  // For zip entries, show both zip file and entry path
+  let parentDir;
+  if (isZipEntry) {
+    const [zipPath, entryPath] = file.filePath.split('::');
+    const zipFileName = zipPath.split(/[/\\]/).pop();
+    parentDir = `${zipFileName} → ${entryPath.split(/[/\\]/).slice(0, -1).join('/') || 'root'}`;
+  } else {
+    const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1); // Keep this as an array for now
+    parentDir = parentDirArray[0]; // Get the string value from the array
+  }
   
   const parentDirElement = document.createElement('div');
   parentDirElement.className = 'parent-directory';
@@ -5400,14 +5404,8 @@ async function renderFile(file, container, skipThumbnail = false) {
   fileElement.addEventListener('click', () => {
     toggleModelSelection(fileElement, file.filePath);
   });
- // Add designer info if available
- if (file.designer) {
-  const designerInfo = document.createElement('div');
-  designerInfo.className = 'designer-info';
-  designerInfo.innerHTML = `<span class="directory-label">Designer:
-  <span>${file.designer}</span>`;
-  fileInfo.appendChild(designerInfo);
-}
+ // Designer info is now shown in metadata section, so we don't need it here
+ // Removed redundant designer info display
 
   if (!file.thumbnail &&!skipThumbnail) {
     const fileExtension = file.filePath.split('.').pop().toLowerCase();
@@ -5415,17 +5413,21 @@ async function renderFile(file, container, skipThumbnail = false) {
       try {
         const images = await window.electron.get3MFImages(file.filePath);
         if (images && images.length > 0) {
+          const firstImage = images[0]; // Use first image, not the array
+          console.log(`[DEBUG] renderFile: Using embedded image from 3MF: ${file.filePath}`);
           const img = document.createElement('img');
-          img.src = images;
+          img.src = firstImage;
           img.className = 'model-thumbnail';
           thumbnailContainer.innerHTML = '';
           thumbnailContainer.appendChild(img);
           thumbnailContainer.classList.remove('loading');
           
-          await window.electron.saveThumbnail(file.filePath, images);
-          file.thumbnail = images;
+          await window.electron.saveThumbnail(file.filePath, firstImage);
+          file.thumbnail = firstImage;
           
           return fileElement;
+        } else {
+          console.log(`[DEBUG] renderFile: No embedded images found in 3MF: ${file.filePath}`);
         }
       } catch (imageError) {
         console.error('renderFile: Error checking for embedded image:', imageError);
@@ -5498,6 +5500,8 @@ async function processRenderQueue() {
 }
 
 async function renderModelToPNG(filePath, container, existingThumbnail) {
+  const startTime = Date.now();
+  console.log(`[DEBUG] renderModelToPNG: Start rendering ${filePath}`);
   if (existingThumbnail) {
     const img = document.createElement('img');
     img.src = existingThumbnail;
@@ -5506,6 +5510,42 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     container.innerHTML = '';
     container.appendChild(img);
     return existingThumbnail;
+  }
+
+  // For 3MF files, check for embedded images BEFORE 3D rendering
+  // Handle ZIP entries: get extension from entry path if it's a ZIP entry
+  let fileExtension;
+  if (filePath.includes('::')) {
+    // ZIP entry: get extension from the entry part after ::
+    const entryPath = filePath.split('::')[1];
+    fileExtension = entryPath.split('.').pop().toLowerCase();
+  } else {
+    fileExtension = filePath.split('.').pop().toLowerCase();
+  }
+  
+  if (fileExtension === '3mf') {
+    console.log(`[DEBUG] renderModelToPNG: Checking for embedded images in 3MF: ${filePath}`);
+    try {
+      const images = await window.electron.get3MFImages(filePath);
+      if (images && images.length > 0) {
+        const firstImage = images[0];
+        console.log(`[DEBUG] renderModelToPNG: SUCCESS - Found embedded image, skipping 3D render for ${filePath}`);
+        // Return the embedded image instead of rendering
+        const img = document.createElement('img');
+        img.src = firstImage;
+        img.style.width = '250px';
+        img.style.height = '250px';
+        container.innerHTML = '';
+        container.appendChild(img);
+        // Save to database
+        await window.electron.saveThumbnail(filePath, firstImage);
+        return firstImage;
+      } else {
+        console.log(`[DEBUG] renderModelToPNG: No embedded images found, will render 3D model for ${filePath}`);
+      }
+    } catch (imageError) {
+      console.error(`[DEBUG] renderModelToPNG: Error checking for embedded image: ${imageError}`);
+    }
   }
 
   let renderer, scene, camera, canvas;
@@ -5537,9 +5577,17 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     scene.add(ambientLight);
     scene.add(directionalLight);
 
-    // Use loadModel function which has proper path encoding handling
-    model = await loadModel(filePath);
-    if (!model) throw new Error('Failed to load model');
+    // Use loadModel function which has proper path encoding handling and embedded image check
+    // loadModel is available globally via window.loadModel
+    const loadModelFunc = window.loadModel || loadModel;
+    if (!loadModelFunc) {
+      throw new Error('loadModel function is not available.');
+    }
+    model = await loadModelFunc(filePath);
+    if (!model) {
+      console.log(`[DEBUG] renderModelToPNG: loadModel returned null (likely embedded image found), skipping 3D render`);
+      throw new Error('Failed to load model - embedded image should be used instead');
+    }
     
     scene.add(model);
     fitCameraToObject(camera, model, scene, renderer);
@@ -6493,15 +6541,21 @@ async function generateThumbnail(file) {
 
     // 1. Try to get embedded thumbnail for 3MF
     if (filePath.toLowerCase().endsWith('.3mf')) {
+        console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded thumbnail for ${filePath}`);
         try {
             const images = await extract3MFThumbnail(filePath);
             if (images && images.length > 0) {
                 const firstImage = images[0];
                 if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
+                    console.log(`[DEBUG] generateThumbnail: SUCCESS - Using embedded thumbnail for ${filePath}`);
                     // Save to database
                     await window.electron.saveThumbnail(filePath, firstImage);
                     return firstImage;
+                } else {
+                    console.log(`[DEBUG] generateThumbnail: Invalid image format. First image type: ${typeof firstImage}`);
                 }
+            } else {
+                console.log(`[DEBUG] generateThumbnail: No embedded images found for ${filePath}`);
             }
         } catch (e) {
             console.error('Error extracting 3MF thumbnail:', e);
@@ -6606,9 +6660,22 @@ async function populateParentModelFilter() {
 
 // Add this function near other file rendering functions
 function addContextMenuHandler(fileElement, filePath) {
-  fileElement.addEventListener('contextmenu', async (e) => {
+  // Remove any existing context menu handler to avoid duplicates
+  fileElement.removeEventListener('contextmenu', fileElement._contextMenuHandler);
+  
+  // Create the handler function
+  const handler = async (e) => {
     e.preventDefault(); // Prevent default context menu
-    e.stopPropagation(); // Prevent event bubbling
+    
+    // For list view, ensure the entire element is clickable
+    // Check if the click is on this element or any of its children
+    const target = e.target;
+    if (!fileElement.contains(target) && target !== fileElement) {
+      return; // Click was outside the element
+    }
+    
+    e.stopPropagation(); // Prevent event bubbling after we've handled it
+    
     // If multi-edit mode is active and more than one model is selected,
     // send the entire selection. Otherwise, use the single filePath.
     if (isMultiSelectMode && selectedModels.size > 1) {
@@ -6616,7 +6683,15 @@ function addContextMenuHandler(fileElement, filePath) {
     } else {
       await window.electron.showContextMenu(filePath);
     }
-  });
+  };
+  
+  // Store handler reference for potential removal
+  fileElement._contextMenuHandler = handler;
+  
+  // Use capture phase for list view to catch events on child elements
+  // For other views, use bubble phase
+  const useCapture = fileElement.classList.contains('file-item-list');
+  fileElement.addEventListener('contextmenu', handler, useCapture);
 }
 
 // Update the exit multi-edit mode functionality
@@ -7072,33 +7147,49 @@ async function autoSaveMultipleModels(field, value) {
       value = 'Unknown';
     }
     
+    // Create a copy of selectedModels to avoid issues if the set changes during iteration
+    const modelsToUpdate = Array.from(selectedModels);
+    console.log(`autoSaveMultipleModels: Updating ${modelsToUpdate.length} models for field ${field}`);
+    
     // Update all selected models
-    for (const filePath of selectedModels) {
-      const model = await window.electron.getModel(filePath);
-      if (model) {
-        // Special handling for tags - MERGE instead of replace
-        if (field === 'tags') {
-          const existingTags = Array.isArray(model.tags) ? model.tags : [];
-          const newTags = Array.isArray(value) ? value : []; 
-          // Combine, filter out duplicates, and sort
-          const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
-          model.tags = allTags;
+    for (const filePath of modelsToUpdate) {
+      try {
+        const model = await window.electron.getModel(filePath);
+        if (model) {
+          // Special handling for tags - MERGE instead of replace
+          if (field === 'tags') {
+            const existingTags = Array.isArray(model.tags) ? model.tags : [];
+            const newTags = Array.isArray(value) ? value : []; 
+            // Combine, filter out duplicates, and sort
+            const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
+            model.tags = allTags;
+          } else {
+            // Handle other fields
+            model[field] = value;
+          }
+          
+          // Save the model
+          await window.electron.saveModel(model);
+          
+          // Small delay to ensure database is updated before fetching
+          await new Promise(resolve => setTimeout(resolve, 50));
+          
+          // Update UI - ensure this happens for each model
+          console.log(`autoSaveMultipleModels: Updating UI for ${filePath}`);
+          await updateModelElement(filePath);
+          
+          // Small delay between updates to avoid overwhelming the UI
+          await new Promise(resolve => setTimeout(resolve, 20));
         } else {
-          // Handle other fields
-          model[field] = value;
+          console.warn(`Could not find model for ${filePath} during autoSaveMultipleModels`);
         }
-        
-        // Save the model
-        await window.electron.saveModel(model);
-        
-        // Update UI
-        await updateModelElement(filePath);
-      } else {
-        console.warn(`Could not find model for ${filePath} during autoSaveMultipleModels`);
+      } catch (error) {
+        console.error(`Error updating model ${filePath} in autoSaveMultipleModels:`, error);
+        // Continue with other models even if one fails
       }
     }
     
-    console.log(`Finished autoSaveMultipleModels for field ${field}.`); // Simplified log
+    console.log(`Finished autoSaveMultipleModels for field ${field}. Updated ${modelsToUpdate.length} models.`);
     return true;
   } catch (error) {
     console.error(`Error in autoSaveMultipleModels for field ${field}:`, error);
@@ -7222,7 +7313,7 @@ function showMultiEditPanel() {
   } else {
     console.error('Multi-printed checkbox not found in showMultiEditPanel');
   }
-
+when 
   // Re-attach event listener for multi-tag-select
   const multiTagSelect = document.getElementById('multi-tag-select');
   if (multiTagSelect) {
@@ -7333,9 +7424,10 @@ document.addEventListener('DOMContentLoaded', () => {
 // ==================== NEW CODE: Virtual Grid Implementation ====================
 
 // Helper function to create a DOM element for a model item
-function createModelItem(model) {
+function createModelItem(model, viewMode = null) {
+  const view = viewMode || currentGridView;
   const item = document.createElement('div');
-  item.className = 'file-item';
+  item.className = `file-item file-item-${view}`;
   item.dataset.filepath = model.filePath;
 
   if (selectedModels.has(model.filePath)) {
@@ -7348,22 +7440,41 @@ function createModelItem(model) {
   printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
   item.appendChild(printStatus);
 
-  // Thumbnail container with fixed size
+  // Archive status element (for models inside ZIP archives)
+  const isZipEntry = model.filePath && model.filePath.includes('::');
+  let archiveStatus = null;
+  if (isZipEntry) {
+    archiveStatus = document.createElement('div');
+    archiveStatus.className = 'archive-status';
+    archiveStatus.textContent = 'Archive';
+    item.appendChild(archiveStatus);
+  }
+
+  // Define thumbnail sizes based on view mode (optimized)
+  const thumbnailSizes = {
+    'list': { width: '48px', height: '48px' },      // Slightly larger for better visibility
+    'preview': { width: '140px', height: '140px' }, // Preview thumbnail size
+    'detailed': { width: '280px', height: '280px' }  // Optimized large thumbnail
+  };
+  
+  const thumbSize = thumbnailSizes[view] || thumbnailSizes['detailed'];
+  
+  // Thumbnail container with size based on view mode
   const thumbnailContainer = document.createElement('div');
   thumbnailContainer.className = 'thumbnail-container';
 
   if (model.thumbnail) {
     const img = document.createElement('img');
     img.src = model.thumbnail;
-    img.style.width = '250px';
-    img.style.height = '250px';
+    img.style.width = thumbSize.width;
+    img.style.height = thumbSize.height;
     thumbnailContainer.appendChild(img);
   } else {
     // Show placeholder/loading state
     const img = document.createElement('img');
     img.src = '3d.png';
-    img.style.width = '250px';
-    img.style.height = '250px';
+    img.style.width = thumbSize.width;
+    img.style.height = thumbSize.height;
     // Add loading class if needed
     thumbnailContainer.appendChild(img);
 
@@ -7388,8 +7499,8 @@ function createModelItem(model) {
             if (visibleItem) {
                const img = document.createElement('img');
                img.src = thumbnail;
-               img.style.width = '250px';
-               img.style.height = '250px';
+               img.style.width = thumbSize.width;
+               img.style.height = thumbSize.height;
                visibleItem.innerHTML = '';
                visibleItem.appendChild(img);
             }
@@ -7410,32 +7521,630 @@ function createModelItem(model) {
 
   item.appendChild(thumbnailContainer);
 
-  // File info container
+  // Get parent directory from file path (needed for list view)
+  const getParentDirectory = (filePath) => {
+    if (!filePath) return '';
+    // Handle both Windows (\) and Unix (/) paths
+    const lastSlash = Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/'));
+    if (lastSlash <= 0) return '';
+    // Get the parent directory path
+    const parentPath = filePath.substring(0, lastSlash);
+    // Extract just the parent folder name (last segment of the path)
+    const parentFolderSlash = Math.max(parentPath.lastIndexOf('\\'), parentPath.lastIndexOf('/'));
+    return parentFolderSlash >= 0 ? parentPath.substring(parentFolderSlash + 1) : parentPath;
+  };
+  const parentDir = getParentDirectory(model.filePath);
+
+  // File info container - layout depends on view mode
   const fileInfo = document.createElement('div');
   fileInfo.className = 'file-info';
 
   // File name element
   const fileName = document.createElement('div');
   fileName.className = 'file-name';
-  fileName.textContent = model.fileName || '';
-  fileInfo.appendChild(fileName);
-
-  // Add designer info if available
-  if (model.designer) {
-    const designerInfo = document.createElement('div');
-    designerInfo.className = 'designer-info';
-
-    const label = document.createElement('span');
-    label.className = 'directory-label';
-    label.textContent = 'Designer: ';
-
-    const value = document.createTextNode(model.designer);
-
-    designerInfo.appendChild(label);
-    designerInfo.appendChild(value);
-    fileInfo.appendChild(designerInfo);
+  // Extract file name from path if fileName is not available
+  // Handle zip entries (format: "zipPath::entryPath")
+  let displayFileName = model.fileName;
+  if (!displayFileName && model.filePath) {
+    if (model.filePath.includes('::')) {
+      // Zip entry: extract filename from entry path
+      const entryPath = model.filePath.split('::')[1];
+      displayFileName = entryPath.split(/[/\\]/).pop() || 'Unknown';
+    } else {
+      // Regular file: extract filename from path
+      displayFileName = model.filePath.split(/[/\\]/).pop() || 'Unknown';
+    }
+  }
+  if (!displayFileName) {
+    displayFileName = 'Unknown';
+  }
+  fileName.textContent = displayFileName;
+  
+  // In detailed view, add file name directly after thumbnail, not in fileInfo
+  // For other views, add it to fileInfo as before
+  if (view === 'detailed') {
+    // File name will be added after thumbnail in detailed view section
+  } else {
+    fileInfo.appendChild(fileName);
   }
 
+  // File details container (directory, size, designer) - only show in detailed and list views
+  const fileDetails = document.createElement('div');
+  fileDetails.className = 'file-details';
+  
+  // In list view, show Windows File Explorer style - thin horizontal row with details
+  if (view === 'list') {
+    // Get status indicators that were already added to item - we'll move them to columns later
+    // Note: These are added to item early in the function (lines 7099-7111), so they should be findable here
+    const printStatusElement = item.querySelector('.print-status');
+    const archiveStatusElement = item.querySelector('.archive-status');
+    
+    // List view: horizontal layout with tiny thumbnail on left, details on right
+    item.style.display = 'flex';
+    item.style.flexDirection = 'row';
+    item.style.alignItems = 'center';
+    item.style.gap = '12px';
+    item.style.padding = '6px 12px';
+    item.style.height = '52px';
+    item.style.position = 'relative';
+    thumbnailContainer.style.flexShrink = '0';
+    thumbnailContainer.style.width = '48px';
+    thumbnailContainer.style.height = '48px';
+    thumbnailContainer.style.position = 'relative';
+    fileInfo.style.flex = '1';
+    fileInfo.style.display = 'flex';
+    fileInfo.style.flexDirection = 'row';
+    fileInfo.style.alignItems = 'center';
+    fileInfo.style.gap = '15px';
+    fileInfo.style.minWidth = '0';
+    
+    // File name column (fixed width)
+    fileName.style.flexShrink = '0';
+    fileName.style.width = '250px';
+    fileName.style.overflow = 'hidden';
+    fileName.style.textOverflow = 'ellipsis';
+    fileName.style.whiteSpace = 'nowrap';
+    fileName.style.fontSize = '13px';
+    fileName.style.color = '#fff';
+    
+    // Parent directory column (fixed width, clickable to filter)
+    const directoryText = document.createElement('div');
+    directoryText.className = 'directory-info';
+    directoryText.textContent = parentDir || '';
+    directoryText.style.fontSize = '11px';
+    directoryText.style.color = parentDir ? '#4a9eff' : '#888';
+    directoryText.style.flexShrink = '0';
+    directoryText.style.width = '150px';
+    directoryText.style.overflow = 'hidden';
+    directoryText.style.textOverflow = 'ellipsis';
+    directoryText.style.whiteSpace = 'nowrap';
+    directoryText.style.cursor = parentDir ? 'pointer' : 'default';
+    directoryText.style.fontWeight = parentDir ? '500' : '400';
+    // Add click handler to filter by directory
+    if (parentDir) {
+      directoryText.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Set the global directory filter
+        window.currentDirectoryFilter = parentDir;
+        // Trigger combined search to apply filter
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        }
+      });
+      // Add hover effect
+      directoryText.addEventListener('mouseenter', () => {
+        directoryText.style.textDecoration = 'underline';
+        directoryText.style.color = '#6bb3ff';
+      });
+      directoryText.addEventListener('mouseleave', () => {
+        directoryText.style.textDecoration = 'none';
+        directoryText.style.color = '#4a9eff';
+      });
+    }
+    fileInfo.appendChild(directoryText);
+    
+    // Optimized column widths for list view
+    // Add file size (fixed width, center-aligned)
+    if (model.size) {
+      const sizeText = document.createElement('div');
+      sizeText.className = 'file-size';
+      sizeText.textContent = formatFileSize(model.size);
+      sizeText.style.fontSize = '12px';
+      sizeText.style.color = '#aaa';
+      sizeText.style.flexShrink = '0';
+      sizeText.style.width = '90px';
+      sizeText.style.textAlign = 'center';
+      sizeText.style.fontFamily = 'monospace';
+      fileInfo.appendChild(sizeText);
+    } else {
+      // Spacer for consistent alignment
+      const spacer = document.createElement('div');
+      spacer.style.width = '90px';
+      spacer.style.flexShrink = '0';
+      fileInfo.appendChild(spacer);
+    }
+    
+    // Add designer column (always show, even if empty)
+    const designerText = document.createElement('div');
+    designerText.className = 'designer-info';
+    designerText.textContent = model.designer || '';
+    designerText.style.fontSize = '12px';
+    designerText.style.color = model.designer ? '#aaa' : '#666';
+    designerText.style.flexShrink = '0';
+    designerText.style.width = '180px';
+    designerText.style.overflow = 'hidden';
+    designerText.style.textOverflow = 'ellipsis';
+    designerText.style.whiteSpace = 'nowrap';
+    fileInfo.appendChild(designerText);
+
+    // Add source column (always show, even if empty)
+    const sourceText = document.createElement('div');
+    sourceText.className = 'source-info';
+    sourceText.textContent = model.source || '';
+    sourceText.style.fontSize = '12px';
+    sourceText.style.color = model.source ? '#aaa' : '#666';
+    sourceText.style.flexShrink = '0';
+    sourceText.style.width = '200px';
+    sourceText.style.overflow = 'hidden';
+    sourceText.style.textOverflow = 'ellipsis';
+    sourceText.style.whiteSpace = 'nowrap';
+    fileInfo.appendChild(sourceText);
+
+    // Add parent model column (always show, even if empty)
+    const parentText = document.createElement('div');
+    parentText.className = 'parent-info';
+    parentText.textContent = model.parentModel || '';
+    parentText.style.fontSize = '12px';
+    parentText.style.color = model.parentModel ? '#aaa' : '#666';
+    parentText.style.flexShrink = '0';
+    parentText.style.width = '180px';
+    parentText.style.overflow = 'hidden';
+    parentText.style.textOverflow = 'ellipsis';
+    parentText.style.whiteSpace = 'nowrap';
+    fileInfo.appendChild(parentText);
+
+    // Add license column (always show, even if empty)
+    const licenseText = document.createElement('div');
+    licenseText.className = 'license-info';
+    licenseText.textContent = model.license || '';
+    licenseText.style.fontSize = '12px';
+    licenseText.style.color = model.license ? '#aaa' : '#666';
+    licenseText.style.flexShrink = '0';
+    licenseText.style.width = '150px';
+    licenseText.style.overflow = 'hidden';
+    licenseText.style.textOverflow = 'ellipsis';
+    licenseText.style.whiteSpace = 'nowrap';
+    fileInfo.appendChild(licenseText);
+
+    // Add tags column (always show, even if empty)
+    // Note: Tags need to be loaded separately if not in model
+    const tagsText = document.createElement('div');
+    tagsText.className = 'tags-info';
+    let tagsDisplay = '';
+    if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
+      tagsDisplay = model.tags.join(', ');
+    }
+    tagsText.textContent = tagsDisplay;
+    tagsText.style.fontSize = '12px';
+    tagsText.style.color = tagsDisplay ? '#aaa' : '#666';
+    tagsText.style.flexShrink = '0';
+    tagsText.style.width = '200px';
+    tagsText.style.overflow = 'hidden';
+    tagsText.style.textOverflow = 'ellipsis';
+    tagsText.style.whiteSpace = 'nowrap';
+    fileInfo.appendChild(tagsText);
+    
+    // Load tags asynchronously if not present
+    if (!model.tags && model.id) {
+      window.electron.getModelTags(model.id).then(tags => {
+        if (tags && tags.length > 0) {
+          tagsText.textContent = tags.map(t => t.name || t).join(', ');
+          tagsText.style.color = '#aaa';
+        }
+      }).catch(err => console.error('Error loading tags:', err));
+    }
+    
+    // Add print status column (fixed width)
+    const printStatusColumn = document.createElement('div');
+    printStatusColumn.className = 'print-status-column';
+    printStatusColumn.style.flexShrink = '0';
+    printStatusColumn.style.width = '100px';
+    printStatusColumn.style.textAlign = 'center';
+    printStatusColumn.style.display = 'flex';
+    printStatusColumn.style.alignItems = 'center';
+    printStatusColumn.style.justifyContent = 'center';
+    if (printStatusElement) {
+      // Remove all positioning styles and move to column
+      printStatusElement.style.position = 'static';
+      printStatusElement.style.top = 'auto';
+      printStatusElement.style.right = 'auto';
+      printStatusElement.style.left = 'auto';
+      printStatusElement.style.fontSize = '11px';
+      printStatusElement.style.padding = '2px 6px';
+      printStatusElement.style.borderRadius = '3px';
+      printStatusElement.style.display = 'inline-block';
+      printStatusElement.style.zIndex = 'auto';
+      printStatusElement.style.margin = '0';
+      // Move the print status from item to the column (appendChild automatically removes from old parent)
+      printStatusColumn.appendChild(printStatusElement);
+    } else {
+      // Add empty spacer for consistent alignment
+      const spacer = document.createElement('div');
+      spacer.style.width = '100%';
+      spacer.style.height = '20px';
+      printStatusColumn.appendChild(spacer);
+    }
+    fileInfo.appendChild(printStatusColumn);
+    
+    // Add archive status column (fixed width)
+    const archiveStatusColumn = document.createElement('div');
+    archiveStatusColumn.className = 'archive-status-column';
+    archiveStatusColumn.style.flexShrink = '0';
+    archiveStatusColumn.style.width = '100px';
+    archiveStatusColumn.style.textAlign = 'center';
+    archiveStatusColumn.style.display = 'flex';
+    archiveStatusColumn.style.alignItems = 'center';
+    archiveStatusColumn.style.justifyContent = 'center';
+    if (archiveStatusElement) {
+      // Remove all positioning styles and move to column
+      archiveStatusElement.style.position = 'static';
+      archiveStatusElement.style.top = 'auto';
+      archiveStatusElement.style.right = 'auto';
+      archiveStatusElement.style.left = 'auto';
+      archiveStatusElement.style.fontSize = '11px';
+      archiveStatusElement.style.padding = '2px 6px';
+      archiveStatusElement.style.borderRadius = '3px';
+      archiveStatusElement.style.display = 'inline-block';
+      archiveStatusElement.style.zIndex = 'auto';
+      archiveStatusElement.style.margin = '0';
+      // Move the archive status from item to the column (appendChild automatically removes from old parent)
+      archiveStatusColumn.appendChild(archiveStatusElement);
+    } else {
+      // Add empty spacer for consistent alignment
+      const spacer = document.createElement('div');
+      spacer.style.width = '100%';
+      spacer.style.height = '20px';
+      archiveStatusColumn.appendChild(spacer);
+    }
+    fileInfo.appendChild(archiveStatusColumn);
+    
+    item.appendChild(fileInfo);
+    
+    // Add click event handler for model selection
+    item.addEventListener('click', (e) => {
+      // Check if ctrl or cmd key is pressed for multi-select
+      if (e.ctrlKey || e.metaKey) {
+        handleFileClick(e, model.filePath);
+      } else {
+        toggleModelSelection(item, model.filePath);
+      }
+    });
+    
+    // Add context menu handler for list view - works on entire element
+    addContextMenuHandler(item, model.filePath);
+    
+    return item;
+  }
+  
+  // For preview view (formerly small), show thumbnail and filename only
+  if (view === 'preview') {
+    // Optimized small view layout
+    item.style.width = '180px';
+    item.style.padding = '10px';
+    item.style.boxSizing = 'border-box';
+    
+    // Show filename below thumbnail
+    fileName.style.fontSize = '11px';
+    fileName.style.marginTop = '10px';
+    fileName.style.textAlign = 'center';
+    fileName.style.padding = '0 4px';
+    fileName.style.lineHeight = '1.3';
+    fileName.style.maxHeight = '32px';
+    fileName.style.overflow = 'hidden';
+    fileName.style.textOverflow = 'ellipsis';
+    fileName.style.display = '-webkit-box';
+    fileName.style.webkitLineClamp = '2';
+    fileName.style.webkitBoxOrient = 'vertical';
+    item.appendChild(fileInfo);
+    
+    // Add click event handler for model selection
+    item.addEventListener('click', (e) => {
+      // Check if ctrl or cmd key is pressed for multi-select
+      if (e.ctrlKey || e.metaKey) {
+        handleFileClick(e, model.filePath);
+      } else {
+        toggleModelSelection(item, model.filePath);
+      }
+    });
+    
+    // Add context menu handler for preview view
+    addContextMenuHandler(item, model.filePath);
+    
+    return item;
+  }
+  
+  // Create metadata items container
+  const metadataContainer = document.createElement('div');
+  metadataContainer.className = 'metadata-container';
+  
+  // Only add metadata in detailed view
+  if (view === 'detailed') {
+    // Optimized detailed view - more compact dimensions
+    // Reduced height and padding for better space utilization
+    item.style.width = '300px';
+    item.style.height = '480px'; // Reduced from 540px
+    item.style.minHeight = '480px';
+    item.style.maxHeight = '480px';
+    item.style.padding = '10px'; // Reduced from 12px
+    item.style.boxSizing = 'border-box';
+    item.style.display = 'flex';
+    item.style.flexDirection = 'column';
+    
+    // Slightly smaller thumbnail to give more room for metadata
+    thumbnailContainer.style.width = '280px'; // Reduced from 276px (actually same, but adjusted for padding)
+    thumbnailContainer.style.height = '240px'; // Reduced from 276px
+    thumbnailContainer.style.flexShrink = '0';
+    
+    // Add file name directly after thumbnail (in the red square area)
+    if (fileName && fileName.textContent) {
+      fileName.style.display = 'block';
+      fileName.style.fontSize = '13px';
+      fileName.style.fontWeight = '500';
+      fileName.style.color = '#fff';
+      fileName.style.marginTop = '8px'; // Reduced from 10px
+      fileName.style.marginBottom = '8px'; // Reduced from 10px
+      fileName.style.padding = '5px 8px'; // Reduced from 6px
+      fileName.style.textAlign = 'center';
+      fileName.style.whiteSpace = 'nowrap';
+      fileName.style.overflow = 'hidden';
+      fileName.style.textOverflow = 'ellipsis';
+      fileName.style.width = '100%';
+      fileName.style.boxSizing = 'border-box';
+      fileName.style.minHeight = '28px';
+      fileName.style.lineHeight = '1.4';
+      fileName.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+      fileName.style.borderRadius = '4px';
+      fileName.style.flexShrink = '0';
+      // Insert file name right after thumbnail container
+      const nextSibling = thumbnailContainer.nextSibling;
+      if (nextSibling) {
+        item.insertBefore(fileName, nextSibling);
+      } else {
+        item.appendChild(fileName);
+      }
+    }
+    
+    // Ensure file info container only takes the space it needs
+    fileInfo.style.minHeight = '0';
+    fileInfo.style.flex = '0 0 auto'; // Don't grow, don't shrink, auto size - prevents overflow
+    fileInfo.style.display = 'flex';
+    fileInfo.style.flexDirection = 'column';
+    fileInfo.style.justifyContent = 'flex-start';
+    fileInfo.style.gap = '4px'; // Slightly increased for better spacing
+    fileInfo.style.overflow = 'hidden';
+    fileInfo.style.padding = '0'; // Remove all padding
+    fileInfo.style.margin = '0'; // Remove all margin
+    
+    // Enable two-column grid layout for metadata
+    metadataContainer.style.display = 'grid';
+    metadataContainer.style.gridTemplateColumns = '1fr 1fr';
+    metadataContainer.style.gap = '2px 8px';
+    metadataContainer.style.padding = '0';
+    
+    // Add directory link (clickable to filter) with icon - spans full width
+    if (parentDir) {
+      const directoryItem = document.createElement('div');
+      directoryItem.className = 'metadata-item directory-item';
+      directoryItem.style.gridColumn = '1 / -1'; // Span both columns
+      directoryItem.innerHTML = `
+        <span class="metadata-icon">📁</span>
+        <span class="metadata-value directory-link">${parentDir}</span>
+      `;
+      directoryItem.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Set the global directory filter
+        window.currentDirectoryFilter = parentDir;
+        // Trigger combined search to apply filter
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        }
+      });
+      metadataContainer.appendChild(directoryItem);
+    }
+
+    // Add file size with icon - spans full width
+    if (model.size) {
+      const sizeItem = document.createElement('div');
+      sizeItem.className = 'metadata-item size-item';
+      sizeItem.style.gridColumn = '1 / -1'; // Span both columns
+      sizeItem.innerHTML = `
+        <span class="metadata-icon">💾</span>
+        <span class="metadata-value file-size">${formatFileSize(model.size)}</span>
+      `;
+      metadataContainer.appendChild(sizeItem);
+    }
+
+    // Get field analysis to determine which fields to show
+    const fieldAnalysis = window.modelFieldAnalysis || {
+      hasDesigner: true,
+      hasSource: true,
+      hasParentModel: true,
+      hasLicense: true,
+      hasTags: true
+    };
+    
+    // Add designer with icon (only show if this model has designer data)
+    if (fieldAnalysis.hasDesigner) {
+      const designerValue = (model.designer && model.designer.trim()) ? model.designer.trim() : '';
+      const hasDesigner = designerValue && designerValue !== '';
+      
+      // Only show if this specific model has a designer value
+      if (hasDesigner) {
+        const designerItem = document.createElement('div');
+        designerItem.className = 'metadata-item designer-item';
+        designerItem.style.cursor = 'pointer';
+        designerItem.classList.add('clickable-metadata');
+        
+        designerItem.innerHTML = `
+          <span class="metadata-icon">👤</span>
+          <span class="metadata-value designer-info" style="color: #ccc; display: inline-block;">${designerValue}</span>
+        `;
+        
+        // Add click handler to filter by designer
+        designerItem.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          // Set the designer filter
+          const designerSelect = document.getElementById('designer-select');
+          if (designerSelect) {
+            designerSelect.value = designerValue;
+            // Trigger combined search to apply filter
+            if (typeof window.performCombinedSearch === 'function') {
+              await window.performCombinedSearch();
+            }
+          }
+        });
+        metadataContainer.appendChild(designerItem);
+      }
+    }
+
+    // Add source with icon (only show if this model has source data)
+    if (fieldAnalysis.hasSource) {
+      const sourceValue = (model.source && model.source.trim()) ? model.source.trim() : '';
+      // Only show if this specific model has a source value
+      if (sourceValue) {
+        const sourceItem = document.createElement('div');
+        sourceItem.className = 'metadata-item source-item';
+        sourceItem.innerHTML = `
+          <span class="metadata-icon">🔗</span>
+          <span class="metadata-value source-info" style="color: #ccc">${sourceValue}</span>
+        `;
+        metadataContainer.appendChild(sourceItem);
+      }
+    }
+
+    // Add parent model with icon (only show if this model has parent model data)
+    if (fieldAnalysis.hasParentModel) {
+      const parentValue = (model.parentModel && model.parentModel.trim()) ? model.parentModel.trim() : '';
+      // Only show if this specific model has a parent model value
+      if (parentValue) {
+        const parentItem = document.createElement('div');
+        parentItem.className = 'metadata-item parent-item';
+        parentItem.style.cursor = 'pointer';
+        parentItem.classList.add('clickable-metadata');
+        
+        parentItem.innerHTML = `
+          <span class="metadata-icon">📦</span>
+          <span class="metadata-value parent-info" style="color: #ccc">${parentValue}</span>
+        `;
+        
+        // Add click handler to filter by parent model
+        parentItem.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          // Set the parent model filter
+          const parentSelect = document.getElementById('parent-select');
+          if (parentSelect) {
+            parentSelect.value = parentValue;
+            // Trigger combined search to apply filter
+            if (typeof window.performCombinedSearch === 'function') {
+              await window.performCombinedSearch();
+            }
+          }
+        });
+        metadataContainer.appendChild(parentItem);
+      }
+    }
+
+    // Add license with icon (only show if this model has license data)
+    if (fieldAnalysis.hasLicense) {
+      const licenseValue = (model.license && model.license.trim()) ? model.license.trim() : '';
+      // Only show if this specific model has a license value
+      if (licenseValue) {
+        const licenseItem = document.createElement('div');
+        licenseItem.className = 'metadata-item license-item';
+        licenseItem.style.cursor = 'pointer';
+        licenseItem.classList.add('clickable-metadata');
+        
+        licenseItem.innerHTML = `
+          <span class="metadata-icon">📜</span>
+          <span class="metadata-value license-info" style="color: #ccc">${licenseValue}</span>
+        `;
+        
+        // Add click handler to filter by license
+        licenseItem.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          // Set the license filter
+          const licenseSelect = document.getElementById('license-select');
+          if (licenseSelect) {
+            licenseSelect.value = licenseValue;
+            // Trigger combined search to apply filter
+            if (typeof window.performCombinedSearch === 'function') {
+              await window.performCombinedSearch();
+            }
+          }
+        });
+        metadataContainer.appendChild(licenseItem);
+      }
+    }
+
+    // Add tags with icon (only show if this model has tags data)
+    if (fieldAnalysis.hasTags) {
+      let tagsDisplay = '';
+      if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
+        tagsDisplay = model.tags.join(', ');
+      }
+      
+      // Only show if this specific model has tags, or load them asynchronously
+      if (tagsDisplay) {
+        const tagsItem = document.createElement('div');
+        tagsItem.className = 'metadata-item tags-item';
+        tagsItem.innerHTML = `
+          <span class="metadata-icon">🏷️</span>
+          <span class="metadata-value tags-info" style="color: #ccc">${tagsDisplay}</span>
+        `;
+        metadataContainer.appendChild(tagsItem);
+      } else if (model.id) {
+        // Create item and load tags asynchronously
+        const tagsItem = document.createElement('div');
+        tagsItem.className = 'metadata-item tags-item';
+        tagsItem.innerHTML = `
+          <span class="metadata-icon">🏷️</span>
+          <span class="metadata-value tags-info" style="color: #666"></span>
+        `;
+        metadataContainer.appendChild(tagsItem);
+        
+        // Load tags asynchronously
+        window.electron.getModelTags(model.id).then(tags => {
+          if (tags && tags.length > 0) {
+            const tagsText = tags.map(t => t.name || t).join(', ');
+            const tagsValueSpan = tagsItem.querySelector('.tags-info');
+            if (tagsValueSpan) {
+              tagsValueSpan.textContent = tagsText;
+              tagsValueSpan.style.color = '#ccc';
+            }
+          } else {
+            // Remove the tags item if no tags found
+            tagsItem.remove();
+          }
+        }).catch(err => {
+          console.error('Error loading tags:', err);
+          // Remove the tags item on error
+          tagsItem.remove();
+        });
+      }
+    }
+    
+    // Show file details in detailed view
+    fileDetails.appendChild(metadataContainer);
+    fileDetails.style.padding = '0'; // Remove all padding
+    fileDetails.style.margin = '0'; // Remove all margin
+    fileInfo.appendChild(fileDetails);
+  }
+  
   item.appendChild(fileInfo);
 
   // Add click event handler for model selection
@@ -7454,95 +8163,428 @@ function createModelItem(model) {
   return item;
 }
 
+// Analyze models to determine which metadata fields have data
+function analyzeModelFields(models) {
+  const fieldAnalysis = {
+    hasDesigner: false,
+    hasSource: false,
+    hasParentModel: false,
+    hasLicense: false,
+    hasTags: false
+  };
+  
+  if (!models || models.length === 0) {
+    return fieldAnalysis;
+  }
+  
+  for (const model of models) {
+    if (model.designer && model.designer.trim()) {
+      fieldAnalysis.hasDesigner = true;
+    }
+    if (model.source && model.source.trim()) {
+      fieldAnalysis.hasSource = true;
+    }
+    if (model.parentModel && model.parentModel.trim()) {
+      fieldAnalysis.hasParentModel = true;
+    }
+    if (model.license && model.license.trim()) {
+      fieldAnalysis.hasLicense = true;
+    }
+    if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
+      fieldAnalysis.hasTags = true;
+    }
+    
+    // If all fields are found, we can break early for performance
+    if (fieldAnalysis.hasDesigner && fieldAnalysis.hasSource && 
+        fieldAnalysis.hasParentModel && fieldAnalysis.hasLicense && fieldAnalysis.hasTags) {
+      break;
+    }
+  }
+  
+  return fieldAnalysis;
+}
+
 // Virtual grid function—renders only items visible in the scroll window.
 function renderVirtualGrid(models) {
   const container = document.querySelector('.file-grid');
   if (!container) return;
 
-  container.innerHTML = ''; // clear existing content
+  // Prevent multiple simultaneous renders
+  if (container.isRendering) {
+    // Queue the render for later
+    container.pendingModels = models;
+    return;
+  }
+  container.isRendering = true;
+  
+  // Analyze which fields have data across all models
+  window.modelFieldAnalysis = analyzeModelFields(models);
+
+  // Store current models for comparison
+  const currentModels = container.currentModels || [];
+  const currentModelIds = currentModels.map(m => m.id || m.filePath).sort();
+  const newModelIds = models.map(m => m.id || m.filePath).sort();
+  const modelsChanged = JSON.stringify(currentModelIds) !== JSON.stringify(newModelIds);
+  
+  // Only clear if models actually changed
+  if (modelsChanged) {
+    container.innerHTML = ''; // clear existing content
+  }
+  container.currentModels = models;
+  
+  // Check if grid structure already exists
+  let spacer = container.querySelector('.virtual-spacer');
+  let virtualContent = container.querySelector('.virtual-content');
+  
+  // If grid structure exists and models haven't changed, just trigger re-render
+  if (spacer && virtualContent && !modelsChanged) {
+    container.isRendering = false;
+    // Store renderVisibleItems function reference if it exists
+    if (container.renderVisibleItemsFn) {
+      container.renderVisibleItemsFn();
+    }
+    // Process any pending render
+    if (container.pendingModels) {
+      const pending = container.pendingModels;
+      container.pendingModels = null;
+      container.isRendering = false;
+      renderVirtualGrid(pending);
+    }
+    return;
+  }
+  
   container.style.position = 'relative';
   container.style.overflowY = 'auto';
+  container.style.overflowX = 'hidden';
+  container.style.display = 'block'; // Override CSS grid display for virtual scrolling
+  
+  // Calculate proper height based on viewport, accounting for any headers/footers
+  const containerRect = container.getBoundingClientRect();
+  const viewportHeight = window.innerHeight;
+  const containerTop = containerRect.top;
+  container.style.height = `calc(100vh - ${containerTop}px)`;
+  container.style.maxHeight = `calc(100vh - ${containerTop}px)`;
 
-  // Assume fixed item size (in pixels)
-  const itemWidth = 270;   // fixed model width (including margins) 250px + 20px margin
-  const itemHeight = 320;  // fixed model height 300px + 20px margin
+  // Define item dimensions based on view mode
+  const viewDimensions = {
+    'list': { width: '100%', height: 52, itemWidth: '100%' },
+    'preview': { width: 180, height: 220, itemWidth: 180 },
+    'detailed': { width: 300, height: 540, itemWidth: 300 }
+  };
+  
+  const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];
+  
+  // Assume fixed item size (in pixels) - optimized gaps
+  const paddingVertical = 10; // Grid top/bottom padding (small top padding to prevent menu overlap)
+  const paddingHorizontal = 20; // Grid left/right padding
+  // Different gaps for different views - optimized for better visual spacing
+  let verticalGap, horizontalGap;
+  if (currentGridView === 'list') {
+    verticalGap = 4; // Slight padding between list items
+    horizontalGap = 0;
+  } else if (currentGridView === 'preview') {
+    verticalGap = 24; // More vertical padding for preview thumbnails
+    horizontalGap = 24; // More horizontal padding for preview thumbnails
+  } else {
+    // Detailed view: improved spacing for better visual hierarchy
+    verticalGap = 28; // Better vertical spacing between rows with slight bottom padding
+    horizontalGap = 20; // Consistent horizontal spacing
+  }
+  const itemWidth = dimensions.itemWidth;   // fixed model width
+  const itemHeight = dimensions.height;  // fixed model height
+  const itemHeightWithGap = itemHeight + verticalGap; // Total height including gap
   const containerWidth = container.clientWidth;
 
-  // Calculate number of columns (at least 1)
-  const columns = Math.max(Math.floor(containerWidth / itemWidth), 1);
-  const rowCount = Math.ceil(models.length / columns);
+  // Calculate number of columns (at least 1), accounting for padding
+  // For list view, always 1 column
+  let columns, rowCount;
+  if (currentGridView === 'list') {
+    columns = 1;
+    rowCount = models.length;
+  } else if (currentGridView === 'preview') {
+    // For small view, account for horizontal gap
+    const availableWidth = containerWidth - (paddingHorizontal * 2);
+    const itemWidthWithGap = itemWidth + horizontalGap;
+    columns = Math.max(Math.floor(availableWidth / itemWidthWithGap), 1);
+    rowCount = Math.ceil(models.length / columns);
+  } else {
+    // For detailed view, calculate columns and center the grid
+    const availableWidth = containerWidth - (paddingHorizontal * 2);
+    columns = Math.max(Math.floor(availableWidth / itemWidth), 1);
+    rowCount = Math.ceil(models.length / columns);
+    
+    // Center the grid if we have fewer columns than would fill the width
+    if (currentGridView === 'detailed') {
+      const totalItemsWidth = columns * itemWidth;
+      const totalGapsWidth = (columns - 1) * horizontalGap;
+      const usedWidth = totalItemsWidth + totalGapsWidth;
+      const leftOffset = (availableWidth - usedWidth) / 2;
+      // Store offset for positioning items
+      container._centeredOffset = leftOffset;
+    } else {
+      container._centeredOffset = 0;
+    }
+  }
 
   // Create a spacer element of full height to allow scrolling
-  const spacer = document.createElement('div');
-  spacer.style.height = (rowCount * itemHeight) + 'px';
-  spacer.style.width = '100%';
-  spacer.style.position = 'relative';
-  container.appendChild(spacer);
+  if (!spacer) {
+    spacer = document.createElement('div');
+    spacer.className = 'virtual-spacer';
+    spacer.style.width = '100%';
+    spacer.style.position = 'relative';
+    container.appendChild(spacer);
+  }
+  // Calculate total height including gaps between rows
+  const totalHeight = (rowCount * itemHeight) + ((rowCount - 1) * verticalGap) + (paddingVertical * 2);
+  spacer.style.height = totalHeight + 'px';
 
   // Create an absolutely positioned element within the container to hold the items
-  const virtualContent = document.createElement('div');
-  virtualContent.style.position = 'absolute';
-  virtualContent.style.top = '0';
-  virtualContent.style.left = '0';
-  virtualContent.style.width = '100%';
-  virtualContent.style.height = '100%';
-  virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
-  container.appendChild(virtualContent);
+  if (!virtualContent) {
+    virtualContent = document.createElement('div');
+    virtualContent.className = 'virtual-content';
+    virtualContent.style.position = 'absolute';
+    virtualContent.style.top = '0';
+    virtualContent.style.left = '0';
+    virtualContent.style.width = '100%';
+    virtualContent.style.height = '100%';
+    virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
+    container.appendChild(virtualContent);
+  }
 
   // Store the resize observer to disconnect later if needed
   if (container.resizeObserver) {
     container.resizeObserver.disconnect();
   }
 
+  // Throttle render function to prevent excessive re-renders
+  let renderTimeout = null;
+  let isRendering = false;
+  
   // Function to (re)render only the visible rows (plus a small buffer)
   function renderVisibleItems() {
-    const scrollTop = container.scrollTop;
-    const containerHeight = container.clientHeight;
-
-    // Recalculate columns in case of resize
-    const currentContainerWidth = container.clientWidth;
-    const currentColumns = Math.max(Math.floor(currentContainerWidth / itemWidth), 1);
-    const currentRowCount = Math.ceil(models.length / currentColumns);
-
-    // Update spacer height
-    spacer.style.height = (currentRowCount * itemHeight) + 'px';
-
-    const buffer = 2; // extra rows to render before and after the visible area
-    const startRow = Math.max(0, Math.floor(scrollTop / itemHeight) - buffer);
-    const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / itemHeight) + buffer);
-
-    // Clear and re-render only the visible items
-    virtualContent.innerHTML = '';
-
-    for (let row = startRow; row < endRow; row++) {
-      for (let col = 0; col < currentColumns; col++) {
-        const index = row * currentColumns + col;
-        if (index >= models.length) break;
-
-        const model = models[index];
-        const item = createModelItem(model);
-        item.style.position = 'absolute';
-        item.style.top = (row * itemHeight) + 'px';
-        item.style.left = (col * itemWidth) + 'px';
-        item.style.width = '250px'; // Explicit width matching CSS
-        item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
-
-        virtualContent.appendChild(item);
-      }
+    // Cancel any pending render
+    if (renderTimeout) {
+      cancelAnimationFrame(renderTimeout);
     }
+    
+    // Skip if already rendering
+    if (isRendering) return;
+    
+    // Recalculate values each time to ensure we use current view settings
+    let currentVerticalGap, currentHorizontalGap;
+    if (currentGridView === 'list') {
+      currentVerticalGap = 4;
+      currentHorizontalGap = 0;
+    } else if (currentGridView === 'preview') {
+      currentVerticalGap = 24;
+      currentHorizontalGap = 24;
+    } else {
+      // Detailed view: no gap between rows
+      currentVerticalGap = 0;
+      currentHorizontalGap = 20;
+    }
+    
+    // Use requestAnimationFrame for smooth updates
+    renderTimeout = requestAnimationFrame(() => {
+      isRendering = true;
+      
+      try {
+        const scrollTop = container.scrollTop;
+        const containerHeight = container.clientHeight;
+
+        // Recalculate columns in case of resize
+        const currentContainerWidth = container.clientWidth;
+        let currentColumns, currentRowCount;
+        if (currentGridView === 'list') {
+          currentColumns = 1;
+          currentRowCount = models.length;
+        } else if (currentGridView === 'preview') {
+          // For small view, account for horizontal gap
+          const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
+          const itemWidthWithGap = itemWidth + currentHorizontalGap;
+          currentColumns = Math.max(Math.floor(currentAvailableWidth / itemWidthWithGap), 1);
+          currentRowCount = Math.ceil(models.length / currentColumns);
+        } else {
+          const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
+          currentColumns = Math.max(Math.floor(currentAvailableWidth / itemWidth), 1);
+          currentRowCount = Math.ceil(models.length / currentColumns);
+          
+          // Center the grid for detailed view
+          if (currentGridView === 'detailed') {
+            const totalItemsWidth = currentColumns * itemWidth;
+            const totalGapsWidth = (currentColumns - 1) * currentHorizontalGap;
+            const usedWidth = totalItemsWidth + totalGapsWidth;
+            const leftOffset = (currentAvailableWidth - usedWidth) / 2;
+            container._centeredOffset = leftOffset;
+          } else {
+            container._centeredOffset = 0;
+          }
+        }
+
+        // Update spacer height - for detailed view, no gap between rows
+        let currentTotalHeight;
+        if (currentGridView === 'detailed') {
+          // Detailed view: rows touch each other, no gaps
+          currentTotalHeight = (currentRowCount * itemHeight) + (paddingVertical * 2);
+        } else {
+          currentTotalHeight = (currentRowCount * itemHeight) + ((currentRowCount - 1) * currentVerticalGap) + (paddingVertical * 2);
+        }
+        spacer.style.height = currentTotalHeight + 'px';
+
+        const buffer = 2; // extra rows to render before and after the visible area
+        // Account for vertical gap when calculating visible rows
+        const rowHeightWithGap = itemHeight + verticalGap;
+        const startRow = Math.max(0, Math.floor(scrollTop / rowHeightWithGap) - buffer);
+        const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / rowHeightWithGap) + buffer);
+
+        // Track which items should be visible
+        const visibleIndices = new Set();
+        for (let row = startRow; row < endRow; row++) {
+          for (let col = 0; col < currentColumns; col++) {
+            const index = row * currentColumns + col;
+            if (index < models.length) {
+              visibleIndices.add(index);
+            }
+          }
+        }
+
+        // Remove items that are no longer visible
+        const existingItems = Array.from(virtualContent.children);
+        existingItems.forEach(item => {
+          const itemIndex = parseInt(item.dataset.index || '-1');
+          if (itemIndex === -1 || !visibleIndices.has(itemIndex)) {
+            item.remove();
+          }
+        });
+
+        // Add or update visible items
+        for (let row = startRow; row < endRow; row++) {
+          for (let col = 0; col < currentColumns; col++) {
+            const index = row * currentColumns + col;
+            if (index >= models.length) break;
+
+            // Check if item already exists
+            const existingItem = virtualContent.querySelector(`[data-index="${index}"]`);
+            if (existingItem) {
+              // Update position if needed (in case of resize)
+              // For detailed view, rows touch each other (no gap)
+              let topPosition;
+              if (currentGridView === 'detailed') {
+                topPosition = paddingVertical + (row * itemHeight);
+              } else {
+                topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
+              }
+              
+              existingItem.style.top = topPosition + 'px';
+              if (currentGridView === 'list') {
+                existingItem.style.left = paddingHorizontal + 'px';
+                existingItem.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+              } else if (currentGridView === 'preview') {
+                // Account for horizontal gap in preview view
+                const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal;
+                existingItem.style.left = leftPosition + 'px';
+                existingItem.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+              } else {
+                // For detailed view, center the grid with proper spacing
+                const centeredOffset = container._centeredOffset || 0;
+                const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
+                existingItem.style.left = leftPosition + 'px';
+                existingItem.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+              }
+              continue;
+            }
+
+            // Create new item
+            const model = models[index];
+            const item = createModelItem(model, currentGridView);
+            item.dataset.index = index;
+            item.style.position = 'absolute';
+            // Calculate top position - for detailed view, rows touch each other (no gap)
+            let topPosition;
+            if (currentGridView === 'detailed') {
+              topPosition = paddingVertical + (row * itemHeight);
+            } else {
+              topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
+            }
+            
+            item.style.top = topPosition + 'px';
+            if (currentGridView === 'list') {
+              item.style.left = paddingHorizontal + 'px';
+              item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+            } else if (currentGridView === 'preview') {
+              // Account for horizontal gap in preview view
+              const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal;
+              item.style.left = leftPosition + 'px';
+              item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+            } else {
+              // For detailed view, center the grid with proper spacing
+              const centeredOffset = container._centeredOffset || 0;
+              const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
+              item.style.left = leftPosition + 'px';
+              item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+            }
+            item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
+
+            virtualContent.appendChild(item);
+          }
+        }
+      } finally {
+        isRendering = false;
+        renderTimeout = null;
+      }
+    });
+
+
   }
 
+  // Throttled scroll handler to prevent excessive renders
+  let scrollTimeout = null;
+  function throttledScrollHandler() {
+    if (scrollTimeout) return;
+    scrollTimeout = requestAnimationFrame(() => {
+      renderVisibleItems();
+      scrollTimeout = null;
+    });
+  }
+  
   // Attach the scroll event handler to update visible items on scroll
   container.removeEventListener('scroll', container.virtualScrollHandler);
-  container.virtualScrollHandler = renderVisibleItems;
-  container.addEventListener('scroll', renderVisibleItems);
+  container.virtualScrollHandler = throttledScrollHandler;
+  container.addEventListener('scroll', throttledScrollHandler, { passive: true });
 
+  // Throttled resize handler
+  let resizeTimeout = null;
+  function throttledResizeHandler() {
+    if (resizeTimeout) {
+      cancelAnimationFrame(resizeTimeout);
+    }
+    resizeTimeout = requestAnimationFrame(() => {
+      renderVisibleItems();
+      resizeTimeout = null;
+    });
+  }
+  
   // Handle window resize
-  container.resizeObserver = new ResizeObserver(() => {
-    renderVisibleItems();
-  });
+  if (container.resizeObserver) {
+    container.resizeObserver.disconnect();
+  }
+  container.resizeObserver = new ResizeObserver(throttledResizeHandler);
   container.resizeObserver.observe(container);
 
+  // Store renderVisibleItems function reference for later use
+  container.renderVisibleItemsFn = renderVisibleItems;
+  
+  // Mark rendering as complete
+  container.isRendering = false;
+  
+  // Process any pending render
+  if (container.pendingModels) {
+    const pending = container.pendingModels;
+    container.pendingModels = null;
+    renderVirtualGrid(pending);
+    return;
+  }
+  
   // Initial render of visible items
   renderVisibleItems();
 }

@@ -66,6 +66,8 @@ contextBridge.exposeInMainWorld('electron', {
     console.log('preload: get3MFSTL called with:', filePath);
     return ipcRenderer.invoke('get3MFSTL', filePath);
   },
+  extractModelFromZip: (filePath) => ipcRenderer.invoke('extract-model-from-zip', filePath),
+  extractZipArchive: (filePath, destinationPath) => ipcRenderer.invoke('extract-zip-archive', filePath, destinationPath),
   onScanProgress: (callback) => {
     ipcRenderer.on('scan-progress', (_, progress) => callback(progress));
   },
@@ -105,6 +107,7 @@ contextBridge.exposeInMainWorld('electron', {
     const validChannels = [
       'ping', 
       'open-ai-config', 
+      'open-file-type-settings',
       'tags-generated', 
       'show-progress-dialog',
       'update-progress',

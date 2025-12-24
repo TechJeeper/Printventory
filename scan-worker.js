@@ -1,10 +1,42 @@
 const { parentPort } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const StreamZip = require('node-stream-zip');
 
 // Concurrency limit for file processing
 const MAX_CONCURRENT_OPS = 50;
+
+async function calculateFileHash(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    
+    stream.on('error', err => {
+      console.error(`Error reading file for hashing: ${filePath}`, err);
+      reject(err);
+    });
+
+    stream.on('data', chunk => {
+      try {
+        hash.update(chunk);
+      } catch (err) {
+        console.error(`Error updating hash for file: ${filePath}`, err);
+        reject(err);
+      }
+    });
+
+    stream.on('end', () => {
+      try {
+        const fileHash = hash.digest('hex');
+        resolve(fileHash);
+      } catch (err) {
+        console.error(`Error generating final hash for file: ${filePath}`, err);
+        reject(err);
+      }
+    });
+  });
+}
 
 async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false) {
   const files = [];
@@ -78,11 +110,21 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
       const ext = path.extname(fileName).toLowerCase();
 
       if ((ext === '.stl' || ext === '.3mf') && stats.size <= maxFileSize) {
+        // Calculate hash for the file
+        let fileHash = null;
+        try {
+          fileHash = await calculateFileHash(filePath);
+        } catch (hashError) {
+          console.error(`Error calculating hash for ${filePath}:`, hashError);
+          // Continue without hash if calculation fails
+        }
+        
         files.push({
           filePath,
           fileName,
           size: stats.size,
           mtime: stats.mtime,
+          hash: fileHash,
           isZipArchive: false
         });
       } else if (enableZipArchives && ext === '.zip' && stats.size <= maxFileSize) {
@@ -119,11 +161,16 @@ async function scanZipFile(zipPath, maxFileSize) {
         const ext = path.extname(entry.name).toLowerCase();
         if (ext === '.stl' || ext === '.3mf') {
           if (entry.size <= maxFileSize) {
+            // Use double colon format: zipPath::entryPath
+            const filePath = `${zipPath}::${entry.name}`;
+            // For zip entries, we can't easily calculate hash without extracting
+            // Hash will be calculated later when the file is accessed
             files.push({
-              filePath: zipPath,
+              filePath: filePath,
               fileName: entry.name,
               size: entry.size,
               mtime: entry.time ? new Date(entry.time) : new Date(),
+              hash: null, // Hash calculated on-demand for zip entries
               isZipArchive: true,
               zipEntryPath: entry.name,
               zip_path: entry.name

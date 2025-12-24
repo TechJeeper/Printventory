@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -82,8 +82,12 @@
       "guide/*",
       "bg.png",
       "search.js",
+      "scan-worker.js",
       "installer.nsh",
       "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "scan-worker.js"
     ],
     "directories": {
       "buildResources": ".",

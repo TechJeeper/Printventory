@@ -214,6 +214,7 @@ function debugLog(...args) {
 
 let db;
 let mainWindow;
+let isGeneratingHashes = false; // Track hash generation state
 
 // Handle single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -466,6 +467,7 @@ function initializeDefaultSettings() {
       { key: 'ClientId', value: crypto.randomUUID() }, // Generate a unique client ID
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
+      { key: 'enableZipArchives', value: '0' }, // ZIP archive support disabled by default
     ];
     
     // Insert default settings if they don't exist
@@ -530,10 +532,6 @@ function createWindow() {
       label: 'Settings',
       submenu: [
         {
-          label: 'Theme',
-          click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
           label: 'AI Config',
           click: () => {
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -542,16 +540,24 @@ function createWindow() {
           }
         },
         {
+          label: 'File Type',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
+        },
+        {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
+        },
+        {
+          label: 'Slicer Path',
+          click: () => mainWindow.webContents.send('open-slicer-settings')
         },
         {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
         },
         {
-          label: 'Slicer Path',
-          click: () => mainWindow.webContents.send('open-slicer-settings')
+          label: 'Theme',
+          click: () => mainWindow.webContents.send('open-theme-settings')
         }
       ]
     },
@@ -676,24 +682,28 @@ function createApplicationMenu() {
       label: 'Settings',
       submenu: [
         {
-          label: 'Theme',
-          click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
           label: 'AI Config',
           click: () => mainWindow.webContents.send('open-ai-config')
+        },
+        {
+          label: 'File Type',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
         },
         {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
         {
+          label: 'Slicer Path',
+          click: () => mainWindow.webContents.send('open-slicer-settings')
+        },
+        {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
         },
         {
-          label: 'Slicer Path',
-          click: () => mainWindow.webContents.send('open-slicer-settings')
+          label: 'Theme',
+          click: () => mainWindow.webContents.send('open-theme-settings')
         }
       ]
     },
@@ -808,14 +818,39 @@ ipcMain.handle('open-file-dialog', async () => {
   }
 });
 
-// Update the calculateFileHash function to be more robust
+// Update the calculateFileHash function to be more robust and handle zip entries
 async function calculateFileHash(filePath) {
+  // Check if this is a zip entry
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+  let tempFilePath = null;
+
+  if (pathInfo.isZipEntry) {
+    // For zip entries, extract to temp file first
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+      tempFilePath = actualFilePath;
+      debugLog(`Extracted zip entry to temp file for hashing: ${actualFilePath}`);
+    } catch (error) {
+      console.error(`Error extracting zip entry for hashing: ${filePath}`, error);
+      throw new Error(`Failed to extract zip entry for hashing: ${error.message}`);
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(actualFilePath);
     
-    stream.on('error', err => {
-      console.error(`Error reading file for hashing: ${filePath}`, err);
+      stream.on('error', err => {
+      console.error(`Error reading file for hashing: ${actualFilePath}`, err);
+      // Clean up temp file if it exists
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch (unlinkErr) {
+          console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
+        }
+      }
       reject(err);
     });
 
@@ -823,7 +858,15 @@ async function calculateFileHash(filePath) {
       try {
         hash.update(chunk);
       } catch (err) {
-        console.error(`Error updating hash for file: ${filePath}`, err);
+        console.error(`Error updating hash for file: ${actualFilePath}`, err);
+        // Clean up temp file if it exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (unlinkErr) {
+            console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
+          }
+        }
         reject(err);
       }
     });
@@ -832,9 +875,27 @@ async function calculateFileHash(filePath) {
       try {
         const fileHash = hash.digest('hex');
         debugLog(`Generated hash for ${filePath}: ${fileHash}`);
+        
+        // Clean up temp file if it exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          fs.unlink(tempFilePath, (err) => {
+            if (err) {
+              console.warn(`Failed to delete temp file: ${tempFilePath}`, err);
+            }
+          });
+        }
+        
         resolve(fileHash);
       } catch (err) {
         console.error(`Error generating final hash for file: ${filePath}`, err);
+        // Clean up temp file if it exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (unlinkErr) {
+            console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
+          }
+        }
         reject(err);
       }
     });
@@ -899,6 +960,10 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
     
+    // Read enableZipArchives setting from database
+    const zipSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipArchives');
+    const enableZipArchives = zipSetting && zipSetting.value === '1';
+    
     // First, remove any non-existent files from the scanned directory
     const removedCount = await removeNonExistentFiles(directoryPath);
     if (removedCount > 0) {
@@ -908,126 +973,48 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     }
 
     return new Promise((resolve, reject) => {
-      // Create a worker for scanning
-      const worker = new Worker(`
-        const { parentPort, workerData } = require('worker_threads');
-        const fs = require('fs');
-        const path = require('path');
-        const crypto = require('crypto');
-
-        async function calculateFileHash(filePath) {
-          return new Promise((resolve, reject) => {
-            const hash = crypto.createHash('sha256');
-            const stream = fs.createReadStream(filePath);
-            
-            stream.on('error', err => {
-              console.error(\`Error reading file for hashing: \${filePath}\`, err);
-              reject(err);
-            });
-
-            stream.on('data', chunk => {
-              try {
-                hash.update(chunk);
-              } catch (err) {
-                console.error(\`Error updating hash for file: \${filePath}\`, err);
-                reject(err);
-              }
-            });
-
-            stream.on('end', () => {
-              try {
-                const fileHash = hash.digest('hex');
-                resolve(fileHash);
-              } catch (err) {
-                console.error(\`Error generating final hash for file: \${filePath}\`, err);
-                reject(err);
-              }
-            });
-          });
-        }
-
-        async function scanDirectory(directoryPath, maxFileSize) {
-          const files = [];
-          let totalFiles = 0;
-          let processedFiles = 0;
-
-          // Use a stack instead of recursion for better performance
-          const directoryStack = [directoryPath];
-          const seenDirs = new Set();
-
-          while (directoryStack.length > 0) {
-            const currentDir = directoryStack.pop();
-            if (seenDirs.has(currentDir)) continue;
-            seenDirs.add(currentDir);
-
-            let entries;
+      // Use scan-worker.js for scanning (supports zip files)
+      // Handle asar archive case - worker threads can't load from inside asar
+      let workerPath = path.join(__dirname, 'scan-worker.js');
+      
+      // Check if we're in an asar archive (worker threads can't load from asar)
+      if (__dirname.includes('.asar')) {
+        // Try to get from app.asar.unpacked directory first
+        const unpackedPath = __dirname.replace('.asar', '.asar.unpacked');
+        const unpackedWorkerPath = path.join(unpackedPath, 'scan-worker.js');
+        if (fs.existsSync(unpackedWorkerPath)) {
+          workerPath = unpackedWorkerPath;
+        } else {
+          // Copy to temp directory as fallback
+          const tempDir = path.join(os.tmpdir(), 'printventory-worker');
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+          const tempWorkerPath = path.join(tempDir, 'scan-worker.js');
+          // Only copy if it doesn't exist
+          if (!fs.existsSync(tempWorkerPath)) {
             try {
-              entries = fs.readdirSync(currentDir, { withFileTypes: true });
-            } catch (err) {
-              console.error(\`Skipping directory \${currentDir} due to error: \${err.message}\`);
-              continue;
-            }
-
-            for (const entry of entries) {
-              const fullPath = path.join(currentDir, entry.name);
-              
-              if (entry.isDirectory()) {
-                // Skip system directories and __MACOSX
-                if (entry.name.toLowerCase() === '__macosx' || 
-                    /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
-                  continue;
-                }
-                directoryStack.push(fullPath);
-              } else {
-                const ext = path.extname(entry.name).toLowerCase();
-                if (ext === '.stl' || ext === '.3mf') {
-                  try {
-                    const stats = fs.statSync(fullPath);
-                    if (stats.size <= maxFileSize) {
-                      // Calculate hash for the file
-                      let fileHash = null;
-                      try {
-                        fileHash = await calculateFileHash(fullPath);
-                      } catch (hashError) {
-                        console.error(\`Error calculating hash for \${fullPath}:\`, hashError);
-                        // Continue without hash if calculation fails
-                      }
-                      
-                      files.push({
-                        filePath: fullPath,
-                        fileName: entry.name,
-                        size: stats.size,
-                        mtime: stats.mtime,
-                        hash: fileHash
-                      });
-                    }
-                  } catch (error) {
-                    console.error(\`Error processing file \${fullPath}:\`, error);
-                  }
-                }
-                processedFiles++;
-                if (processedFiles % 100 === 0) {
-                  parentPort.postMessage({ 
-                    type: 'progress', 
-                    processed: processedFiles 
-                  });
-                }
-              }
+              // Read from asar using fs.readFileSync (this works even from asar)
+              const asarWorkerPath = path.join(__dirname, 'scan-worker.js');
+              const workerContent = fs.readFileSync(asarWorkerPath);
+              fs.writeFileSync(tempWorkerPath, workerContent);
+            } catch (error) {
+              console.error('Error copying scan-worker.js from asar:', error);
+              reject(new Error(`Failed to load scan-worker.js: ${error.message}`));
+              return;
             }
           }
-
-          return { files, totalFiles: processedFiles };
+          workerPath = tempWorkerPath;
         }
-
-        parentPort.on('message', async ({ directoryPath, maxFileSize }) => {
-          try {
-            const result = await scanDirectory(directoryPath, maxFileSize);
-            parentPort.postMessage({ type: 'done', result });
-          } catch (error) {
-            parentPort.postMessage({ type: 'error', error: error.message });
-          }
-        });
-      `, { eval: true });
+      }
+      
+      // Verify the worker file exists before creating the worker
+      if (!fs.existsSync(workerPath)) {
+        reject(new Error(`scan-worker.js not found at: ${workerPath}`));
+        return;
+      }
+      
+      const worker = new Worker(workerPath);
 
       // Set up worker message handling
       worker.on('message', async (message) => {
@@ -1114,7 +1101,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
       });
 
       // Start the worker
-      worker.postMessage({ directoryPath, maxFileSize });
+      worker.postMessage({ directoryPath, maxFileSize, enableZipArchives });
     });
 
   } catch (error) {
@@ -1233,6 +1220,144 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
   } catch (error) {
     console.error("Error in getAllModels IPC:", error);
     return [];
+  }
+});
+
+ipcMain.handle('get-models-filtered', async (event, filters) => {
+  try {
+    console.log('getModelsFiltered called with filters:', filters);
+    
+    // Build WHERE clause conditions
+    const conditions = [];
+    const params = [];
+    
+    // Designer filter
+    if (filters.designer) {
+      if (filters.designer === '__none__') {
+        conditions.push("(designer IS NULL OR designer = '')");
+      } else {
+        conditions.push("LOWER(TRIM(designer)) = LOWER(TRIM(?))");
+        params.push(filters.designer);
+      }
+    }
+    
+    // License filter
+    if (filters.license) {
+      if (filters.license === '__none__') {
+        conditions.push("(license IS NULL OR license = '')");
+      } else {
+        conditions.push("license = ?");
+        params.push(filters.license);
+      }
+    }
+    
+    // Parent model filter
+    if (filters.parentModel) {
+      if (filters.parentModel === '__none__') {
+        conditions.push("(parentModel IS NULL OR parentModel = '')");
+      } else {
+        conditions.push("parentModel = ?");
+        params.push(filters.parentModel);
+      }
+    }
+    
+    // Print status filter
+    if (filters.printed !== undefined) {
+      if (filters.printed === 'printed') {
+        conditions.push("printed = 1");
+      } else if (filters.printed === 'not-printed') {
+        conditions.push("printed = 0");
+      }
+    }
+    
+    // File type filter
+    if (filters.fileType) {
+      if (filters.fileType.toLowerCase() === 'zip') {
+        // For zip filter, show all models inside ZIP archives (entries with :: separator)
+        conditions.push("filePath LIKE ?");
+        params.push('%::%');
+      } else {
+        conditions.push("LOWER(fileName) LIKE ?");
+        params.push(`%.${filters.fileType.toLowerCase()}`);
+      }
+    }
+    
+    // Directory filter
+    if (filters.directory) {
+      conditions.push("filePath LIKE ?");
+      params.push(`${filters.directory}%`);
+    }
+    
+    // Search term filter (searches in fileName, designer, parentModel, notes)
+    if (filters.search) {
+      const searchTerm = `%${filters.search.toLowerCase()}%`;
+      conditions.push(`(
+        LOWER(fileName) LIKE ? OR 
+        LOWER(designer) LIKE ? OR 
+        LOWER(parentModel) LIKE ? OR 
+        LOWER(notes) LIKE ?
+      )`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Build WHERE clause
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    
+    // Determine ORDER BY clause based on sortOption
+    let orderClause = "";
+    const sortOption = filters.sortOption || 'date-desc';
+    switch (sortOption) {
+      case "name-asc":
+        orderClause = "ORDER BY fileName ASC";
+        break;
+      case "name-desc":
+        orderClause = "ORDER BY fileName DESC";
+        break;
+      case "size-asc":
+        orderClause = "ORDER BY size ASC";
+        break;
+      case "size-desc":
+        orderClause = "ORDER BY size DESC";
+        break;
+      case "date-asc":
+        orderClause = "ORDER BY modifiedDate ASC";
+        break;
+      case "date-desc":
+      default:
+        orderClause = "ORDER BY modifiedDate DESC";
+        break;
+    }
+    
+    // Execute query
+    let query = `SELECT * FROM models ${whereClause} ${orderClause}`;
+    console.log('Executing query:', query);
+    console.log('With params:', params);
+    
+    let models = db.prepare(query).all(...params);
+    
+    // Tag filter (needs to be done after query since it requires joining with model_tags)
+    if (filters.tag) {
+      const tagFilteredModels = [];
+      for (const model of models) {
+        const modelTags = db.prepare(`
+          SELECT t.name 
+          FROM tags t
+          INNER JOIN model_tags mt ON t.id = mt.tag_id
+          WHERE mt.model_id = ?
+        `).all(model.id);
+        
+        if (modelTags.some(tag => tag.name === filters.tag)) {
+          tagFilteredModels.push(model);
+        }
+      }
+      models = tagFilteredModels;
+    }
+    
+    console.log(`Returning ${models.length} filtered models`);
+    return models;
+  } catch (error) {
+    console.error("Error in getModelsFiltered IPC:", error);
+    throw error;
   }
 });
 
@@ -1850,13 +1975,24 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     event.sender.send('select-model-by-filepath', filePaths[0]);
   }
   
+  // Check if any file is a zip entry
+  const isZipEntry = filePaths.length === 1 && filePaths[0].includes('::');
+  const pathInfo = filePaths.length === 1 ? parseZipPath(filePaths[0]) : null;
+  
   let menuItems = [
     {
       label: 'Open File',
       enabled: filePaths.length === 1,
       click: async () => {
         try {
-          await shell.openPath(filePaths[0]);
+          if (isZipEntry && pathInfo) {
+            // Extract to temp file first
+            const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+            await shell.openPath(tempPath);
+            // Note: temp file will be cleaned up by OS or on next extraction
+          } else {
+            await shell.openPath(filePaths[0]);
+          }
         } catch (error) {
           console.error('Error opening file:', error);
           dialog.showMessageBox({
@@ -1870,10 +2006,15 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     },
     {
       label: 'Open Directory',
-      enabled: filePaths.length === 1,
+      enabled: filePaths.length === 1 && !isZipEntry,
       click: async () => {
         try {
-          await shell.showItemInFolder(filePaths[0]);
+          if (isZipEntry && pathInfo) {
+            // For zip entries, open the zip file's directory
+            await shell.showItemInFolder(pathInfo.zipPath);
+          } else {
+            await shell.showItemInFolder(filePaths[0]);
+          }
         } catch (error) {
           console.error('Error opening directory:', error);
           dialog.showMessageBox({
@@ -1886,6 +2027,71 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       }
     }
   ];
+  
+  // Add extract options for zip entries
+  if (isZipEntry && pathInfo && filePaths.length === 1) {
+    menuItems.push(
+      { type: 'separator' },
+      {
+        label: 'Extract Model',
+        click: async () => {
+          try {
+            const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+              properties: ['openDirectory'],
+              title: 'Select destination folder for extraction'
+            });
+            
+            if (!result.canceled && result.filePaths.length > 0) {
+              const destPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath, result.filePaths[0]);
+              dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+                type: 'info',
+                title: 'Extraction Complete',
+                message: 'Model extracted successfully',
+                detail: `Extracted to: ${destPath}`
+              });
+            }
+          } catch (error) {
+            console.error('Error extracting model:', error);
+            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not extract model',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Extract Zip Archive',
+        click: async () => {
+          try {
+            const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+              properties: ['openDirectory'],
+              title: 'Select destination folder for extraction'
+            });
+            
+            if (!result.canceled && result.filePaths.length > 0) {
+              const destPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath, result.filePaths[0]);
+              dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+                type: 'info',
+                title: 'Extraction Complete',
+                message: 'Archive extracted successfully',
+                detail: `Extracted to: ${destPath}`
+              });
+            }
+          } catch (error) {
+            console.error('Error extracting archive:', error);
+            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not extract archive',
+              detail: error.message
+            });
+          }
+        }
+      }
+    );
+  }
 
   // Get all configured slicers from the database
   let slicers = [];
@@ -1911,9 +2117,14 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         click: async () => {
           try {
             const { exec } = require('child_process');
-            const modelPath = filePaths[0]; // Use the first file selected
-            let command;
+            let modelPath = filePaths[0]; // Use the first file selected
             
+            // If it's a zip entry, extract to temp first
+            if (isZipEntry && pathInfo) {
+              modelPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+            }
+            
+            let command;
             if (process.platform === 'darwin' && slicer.path.toLowerCase().endsWith('.app')) {
               command = `open -a "${slicer.path}" --args "${modelPath}"`;
             } else {
@@ -1928,7 +2139,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             });
           } catch (error) {
             console.error('Error slicing model:', error);
-            dialog.showMessageBox({
+            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
               type: 'error',
               title: 'Error',
               message: 'Could not slice model',
@@ -2299,19 +2510,72 @@ function getDatabasePath() {
 }
 
 // Add these IPC handlers
+// Helper function to parse zip path format
+function parseZipPath(filePath) {
+  if (filePath.includes('::')) {
+    const [zipPath, entryPath] = filePath.split('::');
+    return { zipPath, entryPath, isZipEntry: true };
+  }
+  return { zipPath: filePath, entryPath: null, isZipEntry: false };
+}
+
+// Helper function to extract model from zip to temp file or specified destination
+async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
+  try {
+    const StreamZip = require('node-stream-zip');
+    const zip = new StreamZip.async({ file: zipPath });
+    const entryData = await zip.entryData(entryPath);
+    await zip.close();
+    
+    if (destinationPath) {
+      // Extract to specified destination, preserving directory structure
+      const destPath = path.join(destinationPath, entryPath);
+      const destDir = path.dirname(destPath);
+      await fs.promises.mkdir(destDir, { recursive: true });
+      await fs.promises.writeFile(destPath, entryData);
+      return destPath;
+    } else {
+      // Create temp file
+      const tempDir = os.tmpdir();
+      const fileName = path.basename(entryPath);
+      const tempPath = path.join(tempDir, `printventory_${Date.now()}_${fileName}`);
+      await fs.promises.writeFile(tempPath, entryData);
+      return tempPath;
+    }
+  } catch (error) {
+    console.error(`Error extracting ${entryPath} from ${zipPath}:`, error);
+    throw error;
+  }
+}
+
 ipcMain.handle('get3MFImages', async (event, filePath) => {
   // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     console.log('Skipping file from __MACOSX directory:', filePath);
-    return null;
+    return [];
   }
+  
+  // Check if this is a zip entry
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+  
+  if (pathInfo.isZipEntry) {
+    // Extract to temp file first
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    } catch (error) {
+      console.error('Error extracting zip entry for 3MF images:', error);
+      return [];
+    }
+  }
+  
   try {
-    console.log('Starting to process 3MF file:', filePath);
+    console.log('Starting to process 3MF file:', actualFilePath);
     
     // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.error('File does not exist:', filePath);
-      return null;
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return [];
     }
     
     // Use JSZip to extract the 3MF file (which is a zip file)
@@ -2319,7 +2583,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     const zip = new JSZip();
     
     console.log('Reading file data...');
-    const data = await fs.promises.readFile(filePath);
+    const data = await fs.promises.readFile(actualFilePath);
     console.log('File read successfully, size:', data.length, 'bytes');
     
     console.log('Loading zip contents...');
@@ -2327,7 +2591,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     console.log('Zip contents loaded successfully');
     
     // Log all files in the 3MF
-    console.log('\nContents of 3MF file:', filePath);
+    console.log('\nContents of 3MF file:', actualFilePath);
     console.log('Number of files in archive:', Object.keys(contents.files).length);
     console.log('All files in archive:');
     Object.keys(contents.files).forEach(filename => {
@@ -2343,13 +2607,31 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       return normalized.match(/\.(png|jpe?g|gif|webp)$/i);
     };
 
+    // Helper to get proper MIME type from file extension
+    const getMimeType = (path) => {
+      const ext = path.split('.').pop().toLowerCase();
+      const mimeMap = {
+        'jpg': 'jpeg',
+        'jpeg': 'jpeg',
+        'png': 'png',
+        'gif': 'gif',
+        'webp': 'webp'
+      };
+      return mimeMap[ext] || 'png';
+    };
+
     // Helper to calculate score for an image to determine priority
     const calculateScore = (path, size) => {
       let score = 0;
       const lowerPath = path.toLowerCase();
       const fileName = path.split('/').pop().toLowerCase();
 
-      // 1. Camera photos (highest priority) - specific patterns
+      // 0. HIGHEST PRIORITY: Images in 3D/Textures/ or 3D/Texture/ directories (3MF standard location)
+      if (lowerPath.includes('3d/textures/') || lowerPath.includes('3d/texture/')) {
+        score += 200; // Very high priority for 3MF texture images
+      }
+
+      // 1. Camera photos (high priority) - specific patterns
       if (fileName.match(/^dsc/)) score += 100; // Nikon/Sony
       if (fileName.match(/^img/)) score += 100; // Canon/generic
       if (fileName.match(/^pxl/)) score += 100; // Pixel
@@ -2404,32 +2686,71 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     for (const imgObj of allImages.slice(0, maxImagesToExtract)) {
       console.log(`Extracting: ${imgObj.path} (Score: ${imgObj.score})`);
       const imageData = await imgObj.file.async('base64');
-      imageFiles.push(`data:image/${imgObj.path.split('.').pop().toLowerCase()};base64,${imageData}`);
+      const mimeType = getMimeType(imgObj.path);
+      imageFiles.push(`data:image/${mimeType};base64,${imageData}`);
     }
     
     console.log('\nExtracted total images:', imageFiles.length);
-    return imageFiles;
+    if (imageFiles.length === 0) {
+      console.log('No images found in 3MF file. Make sure images are in 3D/Textures/ or 3D/Texture/ directories.');
+    }
+    return imageFiles.length > 0 ? imageFiles : [];
   } catch (error) {
     console.error('Error reading 3MF images:', error);
     console.error('Error details:', error.message);
     console.error('Error stack:', error.stack);
-    return null;
+    return [];
   }
 });
 
 ipcMain.handle('get3MFSTL', async (event, filePath) => {
   try {
+    // Check if this is a zip entry
+    const pathInfo = parseZipPath(filePath);
+    let actualFilePath = filePath;
+    let shouldCleanup = false;
+    
+    if (pathInfo.isZipEntry) {
+      // Extract to temp file first
+      try {
+        actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+        shouldCleanup = true;
+      } catch (error) {
+        console.error('Error extracting zip entry for 3MF STL:', error);
+        return null;
+      }
+    }
+    
     const zip = new JSZip();
-    const data = await fs.promises.readFile(filePath);
+    const data = await fs.promises.readFile(actualFilePath);
     const contents = await zip.loadAsync(data);
     
     // Look for STL files in the 3MF
-    for (const [path, file] of Object.entries(contents.files)) {
-      if (path.endsWith('.stl')) {
+    for (const [entryPath, file] of Object.entries(contents.files)) {
+      if (entryPath.endsWith('.stl')) {
         // Extract to temp directory
         const tempPath = path.join(os.tmpdir(), `temp_${Date.now()}.stl`);
         await fs.promises.writeFile(tempPath, await file.async('nodebuffer'));
+        
+        // Clean up intermediate temp file if needed
+        if (shouldCleanup && actualFilePath !== filePath) {
+          try {
+            await fs.promises.unlink(actualFilePath);
+          } catch (cleanupError) {
+            console.error('Error cleaning up temp file:', cleanupError);
+          }
+        }
+        
         return tempPath;
+      }
+    }
+    
+    // Clean up intermediate temp file if needed
+    if (shouldCleanup && actualFilePath !== filePath) {
+      try {
+        await fs.promises.unlink(actualFilePath);
+      } catch (cleanupError) {
+        console.error('Error cleaning up temp file:', cleanupError);
       }
     }
     
@@ -2437,6 +2758,50 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
   } catch (error) {
     console.error('Error extracting STL from 3MF:', error);
     return null;
+  }
+});
+
+// Add handler to extract model from zip to temp file
+ipcMain.handle('extract-model-from-zip', async (event, filePath) => {
+  try {
+    const pathInfo = parseZipPath(filePath);
+    if (!pathInfo.isZipEntry) {
+      // Not a zip entry, return original path
+      return filePath;
+    }
+    
+    return await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+  } catch (error) {
+    console.error('Error extracting model from zip:', error);
+    throw error;
+  }
+});
+
+// Add handler to extract zip archive
+ipcMain.handle('extract-zip-archive', async (event, filePath, destinationPath) => {
+  try {
+    const pathInfo = parseZipPath(filePath);
+    if (!pathInfo.isZipEntry) {
+      throw new Error('Not a zip entry');
+    }
+    
+    const StreamZip = require('node-stream-zip');
+    const zip = new StreamZip.async({ file: pathInfo.zipPath });
+    
+    // Extract the specific entry
+    const entryData = await zip.entryData(pathInfo.entryPath);
+    await zip.close();
+    
+    // Create destination path preserving directory structure
+    const destPath = path.join(destinationPath, pathInfo.entryPath);
+    const destDir = path.dirname(destPath);
+    await fs.promises.mkdir(destDir, { recursive: true });
+    await fs.promises.writeFile(destPath, entryData);
+    
+    return destPath;
+  } catch (error) {
+    console.error('Error extracting zip archive:', error);
+    throw error;
   }
 });
 
@@ -2475,9 +2840,12 @@ ipcMain.handle('get-duplicates', async () => {
   }
 });
 
-// Add IPC handler to calculate missing hashes
-ipcMain.handle('calculate-missing-hashes', async (event) => {
+// Internal function to calculate missing hashes
+async function calculateMissingHashesInternal(event) {
   try {
+    // Set hash generation state
+    isGeneratingHashes = true;
+
     // Get all models with missing hashes
     const modelsWithMissingHashes = db.prepare(`
       SELECT filePath, fileName, size 
@@ -2488,11 +2856,22 @@ ipcMain.handle('calculate-missing-hashes', async (event) => {
     console.log(`Found ${modelsWithMissingHashes.length} models with missing hashes`);
 
     if (modelsWithMissingHashes.length === 0) {
+      isGeneratingHashes = false;
       return { calculated: 0, total: 0 };
     }
 
+    console.log('Starting hash calculation for', modelsWithMissingHashes.length, 'files');
+
     let calculatedCount = 0;
     const updateHash = db.prepare('UPDATE models SET hash = ? WHERE filePath = ?');
+
+    // Send initial progress update
+    if (event && event.sender) {
+      event.sender.send('hash-generation-progress', {
+        processed: 0,
+        total: modelsWithMissingHashes.length
+      });
+    }
 
     // Calculate hashes in batches to avoid blocking
     const batchSize = 10;
@@ -2501,33 +2880,97 @@ ipcMain.handle('calculate-missing-hashes', async (event) => {
       
       for (const model of batch) {
         try {
-          if (fs.existsSync(model.filePath)) {
+          // Check if file exists (for regular files) or zip file exists (for zip entries)
+          const pathInfo = parseZipPath(model.filePath);
+          let fileExists = false;
+
+          if (pathInfo.isZipEntry) {
+            // For zip entries, check if the zip file exists
+            fileExists = fs.existsSync(pathInfo.zipPath);
+          } else {
+            // For regular files, check if the file exists
+            fileExists = fs.existsSync(model.filePath);
+          }
+
+          if (fileExists) {
+            console.log(`Calculating hash for: ${model.filePath}`);
             const hash = await calculateFileHash(model.filePath);
             updateHash.run(hash, model.filePath);
             calculatedCount++;
+            console.log(`Hash calculated for: ${model.filePath} (${calculatedCount}/${modelsWithMissingHashes.length})`);
+            
+            // Send progress update after each file
+            if (event && event.sender) {
+              event.sender.send('hash-generation-progress', {
+                processed: calculatedCount,
+                total: modelsWithMissingHashes.length
+              });
+            }
           } else {
             console.warn(`File no longer exists: ${model.filePath}`);
+            // Still update progress even if file doesn't exist
+            calculatedCount++;
+            if (event && event.sender) {
+              event.sender.send('hash-generation-progress', {
+                processed: calculatedCount,
+                total: modelsWithMissingHashes.length
+              });
+            }
           }
         } catch (error) {
           console.error(`Error calculating hash for ${model.filePath}:`, error);
+          // Update progress even on error to prevent hanging
+          calculatedCount++;
+          if (event && event.sender) {
+            event.sender.send('hash-generation-progress', {
+              processed: calculatedCount,
+              total: modelsWithMissingHashes.length
+            });
+          }
         }
       }
-
-      // Send progress update
-      event.sender.send('hash-calculation-progress', {
-        calculated: calculatedCount,
-        total: modelsWithMissingHashes.length
-      });
 
       // Small delay to prevent blocking
       await new Promise(resolve => setTimeout(resolve, 10));
     }
 
+    isGeneratingHashes = false;
     return { calculated: calculatedCount, total: modelsWithMissingHashes.length };
   } catch (error) {
+    isGeneratingHashes = false;
     console.error('Error calculating missing hashes:', error);
     throw error;
   }
+}
+
+// Add IPC handler to calculate missing hashes
+ipcMain.handle('calculate-missing-hashes', async (event) => {
+  return await calculateMissingHashesInternal(event);
+});
+
+// Add IPC handler for generateMissingHashes (calls the same internal function)
+ipcMain.handle('generateMissingHashes', async (event) => {
+  return await calculateMissingHashesInternal(event);
+});
+
+// Add IPC handler to get count of models without hash
+ipcMain.handle('getModelsWithoutHash', async () => {
+  try {
+    const result = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM models 
+      WHERE hash IS NULL OR hash = ''
+    `).get();
+    return result ? result.count : 0;
+  } catch (error) {
+    console.error('Error getting models without hash:', error);
+    return 0;
+  }
+});
+
+// Add IPC handler to check if hash generation is in progress
+ipcMain.handle('is-generating-hashes', async () => {
+  return isGeneratingHashes;
 });
 
 // Add this IPC handler for thumbnails
