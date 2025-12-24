@@ -326,9 +326,9 @@ button:disabled {
 /* Detailed view - large thumbnail with full metadata - Optimized */
 .file-item-detailed {
   width: 300px;
-  height: 540px !important;
-  min-height: 540px !important;
-  max-height: 540px !important;
+  height: 450px !important;
+  min-height: 450px !important;
+  max-height: 450px !important;
   display: flex;
   flex-direction: column;
   padding: 12px;

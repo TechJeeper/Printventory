@@ -7454,7 +7454,7 @@ function createModelItem(model, viewMode = null) {
   const thumbnailSizes = {
     'list': { width: '48px', height: '48px' },      // Slightly larger for better visibility
     'preview': { width: '140px', height: '140px' }, // Preview thumbnail size
-    'detailed': { width: '280px', height: '280px' }  // Optimized large thumbnail
+    'detailed': { width: '276px', height: '276px' }  // Optimized large thumbnail
   };
   
   const thumbSize = thumbnailSizes[view] || thumbnailSizes['detailed'];
@@ -7873,17 +7873,17 @@ function createModelItem(model, viewMode = null) {
     // Optimized detailed view - more compact dimensions
     // Reduced height and padding for better space utilization
     item.style.width = '300px';
-    item.style.height = '480px'; // Reduced from 540px
-    item.style.minHeight = '480px';
-    item.style.maxHeight = '480px';
+    item.style.height = '450px'; // Reduced from 540px
+    item.style.minHeight = '450px';
+    item.style.maxHeight = '450px';
     item.style.padding = '10px'; // Reduced from 12px
     item.style.boxSizing = 'border-box';
     item.style.display = 'flex';
     item.style.flexDirection = 'column';
     
     // Slightly smaller thumbnail to give more room for metadata
-    thumbnailContainer.style.width = '280px'; // Reduced from 276px (actually same, but adjusted for padding)
-    thumbnailContainer.style.height = '240px'; // Reduced from 276px
+    thumbnailContainer.style.width = '276px'; // Reduced from 276px (actually same, but adjusted for padding)
+    thumbnailContainer.style.height = '276px'; // Reduced from 276px
     thumbnailContainer.style.flexShrink = '0';
     
     // Add file name directly after thumbnail (in the red square area)
@@ -8269,7 +8269,7 @@ function renderVirtualGrid(models) {
   const viewDimensions = {
     'list': { width: '100%', height: 52, itemWidth: '100%' },
     'preview': { width: 180, height: 220, itemWidth: 180 },
-    'detailed': { width: 300, height: 540, itemWidth: 300 }
+    'detailed': { width: 300, height: 450, itemWidth: 300 }
   };
   
   const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];
