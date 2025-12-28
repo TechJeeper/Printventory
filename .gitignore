@@ -1,0 +1,12 @@
+dist
+node_modules
+printventory.db
+package-lock.json
+test-files.zip
+git_credentials
+*git_credentials*
+*.credentials
+npm_output.log
+test-results/
+app.log
+*.log
