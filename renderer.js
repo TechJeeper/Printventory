@@ -5362,14 +5362,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     const checkboxStates = new Map();
     if (container) {
       const existingCheckboxes = container.querySelectorAll('input[type="checkbox"]');
+      console.log(`Saving checkbox states: found ${existingCheckboxes.length} checkboxes`);
       existingCheckboxes.forEach(checkbox => {
         const filePath = checkbox.dataset.filePath;
         const tagValue = checkbox.value;
         if (filePath && tagValue) {
           const key = `${filePath}::${tagValue}`;
           checkboxStates.set(key, checkbox.checked);
+          if (checkbox.checked) {
+            console.log(`Saved checked state for: ${key}`);
+          }
+        } else {
+          console.warn(`Checkbox missing filePath or value:`, { filePath, tagValue, checked: checkbox.checked });
         }
       });
+      console.log(`Total checkbox states saved: ${checkboxStates.size}`);
     }
 
     // Clear container
@@ -5550,7 +5557,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             checkbox.type = 'checkbox';
             // Restore checked state if it was previously set, otherwise default to true
             const stateKey = `${model.filePath}::${tag}`;
-            checkbox.checked = checkboxStates.has(stateKey) ? checkboxStates.get(stateKey) : true;
+            const wasChecked = checkboxStates.has(stateKey) ? checkboxStates.get(stateKey) : true;
+            checkbox.checked = wasChecked;
+            if (!wasChecked && checkboxStates.has(stateKey)) {
+              console.log(`Restored unchecked state for: ${stateKey}`);
+            } else if (wasChecked && checkboxStates.has(stateKey)) {
+              console.log(`Restored checked state for: ${stateKey}`);
+            }
             checkbox.value = tag;
             checkbox.dataset.filePath = model.filePath;
             checkbox.style.marginRight = '6px';
@@ -5742,10 +5755,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('tag-preview-apply')?.addEventListener('click', async () => {
     if (!pendingTagData || pendingTagData.length === 0) {
       console.error('No pending tag data');
+      await window.electron.showMessage('Info', 'No models to process.');
       return;
     }
 
     const container = document.getElementById('tag-preview-container');
+    if (!container) {
+      console.error('Tag preview container not found');
+      await window.electron.showMessage('Error', 'Tag preview container not found');
+      return;
+    }
+    
     const mergeStrategy = await window.electron.getSetting('aiTagMergeStrategy') || 'merge';
 
     let successCount = 0;
@@ -5753,75 +5773,193 @@ document.addEventListener('DOMContentLoaded', async () => {
     let totalTagsApplied = 0;
 
     try {
-      // Process each model
-      for (const modelData of pendingTagData) {
-        // Find the model section by its data-file-path attribute
-        // Try multiple approaches to find the section since file paths may have special characters
-        let modelSection = null;
-        
-        // First try: direct querySelector (may fail with special chars)
-        try {
-          modelSection = container.querySelector(
-            `div[data-file-path="${modelData.model.filePath}"]`
-          );
-        } catch (e) {
-          console.log('QuerySelector failed, trying alternative method');
-        }
-        
-        // Second try: Find all sections and match by comparing data attributes
-        if (!modelSection) {
-          const allSections = container.querySelectorAll('div[data-file-path]');
-          for (const section of allSections) {
-            const sectionPath = section.dataset.filePath;
-            if (sectionPath === modelData.model.filePath || sectionPath === modelData.filePath) {
-              modelSection = section;
-              break;
-            }
-          }
-        }
-        
-        // Fallback: try with modelData.filePath
-        if (!modelSection && modelData.filePath !== modelData.model.filePath) {
-          const allSections = container.querySelectorAll('div[data-file-path]');
-          for (const section of allSections) {
-            if (section.dataset.filePath === modelData.filePath) {
-              modelSection = section;
-              break;
-            }
-          }
-        }
-        
-        if (!modelSection) {
-          console.log(`No model section found for ${modelData.model.filePath || modelData.filePath}, skipping`);
+      // Debug: Log all model sections in container
+      const allSectionsInContainer = container.querySelectorAll('div[data-file-path]');
+      console.log(`\n=== Starting tag application ===`);
+      console.log(`Total model sections found in container: ${allSectionsInContainer.length}`);
+      console.log('Section file paths:', Array.from(allSectionsInContainer).map(s => s.dataset.filePath));
+      console.log(`Total models in pendingTagData: ${pendingTagData.length}`);
+      console.log('Pending tag data file paths:', pendingTagData.map(d => d.model?.filePath || d.filePath));
+      console.log('Pending tag data structure:', pendingTagData.map(d => ({
+        hasModel: !!d.model,
+        filePath: d.filePath,
+        modelFilePath: d.model?.filePath,
+        generatedTagsCount: d.generatedTags?.length || 0,
+        hasGeneratedTags: !!(d.generatedTags && d.generatedTags.length > 0)
+      })));
+      
+      // Build models to process from DOM sections (source of truth) instead of pendingTagData
+      // This ensures we process all visible models even if pendingTagData is incomplete
+      const modelsToProcess = [];
+      const processedFilePaths = new Set(); // Track duplicates
+      
+      for (const section of allSectionsInContainer) {
+        const filePath = section.dataset.filePath;
+        if (!filePath) {
+          console.warn('Found section without file path, skipping');
           continue;
         }
+        
+        // Skip duplicates (some models might appear twice in the DOM)
+        if (processedFilePaths.has(filePath)) {
+          console.log(`Skipping duplicate model: ${filePath}`);
+          continue;
+        }
+        processedFilePaths.add(filePath);
+        
+        // Try to find corresponding data in pendingTagData for existing tags info
+        const modelData = pendingTagData.find(d => 
+          (d.model?.filePath === filePath) || (d.filePath === filePath)
+        );
+        
+        modelsToProcess.push({
+          filePath: filePath,
+          section: section,
+          existingTags: modelData?.existingTags || [],
+          modelData: modelData // Keep reference for any other needed data
+        });
+      }
+      
+      console.log(`Will process ${modelsToProcess.length} models from DOM sections`);
+      console.log(`pendingTagData has ${pendingTagData.length} models`);
+      
+      if (modelsToProcess.length !== pendingTagData.length) {
+        console.warn(`Mismatch: DOM has ${modelsToProcess.length} models, pendingTagData has ${pendingTagData.length}`);
+        console.warn('Processing all models from DOM (source of truth)');
+      }
+      
+      // Filter models that have selected tags before processing
+      const modelsWithTags = [];
+      for (const modelInfo of modelsToProcess) {
+        const targetFilePath = modelInfo.filePath;
+        const modelSection = modelInfo.section;
         
         // Get selected tags for this specific model from within its section
-        // Checkboxes are inside label elements
-        const modelCheckboxes = modelSection.querySelectorAll('input[type="checkbox"]:checked');
-        const selectedTags = Array.from(modelCheckboxes).map(cb => cb.value);
+        let allCheckboxes = modelSection.querySelectorAll('input[type="checkbox"]');
+        let checkedCheckboxes = modelSection.querySelectorAll('input[type="checkbox"]:checked');
         
-        console.log(`Found ${selectedTags.length} selected tags for ${modelData.model.filePath || modelData.filePath}`);
-
-        if (selectedTags.length === 0) {
-          console.log(`No tags selected for ${modelData.model.filePath || modelData.filePath}, skipping`);
-          continue;
+        // Fallback: if no checkboxes found in section, try finding by filePath in entire container
+        if (allCheckboxes.length === 0) {
+          try {
+            const escapedPath = targetFilePath.replace(/[!"#$%&'()*+,.\/:;<=>?@[\\\]^`{|}~]/g, '\\$&');
+            const fallbackCheckboxes = container.querySelectorAll(`input[type="checkbox"][data-file-path="${escapedPath}"]`);
+            if (fallbackCheckboxes.length > 0) {
+              allCheckboxes = fallbackCheckboxes;
+              checkedCheckboxes = container.querySelectorAll(`input[type="checkbox"][data-file-path="${escapedPath}"]:checked`);
+            }
+          } catch (e) {
+            // Try alternative fallback
+            const allCheckboxesInContainer = container.querySelectorAll('input[type="checkbox"]');
+            const matchingCheckboxes = Array.from(allCheckboxesInContainer).filter(cb => 
+              cb.dataset.filePath === targetFilePath ||
+              (modelInfo.modelData?.model?.filePath && cb.dataset.filePath === modelInfo.modelData.model.filePath) ||
+              (modelInfo.modelData?.filePath && cb.dataset.filePath === modelInfo.modelData.filePath)
+            );
+            if (matchingCheckboxes.length > 0) {
+              allCheckboxes = matchingCheckboxes;
+              checkedCheckboxes = matchingCheckboxes.filter(cb => cb.checked);
+            }
+          }
         }
-
-        try {
-          await applyTagsToModel(
-            modelData.filePath,
-            selectedTags,
-            modelData.existingTags,
-            mergeStrategy
-          );
-          successCount++;
-          totalTagsApplied += selectedTags.length;
-        } catch (error) {
-          console.error(`Error applying tags to ${modelData.filePath}:`, error);
-          failCount++;
+        
+        const selectedTags = Array.from(checkedCheckboxes).map(cb => cb.value);
+        
+        if (selectedTags.length > 0) {
+          modelsWithTags.push({
+            ...modelInfo,
+            selectedTags: selectedTags
+          });
         }
       }
+      
+      if (modelsWithTags.length === 0) {
+        const allCheckedBoxes = container.querySelectorAll('input[type="checkbox"]:checked');
+        if (allCheckedBoxes.length === 0) {
+          await window.electron.showMessage('Info', 'No tags were selected to apply.');
+        } else {
+          await window.electron.showMessage('Warning', 'Tags were selected but could not be applied. Please check the console for details.');
+        }
+        document.getElementById('tag-preview-dialog').close();
+        pendingTagData = [];
+        return;
+      }
+      
+      // Show progress dialog
+      const progressDialog = document.getElementById('progress-dialog');
+      const progressTitle = document.getElementById('progress-title');
+      const progressMessage = document.getElementById('progress-message');
+      const progressBar = document.getElementById('progress-bar');
+      const progressStatus = document.getElementById('progress-status');
+      
+      if (progressDialog && progressTitle && progressMessage && progressBar && progressStatus) {
+        progressTitle.textContent = 'Applying Tags';
+        progressMessage.textContent = 'Processing models...';
+        progressBar.style.width = '0%';
+        progressStatus.textContent = `0 / ${modelsWithTags.length}`;
+        progressDialog.showModal();
+      }
+      
+      // Process models in parallel batches (5 at a time)
+      const BATCH_SIZE = 5;
+      let processedCount = 0;
+      
+      for (let i = 0; i < modelsWithTags.length; i += BATCH_SIZE) {
+        const batch = modelsWithTags.slice(i, i + BATCH_SIZE);
+        const batchPromises = batch.map(async (modelInfo) => {
+          const targetFilePath = modelInfo.filePath;
+          const selectedTags = modelInfo.selectedTags;
+          
+          try {
+            console.log(`Applying ${selectedTags.length} tags to model: ${targetFilePath}`);
+            await applyTagsToModel(
+              targetFilePath,
+              selectedTags,
+              modelInfo.existingTags || [],
+              mergeStrategy
+            );
+            
+            processedCount++;
+            const fileName = targetFilePath.split(/[/\\]/).pop() || targetFilePath;
+            
+            // Update progress
+            if (progressDialog && progressMessage && progressBar && progressStatus) {
+              const percentage = (processedCount / modelsWithTags.length) * 100;
+              progressBar.style.width = `${percentage}%`;
+              progressMessage.textContent = `Processing: ${fileName}`;
+              progressStatus.textContent = `${processedCount} / ${modelsWithTags.length}`;
+            }
+            
+            successCount++;
+            totalTagsApplied += selectedTags.length;
+            console.log(`Successfully applied tags to ${targetFilePath}`);
+            return { success: true, filePath: targetFilePath, tagsCount: selectedTags.length };
+          } catch (error) {
+            processedCount++;
+            console.error(`Error applying tags to ${targetFilePath}:`, error);
+            failCount++;
+            
+            // Update progress even on error
+            if (progressDialog && progressBar && progressStatus) {
+              const percentage = (processedCount / modelsWithTags.length) * 100;
+              progressBar.style.width = `${percentage}%`;
+              progressStatus.textContent = `${processedCount} / ${modelsWithTags.length}`;
+            }
+            
+            return { success: false, filePath: targetFilePath, error: error.message };
+          }
+        });
+        
+        // Wait for batch to complete before starting next batch
+        await Promise.all(batchPromises);
+      }
+      
+      // Close progress dialog
+      if (progressDialog) {
+        progressDialog.close();
+      }
+      
+      console.log(`\n=== Finished processing all models ===`);
+      console.log(`Total processed: ${processedCount}, Success: ${successCount}, Failed: ${failCount}, Total tags: ${totalTagsApplied}`);
 
       // Show results
       if (successCount > 0) {
