@@ -9,7 +9,7 @@
     "build": "electron-builder -mw",
     "build:mac": "electron-builder --mac --universal",
     "build:win": "electron-builder -w",
-    "postinstall": "electron-builder install-app-deps"
+    "rebuild:electron": "electron-builder install-app-deps"
   },
   "author": "TechJeeper Designs",
   "license": "ISC",
