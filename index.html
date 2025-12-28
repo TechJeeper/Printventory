@@ -10,6 +10,7 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
+  <script src="https://js.puter.com/v2/"></script>
 
 
 </head>
@@ -69,6 +70,8 @@
           <option value="size-desc">Size (Largest First)</option>
           <option value="date-asc">Modified (Oldest First)</option>
           <option value="date-desc" selected>Modified (Newest First)</option>
+          <option value="dateadded-asc">Date Added (Oldest First)</option>
+          <option value="dateadded-desc">Date Added (Newest First)</option>
         </select>
       </div>
       <div class="form-group">
@@ -104,11 +107,12 @@
           <option value="">All Types</option>
           <option value="stl">STL</option>
           <option value="3mf">3MF</option>
+          <option value="zip">Zip</option>
         </select>
       </div>
       <div class="form-group">
         <label for="tag-filter">Filter by Tag:</label>
-        <div class="designer-input-container">
+        <div class="tags-input-container">
           <select id="tag-filter">
             <option value="">All Tags</option>
           </select>
@@ -132,12 +136,7 @@
       </div>
       <div class="form-group">
         <label for="model-path">Path:</label>
-        <div class="input-with-icon">
-          <input type="text" id="model-path" readonly>
-          <button id="open-file-button" class="icon-button">
-            <img src="file-icon.png" alt="Open File">
-          </button>
-        </div>
+        <div id="path-tree-container" class="path-tree-container"></div>
       </div>
       <div class="form-group">
         <label for="model-source">Source:</label>
@@ -176,7 +175,7 @@
       <div class="form-group">
         <label>Tags:</label>
         <div class="tags-container">
-          <div class="designer-input-container">
+          <div class="tags-input-container">
             <select id="tag-select">
               <option value="">Select a tag...</option>
             </select>
@@ -223,7 +222,11 @@
         <h3>Add New Tag</h3>
         <div class="form-group">
           <label for="new-tag-name">Tag Name:</label>
-          <input type="text" id="new-tag-name" required>
+          <div class="input-with-icon">
+            <input type="text" id="new-tag-name">
+            <button type="button" id="refresh-tag-input" class="icon-button refresh-button" title="Reset input field (click if field is not editable)" onclick="return resetTagInputField();">↻</button>
+          </div>
+          <small style="display: block; margin-top: 5px; color: #aaa; font-style: italic;">If field is not editable, click the refresh button or refocus the window.</small>
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="add-tag-submit">Add</button>
@@ -319,7 +322,7 @@
       <div class="form-group">
         <label>Tags:</label>
         <div class="tags-container">
-          <div class="designer-input-container">
+          <div class="tags-input-container">
             <select id="multi-tag-select">
               <option value="">Select a tag...</option>
             </select>
@@ -329,9 +332,7 @@
           <div id="multi-tags" class="tags-list"></div>
         </div>
       </div>
-      <div style="text-align: center; color: #28a745; font-size: 14px; margin-top: 20px; padding: 10px; background: rgba(40, 167, 69, 0.1); border-radius: 4px;">
-        ✓ Changes are automatically saved
-      </div>
+      <button id="multi-save-button"></button>
     </div>
     <dialog id="new-license-dialog" class="modal">
       <form method="dialog">
@@ -353,6 +354,12 @@
           <p style="font-size: 0.9rem; margin: 0.2rem 0; color: #555;">
             De-duplication is performed using the file hash to ensure that only identical files are considered duplicates.
           </p>
+          <div id="include-zip-container" style="display: none; margin: 0.5rem 0;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+              <input type="checkbox" id="include-zipped-models" style="margin: 0;">
+              <span style="font-size: 0.9rem;">Include Zipped Models</span>
+            </label>
+          </div>
           <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
             <button type="submit" id="close-dedup">Close</button>
@@ -465,17 +472,36 @@
         </div>
       </form>
     </dialog>
+    <dialog id="file-type-settings-dialog" class="modal">
+      <form method="dialog">
+        <h3>File Type Settings</h3>
+        <p class="warning-text">Warning: Enabling ZIP archive support may significantly impact scanning performance, especially with large archives or directories containing many ZIP files. ZIP files will be opened and scanned during directory scans, which can be slow and memory-intensive.</p>
+        <div class="settings-group">
+          <h4>Supported File Types</h4>
+          <div class="form-group checkbox-container">
+            <label for="enable-zip-archives">Enable ZIP Archive Support:</label>
+            <input type="checkbox" id="enable-zip-archives">
+          </div>
+          <p class="setting-description">When enabled, Printventory will scan inside ZIP files for 3D models (STL and 3MF files). Each model found within a ZIP file will be indexed separately.</p>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="save-file-type-settings">Save</button>
+          <button type="button" id="cancel-file-type-settings">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="ai-config-dialog" class="modal">
       <form method="dialog">
         <h3>AI Configuration</h3>
         <p class="setting-description">
-          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Deepseek, Gemini, etc. The selected model must support image analysis (e.g., gpt-4-o). You can use the Test button to check that your AI is properly configured. 
+          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Deepseek, Gemini, Puter.com, etc. The selected model must support image analysis (e.g., gpt-4-o). Puter.com does not require an API key, but may have limitations. You can use the Test button to check that your AI is properly configured. 
         </p>
         <div class="form-group">
           <label for="ai-service-select">AI Service:</label>
           <select id="ai-service-select">
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
+            <option value="puter">Puter.com</option>
             <option value="custom">Custom</option>
           </select>
         </div>
@@ -491,6 +517,50 @@
           <label for="ai-model">AI Model:</label>
           <input type="text" id="ai-model" value="gpt-4o-mini" required>
         </div>
+        <hr style="margin: 20px 0;">
+        <h4 style="margin-top: 0;">Tag Generation Settings</h4>
+        <div class="form-group">
+          <label for="ai-tag-max-tags">Maximum Tags:</label>
+          <input type="number" id="ai-tag-max-tags" min="1" max="50" value="10" required>
+          <small>Maximum number of tags to generate per model (1-50)</small>
+        </div>
+        <div class="form-group">
+          <label for="ai-tag-detail-level">Level of Detail:</label>
+          <select id="ai-tag-detail-level">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+          <small>Detail level for tag generation (Low: "Toy", Medium: "Dragon", High: "Articulated Dragon")</small>
+        </div>
+        <div class="form-group">
+          <label for="ai-tag-merge-strategy">Tag Merge Strategy:</label>
+          <select id="ai-tag-merge-strategy">
+            <option value="merge">Merge (add to existing tags)</option>
+            <option value="append">Append (add only new tags)</option>
+            <option value="replace">Replace (remove existing, add new)</option>
+          </select>
+          <small>How AI-generated tags should be combined with existing tags</small>
+        </div>
+        <div class="form-group">
+          <div class="checkbox-container" style="width: 100%; margin-left: 0; padding: 0;">
+            <input type="checkbox" id="ai-tag-use-categories">
+            <label for="ai-tag-use-categories">Use Category-Based Tagging</label>
+          </div>
+          <small>Organize tags into categories (object type, style, complexity, material)</small>
+        </div>
+        <div class="form-group">
+          <div class="checkbox-container" style="width: 100%; margin-left: 0; padding: 0;">
+            <input type="checkbox" id="ai-tag-allow-retagging">
+            <label for="ai-tag-allow-retagging">Allow Re-tagging</label>
+          </div>
+          <small>Allow re-tagging models that already have "AI Tagged" tag</small>
+        </div>
+        <div class="form-group">
+          <label for="ai-tag-concurrency">Concurrent Requests:</label>
+          <input type="number" id="ai-tag-concurrency" min="1" max="10" value="3" required>
+          <small>Number of tag generation requests to process simultaneously (1-10)</small>
+        </div>
         <div class="dialog-buttons">
           <button type="button" id="test-ai-config">Test</button>
           <button type="button" id="save-ai-config">Save</button>
@@ -499,10 +569,29 @@
         <div id="ai-config-result" class="result-message"></div>
       </form>
     </dialog>
-    <div id="tag-generation-progress-container" class="progress-container hidden">
-      <div class="progress-bar" id="tag-generation-progress-bar"></div>
-      <div class="progress-text" id="tag-generation-progress-text">Generating Tags</div>
-    </div>
+
+    <!-- Tag preview dialog -->
+    <dialog id="tag-preview-dialog" class="modal">
+      <form method="dialog">
+        <h3>Review Generated Tags</h3>
+        <div id="tag-preview-model-info" style="margin-bottom: 15px; padding: 12px; background: #2a2a2a; border-radius: 6px; border: 1px solid #444;">
+          <div style="color: #fff; font-weight: 600; margin-bottom: 6px;">Model:</div>
+          <div id="tag-preview-model-name" style="color: #4a9eff; font-size: 14px; word-break: break-all;"></div>
+          <div id="tag-preview-model-path" style="color: #999; font-size: 12px; margin-top: 4px; word-break: break-all;"></div>
+        </div>
+        <p class="setting-description">
+          Review and select which tags to apply to this model. Uncheck any tags you don't want to include.
+        </p>
+        <div id="tag-preview-container" style="max-height: 400px; overflow-y: auto; margin: 15px 0; padding: 10px; background: #1e1e1e; border-radius: 6px; border: 1px solid #333;">
+          <!-- Tags will be dynamically added here -->
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="tag-preview-apply">Apply Selected Tags</button>
+          <button type="button" id="tag-preview-cancel">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
     <!-- Add progress dialog for tag generation -->
     <dialog id="progress-dialog" class="modal">
       <div class="progress-container">
@@ -514,9 +603,32 @@
         <p id="progress-status">0 / 0</p>
       </div>
     </dialog>
+    
+    <!-- Add progress dialog for thumbnail generation -->
+    <dialog id="thumbnail-progress-dialog" class="modal">
+      <div class="progress-container">
+        <h3>Generating Thumbnails</h3>
+        <p>Please wait while thumbnails are being generated...</p>
+        <div class="progress-bar-container">
+          <div id="thumbnail-progress-bar" class="progress-bar"></div>
+        </div>
+        <p id="thumbnail-progress-text">0 / 0</p>
+      </div>
+    </dialog>
   </div>
   <div class="main-content">
     <main>
+      <div class="grid-view-selector">
+        <button class="view-button active" data-view="detailed" title="Detailed - Large thumbnails with full details">
+          <span>Detailed</span>
+        </button>
+        <button class="view-button" data-view="preview" title="Preview - Small thumbnails">
+          <span>Preview</span>
+        </button>
+        <button class="view-button" data-view="list" title="List - Horizontal list view">
+          <span>List</span>
+        </button>
+      </div>
       <div class="file-grid"></div>
       <dialog id="welcome-message" class="welcome-dialog">
         <div class="welcome-content">
@@ -687,6 +799,30 @@
           </div>
         </form>
       </dialog>
+
+      <dialog id="metadata-editor-dialog" class="modal">
+        <form method="dialog">
+          <h3>Metadata Editor</h3>
+          <div class="metadata-tabs">
+            <button type="button" class="metadata-tab active" data-type="designer">Designer</button>
+            <button type="button" class="metadata-tab" data-type="parentModel">Parent Model</button>
+            <button type="button" class="metadata-tab" data-type="license">License</button>
+          </div>
+          <div class="form-group">
+            <label id="metadata-type-label">Designers</label>
+            <div class="input-with-icon">
+              <input type="text" id="metadata-editor-search" placeholder="Search...">
+              <button type="button" id="clear-metadata-search" class="icon-button" title="Clear search">×</button>
+            </div>
+            <div id="metadata-editor-list" class="metadata-list">
+              <!-- Metadata items will be added here dynamically -->
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit">Close</button>
+          </div>
+        </form>
+      </dialog>
     </main>
   </div>
   <div id="loading-overlay">
@@ -745,36 +881,7 @@
     });
   </script>
   <script type="module" src="search.js"></script>
-
-  <script src="renderer/constants.js"></script>
-  <script src="renderer/state.js"></script>
-  <script src="renderer/initialize.js"></script>
-  <script src="renderer/dialogs/termsDialog.js"></script>
-  <script src="renderer/dialogs/welcomeDialog.js"></script>
-  <script src="renderer/dialogs/aboutDialog.js"></script>
-  <script src="renderer/utils/formatFileSize.js"></script>
-  <script src="renderer/dialogs/themeDialog.js"></script>
-  <script src="renderer/dialogs/purgeDialog.js"></script>
-  <script src="renderer/dialogs/backupRestore.js"></script>
-  <script src="renderer/dialogs/dedup.js"></script>
-  <script src="renderer/dialogs/tagManager.js"></script>
-  <script src="renderer/utils/debug.js"></script>
-  <script src="renderer/dialogs/dialogHandlers.js"></script>
-  <script src="renderer/dialogs/dropdownPopulators.js"></script>
-  <script src="renderer/filters/filterHandlers.js"></script>
-  <script src="renderer/models/loadModelsPage.js"></script>
-  <script src="renderer/models/exitMultiEditMode.js"></script>
-  <script src="renderer/models/autoSaveModel.js"></script>
-  <script src="renderer/models/autoSaveMultipleModels.js"></script>
-  <script src="renderer/models/generateThumbnailsForModels.js"></script>
-  <script src="renderer/models/modelDetails.js"></script>
-  <script src="renderer/models/multiEditPanel.js"></script>
-  <script src="renderer/scanning/scanDirectory.js"></script>
-  <script src="renderer/utils/dom.js"></script>
-  <script src="renderer/init/appInit.js"></script>
-
   <script src="renderer.js"></script>
-
   <script type="module" src="slicer.js"></script>
   <script src="guide.js"></script>
 

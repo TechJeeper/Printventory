@@ -5,12 +5,13 @@
 
 // Global variable to store the last non-empty search term
 let lastSearchTerm = "";
+// Flag to track if a filtering operation is in progress
+let isFilteringInProgress = false;
 
 export async function getCombinedFilteredModels() {
   // Get all models using the current sort option.
   const sortSelect = document.getElementById("sort-select");
   const sortOption = sortSelect ? sortSelect.value : "date-desc";
-  const allModels = await window.electron.getAllModels(sortOption, 0);
 
   // Get filter values from the filter menu.
   const designer = document.getElementById("designer-select")?.value || "";
@@ -23,190 +24,81 @@ export async function getCombinedFilteredModels() {
   // Get current search term from the new search bar in the filter menu.
   const searchInput = document.getElementById("search-filter-input");
   const currentSearchTerm = searchInput ? searchInput.value.trim() : "";
-  const searchLower = currentSearchTerm.toLowerCase();
 
-  console.log("Starting filter process with:", {
-    totalModels: allModels.length,
-    filters: {
-      designer,
-      license,
-      parentModel,
-      printStatus,
-      tagFilter,
-      fileType,
-      searchTerm: currentSearchTerm
-    }
-  });
-
-  // First, deduplicate the initial models based on filePath
-  const uniquePathMap = new Map();
-  for (const model of allModels) {
-    if (!uniquePathMap.has(model.filePath)) {
-      uniquePathMap.set(model.filePath, model);
-    }
-  }
+  // Check if any filters are active - if so, we should reset viewingEntireLibrary flag
+  const hasActiveFilters = designer || license || parentModel || printStatus !== "all" || 
+                          tagFilter || fileType || currentSearchTerm || window.currentDirectoryFilter || window.dateAddedFilter;
   
-  // Start with deduplicated models
-  let models = Array.from(uniquePathMap.values());
-  console.log(`After initial deduplication: ${models.length} models (removed ${allModels.length - models.length} duplicates)`);
-
-  // Apply search term filter first if it exists
-  if (searchLower) {
-    const beforeCount = models.length;
-    const fuseOptions = {
-      keys: ['fileName', 'designer', 'notes', 'parentModel', 'license', 'filePath', 'source'],
-      threshold: 0.3,
-      includeScore: true,
-      minMatchCharLength: 2,
-      ignoreLocation: true
-    };
-    const fuse = new Fuse(models, fuseOptions);
-    const searchResults = fuse.search(searchLower);
-    console.log(`Fuse search results for "${searchLower}":`, searchResults.length);
-    
-    // Use all results but sort by score
-    const fuseResults = searchResults.map(result => result.item);
-
-    // Check for tag matches
-    const remainingModels = models.filter(model => !fuseResults.includes(model));
-    const tagMatches = [];
-    for (const model of remainingModels) {
-      const modelTags = await window.electron.getModelTags(model.id);
-      if (modelTags && modelTags.some(tag => tag.name.toLowerCase().includes(searchLower))) {
-        tagMatches.push(model);
-      }
-    }
-    
-    models = [...new Set([...fuseResults, ...tagMatches])];
-    console.log(`After search filter: ${models.length} models (removed ${beforeCount - models.length})`);
+  if (hasActiveFilters && window.viewingEntireLibrary) {
+    // Reset the flag since filters are now being applied
+    window.viewingEntireLibrary = false;
+    console.log("Reset viewingEntireLibrary flag due to active filters");
   }
 
-  // Apply file type filter
-  if (fileType) {
-    const beforeCount = models.length;
-    models = models.filter(model =>
-      model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-    );
-    console.log(`After file type filter: ${models.length} models (removed ${beforeCount - models.length})`);
+  // Construct filters object
+  // dateAddedFilter works as an additional filter (AND condition) with other filters
+  const filters = {
+    sortOption,
+    designer,
+    dateAdded: window.dateAddedFilter || null,
+    license,
+    parentModel,
+    printed: printStatus === "all" ? undefined : printStatus,
+    tag: tagFilter,
+    fileType,
+    search: currentSearchTerm,
+    directory: window.currentDirectoryFilter
+  };
+
+  console.log("Requesting filtered models from backend:", filters);
+
+  try {
+    // Use the new optimized IPC handler to get filtered results directly from DB
+    const models = await window.electron.getModelsFiltered(filters);
+    console.log(`Received ${models.length} models from backend`);
+    return models;
+  } catch (error) {
+    console.error("Error fetching filtered models:", error);
+    return [];
   }
-
-  // Apply designer filter
-  if (designer) {
-    const beforeCount = models.length;
-    if (designer === "__none__") {
-      models = models.filter(model => !model.designer || model.designer.trim() === '');
-    } else {
-      models = models.filter(model => model.designer === designer);
-    }
-    console.log(`After designer filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply license filter
-  if (license) {
-    const beforeCount = models.length;
-    if (license === "__none__") {
-      models = models.filter(model => {
-        const isEmpty = !model.license || 
-                       model.license === null || 
-                       model.license === undefined || 
-                       model.license === 'null' ||
-                       model.license === 'undefined' ||
-                       String(model.license).trim() === '';
-        return isEmpty;
-      });
-      console.log(`After license "__none__" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    } else {
-      models = models.filter(model => model.license === license);
-      console.log(`After license "${license}" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    }
-  }
-
-  // Apply parent model filter
-  if (parentModel) {
-    const beforeCount = models.length;
-    if (parentModel === "__none__") {
-      models = models.filter(model => {
-        const isEmpty = !model.parentModel || 
-                       model.parentModel === null || 
-                       model.parentModel === undefined || 
-                       model.parentModel === 'null' ||
-                       model.parentModel === 'undefined' ||
-                       String(model.parentModel).trim() === '';
-        return isEmpty;
-      });
-      console.log(`After parentModel "__none__" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    } else {
-      models = models.filter(model => model.parentModel === parentModel);
-      console.log(`After parentModel "${parentModel}" filter: ${models.length} models (removed ${beforeCount - models.length})`);
-    }
-  }
-
-  // Apply printed filter
-  if (printStatus === "printed") {
-    const beforeCount = models.length;
-    models = models.filter(model => model.printed);
-    console.log(`After printed filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  } else if (printStatus === "not-printed") {
-    const beforeCount = models.length;
-    models = models.filter(model => !model.printed);
-    console.log(`After not-printed filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply directory filter
-  const directoryFilter = window.currentDirectoryFilter || "";
-  if (directoryFilter) {
-    const beforeCount = models.length;
-    models = models.filter(model => {
-      const modelDir = model.filePath.replace(/[/\\]+$/, '').split(/[/\\]/).slice(0, -1).join('/');
-      const modelParentDir = modelDir.split(/[/\\]/).pop();
-      return modelParentDir === directoryFilter;
-    });
-    console.log(`After directory filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Apply tag filter
-  if (tagFilter) {
-    const beforeCount = models.length;
-    const filteredModels = [];
-    for (const model of models) {
-      const modelTags = await window.electron.getModelTags(model.id);
-      if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
-        filteredModels.push(model);
-      }
-    }
-    models = filteredModels;
-    console.log(`After tag filter: ${models.length} models (removed ${beforeCount - models.length})`);
-  }
-
-  // Final debug log
-  console.log("Final filtered results:", {
-    totalResults: models.length,
-    sampleResults: models.slice(0, 3)
-  });
-
-  // Add a final deduplication step based on filePath
-  const finalUniqueModels = new Map();
-  for (const model of models) {
-    if (!finalUniqueModels.has(model.filePath)) {
-      finalUniqueModels.set(model.filePath, model);
-    }
-  }
-  models = Array.from(finalUniqueModels.values());
-
-  console.log(`After final deduplication: ${models.length} models`);
-
-  return models;
 }
 
 export async function performCombinedSearch() {
   try {
-    console.log("Performing combined search...");
+    // Log the call stack to see what's calling this
+    console.log("performCombinedSearch called from:", new Error().stack);
+    
+    // If a filtering operation is already in progress, don't start another one
+    if (isFilteringInProgress) {
+      console.log("Filtering operation already in progress, ignoring new request");
+      return;
+    }
+    
+    // Set the filtering flag to prevent concurrent operations
+    isFilteringInProgress = true;
+    
+    // Show loading spinner
+    const spinner = document.getElementById('spinner');
+    if (spinner) spinner.classList.remove('hidden');
+    
+    // Disable all filter controls to prevent user interaction during loading
+    toggleFilterControls(false);
+    
+    console.log("Performing combined search...", window.dateAddedFilter ? `dateAddedFilter: ${window.dateAddedFilter}` : 'no dateAddedFilter');
+    
+    // CRITICAL: If dateAddedFilter was set but is now null, restore it
+    // This prevents it from being cleared by other code
+    if (!window.dateAddedFilter && window._lastDateAddedFilter) {
+      console.warn("dateAddedFilter was cleared! Restoring from _lastDateAddedFilter:", window._lastDateAddedFilter);
+      window.dateAddedFilter = window._lastDateAddedFilter;
+    }
+    
     const viewLibMsg = document.getElementById("view-library-message");
     if (viewLibMsg) { viewLibMsg.style.display = "none"; }
     
-    // Get the filtered models
+    // Get the filtered models (this will preserve dateAddedFilter if set)
     const filteredModels = await getCombinedFilteredModels();
-    console.log(`Got ${filteredModels.length} filtered models, rendering...`);
+    console.log(`Got ${filteredModels.length} filtered models, rendering...`, window.dateAddedFilter ? `(filtered by dateAdded)` : '');
     
     // Update filter indicator with active filters
     updateFilterIndicator(filteredModels.length);
@@ -215,6 +107,16 @@ export async function performCombinedSearch() {
  
   } catch (error) {
     console.error("Error performing combined search:", error);
+  } finally {
+    // Re-enable filter controls
+    toggleFilterControls(true);
+    
+    // Hide loading spinner
+    const spinner = document.getElementById('spinner');
+    if (spinner) spinner.classList.add('hidden');
+    
+    // Reset the filtering flag
+    isFilteringInProgress = false;
   }
 }
 
@@ -322,10 +224,15 @@ export function updateFilterIndicator(count) {
   // Add clear all filters button if any filters are active
   if (hasActiveFilters) {
     message += `<button class="clear-filter-button">Clear All Filters</button>`;
+    
+    // Only show the filter indicator if there are active filters
+    filterIndicator.innerHTML = message;
+    filterIndicator.classList.add('visible');
+  } else {
+    // Hide the filter indicator when no filters are active
+    filterIndicator.innerHTML = "";
+    filterIndicator.classList.remove('visible');
   }
-  
-  filterIndicator.innerHTML = message;
-  filterIndicator.classList.add('visible');
   
   // Add event listener to clear all filters button
   const clearFilterButton = filterIndicator.querySelector('.clear-filter-button');
@@ -351,6 +258,9 @@ export function updateFilterIndicator(count) {
       
       // Clear the directory filter if it exists
       window.currentDirectoryFilter = "";
+      
+      // Clear the last search term
+      lastSearchTerm = "";
       
       // Reset the filter indicator
       filterIndicator.innerHTML = "";
@@ -450,15 +360,8 @@ export function initializeCombinedSearch() {
     newSortSelect.addEventListener('change', async (e) => {
       console.log(`Sort changed: ${e.target.value}`);
       
-      // Get all models with the new sort option
-      const models = await window.electron.getAllModels(e.target.value);
-      
-      // Completely refresh the grid with the new sort order
-      if (typeof window.renderFiles === 'function') {
-        await window.renderFiles(models, false, true);
-      } else {
-        console.error('renderFiles function not available');
-      }
+      // Just re-run performCombinedSearch which will use the current sort option
+      await performCombinedSearch();
     });
   }
 
@@ -467,7 +370,24 @@ export function initializeCombinedSearch() {
     const element = document.getElementById(elementId);
     if (element) {
       element.addEventListener('change', async (e) => {
+        // Skip if we're programmatically updating filters (e.g., when applying dateAdded filter)
+        if (window._suppressFilterEvents) {
+          return;
+        }
+        
         console.log(`Filter changed: ${elementId} = ${e.target.value}`);
+        
+        // If dateAddedFilter is active, only clear it if user manually changed a filter
+        // (not when we're programmatically setting it via _suppressFilterEvents)
+        if (window.dateAddedFilter && !window._suppressFilterEvents) {
+          // User manually changed a filter, so clear dateAddedFilter
+          console.log('User manually changed filter, clearing dateAddedFilter');
+          window.dateAddedFilter = null;
+          window._lastDateAddedFilter = null;
+        }
+        
+        // Reset the viewingEntireLibrary flag when filters are applied
+        window.viewingEntireLibrary = false;
         
         // DO NOT clear search input - preserve the search term
         // Just perform search with updated filters
@@ -478,6 +398,14 @@ export function initializeCombinedSearch() {
 
   searchButton.addEventListener("click", async () => {
     console.log("Filter search button clicked with term:", searchInput.value);
+    // Clear dateAddedFilter when user searches
+    if (window.dateAddedFilter) {
+      console.log('User performed search, clearing dateAddedFilter');
+      window.dateAddedFilter = null;
+      window._lastDateAddedFilter = null;
+    }
+    // Reset the viewingEntireLibrary flag when search is applied
+    window.viewingEntireLibrary = false;
     await performCombinedSearch();
   });
 
@@ -485,6 +413,12 @@ export function initializeCombinedSearch() {
     if (e.key === "Enter") {
       e.preventDefault();
       console.log("Enter pressed in search field:", searchInput.value);
+      // Clear dateAddedFilter when user searches
+      if (window.dateAddedFilter) {
+        console.log('User performed search (Enter key), clearing dateAddedFilter');
+        window.dateAddedFilter = null;
+        window._lastDateAddedFilter = null;
+      }
       searchButton.click();
     }
   });
@@ -517,3 +451,61 @@ document.addEventListener("DOMContentLoaded", () => {
 window.getCombinedFilteredModels = getCombinedFilteredModels;
 window.updateFilterIndicator = updateFilterIndicator;
 window.performCombinedSearch = performCombinedSearch;
+window.initializeCombinedSearch = initializeCombinedSearch;
+window.isFilteringInProgress = isFilteringInProgress;
+window.checkFilterStatus = function() {
+  return isFilteringInProgress;
+};
+
+// Helper function to toggle the enabled state of all filter controls
+function toggleFilterControls(enabled) {
+  const filterElements = [
+    'designer-select',
+    'license-select',
+    'parent-select',
+    'printed-select',
+    'tag-filter',
+    'filetype-select',
+    'sort-select',
+    'search-filter-input',
+    'filter-search-button',
+    'clear-filter-search-button',
+    'view-library-button'
+  ];
+  
+  // Apply loading class to filter section container
+  const filterSection = document.querySelector('.filter-section');
+  if (filterSection) {
+    if (enabled) {
+      filterSection.classList.remove('loading');
+    } else {
+      filterSection.classList.add('loading');
+    }
+  }
+  
+  filterElements.forEach(id => {
+    const element = document.getElementById(id);
+    if (element) {
+      element.disabled = !enabled;
+      // Add visual indication that controls are disabled
+      if (enabled) {
+        element.classList.remove('disabled-during-loading');
+      } else {
+        element.classList.add('disabled-during-loading');
+      }
+    }
+  });
+  
+  // Also disable any clear filter buttons
+  const clearFilterButtons = document.querySelectorAll('.clear-filter-button, .filter-remove');
+  clearFilterButtons.forEach(button => {
+    if (button) {
+      button.disabled = !enabled;
+      if (enabled) {
+        button.classList.remove('disabled-during-loading');
+      } else {
+        button.classList.add('disabled-during-loading');
+      }
+    }
+  });
+}

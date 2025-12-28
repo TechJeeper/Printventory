@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.0.1",
+  "version": "1.22.1",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -25,15 +25,7 @@
         {
           "target": "dmg",
           "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
+            "universal"
           ]
         }
       ]
@@ -82,8 +74,13 @@
       "guide/*",
       "bg.png",
       "search.js",
+      "scan-worker.js",
       "installer.nsh",
       "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "scan-worker.js",
+      "node_modules/node-stream-zip/**/*"
     ],
     "directories": {
       "buildResources": ".",
@@ -92,25 +89,23 @@
     "asar": true
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.1",
-    "electron": "34.0.1",
-    "electron-builder": "^25.1.8",
-    "electron-rebuild": "^3.2.9"
+    "@electron/rebuild": "^4.0.2",
+    "@playwright/test": "^1.57.0",
+    "electron": "^39.2.4",
+    "electron-builder": "^26.0.12"
   },
   "dependencies": {
-    "better-sqlite3": "^11.9.1",
+    "better-sqlite3": "^12.5.0",
     "electron-google-analytics": "^1.0.2",
-    "electron-is-dev": "^2.0.0",
     "fs": "^0.0.1-security",
     "fuse.js": "^7.1.0",
     "jszip": "^3.10.1",
-    "node-fetch": "^2.7.0",
+    "node-fetch": "^3.3.2",
     "node-stream-zip": "^1.15.0",
-    "openai": "4.85.3",
-    "puppeteer": "24.2.1",
-    "three": "0.162.0",
+    "openai": "^6.9.1",
+    "puppeteer": "^24.31.0",
+    "three": "^0.181.2",
     "threejs-webworker-3mf-loader": "github:manyfold3d/threejs-webworker-3mf-loader",
-    "trash": "^9.0.0",
     "universal-analytics": "^0.5.3"
   }
 }

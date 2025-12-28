@@ -48,12 +48,34 @@ const analytics = {
         params.session_engaged = true;
       }
       
+      // Get model count (library size) from database
+      let modelCount = 0;
+      try {
+        const row = db.prepare("SELECT COUNT(*) AS total FROM models").get();
+        modelCount = row ? row.total : 0;
+      } catch (error) {
+        console.error('Error getting model count for analytics:', error);
+        // Continue with modelCount = 0 if query fails
+      }
+      
+      // Prepare user properties for GA4 - these persist across events and enable version-based segmentation
+      const userProperties = {
+        app_version: version,
+        os_platform: process.platform,
+        os_version: os.release(),
+        electron_version: process.versions.electron,
+        node_version: process.versions.node,
+        architecture: process.arch,
+        model_count: modelCount
+      };
+      
       // Prepare the event data - following GA4 protocol exactly
       const eventData = {
         client_id: clientId,
         user_id: clientId,
         timestamp_micros: Date.now() * 1000, // Current time in microseconds
         non_personalized_ads: true,
+        user_properties: userProperties,
         events: [{
           name,
           params
@@ -214,6 +236,7 @@ function debugLog(...args) {
 
 let db;
 let mainWindow;
+let isGeneratingHashes = false; // Track hash generation state
 
 // Handle single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -339,7 +362,8 @@ function initializeDatabase() {
           hash TEXT,
           size INTEGER,
           license TEXT,
-          modifiedDate DATETIME
+          modifiedDate DATETIME,
+          dateAdded DATETIME
       )`).run();
 
       // Create tags table
@@ -377,7 +401,32 @@ function initializeDatabase() {
       db.prepare('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)').run();
       db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)').run();
       db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)').run();
+      
+      // Single-column indexes for sorting and filtering
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_size ON models(size)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_modifieddate ON models(modifiedDate)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_license ON models(license)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_parentmodel ON models(parentModel)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_printed ON models(printed)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_hash ON models(hash)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_thumbnail ON models(thumbnail)').run();
+      
+      // Composite indexes for common query patterns
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_designer_filename ON models(designer, fileName)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_license_modifieddate ON models(license, modifiedDate)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_printed_modifieddate ON models(printed, modifiedDate)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_models_parentmodel_modifieddate ON models(parentModel, modifiedDate)').run();
     })();
+    
+    // Migrate existing database: add dateAdded column if it doesn't exist
+    // This must run before creating indexes on dateAdded
+    migrateDateAddedColumn();
+    
+    // Create index for dateAdded after migration (in case it was just added)
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_models_dateadded ON models(dateAdded)').run();
+    
+    // Clean up any database objects that reference models_old (from old migrations)
+    cleanupModelsOldReferences();
     
     // Repair model_tags table to fix any foreign key issues
     repairModelTagsTable();
@@ -394,6 +443,113 @@ function initializeDatabase() {
     dialog.showErrorBox('Database Error', 
       `Failed to initialize database: ${err.message}\n\nPath: ${getDatabasePath()}\n\nPlease ensure the application has write permissions to its directory.`
     );
+    return false;
+  }
+}
+
+// Add migration function for dateAdded column
+function migrateDateAddedColumn() {
+  try {
+    console.log('Checking for dateAdded column migration...');
+    
+    // Check if dateAdded column exists
+    const tableInfo = db.prepare("PRAGMA table_info(models)").all();
+    const hasDateAdded = tableInfo.some(col => col.name === 'dateAdded');
+    
+    if (!hasDateAdded) {
+      console.log('dateAdded column not found. Adding it...');
+      
+      // Add the column
+      db.prepare('ALTER TABLE models ADD COLUMN dateAdded DATETIME').run();
+      
+      // For existing records, set dateAdded = modifiedDate as fallback, or current timestamp if modifiedDate is null
+      db.prepare(`
+        UPDATE models 
+        SET dateAdded = COALESCE(modifiedDate, datetime('now'))
+        WHERE dateAdded IS NULL
+      `).run();
+      
+      console.log('dateAdded column added and existing records updated');
+    } else {
+      console.log('dateAdded column already exists');
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error migrating dateAdded column:', error);
+    return false;
+  }
+}
+
+// Add this function to clean up any database objects referencing models_old
+function cleanupModelsOldReferences() {
+  try {
+    console.log('Checking for database objects referencing models_old...');
+    
+    // Check for triggers that reference models_old
+    const triggers = db.prepare(`
+      SELECT name, sql 
+      FROM sqlite_master 
+      WHERE type='trigger' 
+      AND (sql LIKE '%models_old%' OR sql LIKE '%modelsOld%')
+    `).all();
+    
+    if (triggers.length > 0) {
+      console.log(`Found ${triggers.length} trigger(s) referencing models_old. Removing them...`);
+      for (const trigger of triggers) {
+        try {
+          db.prepare(`DROP TRIGGER IF EXISTS ${trigger.name}`).run();
+          console.log(`Removed trigger: ${trigger.name}`);
+        } catch (error) {
+          console.error(`Error removing trigger ${trigger.name}:`, error);
+        }
+      }
+    }
+    
+    // Check for views that reference models_old
+    const views = db.prepare(`
+      SELECT name, sql 
+      FROM sqlite_master 
+      WHERE type='view' 
+      AND (sql LIKE '%models_old%' OR sql LIKE '%modelsOld%')
+    `).all();
+    
+    if (views.length > 0) {
+      console.log(`Found ${views.length} view(s) referencing models_old. Removing them...`);
+      for (const view of views) {
+        try {
+          db.prepare(`DROP VIEW IF EXISTS ${view.name}`).run();
+          console.log(`Removed view: ${view.name}`);
+        } catch (error) {
+          console.error(`Error removing view ${view.name}:`, error);
+        }
+      }
+    }
+    
+    // Check for indexes that reference models_old (unlikely but possible)
+    const indexes = db.prepare(`
+      SELECT name 
+      FROM sqlite_master 
+      WHERE type='index' 
+      AND name LIKE '%models_old%'
+    `).all();
+    
+    if (indexes.length > 0) {
+      console.log(`Found ${indexes.length} index(es) referencing models_old. Removing them...`);
+      for (const index of indexes) {
+        try {
+          db.prepare(`DROP INDEX IF EXISTS ${index.name}`).run();
+          console.log(`Removed index: ${index.name}`);
+        } catch (error) {
+          console.error(`Error removing index ${index.name}:`, error);
+        }
+      }
+    }
+    
+    console.log('Finished cleaning up models_old references');
+    return true;
+  } catch (error) {
+    console.error('Error cleaning up models_old references:', error);
     return false;
   }
 }
@@ -466,6 +622,12 @@ function initializeDefaultSettings() {
       { key: 'ClientId', value: crypto.randomUUID() }, // Generate a unique client ID
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
+      { key: 'enableZipArchives', value: '0' }, // ZIP archive support disabled by default
+      { key: 'aiTagMaxTags', value: '10' }, // Maximum number of AI-generated tags
+      { key: 'aiTagUseCategories', value: '0' }, // Use category-based tagging
+      { key: 'aiTagMergeStrategy', value: 'merge' }, // How to merge AI tags: 'replace', 'merge', 'append'
+      { key: 'aiTagAllowRetagging', value: '0' }, // Allow re-tagging even if "AI Tagged" exists
+      { key: 'aiTagConcurrency', value: '3' }, // Number of concurrent tag generation requests
     ];
     
     // Insert default settings if they don't exist
@@ -495,10 +657,22 @@ function createWindow() {
       spellcheck: false,
       // Add these settings for clipboard access
       sandbox: false,
-      enableWebSQL: false
+      enableWebSQL: false,
+      webSecurity: true // Keep web security enabled, but allow puter.com API calls
     }
   });
-  mainWindow.webContents.openDevTools()
+  // mainWindow.webContents.openDevTools() // Disabled - prevents auto-opening debug console on load
+  
+  // Allow puter.com API requests (handle CORS if needed)
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
+    { urls: ['https://api.puter.com/*', 'https://js.puter.com/*'] },
+    (details, callback) => {
+      // Add headers for puter.com API requests
+      details.requestHeaders['Origin'] = 'https://puter.com';
+      details.requestHeaders['Referer'] = 'https://puter.com/';
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  );
 
   const template = [
     {
@@ -530,10 +704,6 @@ function createWindow() {
       label: 'Settings',
       submenu: [
         {
-          label: 'Theme',
-          click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
           label: 'AI Config',
           click: () => {
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -542,16 +712,24 @@ function createWindow() {
           }
         },
         {
+          label: 'File Type',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
+        },
+        {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
+        },
+        {
+          label: 'Slicer Path',
+          click: () => mainWindow.webContents.send('open-slicer-settings')
         },
         {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
         },
         {
-          label: 'Slicer Path',
-          click: () => mainWindow.webContents.send('open-slicer-settings')
+          label: 'Theme',
+          click: () => mainWindow.webContents.send('open-theme-settings')
         }
       ]
     },
@@ -576,10 +754,18 @@ function createWindow() {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
         },
+        {
+          label: 'Metadata Editor',
+          click: () => mainWindow.webContents.send('open-metadata-editor')
+        },
         { type: 'separator' },
         {
           label: 'Regenerate Thumbnails',
           click: () => mainWindow.webContents.send('regenerate-thumbnails')
+        },
+        {
+          label: 'Generate Missing Thumbnails',
+          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
         },
         {
           label: 'Purge Models',
@@ -676,24 +862,28 @@ function createApplicationMenu() {
       label: 'Settings',
       submenu: [
         {
-          label: 'Theme',
-          click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
           label: 'AI Config',
           click: () => mainWindow.webContents.send('open-ai-config')
+        },
+        {
+          label: 'File Type',
+          click: () => mainWindow.webContents.send('open-file-type-settings')
         },
         {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
         {
+          label: 'Slicer Path',
+          click: () => mainWindow.webContents.send('open-slicer-settings')
+        },
+        {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
         },
         {
-          label: 'Slicer Path',
-          click: () => mainWindow.webContents.send('open-slicer-settings')
+          label: 'Theme',
+          click: () => mainWindow.webContents.send('open-theme-settings')
         }
       ]
     },
@@ -718,10 +908,18 @@ function createApplicationMenu() {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
         },
+        {
+          label: 'Metadata Editor',
+          click: () => mainWindow.webContents.send('open-metadata-editor')
+        },
         { type: 'separator' },
         {
           label: 'Regenerate Thumbnails',
           click: () => mainWindow.webContents.send('regenerate-thumbnails')
+        },
+        {
+          label: 'Generate Missing Thumbnails',
+          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
         },
         {
           label: 'Purge Models',
@@ -808,14 +1006,39 @@ ipcMain.handle('open-file-dialog', async () => {
   }
 });
 
-// Update the calculateFileHash function to be more robust
+// Update the calculateFileHash function to be more robust and handle zip entries
 async function calculateFileHash(filePath) {
+  // Check if this is a zip entry
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+  let tempFilePath = null;
+
+  if (pathInfo.isZipEntry) {
+    // For zip entries, extract to temp file first
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+      tempFilePath = actualFilePath;
+      debugLog(`Extracted zip entry to temp file for hashing: ${actualFilePath}`);
+    } catch (error) {
+      console.error(`Error extracting zip entry for hashing: ${filePath}`, error);
+      throw new Error(`Failed to extract zip entry for hashing: ${error.message}`);
+    }
+  }
+
   return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
+    const hash = crypto.createHash('md5');
+    const stream = fs.createReadStream(actualFilePath);
     
-    stream.on('error', err => {
-      console.error(`Error reading file for hashing: ${filePath}`, err);
+      stream.on('error', err => {
+      console.error(`Error reading file for hashing: ${actualFilePath}`, err);
+      // Clean up temp file if it exists
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch (unlinkErr) {
+          console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
+        }
+      }
       reject(err);
     });
 
@@ -823,7 +1046,15 @@ async function calculateFileHash(filePath) {
       try {
         hash.update(chunk);
       } catch (err) {
-        console.error(`Error updating hash for file: ${filePath}`, err);
+        console.error(`Error updating hash for file: ${actualFilePath}`, err);
+        // Clean up temp file if it exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (unlinkErr) {
+            console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
+          }
+        }
         reject(err);
       }
     });
@@ -832,9 +1063,27 @@ async function calculateFileHash(filePath) {
       try {
         const fileHash = hash.digest('hex');
         debugLog(`Generated hash for ${filePath}: ${fileHash}`);
+        
+        // Clean up temp file if it exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          fs.unlink(tempFilePath, (err) => {
+            if (err) {
+              console.warn(`Failed to delete temp file: ${tempFilePath}`, err);
+            }
+          });
+        }
+        
         resolve(fileHash);
       } catch (err) {
         console.error(`Error generating final hash for file: ${filePath}`, err);
+        // Clean up temp file if it exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (unlinkErr) {
+            console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
+          }
+        }
         reject(err);
       }
     });
@@ -857,28 +1106,109 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
+// Helper function to check if a zip entry exists
+async function checkZipEntryExists(zipPath, entryPath) {
+  try {
+    if (!fs.existsSync(zipPath)) {
+      return false;
+    }
+    const StreamZip = require('node-stream-zip');
+    const zip = new StreamZip.async({ file: zipPath });
+    const entries = await zip.entries();
+    await zip.close();
+    return entries[entryPath] !== undefined;
+  } catch (error) {
+    console.error(`Error checking zip entry existence for ${zipPath}::${entryPath}:`, error);
+    return false;
+  }
+}
+
 // Update the removeNonExistentFiles function
-async function removeNonExistentFiles(scanDirectoryPath) {
+async function removeNonExistentFiles(scanDirectoryPath, window = null) {
   try {
     const allModels = db.prepare('SELECT filePath, id FROM models').all();
-    let removedCount = 0;
+    const filesToDelete = [];
 
-    db.transaction(() => {
-      for (const model of allModels) {
-        // Only check files that are within the scanned directory
-        const normalizedScanPath = normalizePath(scanDirectoryPath);
-        const normalizedFilePath = normalizePath(model.filePath);
-        if (normalizedFilePath.startsWith(normalizedScanPath)) {
-          if (!fs.existsSync(model.filePath)) {
-            // First delete from model_tags (child table)
-            db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-            
-            // Then delete from models (parent table)
-            db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
-            
-            removedCount++;
+    // First, collect files that would be deleted
+    for (const model of allModels) {
+      // Only check files that are within the scanned directory
+      const normalizedScanPath = normalizePath(scanDirectoryPath);
+      const normalizedFilePath = normalizePath(model.filePath);
+      if (normalizedFilePath.startsWith(normalizedScanPath)) {
+        const pathInfo = parseZipPath(model.filePath);
+        let fileExists = false;
+        
+        if (pathInfo.isZipEntry) {
+          // For zip entries, check if the zip file exists and the entry exists within it
+          try {
+            fileExists = await checkZipEntryExists(pathInfo.zipPath, pathInfo.entryPath);
+          } catch (error) {
+            console.error(`Error checking zip entry ${model.filePath}:`, error);
+            fileExists = false; // If check fails, consider file as non-existent
           }
+        } else {
+          // For regular files, check if the file exists
+          fileExists = fs.existsSync(model.filePath);
         }
+        
+        if (!fileExists) {
+          filesToDelete.push({
+            filePath: model.filePath,
+            id: model.id
+          });
+        }
+      }
+    }
+
+    // If there are files to delete, show confirmation dialog
+    if (filesToDelete.length > 0) {
+      // Get the window to show dialog - use provided window, mainWindow, or any available window
+      let dialogWindow = window;
+      if (!dialogWindow) {
+        dialogWindow = mainWindow;
+      }
+      if (!dialogWindow) {
+        const windows = BrowserWindow.getAllWindows();
+        if (windows.length > 0) {
+          dialogWindow = windows[0];
+        }
+      }
+
+      // Prepare file list for display (limit to first 20 files, show just filename)
+      const fileList = filesToDelete.slice(0, 20).map(f => {
+        const fileName = path.basename(f.filePath);
+        return fileName;
+      }).join('\n');
+      const moreFiles = filesToDelete.length > 20 ? `\n... and ${filesToDelete.length - 20} more file(s)` : '';
+      
+      const result = await dialog.showMessageBox(dialogWindow || undefined, {
+        type: 'warning',
+        title: 'Confirm File Removal',
+        message: `The scan found ${filesToDelete.length} file${filesToDelete.length === 1 ? '' : 's'} in the library that no longer exist on disk.`,
+        detail: `These files will be removed from the library (files are not deleted from disk):\n\n${fileList}${moreFiles}\n\nDo you want to proceed?`,
+        buttons: ['Remove from Library', 'Skip'],
+        defaultId: 1,
+        cancelId: 1,
+      });
+
+      // If user clicked "Skip", return 0 without deleting
+      if (result.response === 1) {
+        console.log(`User skipped removal of ${filesToDelete.length} non-existent files from directory ${scanDirectoryPath}`);
+        return 0;
+      }
+    }
+
+    // Proceed with deletion if user confirmed or if there were no files to delete
+    let removedCount = 0;
+    db.transaction(() => {
+      for (const fileInfo of filesToDelete) {
+        // First delete from model_tags (child table)
+        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(fileInfo.id);
+        
+        // Then delete from models (parent table)
+        db.prepare('DELETE FROM models WHERE id = ?').run(fileInfo.id);
+        
+        removedCount++;
       }
     })();
 
@@ -899,8 +1229,14 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
     
+    // Read enableZipArchives setting from database
+    const zipSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipArchives');
+    const enableZipArchives = zipSetting && zipSetting.value === '1';
+    
     // First, remove any non-existent files from the scanned directory
-    const removedCount = await removeNonExistentFiles(directoryPath);
+    // Pass the window so we can show a confirmation dialog if needed
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const removedCount = await removeNonExistentFiles(directoryPath, window);
     if (removedCount > 0) {
       event.sender.send('db-cleanup', {
         message: `Removed ${removedCount} non-existent files from directory ${directoryPath}`
@@ -908,126 +1244,48 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     }
 
     return new Promise((resolve, reject) => {
-      // Create a worker for scanning
-      const worker = new Worker(`
-        const { parentPort, workerData } = require('worker_threads');
-        const fs = require('fs');
-        const path = require('path');
-        const crypto = require('crypto');
-
-        async function calculateFileHash(filePath) {
-          return new Promise((resolve, reject) => {
-            const hash = crypto.createHash('sha256');
-            const stream = fs.createReadStream(filePath);
-            
-            stream.on('error', err => {
-              console.error(\`Error reading file for hashing: \${filePath}\`, err);
-              reject(err);
-            });
-
-            stream.on('data', chunk => {
-              try {
-                hash.update(chunk);
-              } catch (err) {
-                console.error(\`Error updating hash for file: \${filePath}\`, err);
-                reject(err);
-              }
-            });
-
-            stream.on('end', () => {
-              try {
-                const fileHash = hash.digest('hex');
-                resolve(fileHash);
-              } catch (err) {
-                console.error(\`Error generating final hash for file: \${filePath}\`, err);
-                reject(err);
-              }
-            });
-          });
-        }
-
-        async function scanDirectory(directoryPath, maxFileSize) {
-          const files = [];
-          let totalFiles = 0;
-          let processedFiles = 0;
-
-          // Use a stack instead of recursion for better performance
-          const directoryStack = [directoryPath];
-          const seenDirs = new Set();
-
-          while (directoryStack.length > 0) {
-            const currentDir = directoryStack.pop();
-            if (seenDirs.has(currentDir)) continue;
-            seenDirs.add(currentDir);
-
-            let entries;
+      // Use scan-worker.js for scanning (supports zip files)
+      // Handle asar archive case - worker threads can't load from inside asar
+      let workerPath = path.join(__dirname, 'scan-worker.js');
+      
+      // Check if we're in an asar archive (worker threads can't load from asar)
+      if (__dirname.includes('.asar')) {
+        // Try to get from app.asar.unpacked directory first
+        const unpackedPath = __dirname.replace('.asar', '.asar.unpacked');
+        const unpackedWorkerPath = path.join(unpackedPath, 'scan-worker.js');
+        if (fs.existsSync(unpackedWorkerPath)) {
+          workerPath = unpackedWorkerPath;
+        } else {
+          // Copy to temp directory as fallback
+          const tempDir = path.join(os.tmpdir(), 'printventory-worker');
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+          const tempWorkerPath = path.join(tempDir, 'scan-worker.js');
+          // Only copy if it doesn't exist
+          if (!fs.existsSync(tempWorkerPath)) {
             try {
-              entries = fs.readdirSync(currentDir, { withFileTypes: true });
-            } catch (err) {
-              console.error(\`Skipping directory \${currentDir} due to error: \${err.message}\`);
-              continue;
-            }
-
-            for (const entry of entries) {
-              const fullPath = path.join(currentDir, entry.name);
-              
-              if (entry.isDirectory()) {
-                // Skip system directories and __MACOSX
-                if (entry.name.toLowerCase() === '__macosx' || 
-                    /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
-                  continue;
-                }
-                directoryStack.push(fullPath);
-              } else {
-                const ext = path.extname(entry.name).toLowerCase();
-                if (ext === '.stl' || ext === '.3mf') {
-                  try {
-                    const stats = fs.statSync(fullPath);
-                    if (stats.size <= maxFileSize) {
-                      // Calculate hash for the file
-                      let fileHash = null;
-                      try {
-                        fileHash = await calculateFileHash(fullPath);
-                      } catch (hashError) {
-                        console.error(\`Error calculating hash for \${fullPath}:\`, hashError);
-                        // Continue without hash if calculation fails
-                      }
-                      
-                      files.push({
-                        filePath: fullPath,
-                        fileName: entry.name,
-                        size: stats.size,
-                        mtime: stats.mtime,
-                        hash: fileHash
-                      });
-                    }
-                  } catch (error) {
-                    console.error(\`Error processing file \${fullPath}:\`, error);
-                  }
-                }
-                processedFiles++;
-                if (processedFiles % 100 === 0) {
-                  parentPort.postMessage({ 
-                    type: 'progress', 
-                    processed: processedFiles 
-                  });
-                }
-              }
+              // Read from asar using fs.readFileSync (this works even from asar)
+              const asarWorkerPath = path.join(__dirname, 'scan-worker.js');
+              const workerContent = fs.readFileSync(asarWorkerPath);
+              fs.writeFileSync(tempWorkerPath, workerContent);
+            } catch (error) {
+              console.error('Error copying scan-worker.js from asar:', error);
+              reject(new Error(`Failed to load scan-worker.js: ${error.message}`));
+              return;
             }
           }
-
-          return { files, totalFiles: processedFiles };
+          workerPath = tempWorkerPath;
         }
-
-        parentPort.on('message', async ({ directoryPath, maxFileSize }) => {
-          try {
-            const result = await scanDirectory(directoryPath, maxFileSize);
-            parentPort.postMessage({ type: 'done', result });
-          } catch (error) {
-            parentPort.postMessage({ type: 'error', error: error.message });
-          }
-        });
-      `, { eval: true });
+      }
+      
+      // Verify the worker file exists before creating the worker
+      if (!fs.existsSync(workerPath)) {
+        reject(new Error(`scan-worker.js not found at: ${workerPath}`));
+        return;
+      }
+      
+      const worker = new Worker(workerPath);
 
       // Set up worker message handling
       worker.on('message', async (message) => {
@@ -1050,10 +1308,13 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             
             const insertNew = db.prepare(`
               INSERT INTO models (
-                filePath, fileName, hash, size, modifiedDate
-              ) VALUES (?, ?, ?, ?, ?)
+                filePath, fileName, hash, size, modifiedDate, dateAdded
+              ) VALUES (?, ?, ?, ?, ?, ?)
             `);
 
+            // Track count of newly inserted files
+            let newFilesCount = 0;
+            
             // Use a transaction for better performance
             db.transaction(() => {
               for (let i = 0; i < files.length; i += batchSize) {
@@ -1070,13 +1331,16 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                       file.filePath
                     );
                   } else {
+                    const dateAdded = new Date().toISOString();
                     insertNew.run(
                       file.filePath,
                       file.fileName,
                       file.hash || '',
                       file.size,
-                      file.mtime.toISOString()
+                      file.mtime.toISOString(),
+                      dateAdded
                     );
+                    newFilesCount++;
                   }
                 }
                 
@@ -1089,7 +1353,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             })();
 
             worker.terminate();
-            resolve({ files, totalFiles });
+            resolve({ files, totalFiles, newFilesCount });
           } catch (error) {
             worker.terminate();
             reject(error);
@@ -1114,7 +1378,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
       });
 
       // Start the worker
-      worker.postMessage({ directoryPath, maxFileSize });
+      worker.postMessage({ directoryPath, maxFileSize, enableZipArchives });
     });
 
   } catch (error) {
@@ -1154,6 +1418,10 @@ ipcMain.handle('save-model', async (event, modelData) => {
 
 ipcMain.handle('save-model-batch', async (event, modelDataBatch) => {
   return await saveModelBatch(modelDataBatch);
+});
+
+ipcMain.handle('update-models-batch', async (event, modelDataBatch) => {
+  return await updateModelsBatch(modelDataBatch);
 });
 
 ipcMain.handle('save-thumbnail', async (event, filePath, thumbnail) => {
@@ -1196,6 +1464,17 @@ ipcMain.handle('get-models-by-designer', async (event, designer) => {
   }
 });
 
+ipcMain.handle('show-message-box', async (event, options) => {
+  try {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showMessageBox(window || undefined, options);
+    return result;
+  } catch (error) {
+    console.error('Error showing message box:', error);
+    throw error;
+  }
+});
+
 ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
   try {
     // Determine the ORDER BY clause based on sortOption.
@@ -1217,6 +1496,14 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
         orderClause = "ORDER BY modifiedDate ASC";
         break;
       case "date-desc":
+        orderClause = "ORDER BY modifiedDate DESC";
+        break;
+      case "dateadded-asc":
+        orderClause = "ORDER BY dateAdded ASC";
+        break;
+      case "dateadded-desc":
+        orderClause = "ORDER BY dateAdded DESC";
+        break;
       default:
         orderClause = "ORDER BY modifiedDate DESC";
         break;
@@ -1233,6 +1520,174 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
   } catch (error) {
     console.error("Error in getAllModels IPC:", error);
     return [];
+  }
+});
+
+ipcMain.handle('get-models-filtered', async (event, filters) => {
+  try {
+    console.log('getModelsFiltered called with filters:', filters);
+    
+    // Build WHERE clause conditions
+    const conditions = [];
+    const params = [];
+    
+    // Designer filter
+    if (filters.designer) {
+      if (filters.designer === '__none__') {
+        conditions.push("(designer IS NULL OR designer = '')");
+      } else {
+        conditions.push("LOWER(TRIM(designer)) = LOWER(TRIM(?))");
+        params.push(filters.designer);
+      }
+    }
+    
+    // License filter
+    if (filters.license) {
+      if (filters.license === '__none__') {
+        conditions.push("(license IS NULL OR license = '')");
+      } else {
+        conditions.push("license = ?");
+        params.push(filters.license);
+      }
+    }
+    
+    // Parent model filter
+    if (filters.parentModel) {
+      if (filters.parentModel === '__none__') {
+        conditions.push("(parentModel IS NULL OR parentModel = '')");
+      } else {
+        conditions.push("parentModel = ?");
+        params.push(filters.parentModel);
+      }
+    }
+    
+    // Print status filter
+    if (filters.printed !== undefined) {
+      if (filters.printed === 'printed') {
+        conditions.push("printed = 1");
+      } else if (filters.printed === 'not-printed') {
+        conditions.push("printed = 0");
+      }
+    }
+    
+    // File type filter
+    if (filters.fileType) {
+      if (filters.fileType.toLowerCase() === 'zip') {
+        // For zip filter, show all models inside ZIP archives (entries with :: separator)
+        conditions.push("filePath LIKE ?");
+        params.push('%::%');
+      } else {
+        conditions.push("LOWER(fileName) LIKE ?");
+        params.push(`%.${filters.fileType.toLowerCase()}`);
+      }
+    }
+    
+    // Directory filter
+    if (filters.directory) {
+      // Ensure the directory path ends with a separator to match only files within that directory
+      // This prevents matching subdirectories with similar names (e.g., "test" matching "test2")
+      let directoryPath = filters.directory;
+      // Add path separator if not already present at the end
+      if (!directoryPath.endsWith('\\') && !directoryPath.endsWith('/') && !directoryPath.endsWith('::')) {
+        // Determine the appropriate separator based on the path
+        if (directoryPath.includes('\\')) {
+          directoryPath += '\\';
+        } else if (directoryPath.includes('/')) {
+          directoryPath += '/';
+        } else {
+          // Default to backslash for Windows paths
+          directoryPath += '\\';
+        }
+      }
+      conditions.push("filePath LIKE ?");
+      params.push(`${directoryPath}%`);
+    }
+    
+    // Search term filter (searches in fileName, designer, parentModel, notes, filePath)
+    if (filters.search) {
+      const searchTerm = `%${filters.search.toLowerCase()}%`;
+      conditions.push(`(
+        LOWER(fileName) LIKE ? OR 
+        LOWER(designer) LIKE ? OR 
+        LOWER(parentModel) LIKE ? OR 
+        LOWER(notes) LIKE ? OR
+        LOWER(filePath) LIKE ?
+      )`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Date Added filter (filter by dateAdded >= specified date)
+    if (filters.dateAdded) {
+      conditions.push("dateAdded >= ?");
+      params.push(filters.dateAdded);
+    }
+    
+    // Build WHERE clause
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    
+    // Determine ORDER BY clause based on sortOption
+    let orderClause = "";
+    const sortOption = filters.sortOption || 'date-desc';
+    switch (sortOption) {
+      case "name-asc":
+        orderClause = "ORDER BY fileName ASC";
+        break;
+      case "name-desc":
+        orderClause = "ORDER BY fileName DESC";
+        break;
+      case "size-asc":
+        orderClause = "ORDER BY size ASC";
+        break;
+      case "size-desc":
+        orderClause = "ORDER BY size DESC";
+        break;
+      case "date-asc":
+        orderClause = "ORDER BY modifiedDate ASC";
+        break;
+      case "date-desc":
+        orderClause = "ORDER BY modifiedDate DESC";
+        break;
+      case "dateadded-asc":
+        orderClause = "ORDER BY dateAdded ASC";
+        break;
+      case "dateadded-desc":
+        orderClause = "ORDER BY dateAdded DESC";
+        break;
+      default:
+        orderClause = "ORDER BY modifiedDate DESC";
+        break;
+    }
+    
+    // Execute query
+    let query = `SELECT * FROM models ${whereClause} ${orderClause}`;
+    console.log('Executing query:', query);
+    console.log('With params:', params);
+    
+    let models = db.prepare(query).all(...params);
+    
+    // Tag filter (needs to be done after query since it requires joining with model_tags)
+    if (filters.tag) {
+      const tagFilteredModels = [];
+      for (const model of models) {
+        const modelTags = db.prepare(`
+          SELECT t.name 
+          FROM tags t
+          INNER JOIN model_tags mt ON t.id = mt.tag_id
+          WHERE mt.model_id = ?
+        `).all(model.id);
+        
+        if (modelTags.some(tag => tag.name === filters.tag)) {
+          tagFilteredModels.push(model);
+        }
+      }
+      models = tagFilteredModels;
+    }
+    
+    console.log(`Returning ${models.length} filtered models`);
+    return models;
+  } catch (error) {
+    console.error("Error in getModelsFiltered IPC:", error);
+    throw error;
   }
 });
 
@@ -1480,6 +1935,40 @@ async function scanDirectory(directoryPath, isValidFile) {
   return { files, totalFiles, cancelScan };
 }
 
+// Helper functions for managing multiple thumbnails
+function parseThumbnails(thumbnailString) {
+  if (!thumbnailString || thumbnailString === '3d.png' || !thumbnailString.includes('::')) {
+    return [thumbnailString].filter(Boolean);
+  }
+  return thumbnailString.split('::').filter(Boolean);
+}
+
+function getDefaultThumbnail(thumbnailString, defaultIndex = 0) {
+  const thumbnails = parseThumbnails(thumbnailString);
+  if (thumbnails.length === 0) return null;
+  const index = Math.max(0, Math.min(defaultIndex, thumbnails.length - 1));
+  return thumbnails[index];
+}
+
+function addThumbnailToModel(thumbnailString, newThumbnail) {
+  if (!newThumbnail) return thumbnailString;
+  const thumbnails = parseThumbnails(thumbnailString);
+  thumbnails.push(newThumbnail);
+  return thumbnails.join('::');
+}
+
+function setDefaultThumbnailIndex(thumbnailString, index) {
+  const thumbnails = parseThumbnails(thumbnailString);
+  if (thumbnails.length === 0 || index < 0 || index >= thumbnails.length) {
+    return thumbnailString;
+  }
+  // Move the selected thumbnail to the front (making it the default)
+  const selected = thumbnails[index];
+  thumbnails.splice(index, 1);
+  thumbnails.unshift(selected);
+  return thumbnails.join('::');
+}
+
 async function saveThumbnail(filePath, thumbnail) {
   try {
     db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(thumbnail, filePath);
@@ -1492,10 +1981,23 @@ async function saveThumbnail(filePath, thumbnail) {
 
 ipcMain.handle('show-item-in-folder', async (event, filePath) => {
   try {
-    shell.showItemInFolder(filePath);
+    // If it's a zip entry, extract the zip path
+    const pathInfo = parseZipPath(filePath);
+    const pathToShow = pathInfo.isZipEntry ? pathInfo.zipPath : filePath;
+    shell.showItemInFolder(pathToShow);
     return true;
   } catch (error) {
     console.error('Error showing item in folder:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('open-path', async (event, path) => {
+  try {
+    await shell.openPath(path);
+    return true;
+  } catch (error) {
+    console.error('Error opening path:', error);
     throw error;
   }
 });
@@ -1508,6 +2010,170 @@ ipcMain.handle('show-message', async (event, title, message, buttons = ['OK']) =
     buttons: buttons
   });
   return buttons[result.response];
+});
+
+ipcMain.handle('show-input-dialog', async (event, options) => {
+  const { title, message, defaultValue = '', placeholder = '' } = options;
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  
+  // Create a simple input dialog window
+  const inputWindow = new BrowserWindow({
+    width: 400,
+    height: 200,
+    resizable: false,
+    modal: true,
+    parent: senderWindow,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false
+    },
+    title: title || 'Input',
+    show: false,
+    backgroundColor: '#2d2d2d'
+  });
+
+  // Escape HTML to prevent XSS
+  const escapeHtml = (text) => {
+    return String(text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  };
+
+  // Create HTML for the input dialog
+  const safeMessage = escapeHtml(message || 'Enter value:');
+  const safePlaceholder = escapeHtml(placeholder || '');
+  const safeDefaultValue = escapeHtml(defaultValue || '');
+  
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+          background-color: #2d2d2d;
+          color: #fff;
+          margin: 0;
+          padding: 20px;
+          display: flex;
+          flex-direction: column;
+          height: 100vh;
+          box-sizing: border-box;
+        }
+        .message {
+          margin-bottom: 15px;
+          font-size: 14px;
+        }
+        input {
+          width: 100%;
+          padding: 8px;
+          background-color: #444;
+          border: 1px solid #555;
+          border-radius: 4px;
+          color: #fff;
+          font-size: 14px;
+          box-sizing: border-box;
+          margin-bottom: 15px;
+        }
+        input:focus {
+          outline: none;
+          border-color: #007bff;
+        }
+        input::placeholder {
+          color: #999;
+        }
+        .buttons {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+        }
+        button {
+          padding: 8px 16px;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 14px;
+          font-weight: 500;
+        }
+        .cancel {
+          background-color: #555;
+          color: #fff;
+        }
+        .cancel:hover {
+          background-color: #666;
+        }
+        .ok {
+          background-color: #007bff;
+          color: #fff;
+        }
+        .ok:hover {
+          background-color: #0056b3;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="message">${safeMessage}</div>
+      <input type="text" id="input-field" placeholder="${safePlaceholder}" value="${safeDefaultValue}" autofocus>
+      <div class="buttons">
+        <button class="cancel" id="cancel-btn">Cancel</button>
+        <button class="ok" id="ok-btn">OK</button>
+      </div>
+      <script>
+        const { ipcRenderer } = require('electron');
+        const input = document.getElementById('input-field');
+        const okBtn = document.getElementById('ok-btn');
+        const cancelBtn = document.getElementById('cancel-btn');
+        
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            okBtn.click();
+          } else if (e.key === 'Escape') {
+            cancelBtn.click();
+          }
+        });
+        
+        okBtn.addEventListener('click', () => {
+          ipcRenderer.send('input-dialog-response', input.value);
+        });
+        
+        cancelBtn.addEventListener('click', () => {
+          ipcRenderer.send('input-dialog-response', null);
+        });
+        
+        input.focus();
+        input.select();
+      </script>
+    </body>
+    </html>
+  `;
+
+  inputWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  inputWindow.show();
+
+  return new Promise((resolve) => {
+    // Handle response from the input dialog
+    const responseHandler = (event, value) => {
+      if (event.sender === inputWindow.webContents) {
+        ipcMain.removeListener('input-dialog-response', responseHandler);
+        inputWindow.close();
+        resolve(value || null);
+      }
+    };
+    
+    ipcMain.on('input-dialog-response', responseHandler);
+    
+    // Handle window close (user clicked X)
+    inputWindow.on('closed', () => {
+      ipcMain.removeListener('input-dialog-response', responseHandler);
+      if (!inputWindow.isDestroyed()) {
+        resolve(null);
+      }
+    });
+  });
 });
 
 // Update the backup-database handler
@@ -1794,6 +2460,94 @@ ipcMain.handle('get-tag-model-count', async (event, tagId) => {
   });
 });
 
+ipcMain.handle('get-all-metadata', async () => {
+  try {
+    return db.prepare(`
+      SELECT 'designer' as type, designer as name, COUNT(*) as model_count 
+      FROM models 
+      WHERE designer IS NOT NULL AND designer != '' 
+      GROUP BY designer
+      UNION ALL
+      SELECT 'parentModel' as type, parentModel as name, COUNT(*) as model_count 
+      FROM models 
+      WHERE parentModel IS NOT NULL AND parentModel != '' 
+      GROUP BY parentModel
+      UNION ALL
+      SELECT 'license' as type, license as name, COUNT(*) as model_count 
+      FROM models 
+      WHERE license IS NOT NULL AND license != '' 
+      GROUP BY license
+      ORDER BY type, name
+    `).all();
+  } catch (error) {
+    console.error('Error getting metadata:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('rename-metadata', async (event, type, oldName, newName) => {
+  try {
+    if (!oldName || !newName || oldName.trim() === '' || newName.trim() === '') {
+      throw new Error('Name cannot be empty');
+    }
+
+    // Validate type
+    const validTypes = ['designer', 'parentModel', 'license'];
+    if (!validTypes.includes(type)) {
+      throw new Error('Invalid metadata type');
+    }
+
+    // Check if new name already exists for this type
+    const existing = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM models 
+      WHERE ${type} = ? AND ${type} IS NOT NULL AND ${type} != ''
+    `).get(newName.trim());
+    
+    if (existing && existing.count > 0) {
+      throw new Error(`A ${type} with that name already exists`);
+    }
+
+    // Update all models with the old name to the new name
+    const result = db.prepare(`
+      UPDATE models 
+      SET ${type} = ? 
+      WHERE ${type} = ?
+    `).run(newName.trim(), oldName.trim());
+
+    return { success: true, updated: result.changes };
+  } catch (error) {
+    console.error('Error renaming metadata:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('delete-metadata', async (event, type, name) => {
+  try {
+    if (!name || name.trim() === '') {
+      throw new Error('Name cannot be empty');
+    }
+
+    // Validate type
+    const validTypes = ['designer', 'parentModel', 'license'];
+    if (!validTypes.includes(type)) {
+      throw new Error('Invalid metadata type');
+    }
+
+    // Set the field to NULL for all models with that value
+    const result = db.prepare(`
+      UPDATE models 
+      SET ${type} = NULL 
+      WHERE ${type} = ?
+    `).run(name.trim());
+
+    return { success: true, updated: result.changes };
+  } catch (error) {
+    console.error('Error deleting metadata:', error);
+    throw error;
+  }
+});
+
 // Update the purge-models handler
 ipcMain.handle('purge-models', async () => {
   try {
@@ -1850,13 +2604,24 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     event.sender.send('select-model-by-filepath', filePaths[0]);
   }
   
+  // Check if any file is a zip entry
+  const isZipEntry = filePaths.length === 1 && filePaths[0].includes('::');
+  const pathInfo = filePaths.length === 1 ? parseZipPath(filePaths[0]) : null;
+  
   let menuItems = [
     {
       label: 'Open File',
       enabled: filePaths.length === 1,
       click: async () => {
         try {
-          await shell.openPath(filePaths[0]);
+          if (isZipEntry && pathInfo) {
+            // Extract to temp file first
+            const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+            await shell.openPath(tempPath);
+            // Note: temp file will be cleaned up by OS or on next extraction
+          } else {
+            await shell.openPath(filePaths[0]);
+          }
         } catch (error) {
           console.error('Error opening file:', error);
           dialog.showMessageBox({
@@ -1873,7 +2638,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       enabled: filePaths.length === 1,
       click: async () => {
         try {
-          await shell.showItemInFolder(filePaths[0]);
+          if (isZipEntry && pathInfo) {
+            // For zip entries, open the zip file's directory
+            await shell.showItemInFolder(pathInfo.zipPath);
+          } else {
+            await shell.showItemInFolder(filePaths[0]);
+          }
         } catch (error) {
           console.error('Error opening directory:', error);
           dialog.showMessageBox({
@@ -1886,6 +2656,71 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       }
     }
   ];
+  
+  // Add extract options for zip entries
+  if (isZipEntry && pathInfo && filePaths.length === 1) {
+    menuItems.push(
+      { type: 'separator' },
+      {
+        label: 'Extract Model',
+        click: async () => {
+          try {
+            const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+              properties: ['openDirectory'],
+              title: 'Select destination folder for extraction'
+            });
+            
+            if (!result.canceled && result.filePaths.length > 0) {
+              const destPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath, result.filePaths[0]);
+              dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+                type: 'info',
+                title: 'Extraction Complete',
+                message: 'Model extracted successfully',
+                detail: `Extracted to: ${destPath}`
+              });
+            }
+          } catch (error) {
+            console.error('Error extracting model:', error);
+            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not extract model',
+              detail: error.message
+            });
+          }
+        }
+      },
+      {
+        label: 'Extract Zip Archive',
+        click: async () => {
+          try {
+            const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+              properties: ['openDirectory'],
+              title: 'Select destination folder for extraction'
+            });
+            
+            if (!result.canceled && result.filePaths.length > 0) {
+              const destPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath, result.filePaths[0]);
+              dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+                type: 'info',
+                title: 'Extraction Complete',
+                message: 'Archive extracted successfully',
+                detail: `Extracted to: ${destPath}`
+              });
+            }
+          } catch (error) {
+            console.error('Error extracting archive:', error);
+            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not extract archive',
+              detail: error.message
+            });
+          }
+        }
+      }
+    );
+  }
 
   // Get all configured slicers from the database
   let slicers = [];
@@ -1911,9 +2746,14 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         click: async () => {
           try {
             const { exec } = require('child_process');
-            const modelPath = filePaths[0]; // Use the first file selected
-            let command;
+            let modelPath = filePaths[0]; // Use the first file selected
             
+            // If it's a zip entry, extract to temp first
+            if (isZipEntry && pathInfo) {
+              modelPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+            }
+            
+            let command;
             if (process.platform === 'darwin' && slicer.path.toLowerCase().endsWith('.app')) {
               command = `open -a "${slicer.path}" --args "${modelPath}"`;
             } else {
@@ -1928,7 +2768,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             });
           } catch (error) {
             console.error('Error slicing model:', error);
-            dialog.showMessageBox({
+            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
               type: 'error',
               title: 'Error',
               message: 'Could not slice model',
@@ -1945,8 +2785,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   const apiKeyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('apiKey');
   const apiKey = apiKeyRow ? apiKeyRow.value : null;
   
-  // Add "Generate Tags" option if API key exists
-  if (apiKey) {
+  // Check AI service type
+  const aiServiceRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiService');
+  const aiService = aiServiceRow ? aiServiceRow.value : 'openai';
+  
+  // Add "Generate Tags" option if API key exists OR if using Puter (which doesn't need API key)
+  if (apiKey || aiService === 'puter') {
     menuItems.push({
       label: 'Generate Tags',
       // Remove the restriction to only one file
@@ -1955,114 +2799,173 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           const aitagging = require('./aitagging');
           const settings = getSettings();
           
+          // Create puter IPC handler if service is puter
+          const puterIPCHandler = settings.aiService === 'puter' ? createPuterIPCHandler() : null;
+          
           // Initialize OpenAI with the API key
-          aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService);
+          aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService, puterIPCHandler);
           
-          // Show progress dialog for multiple files
-          if (filePaths.length > 1) {
-            event.sender.send('show-progress-dialog', {
-              title: 'Generating Tags',
-              message: `Generating tags for ${filePaths.length} models...`,
-              total: filePaths.length
-            });
-          }
+          // Filter out invalid file paths first
+          const validFilePaths = filePaths.filter(fp => fp && typeof fp === 'string');
           
-          // Process each file path
-          for (let i = 0; i < filePaths.length; i++) {
-            const filePath = filePaths[i];
-            
-            // Update progress for multiple files
-            if (filePaths.length > 1) {
-              event.sender.send('update-progress', {
-                current: i + 1,
-                total: filePaths.length,
-                message: `Processing model ${i + 1} of ${filePaths.length}`
+          // Use validFilePaths for processing
+          const filesToProcess = validFilePaths.length > 0 ? validFilePaths : filePaths;
+          
+          // Start tag generation - show review dialog immediately for both single and multiple files
+          if (filesToProcess.length > 1) {
+            // Send all file paths so the dialog can show all models immediately
+            event.sender.send('start-batch-tag-generation', filesToProcess.length, filesToProcess);
+          } else if (filesToProcess.length === 1) {
+            // For single file, also open dialog immediately with "Generating..." status
+            const singleModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filesToProcess[0]);
+            if (singleModel) {
+              const modelTagRows = db.prepare(`
+                SELECT t.name 
+                FROM tags t
+                JOIN model_tags mt ON mt.tag_id = t.id
+                WHERE mt.model_id = ?
+              `).all(singleModel.id);
+              const modelTags = modelTagRows.map(row => row.name);
+              
+              console.log('Sending start-single-tag-generation event');
+              event.sender.send('start-single-tag-generation', filesToProcess[0], {
+                filePath: filesToProcess[0],
+                model: singleModel,
+                generatedTags: undefined, // undefined means "generating"
+                existingTags: modelTags
               });
-            }
-            
-            // Get the model from the database to access its thumbnail
-            const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
-//            
-            if (!model) {
-              console.log(`Model not found in database: ${filePath}, skipping`);
-              continue;
-            }
-            
-            // Get the model tags from the database
-            const modelTagRows = db.prepare(`
-              SELECT t.name 
-              FROM tags t
-              JOIN model_tags mt ON mt.tag_id = t.id
-              WHERE mt.model_id = ?
-            `).all(model.id);
-            
-            const modelTags = modelTagRows.map(row => row.name);
-            
-            // Check if model already has the "AI Tagged" tag
-            if (modelTags.includes("AI Tagged")) {
-              console.log(`Model ${filePath} already has AI Tagged tag, skipping generation`);
-              event.sender.send('tags-generated', filePath, []);
-              continue;
-            }
-            
-            if (!model.thumbnail) {
-              // If no thumbnail exists, we need to generate one or use a default image
-              console.log('No thumbnail found for model, using default image');
-              try {
-                
-                const fs = require('fs').promises;
-                const defaultImagePath = './logo.png'; // Use a default image that's guaranteed to be in PNG format
-                const data = await fs.readFile(defaultImagePath, { encoding: 'base64' });
-                const tags = await aitagging.generateTagsForImage(data, settings.aiModel);
-                
-                // Send the generated tags back to the renderer process
-                event.sender.send('tags-generated', filePath, tags);
-              } catch (error) {
-                console.error(`Error generating tags with default image for ${filePath}:`, error);
-                // Send an empty tags array to the renderer to continue processing
-                event.sender.send('tags-generated', filePath, []);
-              }
             } else {
-              // Extract the base64 data from the thumbnail data URL
-              // The thumbnail is stored as a data URL like: data:image/png;base64,BASE64_DATA
-              const base64Data = model.thumbnail.split(',')[1];
-              
-              if (!base64Data) {
-                console.error(`Invalid thumbnail format for ${filePath}`);
-                continue; // Skip this file and continue with the next one
-              }
-              
-              try {
-                // We already retrieved the model tags earlier, so we can reuse them here
-                if (modelTags.includes("AI Tagged")) {
-                  console.log(`Model ${filePath} already has AI Tagged tag, skipping generation`);
-                  event.sender.send('tags-generated', filePath, []);
-                  continue;
-                }
-                
-                // Generate tags using the thumbnail image which is already in PNG format
-                const tags = await aitagging.generateTagsForImage(base64Data, settings.aiModel);
-                
-                // Send the generated tags back to the renderer process
-                event.sender.send('tags-generated', filePath, tags);
-              } catch (error) {
-                console.error(`Error generating tags for ${filePath}:`, error);
-                // Send an empty tags array to the renderer to continue processing
-                event.sender.send('tags-generated', filePath, []);
-              }
+              console.log('Model not found in database for single file generation');
             }
           }
           
-          // Close progress dialog for multiple files
-          if (filePaths.length > 1) {
-            event.sender.send('close-progress-dialog');
-            
-            // Show completion message
-            dialog.showMessageBox({
-              type: 'info',
-              title: 'Tags Generated',
-              message: `Successfully generated tags for ${filePaths.length} models.`
-            });
+          // Process files in parallel with concurrency limit
+          const concurrency = Math.max(1, Math.min(settings.aiTagConcurrency || 3, 10));
+          let completed = 0;
+          let successCount = 0;
+          let failureCount = 0;
+          const totalFiles = filesToProcess.length;
+          
+          // Helper function to process a single file
+          const processFile = async (filePath, index) => {
+            try {
+              // Get the model from the database to access its thumbnail
+              const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+              
+              if (!model) {
+                console.log(`Model not found in database: ${filePath}, skipping`);
+                completed++;
+                // Send empty tags for skipped models so they appear in the review dialog
+                event.sender.send('tags-generated', filePath, [], null);
+                return;
+              }
+              
+              // Get the model tags from the database
+              const modelTagRows = db.prepare(`
+                SELECT t.name 
+                FROM tags t
+                JOIN model_tags mt ON mt.tag_id = t.id
+                WHERE mt.model_id = ?
+              `).all(model.id);
+              
+              const modelTags = modelTagRows.map(row => row.name);
+              
+              // Check if model already has the "AI Tagged" tag (unless retagging is allowed)
+              if (!settings.aiTagAllowRetagging && modelTags.includes("AI Tagged")) {
+                console.log(`Model ${filePath} already has AI Tagged tag, skipping generation`);
+              completed++;
+              // Send empty tags for already-tagged models so they appear in the review dialog
+              event.sender.send('tags-generated', filePath, [], null);
+              return;
+              }
+              
+              // Prepare tag generation options
+              const tagOptions = {
+                maxTags: settings.aiTagMaxTags,
+                useCategories: settings.aiTagUseCategories,
+                useJsonResponse: settings.aiTagUseJsonResponse,
+                detailLevel: settings.aiTagDetailLevel
+              };
+              
+              let tags = [];
+              
+              if (!model.thumbnail) {
+                // If no thumbnail exists, use default image
+                console.log(`No thumbnail found for model ${filePath}, using default image`);
+                try {
+                  const fs = require('fs').promises;
+                  const defaultImagePath = './logo.png';
+                  const data = await fs.readFile(defaultImagePath, { encoding: 'base64' });
+                  tags = await aitagging.generateTagsForImage(data, settings.aiModel, tagOptions, 2000, 5, filePath);
+                  successCount++;
+                } catch (error) {
+                  console.error(`Error generating tags with default image for ${filePath}:`, error);
+                  failureCount++;
+                  // Check if it's a rate limit error
+                  if (error.message && error.message.includes('Rate limit')) {
+                    // Send error info with empty tags
+                    event.sender.send('tags-generated', filePath, [], error.message);
+                    completed++;
+                    return;
+                  }
+                }
+              } else {
+                // Extract the base64 data from the thumbnail data URL
+                const base64Data = model.thumbnail.split(',')[1];
+                
+                if (!base64Data) {
+                  console.error(`Invalid thumbnail format for ${filePath}`);
+                  failureCount++;
+                } else {
+                  try {
+                    // Generate tags using the thumbnail image
+                    tags = await aitagging.generateTagsForImage(base64Data, settings.aiModel, tagOptions, 2000, 5, filePath);
+                    successCount++;
+                  } catch (error) {
+                    console.error(`Error generating tags for ${filePath}:`, error);
+                    failureCount++;
+                    // Check if it's a rate limit error
+                    if (error.message && error.message.includes('Rate limit')) {
+                      // Send error info with empty tags
+                      event.sender.send('tags-generated', filePath, [], error.message);
+                      completed++;
+                      return;
+                    }
+                  }
+                }
+              }
+              
+              // Send the generated tags back to the renderer process
+              event.sender.send('tags-generated', filePath, tags, null);
+              
+              completed++;
+              // Progress is now shown in the review dialog
+            } catch (error) {
+              console.error(`Unexpected error processing ${filePath}:`, error);
+              failureCount++;
+              completed++;
+              // Check if it's a rate limit error
+              if (error.message && error.message.includes('Rate limit')) {
+                // Send error info with empty tags
+                event.sender.send('tags-generated', filePath, [], error.message);
+              } else {
+                // Send empty tags for failed models so they appear in the review dialog
+                event.sender.send('tags-generated', filePath, []);
+              }
+            }
+          };
+          
+          // Process files in batches with concurrency limit
+          for (let i = 0; i < filesToProcess.length; i += concurrency) {
+            const batch = filesToProcess.slice(i, i + concurrency);
+            await Promise.all(batch.map((filePath, batchIndex) => 
+              processFile(filePath, i + batchIndex)
+            ));
+          }
+          
+          // Signal batch completion for multiple files
+          if (totalFiles > 1) {
+            event.sender.send('batch-tag-generation-complete');
           }
         } catch (error) {
           console.error('Error generating tags:', error);
@@ -2072,10 +2975,101 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             event.sender.send('close-progress-dialog');
           }
           
+          // Provide more user-friendly error messages
+          let errorMessage = 'Could not generate tags';
+          let errorDetail = error.message || 'An unknown error occurred';
+          
+          if (error.message && error.message.includes('Authentication failed')) {
+            errorMessage = 'Authentication Error';
+            errorDetail = 'Your API key is invalid or has insufficient permissions. Please check your AI configuration settings.';
+          } else if (error.message && error.message.includes('Network error')) {
+            errorMessage = 'Connection Error';
+            errorDetail = 'Unable to connect to the AI service. Please check your internet connection and API endpoint settings.';
+          } else if (error.message && error.message.includes('Rate limit')) {
+            errorMessage = 'Rate Limit Exceeded';
+            // Extract the detailed message if available (after "Rate limit exceeded: ")
+            const detailedMessage = error.message.includes('Rate limit exceeded: ') 
+              ? error.message.split('Rate limit exceeded: ')[1]
+              : 'API rate limit has been exceeded. Please try again later.';
+            errorDetail = detailedMessage;
+          } else if (error.message && error.message.includes('Invalid request')) {
+            errorMessage = 'Invalid Request';
+            errorDetail = error.message;
+          }
+          
           dialog.showMessageBox({
             type: 'error',
+            title: errorMessage,
+            message: errorDetail,
+            detail: error.stack ? `Technical details: ${error.stack.substring(0, 200)}...` : ''
+          });
+        }
+      }
+    });
+  }
+
+  // Add "Add Image" option for single file selection
+  if (filePaths.length === 1) {
+    menuItems.push({
+      label: 'Add Image',
+      click: async () => {
+        try {
+          const win = BrowserWindow.fromWebContents(event.sender);
+          const result = await dialog.showOpenDialog(win, {
+            title: 'Select Image File',
+            properties: ['openFile'],
+            filters: [
+              { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
+              { name: 'All Files', extensions: ['*'] }
+            ]
+          });
+          
+          if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+            const imagePath = result.filePaths[0];
+            
+            // Read the image file and convert to data URL
+            const imageData = await fs.promises.readFile(imagePath);
+            const ext = path.extname(imagePath).toLowerCase().slice(1);
+            let mimeType = 'image/png';
+            if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+            else if (ext === 'gif') mimeType = 'image/gif';
+            else if (ext === 'webp') mimeType = 'image/webp';
+            
+            const base64Data = imageData.toString('base64');
+            const dataUrl = `data:${mimeType};base64,${base64Data}`;
+            
+            // Add thumbnail to model
+            const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
+            const currentThumbnail = model?.thumbnail || null;
+            const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, dataUrl);
+            
+            // Parse thumbnails to get count
+            const thumbnails = parseThumbnails(thumbnailsWithNew);
+            const newImageIndex = thumbnails.length - 1; // The new image is at the end
+            
+            // Make the new image the default (move it to the front)
+            const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
+            await saveThumbnail(filePaths[0], updatedThumbnail);
+            
+            // Verify the save was successful
+            const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
+            const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
+            
+            // Send message to renderer to refresh the grid with updated thumbnail
+            // The renderer will handle the refresh with a delay to ensure database write completes
+            event.sender.send('thumbnail-added', {
+              filePath: filePaths[0],
+              thumbnailCount: finalThumbnails.length,
+              hasMultiple: finalThumbnails.length > 1,
+              newImageIsDefault: true
+            });
+          }
+        } catch (error) {
+          console.error('Error adding image:', error);
+          dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+            type: 'error',
             title: 'Error',
-            message: 'Could not generate tags',
+            message: 'Could not add image',
             detail: error.message
           });
         }
@@ -2299,19 +3293,72 @@ function getDatabasePath() {
 }
 
 // Add these IPC handlers
+// Helper function to parse zip path format
+function parseZipPath(filePath) {
+  if (filePath.includes('::')) {
+    const [zipPath, entryPath] = filePath.split('::');
+    return { zipPath, entryPath, isZipEntry: true };
+  }
+  return { zipPath: filePath, entryPath: null, isZipEntry: false };
+}
+
+// Helper function to extract model from zip to temp file or specified destination
+async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
+  try {
+    const StreamZip = require('node-stream-zip');
+    const zip = new StreamZip.async({ file: zipPath });
+    const entryData = await zip.entryData(entryPath);
+    await zip.close();
+    
+    if (destinationPath) {
+      // Extract to specified destination, preserving directory structure
+      const destPath = path.join(destinationPath, entryPath);
+      const destDir = path.dirname(destPath);
+      await fs.promises.mkdir(destDir, { recursive: true });
+      await fs.promises.writeFile(destPath, entryData);
+      return destPath;
+    } else {
+      // Create temp file
+      const tempDir = os.tmpdir();
+      const fileName = path.basename(entryPath);
+      const tempPath = path.join(tempDir, `printventory_${Date.now()}_${fileName}`);
+      await fs.promises.writeFile(tempPath, entryData);
+      return tempPath;
+    }
+  } catch (error) {
+    console.error(`Error extracting ${entryPath} from ${zipPath}:`, error);
+    throw error;
+  }
+}
+
 ipcMain.handle('get3MFImages', async (event, filePath) => {
   // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     console.log('Skipping file from __MACOSX directory:', filePath);
-    return null;
+    return [];
   }
+  
+  // Check if this is a zip entry
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+  
+  if (pathInfo.isZipEntry) {
+    // Extract to temp file first
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    } catch (error) {
+      console.error('Error extracting zip entry for 3MF images:', error);
+      return [];
+    }
+  }
+  
   try {
-    console.log('Starting to process 3MF file:', filePath);
+    console.log('Starting to process 3MF file:', actualFilePath);
     
     // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.error('File does not exist:', filePath);
-      return null;
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return [];
     }
     
     // Use JSZip to extract the 3MF file (which is a zip file)
@@ -2319,7 +3366,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     const zip = new JSZip();
     
     console.log('Reading file data...');
-    const data = await fs.promises.readFile(filePath);
+    const data = await fs.promises.readFile(actualFilePath);
     console.log('File read successfully, size:', data.length, 'bytes');
     
     console.log('Loading zip contents...');
@@ -2327,7 +3374,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     console.log('Zip contents loaded successfully');
     
     // Log all files in the 3MF
-    console.log('\nContents of 3MF file:', filePath);
+    console.log('\nContents of 3MF file:', actualFilePath);
     console.log('Number of files in archive:', Object.keys(contents.files).length);
     console.log('All files in archive:');
     Object.keys(contents.files).forEach(filename => {
@@ -2335,74 +3382,160 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
     });
     
-    // Look for plate_1.png in the Metadata directory, trying different case variations
-    const possiblePaths = [
-      'Metadata/plate_1.png',
-      'metadata/plate_1.png',
-      '/Metadata/plate_1.png',
-      '/metadata/plate_1.png'
-    ];
+    // Helper to check if file is an image and not a system file
+    const isImage = (path) => {
+      const normalized = path.replace(/\\/g, '/');
+      // Skip Mac/System files
+      if (normalized.includes('__MACOSX/') || normalized.split('/').pop().startsWith('._')) return false;
+      return normalized.match(/\.(png|jpe?g|gif|webp)$/i);
+    };
 
-    // Try each possible path
-    console.log('\nSearching for plate_1.png...');
-    for (const path of possiblePaths) {
-      console.log('Checking for:', path);
-      const plateImage = contents.files[path];
-      if (plateImage) {
-        console.log('Found plate_1.png at:', path);
-        const imageData = await plateImage.async('base64');
-        console.log('Successfully extracted plate_1.png data');
-        return [`data:image/png;base64,${imageData}`];
+    // Helper to get proper MIME type from file extension
+    const getMimeType = (path) => {
+      const ext = path.split('.').pop().toLowerCase();
+      const mimeMap = {
+        'jpg': 'jpeg',
+        'jpeg': 'jpeg',
+        'png': 'png',
+        'gif': 'gif',
+        'webp': 'webp'
+      };
+      return mimeMap[ext] || 'png';
+    };
+
+    // Helper to calculate score for an image to determine priority
+    const calculateScore = (path, size) => {
+      let score = 0;
+      const lowerPath = path.toLowerCase();
+      const fileName = path.split('/').pop().toLowerCase();
+
+      // 0. HIGHEST PRIORITY: Images in 3D/Textures/ or 3D/Texture/ directories (3MF standard location)
+      if (lowerPath.includes('3d/textures/') || lowerPath.includes('3d/texture/')) {
+        score += 200; // Very high priority for 3MF texture images
       }
-    }
-    
-    // If plate_1.png wasn't found, look for any images in the Metadata directory first
-    console.log('\nLooking for any images in Metadata directory...');
-    const imageFiles = [];
+
+      // 1. Plate images (high priority) - prefer images with "plate" in name
+      if (fileName.includes('plate')) score += 150; // Prefer plate images like plate_1.jpg
+
+      // 2. Camera photos (high priority) - specific patterns
+      if (fileName.match(/^dsc/)) score += 100; // Nikon/Sony
+      if (fileName.match(/^img/)) score += 100; // Canon/generic
+      if (fileName.match(/^pxl/)) score += 100; // Pixel
+      if (fileName.match(/^\d{8}_\d{6}/)) score += 100; // Android date format
+
+      // 3. Metadata/Generated thumbnails (lower priority)
+      if (lowerPath.includes('metadata')) score -= 50;
+      if (fileName.includes('thumbnail')) score -= 20;
+      if (fileName.includes('preview')) score -= 10;
+
+      // 3. File size (preference for larger, likely higher res images)
+      // Cap size bonus at 50 points (assuming size is in bytes)
+      // Use 0 if size is undefined
+      const safeSize = size || 0;
+      score += Math.min(safeSize / 1024, 50);
+
+      // 4. Prefer webp/jpg over png (often photos vs generated)
+      if (fileName.endsWith('.webp') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) {
+        score += 10;
+      }
+
+      return score;
+    };
+
+    // Scan all images in the archive
+    console.log('\nScanning all images in 3MF archive...');
+    const allImages = [];
+
     for (const [path, file] of Object.entries(contents.files)) {
-      // Check if file is in Metadata directory first
-      if (path.toLowerCase().includes('metadata/') && path.match(/\.(png|jpe?g|gif|webp)$/i)) {
-        console.log('Found image in Metadata:', path);
-        const imageData = await file.async('base64');
-        imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
+      if (isImage(path) && !file.dir) {
+        // Try to get uncompressed size if available, otherwise 0
+        const size = (file._data && file._data.uncompressedSize) || 0;
+        const score = calculateScore(path, size);
+        console.log(`Found image: ${path} (Score: ${score})`);
+
+        allImages.push({
+          path,
+          file,
+          score
+        });
       }
     }
 
-    // If no images found in Metadata, look elsewhere in the 3MF
-    if (imageFiles.length === 0) {
-      console.log('\nLooking for images anywhere in 3MF...');
-      for (const [path, file] of Object.entries(contents.files)) {
-        if (path.match(/\.(png|jpe?g|gif|webp)$/i)) {
-          console.log('Found image:', path);
-          const imageData = await file.async('base64');
-          imageFiles.push(`data:image/${path.split('.').pop()};base64,${imageData}`);
-        }
-      }
+    // Sort images by score descending
+    allImages.sort((a, b) => b.score - a.score);
+
+    // Extract top images
+    const imageFiles = [];
+    const maxImagesToExtract = 5; // Limit to top 5 to save memory
+
+    for (const imgObj of allImages.slice(0, maxImagesToExtract)) {
+      console.log(`Extracting: ${imgObj.path} (Score: ${imgObj.score})`);
+      const imageData = await imgObj.file.async('base64');
+      const mimeType = getMimeType(imgObj.path);
+      imageFiles.push(`data:image/${mimeType};base64,${imageData}`);
     }
     
-    console.log('\nFound total images:', imageFiles.length);
-    return imageFiles;
+    console.log('\nExtracted total images:', imageFiles.length);
+    if (imageFiles.length === 0) {
+      console.log('No images found in 3MF file. Make sure images are in 3D/Textures/ or 3D/Texture/ directories.');
+    }
+    return imageFiles.length > 0 ? imageFiles : [];
   } catch (error) {
     console.error('Error reading 3MF images:', error);
     console.error('Error details:', error.message);
     console.error('Error stack:', error.stack);
-    return null;
+    return [];
   }
 });
 
 ipcMain.handle('get3MFSTL', async (event, filePath) => {
   try {
+    // Check if this is a zip entry
+    const pathInfo = parseZipPath(filePath);
+    let actualFilePath = filePath;
+    let shouldCleanup = false;
+    
+    if (pathInfo.isZipEntry) {
+      // Extract to temp file first
+      try {
+        actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+        shouldCleanup = true;
+      } catch (error) {
+        console.error('Error extracting zip entry for 3MF STL:', error);
+        return null;
+      }
+    }
+    
     const zip = new JSZip();
-    const data = await fs.promises.readFile(filePath);
+    const data = await fs.promises.readFile(actualFilePath);
     const contents = await zip.loadAsync(data);
     
     // Look for STL files in the 3MF
-    for (const [path, file] of Object.entries(contents.files)) {
-      if (path.endsWith('.stl')) {
+    for (const [entryPath, file] of Object.entries(contents.files)) {
+      if (entryPath.endsWith('.stl')) {
         // Extract to temp directory
         const tempPath = path.join(os.tmpdir(), `temp_${Date.now()}.stl`);
         await fs.promises.writeFile(tempPath, await file.async('nodebuffer'));
+        
+        // Clean up intermediate temp file if needed
+        if (shouldCleanup && actualFilePath !== filePath) {
+          try {
+            await fs.promises.unlink(actualFilePath);
+          } catch (cleanupError) {
+            console.error('Error cleaning up temp file:', cleanupError);
+          }
+        }
+        
         return tempPath;
+      }
+    }
+    
+    // Clean up intermediate temp file if needed
+    if (shouldCleanup && actualFilePath !== filePath) {
+      try {
+        await fs.promises.unlink(actualFilePath);
+      } catch (cleanupError) {
+        console.error('Error cleaning up temp file:', cleanupError);
       }
     }
     
@@ -2413,8 +3546,52 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
   }
 });
 
+// Add handler to extract model from zip to temp file
+ipcMain.handle('extract-model-from-zip', async (event, filePath) => {
+  try {
+    const pathInfo = parseZipPath(filePath);
+    if (!pathInfo.isZipEntry) {
+      // Not a zip entry, return original path
+      return filePath;
+    }
+    
+    return await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+  } catch (error) {
+    console.error('Error extracting model from zip:', error);
+    throw error;
+  }
+});
+
+// Add handler to extract zip archive
+ipcMain.handle('extract-zip-archive', async (event, filePath, destinationPath) => {
+  try {
+    const pathInfo = parseZipPath(filePath);
+    if (!pathInfo.isZipEntry) {
+      throw new Error('Not a zip entry');
+    }
+    
+    const StreamZip = require('node-stream-zip');
+    const zip = new StreamZip.async({ file: pathInfo.zipPath });
+    
+    // Extract the specific entry
+    const entryData = await zip.entryData(pathInfo.entryPath);
+    await zip.close();
+    
+    // Create destination path preserving directory structure
+    const destPath = path.join(destinationPath, pathInfo.entryPath);
+    const destDir = path.dirname(destPath);
+    await fs.promises.mkdir(destDir, { recursive: true });
+    await fs.promises.writeFile(destPath, entryData);
+    
+    return destPath;
+  } catch (error) {
+    console.error('Error extracting zip archive:', error);
+    throw error;
+  }
+});
+
 // Add a new IPC handler for getting duplicates
-ipcMain.handle('get-duplicates', async () => {
+ipcMain.handle('get-duplicates', async (event, includeZip = false) => {
   try {
     // Get all models with their hashes
     const models = db.prepare(`
@@ -2423,8 +3600,13 @@ ipcMain.handle('get-duplicates', async () => {
       WHERE hash IS NOT NULL
     `).all();
 
+    // Filter out zip entries if includeZip is false
+    const filteredModels = includeZip 
+      ? models 
+      : models.filter(model => !model.filePath.includes('::'));
+
     // Group by hash to find duplicates
-    const duplicates = models.reduce((acc, model) => {
+    const duplicates = filteredModels.reduce((acc, model) => {
       if (!acc[model.hash]) {
         acc[model.hash] = [];
       }
@@ -2448,57 +3630,146 @@ ipcMain.handle('get-duplicates', async () => {
   }
 });
 
-// Add IPC handler to calculate missing hashes
-ipcMain.handle('calculate-missing-hashes', async (event) => {
+// Internal function to calculate missing hashes
+async function calculateMissingHashesInternal(event) {
   try {
-    // Get all models with missing hashes
+    // Set hash generation state
+    isGeneratingHashes = true;
+
+    // Get all models with missing hashes OR SHA256 hashes (64 hex chars) that need to be regenerated as MD5 (32 hex chars)
     const modelsWithMissingHashes = db.prepare(`
       SELECT filePath, fileName, size 
       FROM models 
-      WHERE hash IS NULL OR hash = ''
+      WHERE hash IS NULL OR hash = '' OR LENGTH(hash) = 64
     `).all();
 
-    console.log(`Found ${modelsWithMissingHashes.length} models with missing hashes`);
+    console.log(`Found ${modelsWithMissingHashes.length} models with missing or SHA256 hashes (need MD5)`);
 
     if (modelsWithMissingHashes.length === 0) {
+      isGeneratingHashes = false;
       return { calculated: 0, total: 0 };
     }
+
+    console.log('Starting parallel hash calculation for', modelsWithMissingHashes.length, 'files');
 
     let calculatedCount = 0;
     const updateHash = db.prepare('UPDATE models SET hash = ? WHERE filePath = ?');
 
-    // Calculate hashes in batches to avoid blocking
-    const batchSize = 10;
-    for (let i = 0; i < modelsWithMissingHashes.length; i += batchSize) {
-      const batch = modelsWithMissingHashes.slice(i, i + batchSize);
-      
-      for (const model of batch) {
-        try {
-          if (fs.existsSync(model.filePath)) {
-            const hash = await calculateFileHash(model.filePath);
-            updateHash.run(hash, model.filePath);
-            calculatedCount++;
-          } else {
-            console.warn(`File no longer exists: ${model.filePath}`);
-          }
-        } catch (error) {
-          console.error(`Error calculating hash for ${model.filePath}:`, error);
-        }
-      }
-
-      // Send progress update
-      event.sender.send('hash-calculation-progress', {
-        calculated: calculatedCount,
+    // Send initial progress update
+    if (event && event.sender) {
+      event.sender.send('hash-generation-progress', {
+        processed: 0,
         total: modelsWithMissingHashes.length
       });
-
-      // Small delay to prevent blocking
-      await new Promise(resolve => setTimeout(resolve, 10));
     }
 
+    // Process files in parallel with concurrency limit
+    const concurrencyLimit = 50; // Process up to 50 files simultaneously
+    const processFile = async (model) => {
+      try {
+        // Check if file exists (for regular files) or zip file exists (for zip entries)
+        const pathInfo = parseZipPath(model.filePath);
+        let fileExists = false;
+
+        if (pathInfo.isZipEntry) {
+          // For zip entries, check if the zip file exists
+          fileExists = fs.existsSync(pathInfo.zipPath);
+        } else {
+          // For regular files, check if the file exists
+          fileExists = fs.existsSync(model.filePath);
+        }
+
+        if (fileExists) {
+          const hash = await calculateFileHash(model.filePath);
+          updateHash.run(hash, model.filePath);
+          calculatedCount++;
+          console.log(`Hash calculated for: ${model.filePath} (${calculatedCount}/${modelsWithMissingHashes.length})`);
+          
+          // Send progress update after each file
+          if (event && event.sender) {
+            event.sender.send('hash-generation-progress', {
+              processed: calculatedCount,
+              total: modelsWithMissingHashes.length
+            });
+          }
+        } else {
+          console.warn(`File no longer exists: ${model.filePath}`);
+          // Still update progress even if file doesn't exist
+          calculatedCount++;
+          if (event && event.sender) {
+            event.sender.send('hash-generation-progress', {
+              processed: calculatedCount,
+              total: modelsWithMissingHashes.length
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`Error calculating hash for ${model.filePath}:`, error);
+        // Update progress even on error to prevent hanging
+        calculatedCount++;
+        if (event && event.sender) {
+          event.sender.send('hash-generation-progress', {
+            processed: calculatedCount,
+            total: modelsWithMissingHashes.length
+          });
+        }
+      }
+    };
+
+    // Process files in parallel batches
+    for (let i = 0; i < modelsWithMissingHashes.length; i += concurrencyLimit) {
+      const batch = modelsWithMissingHashes.slice(i, i + concurrencyLimit);
+      await Promise.all(batch.map(processFile));
+    }
+
+    isGeneratingHashes = false;
     return { calculated: calculatedCount, total: modelsWithMissingHashes.length };
   } catch (error) {
+    isGeneratingHashes = false;
     console.error('Error calculating missing hashes:', error);
+    throw error;
+  }
+}
+
+// Add IPC handler to calculate missing hashes
+ipcMain.handle('calculate-missing-hashes', async (event) => {
+  return await calculateMissingHashesInternal(event);
+});
+
+// Add IPC handler for generateMissingHashes (calls the same internal function)
+ipcMain.handle('generateMissingHashes', async (event) => {
+  return await calculateMissingHashesInternal(event);
+});
+
+// Add IPC handler to get count of models without hash
+ipcMain.handle('getModelsWithoutHash', async () => {
+  try {
+    const result = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM models 
+      WHERE hash IS NULL OR hash = '' OR LENGTH(hash) = 64
+    `).get();
+    return result ? result.count : 0;
+  } catch (error) {
+    console.error('Error getting models without hash:', error);
+    return 0;
+  }
+});
+
+// Add IPC handler to check if hash generation is in progress
+ipcMain.handle('is-generating-hashes', async () => {
+  return isGeneratingHashes;
+});
+
+// Add IPC handler to calculate and save hash for a single file
+ipcMain.handle('calculate-file-hash', async (event, filePath) => {
+  try {
+    const hash = await calculateFileHash(filePath);
+    // Update the database with the calculated hash
+    db.prepare('UPDATE models SET hash = ? WHERE filePath = ?').run(hash, filePath);
+    return hash;
+  } catch (error) {
+    console.error(`Error calculating hash for ${filePath}:`, error);
     throw error;
   }
 });
@@ -2507,10 +3778,139 @@ ipcMain.handle('calculate-missing-hashes', async (event) => {
 ipcMain.handle('getThumbnail', async (event, filePath) => {
   try {
     const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    return model?.thumbnail || null;
+    if (!model || !model.thumbnail) return null;
+    // Return the default (first) thumbnail
+    return getDefaultThumbnail(model.thumbnail, 0);
   } catch (error) {
     console.error('Error getting thumbnail:', error);
     return null;
+  }
+});
+
+// IPC handler to get all thumbnails for a model
+ipcMain.handle('get-all-thumbnails', async (event, filePath) => {
+  try {
+    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    if (!model || !model.thumbnail) return [];
+    return parseThumbnails(model.thumbnail);
+  } catch (error) {
+    console.error('Error getting all thumbnails:', error);
+    return [];
+  }
+});
+
+// Helper function to add multiple thumbnails at once
+function addMultipleThumbnails(thumbnailString, newThumbnails) {
+  if (!newThumbnails || newThumbnails.length === 0) return thumbnailString;
+  const thumbnails = parseThumbnails(thumbnailString);
+  
+  // Add all new thumbnails, avoiding duplicates by checking the full string
+  for (const newThumbnail of newThumbnails) {
+    if (newThumbnail && typeof newThumbnail === 'string' && newThumbnail.length > 0) {
+      // Check if this exact thumbnail already exists
+      const exists = thumbnails.some(t => t === newThumbnail);
+      if (!exists) {
+        thumbnails.push(newThumbnail);
+      }
+    }
+  }
+  return thumbnails.join('::');
+}
+
+// IPC handler to add a thumbnail to a model
+ipcMain.handle('add-thumbnail', async (event, filePath, imageDataUrl) => {
+  try {
+    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    const currentThumbnail = model?.thumbnail || null;
+    const updatedThumbnail = addThumbnailToModel(currentThumbnail, imageDataUrl);
+    await saveThumbnail(filePath, updatedThumbnail);
+    return true;
+  } catch (error) {
+    console.error('Error adding thumbnail:', error);
+    throw error;
+  }
+});
+
+// IPC handler to add multiple thumbnails at once (for 3MF files)
+ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls) => {
+  try {
+    if (!imageDataUrls || !Array.isArray(imageDataUrls) || imageDataUrls.length === 0) {
+      return false;
+    }
+    
+    // Check if model exists in database
+    let model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    if (!model) {
+      // Model doesn't exist yet - create it with just the thumbnails
+      // Extract fileName from filePath
+      const path = require('path');
+      const fileName = path.basename(filePath);
+      // Create model entry
+      const dateAdded = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO models (filePath, fileName, thumbnail, dateAdded)
+        VALUES (?, ?, ?, ?)
+      `).run(filePath, fileName, '', dateAdded);
+      // Re-fetch the model
+      model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+      if (!model) {
+        return false;
+      }
+    }
+    
+    const currentThumbnail = model?.thumbnail || null;
+    
+    // Filter out any null/undefined/empty images
+    const validImages = imageDataUrls.filter(img => img && typeof img === 'string' && img.length > 0);
+    
+    if (validImages.length === 0) {
+      return false;
+    }
+    
+    const updatedThumbnail = addMultipleThumbnails(currentThumbnail, validImages);
+    const finalCount = parseThumbnails(updatedThumbnail).length;
+    
+    // Save the thumbnail
+    await saveThumbnail(filePath, updatedThumbnail);
+    
+    // Verify it was saved
+    const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    if (!verifyModel) {
+      return { success: false, error: 'Model not found after save' };
+    }
+    
+    const verifyThumbnail = verifyModel.thumbnail;
+    const verifyCount = verifyThumbnail ? parseThumbnails(verifyThumbnail).length : 0;
+    
+    if (verifyCount !== finalCount) {
+      // Try to save again
+      await saveThumbnail(filePath, updatedThumbnail);
+    }
+    
+    // Return the updated thumbnail string so renderer can use it
+    return {
+      success: true,
+      thumbnailCount: verifyCount,
+      thumbnailString: verifyThumbnail || updatedThumbnail
+    };
+  } catch (error) {
+    console.error('Error adding multiple thumbnails:', error);
+    console.error('Error stack:', error.stack);
+    throw error;
+  }
+});
+
+// IPC handler to set the default thumbnail index
+ipcMain.handle('set-default-thumbnail', async (event, filePath, index) => {
+  try {
+    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    if (!model || !model.thumbnail) return false;
+    const updatedThumbnail = setDefaultThumbnailIndex(model.thumbnail, index);
+    await saveThumbnail(filePath, updatedThumbnail);
+    return true;
+  } catch (error) {
+    console.error('Error setting default thumbnail:', error);
+    throw error;
   }
 });
 
@@ -2638,6 +4038,10 @@ ipcMain.on('open-tag-manager', (event) => {
   mainWindow.webContents.send('open-tag-manager');
 });
 
+ipcMain.on('open-metadata-editor', (event) => {
+  mainWindow.webContents.send('open-metadata-editor');
+});
+
 ipcMain.on('start-print-roulette', (event) => {
   mainWindow.webContents.send('start-print-roulette');
 });
@@ -2694,7 +4098,52 @@ ipcMain.handle('open-slicer-dialog', async (event, title) => {
 // Add IPC handlers for AI Config
 ipcMain.handle('test-ai-config', async (event, apiKey, baseURL, model, service) => {
   const aitagging = require('./aitagging');
-  return await aitagging.testAIConfig(apiKey, baseURL, model, service);
+  // Create puter IPC handler if service is puter
+  const puterIPCHandler = service === 'puter' ? createPuterIPCHandler() : null;
+  return await aitagging.testAIConfig(apiKey, baseURL, model, service, puterIPCHandler);
+});
+
+// Helper function for puter.com AI calls (forwards to renderer)
+let puterResponseListenerSet = false;
+const puterPendingRequests = new Map();
+
+function createPuterIPCHandler() {
+  // Set up a single listener for all puter responses
+  if (!puterResponseListenerSet) {
+    ipcMain.on('puter-ai-chat-response', (event, requestId, result) => {
+      const pending = puterPendingRequests.get(requestId);
+      if (pending) {
+        puterPendingRequests.delete(requestId);
+        if (result.error) {
+          pending.reject(new Error(result.error));
+        } else {
+          pending.resolve(result.response);
+        }
+      }
+    });
+    puterResponseListenerSet = true;
+  }
+  
+  return async (prompt, imageUrl, model) => {
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      puterPendingRequests.set(requestId, { resolve, reject });
+      mainWindow.webContents.send('puter-ai-chat-request', requestId, prompt, imageUrl, model);
+      // Timeout after 60 seconds
+      setTimeout(() => {
+        if (puterPendingRequests.has(requestId)) {
+          puterPendingRequests.delete(requestId);
+          reject(new Error('Puter AI request timeout'));
+        }
+      }, 60000);
+    });
+  };
+}
+
+// IPC handler for puter.com AI calls (forwards to renderer)
+ipcMain.handle('puter-ai-chat', async (event, prompt, imageUrl, model) => {
+  const handler = createPuterIPCHandler();
+  return await handler(prompt, imageUrl, model);
 });
 
 ipcMain.handle('generate-tags', async (event, filePath) => {
@@ -2702,29 +4151,59 @@ ipcMain.handle('generate-tags', async (event, filePath) => {
     const aitagging = require('./aitagging');
     const settings = getSettings();
     
+    // Create puter IPC handler if service is puter
+    const puterIPCHandler = settings.aiService === 'puter' ? createPuterIPCHandler() : null;
+    
     // Initialize OpenAI with the API key
-    aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService);
+    aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService, puterIPCHandler);
     
     // Get the model from the database to access its thumbnail
     const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
     
-    // Check if model already has the "AI Tagged" tag
-    if (model && model.tags && model.tags.includes("AI Tagged")) {
+    if (!model) {
+      console.log(`Model not found in database: ${filePath}`);
+      return [];
+    }
+    
+    // Get the model tags from the database
+    const modelTagRows = db.prepare(`
+      SELECT t.name 
+      FROM tags t
+      JOIN model_tags mt ON mt.tag_id = t.id
+      WHERE mt.model_id = ?
+    `).all(model.id);
+    
+    const modelTags = modelTagRows.map(row => row.name);
+    
+    // Check if model already has the "AI Tagged" tag (unless retagging is allowed)
+    if (!settings.aiTagAllowRetagging && modelTags.includes("AI Tagged")) {
       console.log(`Model ${filePath} already has AI Tagged tag, skipping generation`);
       return [];
     }
     
-    if (!model || !model.thumbnail) {
+    // Prepare tag generation options
+    const tagOptions = {
+      maxTags: settings.aiTagMaxTags,
+      useCategories: settings.aiTagUseCategories,
+      useJsonResponse: settings.aiTagUseJsonResponse,
+      detailLevel: settings.aiTagDetailLevel
+    };
+    
+    if (!model.thumbnail) {
       // If no thumbnail exists, we need to generate one or use a default image
       console.log('No thumbnail found for model, using default image');
       try {
         const fs = require('fs').promises;
         const defaultImagePath = './logo.png'; // Use a default image that's guaranteed to be in PNG format
         const data = await fs.readFile(defaultImagePath, { encoding: 'base64' });
-        const tags = await aitagging.generateTagsForImage(data, settings.aiModel);
+        const tags = await aitagging.generateTagsForImage(data, settings.aiModel, tagOptions, 2000, 5, filePath);
         return tags;
       } catch (error) {
         console.error(`Error generating tags with default image:`, error);
+        // Re-throw rate limit errors so user is notified
+        if (error.message && error.message.includes('Rate limit')) {
+          throw error;
+        }
         return []; // Return empty tags array instead of throwing
       }
     }
@@ -2740,10 +4219,14 @@ ipcMain.handle('generate-tags', async (event, filePath) => {
     
     try {
       // Generate tags using the thumbnail image which is already in PNG format
-      const tags = await aitagging.generateTagsForImage(base64Data, settings.aiModel);
+      const tags = await aitagging.generateTagsForImage(base64Data, settings.aiModel, tagOptions, 2000, 5, filePath);
       return tags;
     } catch (error) {
       console.error('Error generating tags:', error);
+      // Re-throw rate limit errors so user is notified
+      if (error.message && error.message.includes('Rate limit')) {
+        throw error;
+      }
       return []; // Return empty tags array instead of throwing
     }
   } catch (error) {
@@ -2758,11 +4241,25 @@ function getSettings() {
   const apiEndpointRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('apiEndpoint');
   const aiModelRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiModel');
   const aiServiceRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiService');
+  const aiTagMaxTagsRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagMaxTags');
+  const aiTagUseCategoriesRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagUseCategories');
+  const aiTagMergeStrategyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagMergeStrategy');
+  const aiTagAllowRetaggingRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagAllowRetagging');
+  const aiTagConcurrencyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagConcurrency');
+  const aiTagDetailLevelRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagDetailLevel');
+  
   return {
     apiKey: apiKeyRow ? apiKeyRow.value : null,
     apiEndpoint: apiEndpointRow ? apiEndpointRow.value : 'https://api.openai.com/v1',
     aiModel: aiModelRow ? aiModelRow.value : 'gpt-4o-mini',
-    aiService: aiServiceRow ? aiServiceRow.value : 'openai'
+    aiService: aiServiceRow ? aiServiceRow.value : 'openai',
+    aiTagMaxTags: aiTagMaxTagsRow ? parseInt(aiTagMaxTagsRow.value) || 10 : 10,
+    aiTagUseCategories: aiTagUseCategoriesRow ? aiTagUseCategoriesRow.value === '1' : false,
+    aiTagUseJsonResponse: true, // Always use JSON response format
+    aiTagMergeStrategy: aiTagMergeStrategyRow ? aiTagMergeStrategyRow.value : 'merge',
+    aiTagAllowRetagging: aiTagAllowRetaggingRow ? aiTagAllowRetaggingRow.value === '1' : false,
+    aiTagConcurrency: aiTagConcurrencyRow ? parseInt(aiTagConcurrencyRow.value) || 3 : 3,
+    aiTagDetailLevel: aiTagDetailLevelRow ? aiTagDetailLevelRow.value : 'medium'
   };
 }
 
@@ -3092,6 +4589,135 @@ async function saveModelBatch(modelDataBatch) {
   }
 }
 
+// Bulk update function for updating multiple models in a single transaction
+async function updateModelsBatch(modelDataBatch) {
+  try {
+    if (!db) {
+      console.error('Database not initialized');
+      return false;
+    }
+
+    // Enable foreign key constraints
+    db.pragma('foreign_keys = ON');
+
+    // Use a transaction for better performance - update models and tags together
+    const transaction = db.transaction(() => {
+      const getModelIdStmt = db.prepare('SELECT id FROM models WHERE filePath = ?');
+      const getExistingModelStmt = db.prepare('SELECT * FROM models WHERE filePath = ?');
+      const updateStmt = db.prepare(`
+        UPDATE models SET 
+          fileName = ?,
+          designer = ?,
+          source = ?,
+          notes = ?,
+          printed = ?,
+          parentModel = ?,
+          license = ?
+        WHERE filePath = ?
+      `);
+
+      const deleteTagsStmt = db.prepare('DELETE FROM model_tags WHERE model_id = ?');
+      const getTagIdStmt = db.prepare('SELECT id FROM tags WHERE name = ?');
+      const insertTagStmt = db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)');
+      const insertTagNameStmt = db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)');
+      const getTagIdAfterInsertStmt = db.prepare('SELECT id FROM tags WHERE name = ?');
+
+      for (let i = 0; i < modelDataBatch.length; i++) {
+        const modelData = modelDataBatch[i];
+        const {
+          filePath,
+          fileName,
+          designer,
+          source,
+          notes,
+          printed,
+          parentModel,
+          license,
+          tags
+        } = modelData;
+
+        console.log(`[Batch ${i}] Processing model: ${filePath}`);
+        console.log(`[Batch ${i}] Field values:`, { fileName, designer, source, notes, printed, parentModel, license, tags });
+
+        // Get existing model to preserve values that aren't being updated
+        const existingModel = getExistingModelStmt.get(filePath);
+        
+        if (!existingModel) {
+          console.warn(`[Batch ${i}] Model not found in database: ${filePath}`);
+          continue; // Skip this model if it doesn't exist
+        }
+        
+        console.log(`[Batch ${i}] Found existing model with ID: ${existingModel.id}`);
+        // Only update fields that are explicitly provided (not undefined)
+        const finalFileName = fileName !== undefined ? fileName : existingModel.fileName;
+        const finalDesigner = designer !== undefined ? (designer || null) : existingModel.designer;
+        const finalSource = source !== undefined ? (source || null) : existingModel.source;
+        const finalNotes = notes !== undefined ? (notes || null) : existingModel.notes;
+        const finalPrinted = printed !== undefined ? (printed ? 1 : 0) : existingModel.printed;
+        const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModel.parentModel;
+        const finalLicense = license !== undefined ? (license || null) : existingModel.license;
+
+        // Update model fields
+        console.log(`[Batch ${i}] Updating model with values:`, {
+          finalFileName,
+          finalDesigner,
+          finalSource,
+          finalNotes,
+          finalPrinted,
+          finalParentModel,
+          finalLicense,
+          filePath
+        });
+        const updateResult = updateStmt.run(
+          finalFileName,
+          finalDesigner,
+          finalSource,
+          finalNotes,
+          finalPrinted,
+          finalParentModel,
+          finalLicense,
+          filePath
+        );
+        console.log(`[Batch ${i}] Update result:`, updateResult);
+
+        // Handle tags if provided
+        if (tags && Array.isArray(tags) && tags.length > 0) {
+          const modelId = existingModel.id;
+          
+          // Delete existing tags
+          deleteTagsStmt.run(modelId);
+          
+          // Insert new tags
+          for (const tagName of tags) {
+            if (!tagName || typeof tagName !== 'string' || tagName.trim() === '') continue;
+            
+            const trimmedTagName = tagName.trim();
+            
+            // Get or create tag
+            let tagResult = getTagIdStmt.get(trimmedTagName);
+            if (!tagResult) {
+              // Tag doesn't exist, create it
+              insertTagNameStmt.run(trimmedTagName);
+              tagResult = getTagIdAfterInsertStmt.get(trimmedTagName);
+            }
+            
+            if (tagResult) {
+              insertTagStmt.run(modelId, tagResult.id);
+            }
+          }
+        }
+      }
+    });
+
+    transaction();
+
+    return true;
+  } catch (error) {
+    console.error('Error updating models batch:', error);
+    return false;
+  }
+}
+
 // Add this function before the IPC handlers
 async function saveModel(modelData) {
   try {
@@ -3136,6 +4762,19 @@ async function saveModel(modelData) {
         // Update existing model
         console.log(`Updating existing model with ID: ${existingModel.id}`);
         
+        // Get existing model data to preserve values that aren't being updated
+        const existingModelData = db.prepare('SELECT * FROM models WHERE id = ?').get(existingModel.id);
+        
+        // Only update fields that are explicitly provided (not undefined)
+        // Preserve existing values for fields that are undefined in the update
+        const finalFileName = fileName !== undefined ? fileName : existingModelData.fileName;
+        const finalDesigner = designer !== undefined ? (designer || null) : existingModelData.designer;
+        const finalSource = source !== undefined ? (source || null) : existingModelData.source;
+        const finalNotes = notes !== undefined ? (notes || null) : existingModelData.notes;
+        const finalPrinted = printed !== undefined ? (printed ? 1 : 0) : existingModelData.printed;
+        const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModelData.parentModel;
+        const finalLicense = license !== undefined ? (license || null) : existingModelData.license;
+        
         // Use a simpler update approach to avoid foreign key issues
         const updateStmt = db.prepare(`
           UPDATE models SET 
@@ -3150,13 +4789,13 @@ async function saveModel(modelData) {
         `);
         
         updateStmt.run(
-          fileName,
-          designer || null,
-          source || null,
-          notes || null,
-          printed ? 1 : 0,
-          parentModel || null,
-          license || null,
+          finalFileName,
+          finalDesigner,
+          finalSource,
+          finalNotes,
+          finalPrinted,
+          finalParentModel,
+          finalLicense,
           existingModel.id
         );
         
@@ -3165,10 +4804,11 @@ async function saveModel(modelData) {
         // Insert new model
         console.log('Inserting new model');
         
+        const dateAdded = new Date().toISOString();
         const insertStmt = db.prepare(`
           INSERT INTO models (
-            filePath, fileName, designer, source, notes, printed, parentModel, license
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            filePath, fileName, designer, source, notes, printed, parentModel, license, dateAdded
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         
         const result = insertStmt.run(
@@ -3179,7 +4819,8 @@ async function saveModel(modelData) {
           notes || null,
           printed ? 1 : 0,
           parentModel || null,
-          license || null
+          license || null,
+          dateAdded
         );
         
         modelId = result.lastInsertRowid;
@@ -3203,40 +4844,97 @@ async function saveModel(modelData) {
           return { success: true, modelId }; // Return success but skip tag processing
         }
         
-        // First, remove all existing tags for this model
-        const deleteResult = db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
-        console.log(`Deleted ${deleteResult.changes} existing tag relationships`);
-
-        // Process each tag individually
-        for (const tagName of tags) {
-          if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
-            const trimmedTagName = tagName.trim();
-            try {
-              console.log(`Processing tag: "${trimmedTagName}"`);
-              
-              // First ensure the tag exists in the tags table
-              db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
-              
-              // Get the tag ID directly
-              const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
-              
-              if (tagRow && tagRow.id) {
-                console.log(`Found tag ID ${tagRow.id} for "${trimmedTagName}"`);
-                
-                // Now create the relationship with the known IDs
-                db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
-              } else {
-                console.warn(`Could not find tag ID for "${trimmedTagName}" after insertion`);
-              }
-            } catch (singleTagError) {
-              console.error(`Error processing tag "${trimmedTagName}":`, singleTagError);
-              // Continue with other tags
+        // Use a transaction to ensure atomicity and handle errors gracefully
+        db.transaction(() => {
+          // First, get existing tags before deleting (to preserve them if there's an error)
+          const existingTags = db.prepare(`
+            SELECT t.name 
+            FROM model_tags mt
+            JOIN tags t ON mt.tag_id = t.id
+            WHERE mt.model_id = ?
+          `).all(modelId).map(row => row.name);
+          
+          // First, remove all existing tags for this model
+          try {
+            const deleteResult = db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
+            console.log(`Deleted ${deleteResult.changes} existing tag relationships`);
+          } catch (deleteError) {
+            // If delete fails due to models_old, clean up and try again
+            if (deleteError.message && deleteError.message.includes('models_old')) {
+              console.log('Delete failed due to models_old reference. Cleaning up...');
+              cleanupModelsOldReferences();
+              // Try delete again
+              const deleteResult = db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
+              console.log(`Deleted ${deleteResult.changes} existing tag relationships after cleanup`);
+            } else {
+              throw deleteError; // Re-throw if it's a different error
             }
           }
-        }
+
+          // Process each tag individually
+          for (const tagName of tags) {
+            if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
+              const trimmedTagName = tagName.trim();
+              try {
+                console.log(`Processing tag: "${trimmedTagName}"`);
+                
+                // First ensure the tag exists in the tags table
+                db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
+                
+                // Get the tag ID directly
+                const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
+                
+                if (tagRow && tagRow.id) {
+                  console.log(`Found tag ID ${tagRow.id} for "${trimmedTagName}"`);
+                  
+                  // Now create the relationship with the known IDs
+                  db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
+                } else {
+                  console.warn(`Could not find tag ID for "${trimmedTagName}" after insertion`);
+                }
+              } catch (singleTagError) {
+                console.error(`Error processing tag "${trimmedTagName}":`, singleTagError);
+                // Continue with other tags
+              }
+            }
+          }
+        })();
       } catch (tagError) {
         console.error('Error updating tags:', tagError);
-        // Continue with the save even if tag update fails
+        
+        // If the error is about models_old, try to clean it up and retry
+        if (tagError.message && tagError.message.includes('models_old')) {
+          console.log('Detected models_old error. Attempting to clean up and retry...');
+          try {
+            cleanupModelsOldReferences();
+            // Retry the tag save operation in a new transaction
+            db.transaction(() => {
+              // Delete existing tags first
+              db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
+              
+              // Re-insert the tags we were trying to save
+              for (const tagName of tags) {
+                if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
+                  const trimmedTagName = tagName.trim();
+                  try {
+                    db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
+                    const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
+                    if (tagRow && tagRow.id) {
+                      db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
+                    }
+                  } catch (retryError) {
+                    console.error(`Error retrying tag "${trimmedTagName}":`, retryError);
+                  }
+                }
+              }
+            })();
+            console.log('Successfully retried tag save after cleanup');
+          } catch (cleanupError) {
+            console.error('Error during cleanup and retry:', cleanupError);
+            // Don't throw - we want to preserve the model save even if tags fail
+          }
+        }
+        // Continue with the save even if tag update fails - don't throw to preserve model data
       }
     }
 
