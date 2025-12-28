@@ -1,4 +1,4 @@
-# Printventory
+# Printventory RM
 
 **Version 1.22.1**
 
