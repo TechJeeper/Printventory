@@ -1,10 +1,11 @@
 {
-  "name": "printventory",
+  "name": "printventory-rm",
   "version": "1.22.2",
-  "description": "Printventory",
-  "main": "main.js",
+  "description": "Printventory Remote Manager",
+  "main": "server/index.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node server/index.js",
+    "electron-start": "electron .",
     "build": "electron-builder -mw",
     "build:mac": "electron-builder --mac --universal",
     "build:win": "electron-builder -w",
@@ -96,7 +97,9 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.5.0",
+    "cors": "^2.8.5",
     "electron-google-analytics": "^1.0.2",
+    "express": "^5.2.1",
     "fs": "^0.0.1-security",
     "fuse.js": "^7.1.0",
     "jszip": "^3.10.1",
@@ -104,8 +107,10 @@
     "node-stream-zip": "^1.15.0",
     "openai": "^6.9.1",
     "puppeteer": "^24.31.0",
+    "socket.io": "^4.8.3",
     "three": "^0.181.2",
     "threejs-webworker-3mf-loader": "github:manyfold3d/threejs-webworker-3mf-loader",
-    "universal-analytics": "^0.5.3"
+    "universal-analytics": "^0.5.3",
+    "uuid": "^13.0.0"
   }
 }
