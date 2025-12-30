@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+*.exe
+*.dmg
+*.zip
+*.blockmap
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Documentation (optional - uncomment if you want to exclude)
+# README.md
+# GUIDE.md
+# LICENSE.txt
+
+# Test files
+*.spec.js
+playwright.config.js
+verify.spec.js
+
+# Development files
+scripts/
+.cursor/
+
+# Database files (will be created in container)
+printventory.db
+*.db-journal
+
+# Temporary files
+*.tmp
+*.log
+.cache/
+

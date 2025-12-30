@@ -106,11 +106,19 @@ async function loadModel(filePath, options = {}) {
       }
     }
     
-    // Properly encode the file path to handle special characters and Windows paths
+    // Check if we're in server mode - use HTTP endpoint instead of file://
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    
     let encodedFilePath;
     
-    // Check if we're running on Windows (starts with drive letter)
-    if (/^[A-Za-z]:/.test(actualFilePath)) {
+    if (serverMode) {
+      // In server mode, use HTTP endpoint for UNC paths
+      // Encode the path for URL
+      const encodedPath = encodeURIComponent(actualFilePath);
+      encodedFilePath = `/api/file/${encodedPath}`;
+      console.log('loadModel: Using HTTP endpoint for server mode:', encodedFilePath);
+    } else if (/^[A-Za-z]:/.test(actualFilePath)) {
+      // Check if we're running on Windows (starts with drive letter)
       // For Windows paths: 
       // 1. Convert backslashes to forward slashes
       // 2. Add file:/// protocol
@@ -377,10 +385,12 @@ async function updateModelElement(filePath) {
     });
 
     // Check current filter values
-    const designer = document.getElementById('designer-select').value;
-    const license = document.getElementById('license-select').value; 
-    const parentModel = document.getElementById('parent-select').value;
-    const printStatus = document.getElementById('printed-select').value;
+    const designer = document.getElementById('designer-select')?.value || '';
+    const license = document.getElementById('license-select')?.value || ''; 
+    const parentModel = document.getElementById('parent-select')?.value || '';
+    const printStatus = document.getElementById('printed-select')?.value || 'all';
+    const fileType = document.getElementById('filetype-select')?.value || '';
+    const searchTerm = document.getElementById('search-filter-input')?.value.trim() || '';
     
     // Check if the model matches current filters
     let shouldBeVisible = true;
@@ -415,6 +425,34 @@ async function updateModelElement(filePath) {
     } else if (shouldBeVisible && printStatus === 'not-printed') {
       shouldBeVisible = !model.printed;
     }
+    
+    // Check file type filter
+    if (shouldBeVisible && fileType) {
+      if (fileType.toLowerCase() === 'zip') {
+        shouldBeVisible = model.filePath && model.filePath.includes('::');
+      } else {
+        const fileName = model.fileName || '';
+        shouldBeVisible = fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`);
+      }
+    }
+    
+    // Check search term filter
+    if (shouldBeVisible && searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      const fileName = (model.fileName || '').toLowerCase();
+      const filePath = (model.filePath || '').toLowerCase();
+      const modelDesigner = (model.designer || '').toLowerCase();
+      const modelSource = (model.source || '').toLowerCase();
+      const modelLicense = (model.license || '').toLowerCase();
+      const modelParent = (model.parentModel || '').toLowerCase();
+      
+      shouldBeVisible = fileName.includes(searchLower) ||
+                       filePath.includes(searchLower) ||
+                       modelDesigner.includes(searchLower) ||
+                       modelSource.includes(searchLower) ||
+                       modelLicense.includes(searchLower) ||
+                       modelParent.includes(searchLower);
+    }
 
     // Find existing element by iterating through all file items
     // This avoids CSS escaping issues with special characters in file paths
@@ -448,16 +486,44 @@ async function updateModelElement(filePath) {
     const isPreviewView = existingElement.classList.contains('file-item-preview') || currentGridView === 'preview';
     const isListView = existingElement.classList.contains('file-item-list') || currentGridView === 'list';
 
-    // If the model no longer matches the current filters, hide it
+    // If the model no longer matches the current filters, remove it from the grid
     if (!shouldBeVisible) {
-      existingElement.style.display = 'none';
-      
-      // If in multi-select mode and the item is hidden due to filter, remove it from selection
+      // Remove from multi-select if selected
       if (isMultiSelectMode && selectedModels.has(filePath)) {
         selectedModels.delete(filePath);
         existingElement.classList.remove('selected');
-        // Update the selection count
         updateSelectedCount();
+      }
+      
+      // Remove the model from currentModels array so virtual grid knows it's gone
+      const container = document.querySelector('.file-grid');
+      if (container && container.currentModels) {
+        const modelIndex = container.currentModels.findIndex(m => 
+          (m.id || m.filePath) === (model.id || model.filePath)
+        );
+        if (modelIndex !== -1) {
+          container.currentModels.splice(modelIndex, 1);
+          
+          // Recalculate field analysis since a model was removed
+          if (container.currentModels.length > 0) {
+            window.modelFieldAnalysis = analyzeModelFields(container.currentModels);
+          }
+        }
+      }
+      
+      // Remove the element from DOM
+      existingElement.remove();
+      
+      // Trigger virtual grid refresh to reflow remaining items
+      if (container && container.renderVisibleItemsFn) {
+        requestAnimationFrame(() => {
+          container.renderVisibleItemsFn();
+        });
+      }
+      
+      // Update model count
+      if (container && container.currentModels) {
+        updateModelCounts(container.currentModels.length);
       }
       
       return;
@@ -715,12 +781,16 @@ async function updateModelElement(filePath) {
       if (tagsItem) {
         let tagsDisplay = '';
         if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-          tagsDisplay = model.tags.map(t => t.name || t).join(', ');
+          const tagNames = model.tags.map(t => t.name || t);
+          tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+          tagsDisplay = tagNames.join(', ');
         } else if (model.id) {
           // Load tags asynchronously if not present
           window.electron.getModelTags(model.id).then(tags => {
             if (tags && tags.length > 0) {
-              const tagsText = tags.map(t => t.name || t).join(', ');
+              const tagNames = tags.map(t => t.name || t);
+              tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+              const tagsText = tagNames.join(', ');
               const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
               if (tagsValueSpan) {
                 tagsValueSpan.textContent = tagsText;
@@ -806,12 +876,16 @@ async function updateModelElement(filePath) {
           let tagsDisplay = '';
           if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
             // Handle both object format (with .name) and string format
-            tagsDisplay = model.tags.map(t => t.name || t).join(', ');
+            const tagNames = model.tags.map(t => t.name || t);
+            tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+            tagsDisplay = tagNames.join(', ');
           } else if (model.id) {
             // Load tags asynchronously if not present
             window.electron.getModelTags(model.id).then(tags => {
               if (tags && tags.length > 0) {
-                const tagsText = tags.map(t => t.name || t).join(', ');
+                const tagNames = tags.map(t => t.name || t);
+                tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+                const tagsText = tagNames.join(', ');
                 tagsElement.textContent = tagsText;
                 tagsElement.style.color = '#aaa';
               } else {
@@ -835,11 +909,15 @@ async function updateModelElement(filePath) {
         if (tagsElement) {
           let tagsDisplay = '';
           if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-            tagsDisplay = model.tags.map(t => t.name || t).join(', ');
+            const tagNames = model.tags.map(t => t.name || t);
+            tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+            tagsDisplay = tagNames.join(', ');
           } else if (model.id) {
             window.electron.getModelTags(model.id).then(tags => {
               if (tags && tags.length > 0) {
-                const tagsText = tags.map(t => t.name || t).join(', ');
+                const tagNames = tags.map(t => t.name || t);
+                tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+                const tagsText = tagNames.join(', ');
                 tagsElement.textContent = tagsText;
                 tagsElement.style.color = '#aaa';
               } else {
@@ -1806,10 +1884,212 @@ async function checkTermsOfService() {
   }
 }
 
+// Function to create menu dropdown for server mode
+function createMenuDropdown(label, items) {
+  const menuContainer = document.createElement('div');
+  menuContainer.style.cssText = 'position: relative; margin-right: 15px;';
+  
+  const menuButton = document.createElement('button');
+  menuButton.textContent = label;
+  menuButton.style.cssText = 'background: none; border: none; color: #e0e0e0; padding: 5px 10px; cursor: pointer; font-size: 13px; font-family: inherit;';
+  menuButton.onmouseover = () => menuButton.style.backgroundColor = '#3a3a3a';
+  menuButton.onmouseout = () => menuButton.style.backgroundColor = 'transparent';
+  
+  const dropdown = document.createElement('div');
+  dropdown.style.cssText = 'display: none; position: absolute; top: 100%; left: 0; background-color: #2c2c2c; border: 1px solid #444; border-radius: 4px; min-width: 180px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); z-index: 10001; margin-top: 2px;';
+  
+  items.forEach(item => {
+    if (item.label === '---') {
+      const separator = document.createElement('div');
+      separator.style.cssText = 'height: 1px; background-color: #444; margin: 4px 0;';
+      dropdown.appendChild(separator);
+    } else {
+      const menuItem = document.createElement('div');
+      menuItem.textContent = item.label;
+      menuItem.style.cssText = 'padding: 8px 12px; color: #e0e0e0; cursor: pointer; font-size: 13px;';
+      menuItem.onmouseover = () => menuItem.style.backgroundColor = '#3a3a3a';
+      menuItem.onmouseout = () => menuItem.style.backgroundColor = 'transparent';
+      menuItem.onclick = () => {
+        if (item.action) {
+          item.action();
+        }
+        dropdown.style.display = 'none';
+      };
+      dropdown.appendChild(menuItem);
+    }
+  });
+  
+  menuButton.onclick = (e) => {
+    e.stopPropagation();
+    const isVisible = dropdown.style.display === 'block';
+    // Close all other dropdowns
+    document.querySelectorAll('#server-menu-bar [style*="display: block"]').forEach(el => {
+      if (el !== dropdown && el.style.display === 'block') el.style.display = 'none';
+    });
+    dropdown.style.display = isVisible ? 'none' : 'block';
+  };
+  
+  // Close dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!menuContainer.contains(e.target)) {
+      dropdown.style.display = 'none';
+    }
+  });
+  
+  menuContainer.appendChild(menuButton);
+  menuContainer.appendChild(dropdown);
+  
+  return menuContainer;
+}
+
+// Function to create server mode menu bar
+function createServerMenuBar() {
+  const menuBar = document.createElement('div');
+  menuBar.id = 'server-menu-bar';
+  menuBar.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; height: 30px; background-color: #2c2c2c; border-bottom: 1px solid #444; display: flex; align-items: center; padding: 0 10px; z-index: 10000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px;';
+  
+  // Tools menu
+  const toolsMenu = createMenuDropdown('Tools', [
+    { label: 'Scan Directory', action: () => document.getElementById('scan-directory-button')?.click() },
+    { label: 'View Entire Library', action: () => document.getElementById('view-library-button')?.click() },
+    { label: '---', action: null },
+    { label: 'De-Duplicate', action: () => {
+      const dialog = document.getElementById('dedup-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        // Trigger the event which will open the dialog via the listener
+        window.electron.send('open-dedup');
+      }
+    }},
+    { label: 'Tag Manager', action: () => {
+      const dialog = document.getElementById('tag-manager-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        // Fallback: trigger the event which will open the dialog via the listener
+        window.electron.send('open-tag-manager');
+      }
+    }},
+    { label: 'Print Roulette', action: () => window.electron.send('start-print-roulette') },
+    { label: '---', action: null },
+    { label: 'Purge Models', action: () => {
+      const dialog = document.getElementById('purge-models-dialog');
+      if (dialog) {
+        dialog.showModal();
+      }
+    }}
+  ]);
+  
+  // Settings menu
+  const settingsMenu = createMenuDropdown('Settings', [
+    { label: 'Application Settings', action: () => {
+      const settingsDialog = document.getElementById('settings-dialog');
+      if (settingsDialog) {
+        settingsDialog.showModal();
+      } else {
+        window.electron.send('open-settings');
+      }
+    }},
+    { label: 'AI Config', action: () => {
+      const dialog = document.getElementById('ai-config-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        window.electron.send('open-ai-config');
+      }
+    }},
+    { label: 'File Type Settings', action: () => {
+      const dialog = document.getElementById('file-type-settings-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        window.electron.send('open-file-type-settings');
+      }
+    }},
+    { label: 'Performance Settings', action: () => {
+      const dialog = document.getElementById('performance-settings-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        window.electron.send('open-performance-settings');
+      }
+    }},
+    { label: 'Slicer Settings', action: () => {
+      const dialog = document.getElementById('slicer-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        window.electron.send('open-slicer-settings');
+      }
+    }},
+    { label: 'STL Home', action: () => {
+      const dialog = document.getElementById('stl-home-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        window.electron.send('open-stl-home');
+      }
+    }},
+    { label: 'Theme Settings', action: () => {
+      window.electron.send('open-theme-settings');
+    }}
+  ]);
+  
+  // Help menu
+  const helpMenu = createMenuDropdown('Help', [
+    { label: 'User Guide', action: () => {
+      const dialog = document.getElementById('guide-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        window.electron.send('open-guide');
+      }
+    }},
+    { label: 'About', action: () => {
+      const aboutDialog = document.getElementById('about-dialog');
+      if (aboutDialog) aboutDialog.showModal();
+    }}
+  ]);
+  
+  menuBar.appendChild(toolsMenu);
+  menuBar.appendChild(settingsMenu);
+  menuBar.appendChild(helpMenu);
+  
+  document.body.insertBefore(menuBar, document.body.firstChild);
+  
+  // Adjust body padding to account for menu bar
+  document.body.style.paddingTop = '30px';
+}
+
 // Update the DOMContentLoaded event listener
 document.addEventListener('DOMContentLoaded', async () => {
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
+
+  // Check for server mode and add UI indicators
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  if (serverMode) {
+    // Add server mode indicator to the sidebar (only if it doesn't already exist)
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar && !document.getElementById('server-mode-indicator')) {
+      const serverIndicator = document.createElement('div');
+      serverIndicator.id = 'server-mode-indicator';
+      serverIndicator.style.cssText = 'background-color: #4a9eff; color: white; padding: 10px; margin: 10px 0; border-radius: 4px; text-align: center; font-weight: bold;';
+      serverIndicator.innerHTML = `
+        <div>🌐 Server Mode</div>
+        <div style="font-size: 12px; font-weight: normal; margin-top: 5px;">
+          UNC paths required for all file operations
+        </div>
+      `;
+      sidebar.insertBefore(serverIndicator, sidebar.firstChild);
+    }
+    
+    // Add menu bar for server mode (only if it doesn't already exist)
+    if (!document.getElementById('server-menu-bar')) {
+      createServerMenuBar();
+    }
+  }
 
   // Show the welcome dialog if this is the first run
   const hasRunBefore = await window.electron.getSetting('hasRunBefore');
@@ -2684,8 +2964,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     
-    const directoryPath = await window.electron.openFileDialog();
-    if (!directoryPath || directoryPath.length === 0) return;
+    // Check if we're in server mode
+    const serverMode = await window.electron.isServerMode();
+    let directoryPath;
+    
+    if (serverMode) {
+      // In server mode, prompt for UNC path via text input
+      const uncPath = prompt('Enter UNC path to scan (e.g., \\\\server\\share\\path):');
+      if (!uncPath || uncPath.trim() === '') return;
+      directoryPath = [uncPath.trim()];
+    } else {
+      // Normal mode: use file dialog
+      directoryPath = await window.electron.openFileDialog();
+      if (!directoryPath || directoryPath.length === 0) return;
+    }
 
     await window.electron.saveDirectory(directoryPath[0]);
     console.log('Scanning directory:', directoryPath[0]);
@@ -2777,6 +3069,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } else {
       console.error('About dialog element not found');
+    }
+  });
+
+  // Server Mode Info dialog handler
+  window.electron.onOpenServerModeInfo(async () => {
+    const dialog = document.getElementById('server-mode-info-dialog');
+    if (dialog) {
+      dialog.showModal();
+    } else {
+      console.error('Server Mode Info dialog element not found');
     }
   });
 
@@ -3021,6 +3323,58 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('tag-manager-search').value = '';
   });
 
+  // Add close event handler to refresh UI when tag manager closes
+  const tagManagerDialog = document.getElementById('tag-manager-dialog');
+  if (tagManagerDialog) {
+    tagManagerDialog.addEventListener('close', async () => {
+      try {
+        // Small delay to ensure database writes are flushed
+        await new Promise(resolve => setTimeout(resolve, 150));
+        
+        // Clear the model cache to force fresh data
+        const container = document.querySelector('.file-grid');
+        if (container) {
+          container.currentModels = null; // Clear cache to force re-render
+        }
+        
+        // Refresh tag dropdowns in edit view
+        await populateTagSelect('tag-select', 'model-tags');
+        await populateTagSelect('multi-tag-select', 'multi-tags');
+        
+        // Refresh tag filter dropdown
+        await populateTagFilter();
+        
+        // Refresh tag list in edit view if a model is currently being edited
+        const currentModelPath = getCurrentModelFilePath() || currentModelDetailsPath;
+        if (currentModelPath) {
+          await loadModelTags(currentModelPath);
+        }
+        
+        // Force a full grid refresh to show updated tags on all model cards
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        } else {
+          // Fallback: Get current sort option and refresh the grid
+          const sortSelect = document.getElementById('sort-select');
+          const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+          await renderFiles(models);
+        }
+        
+        // Update all visible model elements to refresh their tags
+        // This ensures tags are updated even if the grid doesn't fully re-render
+        const allFileItems = document.querySelectorAll('.file-item');
+        for (const item of allFileItems) {
+          const filePath = item.getAttribute('data-filepath') || item.dataset.filepath;
+          if (filePath) {
+            await updateModelElement(filePath);
+          }
+        }
+      } catch (error) {
+        console.error('Error refreshing UI after tag manager close:', error);
+      }
+    });
+  }
+
   let allTags = []; // Store all tags for filtering
 
   async function refreshTagManagerList(searchTerm = '') {
@@ -3065,8 +3419,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             allTags = []; // Reset tags cache to force refresh
             await refreshTagManagerList(searchTerm);
             // Also refresh other tag-related UI elements
-            await populateTagSelect();
+            await populateTagSelect('tag-select', 'model-tags');
+            await populateTagSelect('multi-tag-select', 'multi-tags');
             await populateTagFilter();
+            
+            // Refresh tag list in edit view if a model is currently being edited
+            const currentModelPath = getCurrentModelFilePath() || currentModelDetailsPath;
+            if (currentModelPath) {
+              await loadModelTags(currentModelPath);
+            }
+            
+            // Refresh the grid to show updated tags on model cards
+            if (typeof window.performCombinedSearch === 'function') {
+              await window.performCombinedSearch();
+            } else {
+              // Fallback: Get current sort option and refresh the grid
+              const sortSelect = document.getElementById('sort-select');
+              const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+              await renderFiles(models);
+            }
           } catch (error) {
             console.error('Error deleting tag:', error);
             await window.electron.showMessage('Error', 'Failed to delete tag');
@@ -3796,6 +4167,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function updateAllTagDropdowns() {
     try {
       const tags = await window.electron.getAllTags();
+      tags.sort((a, b) => a.name.localeCompare(b.name)); // Sort tags alphabetically
       const tagDropdowns = document.querySelectorAll('.tags-input-container select');
       
       tagDropdowns.forEach(dropdown => {
@@ -4715,6 +5087,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           dialog.showModal();
           // Initialize after showing the dialog to ensure elements are in the DOM
           await initializeAboutDialog();
+        }
+      });
+
+      // Add server mode info dialog handler
+      window.electron.onOpenServerModeInfo(async () => {
+        const dialog = document.getElementById('server-mode-info-dialog');
+        if (dialog) {
+          dialog.showModal();
         }
       });
 
@@ -7387,6 +7767,10 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     console.error('Error scanning directory:', error);
     if (!background) {
       renderProgressText.textContent = `Error: ${error.message}`;
+      // Show alert for UNC path validation errors
+      if (error.message && error.message.includes('UNC path')) {
+        alert(`Error: ${error.message}\n\nIn server mode, all file paths must be UNC paths (e.g., \\\\server\\share\\path\\to\\file.stl)`);
+      }
     }
   } finally {
     // Clean up event listener
@@ -8454,8 +8838,15 @@ document.getElementById('new-designer-dialog').addEventListener('submit', async 
     
     // Update all designer dropdowns - both filter and model dropdowns
     await populateDesignerDropdown(); // Filter dropdown on left side
-    await populateModelDesignerDropdown(null, 'multi-designer'); // Multi-edit dropdown
-    await populateModelDesignerDropdown(null, 'model-designer'); // Single-edit dropdown
+    // Preserve the selection for the dropdown that was just updated
+    await populateModelDesignerDropdown(
+      sourceDropdownId === 'multi-designer' ? newDesignerName : null, 
+      'multi-designer'
+    ); // Multi-edit dropdown
+    await populateModelDesignerDropdown(
+      sourceDropdownId === 'model-designer' ? newDesignerName : null, 
+      'model-designer'
+    ); // Single-edit dropdown
   }
 });
 
@@ -8643,7 +9034,8 @@ async function addTagToModel(tagName, containerId) {
     if (containerId === 'multi-tags') {
       // When removing, we DO want to save the resulting list for all selected models
       // Note: This sets all selected models to have exactly the tags remaining in the UI.
-      await autoSaveMultipleModels('tags', currentTags); 
+      // Use replaceTags: true to replace tags instead of merging
+      await autoSaveMultipleModels('tags', currentTags, { replaceTags: true }); 
     } else {
       // Single edit mode save
       const filePath = getModelFilePath();
@@ -8686,15 +9078,32 @@ document.getElementById('multi-tag-select').addEventListener('change', async () 
   }
 });
 
-async function loadModelTags(modelId) {
+async function loadModelTags(modelIdOrPath) {
   const tagsContainer = document.getElementById('model-tags');
+  if (!tagsContainer) {
+    console.error('Model tags container not found');
+    return;
+  }
+  
   tagsContainer.innerHTML = '';
   
   try {
-    const model = await window.electron.getModel(modelId);
-    if (model && model.tags) {
-      model.tags.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-      model.tags.forEach(tag => addTagToModel(tag, 'model-tags'));
+    // Get the model to retrieve its ID (modelIdOrPath can be filePath or model ID)
+    const model = await window.electron.getModel(modelIdOrPath);
+    if (!model || !model.id) {
+      console.warn('Model not found or missing ID:', modelIdOrPath);
+      return;
+    }
+    
+    // Fetch fresh tags directly from the database using getModelTags
+    // This ensures we get the latest tags even if the model object is cached
+    const tags = await window.electron.getModelTags(model.id);
+    
+    if (tags && Array.isArray(tags) && tags.length > 0) {
+      // Extract tag names (tags might be objects with .name property or just strings)
+      const tagNames = tags.map(tag => typeof tag === 'string' ? tag : (tag.name || tag));
+      tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+      tagNames.forEach(tagName => addTagToModel(tagName, 'model-tags'));
     }
   } catch (error) {
     console.error('Error loading model tags:', error);
@@ -9852,6 +10261,48 @@ document.addEventListener('DOMContentLoaded', async () => {
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
 
+  // Check for server mode and add UI indicators
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  if (serverMode) {
+    // Server mode indicator and menu bar are already added in the first DOMContentLoaded listener
+    // Just ensure they exist (they should already be there)
+    if (!document.getElementById('server-mode-indicator')) {
+      const sidebar = document.querySelector('.sidebar');
+      if (sidebar) {
+        const serverIndicator = document.createElement('div');
+        serverIndicator.id = 'server-mode-indicator';
+        serverIndicator.style.cssText = 'background-color: #4a9eff; color: white; padding: 10px; margin: 10px 0; border-radius: 4px; text-align: center; font-weight: bold;';
+        serverIndicator.innerHTML = `
+          <div>🌐 Server Mode</div>
+          <div style="font-size: 12px; font-weight: normal; margin-top: 5px;">
+            UNC paths required for all file operations
+          </div>
+        `;
+        sidebar.insertBefore(serverIndicator, sidebar.firstChild);
+      }
+    }
+    if (!document.getElementById('server-menu-bar')) {
+      createServerMenuBar();
+    }
+  }
+
+  // Show the welcome dialog if this is the first run
+  try {
+    const hasRunBefore = await window.electron.getSetting('hasRunBefore');
+    console.log('hasRunBefore check:', hasRunBefore);
+    if (!hasRunBefore) {
+      console.log('Showing welcome dialog and saving hasRunBefore setting');
+      const welcomeDialog = document.getElementById('welcome-message');
+      if (welcomeDialog) {
+        welcomeDialog.showModal();
+      }
+      await window.electron.saveSetting('hasRunBefore', 'true');
+      console.log('hasRunBefore setting saved');
+    }
+  } catch (error) {
+    console.error('Error checking/saving hasRunBefore:', error);
+  }
+
   debugLog('DOM fully loaded and parsed');
 
   // (update check and app initialization code already present)
@@ -10043,7 +10494,7 @@ async function autoSaveModel(field, value, filePath) {
 }
 
 // Add implementation of autoSaveMultipleModels function
-async function autoSaveMultipleModels(field, value) {
+async function autoSaveMultipleModels(field, value, options = {}) {
   try {
     // No models selected
     if (selectedModels.size === 0) {
@@ -10089,13 +10540,21 @@ async function autoSaveMultipleModels(field, value) {
       if (result) {
         const { filePath, model } = result;
         console.log(`[${i}] Processing model update for: ${filePath}`);
-        // Special handling for tags - MERGE instead of replace
+        // Special handling for tags - MERGE or REPLACE based on options
         if (field === 'tags') {
-          const existingTags = Array.isArray(model.tags) ? model.tags : [];
           const newTags = Array.isArray(value) ? value : []; 
-          // Combine, filter out duplicates, and sort
-          const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
-          model.tags = allTags;
+          if (options.replaceTags) {
+            // Replace tags completely (used when removing tags)
+            model.tags = newTags.sort();
+            console.log(`[${i}] Replacing tags with: ${newTags.join(', ')}`);
+          } else {
+            // Merge tags (used when adding tags)
+            const existingTags = Array.isArray(model.tags) ? model.tags : [];
+            // Combine, filter out duplicates, and sort
+            const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
+            model.tags = allTags;
+            console.log(`[${i}] Merging tags. Existing: ${existingTags.join(', ')}, New: ${newTags.join(', ')}, Result: ${allTags.join(', ')}`);
+          }
         } else {
           // Handle other fields
           model[field] = value;
@@ -11028,12 +11487,16 @@ function createModelItem(model, viewMode = null) {
     // Get tags from model
     let tagsDisplay = '';
     if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-      tagsDisplay = model.tags.map(t => t.name || t).join(', ');
+      const tagNames = model.tags.map(t => t.name || t);
+      tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+      tagsDisplay = tagNames.join(', ');
     } else if (model.id) {
       // Load tags asynchronously if not present
       window.electron.getModelTags(model.id).then(tags => {
         if (tags && tags.length > 0) {
-          const tagsText = tags.map(t => t.name || t).join(', ');
+          const tagNames = tags.map(t => t.name || t);
+          tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+          const tagsText = tagNames.join(', ');
           const tagsSpan = tagsColumn.querySelector('.tags-info');
           if (tagsSpan) {
             tagsSpan.textContent = tagsText;
@@ -11452,7 +11915,9 @@ function createModelItem(model, viewMode = null) {
     let tagsDisplay = '';
     if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
       // Handle both array of strings and array of objects with name property
-      tagsDisplay = model.tags.map(t => (typeof t === 'string' ? t : (t.name || t))).join(', ');
+      const tagNames = model.tags.map(t => (typeof t === 'string' ? t : (t.name || t)));
+      tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+      tagsDisplay = tagNames.join(', ');
     }
     
     // Always create tags item and load asynchronously if needed
@@ -11487,7 +11952,9 @@ function createModelItem(model, viewMode = null) {
               modelId = fullModel.id;
               // Also check if tags are already in the full model
               if (fullModel.tags && Array.isArray(fullModel.tags) && fullModel.tags.length > 0) {
-                const tagsText = fullModel.tags.map(t => (typeof t === 'string' ? t : (t.name || t))).join(', ');
+                const tagNames = fullModel.tags.map(t => (typeof t === 'string' ? t : (t.name || t)));
+                tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+                const tagsText = tagNames.join(', ');
                 const tagsValueSpan = tagsItem.querySelector('.tags-info');
                 if (tagsValueSpan) {
                   tagsValueSpan.textContent = tagsText;
@@ -11502,7 +11969,9 @@ function createModelItem(model, viewMode = null) {
           if (modelId) {
             const tags = await window.electron.getModelTags(modelId);
             if (tags && tags.length > 0) {
-              const tagsText = tags.map(t => (typeof t === 'string' ? t : (t.name || t))).join(', ');
+              const tagNames = tags.map(t => (typeof t === 'string' ? t : (t.name || t)));
+              tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+              const tagsText = tagNames.join(', ');
               const tagsValueSpan = tagsItem.querySelector('.tags-info');
               if (tagsValueSpan) {
                 tagsValueSpan.textContent = tagsText;

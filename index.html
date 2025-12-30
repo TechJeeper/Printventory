@@ -754,6 +754,89 @@
           </div>
         </form>
       </dialog>
+      <dialog id="server-mode-info-dialog" class="modal">
+        <form method="dialog">
+          <h2>Server Mode Information</h2>
+          <div class="about-content">
+            <div class="about-tos">
+              <h3>What is Server Mode?</h3>
+              <div class="about-tos-content">
+                <p>Server Mode allows you to run Printventory as a web server that can be accessed from any browser on your network. This is useful for accessing your 3D model library from multiple computers or devices without installing the application on each one.</p>
+                <p>Server Mode runs Printventory as an HTTP server on port 5000, making it accessible from any device on your local network through a web browser.</p>
+              </div>
+            </div>
+
+            <div class="about-tos">
+              <h3>How to Start in Server Mode</h3>
+              <div class="about-tos-content">
+                <p>To start Printventory in Server Mode, launch it with the <code>--server</code> flag:</p>
+                <ul>
+                  <li><strong>Windows:</strong> <code>printventory.exe --server</code></li>
+                  <li><strong>Command Line:</strong> <code>printventory --server</code></li>
+                </ul>
+                <p>The server will start and continue running until you close the application.</p>
+              </div>
+            </div>
+
+            <div class="about-tos">
+              <h3>Important Requirements</h3>
+              <div class="about-tos-content">
+                <ul>
+                  <li>Server Mode requires <strong>UNC (Universal Naming Convention) paths</strong> for all file operations</li>
+                  <li>UNC paths use the format: <code>\\\\server\\share\\path\\to\\file</code></li>
+                  <li>Local drive paths (C:\, D:\, etc.) will <strong>not work</strong> in Server Mode</li>
+                  <li>The server runs on port 5000 and listens on all network interfaces (0.0.0.0)</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="about-tos">
+              <h3>Accessing the Server</h3>
+              <div class="about-tos-content">
+                <p>Once started, you can access Printventory from any browser on your network:</p>
+                <p><strong>http://&lt;your-computer-ip&gt;:5000</strong></p>
+                <p>For example, if your computer's IP address is 192.168.1.100:</p>
+                <p><strong>http://192.168.1.100:5000</strong></p>
+              </div>
+            </div>
+
+            <div class="about-tos">
+              <h3>Docker Deployment (Linux)</h3>
+              <div class="about-tos-content">
+                <p>Printventory can be deployed as a Docker container for easy server mode deployment on Linux systems.</p>
+                
+                <h4>Quick Start:</h4>
+                <p><strong>Build and run with Docker Compose:</strong></p>
+                <pre><code>docker-compose up -d</code></pre>
+                
+                <p><strong>Or build and run manually:</strong></p>
+                <pre><code>docker build -t printventory:latest .
+docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root/.config/Printventory printventory:latest</code></pre>
+                
+                <h4>Accessing Network Shares:</h4>
+                <p>Docker containers cannot directly access Windows UNC paths. You need to mount network shares:</p>
+                <ol>
+                  <li><strong>Mount SMB/CIFS share on host:</strong>
+                    <pre><code>sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass</code></pre>
+                  </li>
+                  <li><strong>Add to docker-compose.yml:</strong>
+                    <pre><code>volumes:
+  - /mnt/network-share:/mnt/network-share:ro</code></pre>
+                  </li>
+                  <li><strong>Use Linux paths in Printventory:</strong> <code>/mnt/network-share/path/to/files</code></li>
+                </ol>
+                
+                <p><strong>Note:</strong> When running in Docker, the application automatically accepts Linux-style absolute paths (starting with <code>/</code>) instead of requiring UNC paths.</p>
+                
+                <p>For detailed Docker deployment instructions, see the README.md file.</p>
+              </div>
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit">Close</button>
+          </div>
+        </form>
+      </dialog>
       <dialog id="backup-restore-dialog" class="modal">
         <form method="dialog">
           <h3>Backup/Restore</h3>

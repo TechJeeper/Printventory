@@ -1,13 +1,15 @@
 {
   "name": "printventory",
-  "version": "1.22.2",
+  "version": "1.23.0",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "start:server": "electron . --server",
     "build": "electron-builder -mw",
     "build:mac": "electron-builder --mac --universal",
-    "build:win": "electron-builder -w",
+    "build:win": "electron-builder -w --config.nsis.differentialPackage=false && node scripts/cleanup-win-build.js",
+    "build:docker": "node scripts/create-docker-distribution.js",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "TechJeeper Designs",
@@ -75,6 +77,7 @@
       "bg.png",
       "search.js",
       "scan-worker.js",
+      "server-bridge.js",
       "installer.nsh",
       "node_modules/**/*"
     ],
@@ -97,6 +100,8 @@
   "dependencies": {
     "better-sqlite3": "^12.5.0",
     "electron-google-analytics": "^1.0.2",
+    "express": "^4.18.2",
+    "ws": "^8.14.2",
     "fs": "^0.0.1-security",
     "fuse.js": "^7.1.0",
     "jszip": "^3.10.1",

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer, shell } = require('electron');
 const { version } = require('./package.json');
 
 contextBridge.exposeInMainWorld('electron', {
+  isServerMode: () => ipcRenderer.invoke('is-server-mode'),
   loadDirectory: () => ipcRenderer.invoke('load-directory'),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   saveDirectory: (directoryPath) => ipcRenderer.invoke('save-directory', directoryPath),
@@ -40,6 +41,11 @@ contextBridge.exposeInMainWorld('electron', {
   trackEvent: (category, action, label, value) => ipcRenderer.invoke('track-event', category, action, label, value),
   onOpenAbout: (callback) => {
     ipcRenderer.on('open-about', async () => {
+      await callback();
+    });
+  },
+  onOpenServerModeInfo: (callback) => {
+    ipcRenderer.on('open-server-mode-info', async () => {
       await callback();
     });
   },

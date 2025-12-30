@@ -1653,6 +1653,12 @@ header {
   margin-top: 16px;
 }
 
+#server-mode-info-dialog .dialog-buttons {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
 .metadata-tabs {
   display: flex;
   gap: 4px;
@@ -2052,6 +2058,19 @@ header {
   padding: 20px;
 }
 
+/* Server Mode Info dialog - fill width */
+#server-mode-info-dialog {
+  width: 80%;
+  max-width: 700px;
+  max-height: 80vh;
+  padding: 20px 0 20px 20px;
+}
+
+#server-mode-info-dialog .about-content {
+  padding: 0;
+  max-width: none;
+}
+
 /* Add these rules to hide the save buttons */
 #save-model-button,
 #save-multi-edit-button,
@@ -2432,6 +2451,16 @@ header {
 
 .about-tos-content li {
   margin: 5px 0;
+}
+
+.about-tos-content code {
+  background-color: #2a2a2a;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.9em;
+  color: #4a9eff;
+  border: 1px solid #444;
 }
 
 #check-updates-button {

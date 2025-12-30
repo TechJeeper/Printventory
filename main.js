@@ -9,6 +9,8 @@ const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
 const ua = require('universal-analytics');
+const express = require('express');
+const WebSocket = require('ws');
 
 // Create an analytics wrapper for GA4
 const analytics = {
@@ -234,9 +236,487 @@ function debugLog(...args) {
   }
 }
 
+// Server mode detection
+const isServerMode = process.argv.includes('--server');
+let httpServer = null;
+
+// UNC Path Validation Functions
+function isUncPath(path) {
+  if (!path || typeof path !== 'string') {
+    return false;
+  }
+  // UNC paths on Windows start with \\
+  // They cannot be local drive paths (C:\, D:\, etc.)
+  return path.startsWith('\\\\') && !/^[A-Za-z]:/.test(path);
+}
+
+// Check if running in Docker container
+function isDockerContainer() {
+  // Check for Docker environment indicators
+  return fs.existsSync('/.dockerenv') || 
+         fs.existsSync('/proc/self/cgroup') && 
+         fs.readFileSync('/proc/self/cgroup', 'utf8').includes('docker');
+}
+
+function validateUncPath(path, operation = 'operation') {
+  if (isServerMode) {
+    // In Docker, allow Linux-style absolute paths (mounted shares)
+    if (isDockerContainer()) {
+      // Allow absolute paths starting with / (Linux-style)
+      if (!path.startsWith('/') && !isUncPath(path)) {
+        throw new Error(`Server mode in Docker requires absolute paths (e.g., /mnt/network-share/path/to/file.stl) or UNC paths. The path "${path}" is not valid.`);
+      }
+    } else {
+      // On Windows, require UNC paths
+      if (!isUncPath(path)) {
+        throw new Error(`Server mode requires UNC paths. The path "${path}" is not a valid UNC path. UNC paths must start with \\\\ (e.g., \\\\server\\share\\path\\to\\file.stl).`);
+      }
+    }
+  }
+}
+
+// Create a hidden window in server mode for IPC handling
+function createHiddenWindow() {
+  return new Promise((resolve) => {
+    const hiddenWindow = new BrowserWindow({
+      width: 1,
+      height: 1,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'preload.js'),
+        spellcheck: false,
+        sandbox: false,
+        enableWebSQL: false,
+        webSecurity: true
+      }
+    });
+
+    // Store reference to hidden window
+    mainWindow = hiddenWindow;
+    
+    // Wait for window to be ready before resolving
+    hiddenWindow.webContents.once('did-finish-load', () => {
+      console.log('Hidden window ready for IPC handling in server mode');
+      resolve();
+    });
+    
+    // Load the HTML file so preload script is injected
+    hiddenWindow.loadFile('index.html');
+  });
+}
+
+// Helper function to safely get BrowserWindow from event (returns null in server mode)
+function getWindowFromEvent(event) {
+  if (isServerMode) {
+    return null;
+  }
+  try {
+    return BrowserWindow.fromWebContents(event.sender);
+  } catch (error) {
+    return null;
+  }
+}
+
+// HTTP Server Function
+function startHttpServer() {
+  const expressApp = express();
+  const PORT = 5000;
+  const HOST = '0.0.0.0';
+
+  // Enable CORS for remote access
+  expressApp.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(200);
+    } else {
+      next();
+    }
+  });
+
+  // Serve static files from the application directory
+  const appDir = __dirname;
+  
+  // Inject server-bridge.js into HTML for server mode
+  expressApp.get('/', (req, res) => {
+    const htmlPath = path.join(appDir, 'index.html');
+    fs.readFile(htmlPath, 'utf8', (err, data) => {
+      if (err) {
+        res.status(500).send('Error loading index.html');
+        return;
+      }
+      // Inject server-bridge.js BEFORE renderer.js loads
+      // This is critical - bridge must initialize window.electron.on before renderer.js uses it
+      const bridgeScript = '<script src="/server-bridge.js"></script>';
+      let modifiedHtml = data;
+      
+      // Try to inject before the first <script> tag (which should be renderer.js or search.js)
+      if (data.includes('<script')) {
+        // Insert before first script tag
+        modifiedHtml = data.replace(/(<script[^>]*>)/i, `${bridgeScript}\n$1`);
+      } else if (data.includes('</head>')) {
+        // Insert before closing head tag
+        modifiedHtml = data.replace('</head>', `${bridgeScript}\n</head>`);
+      } else {
+        // Fallback: insert before closing body tag
+        modifiedHtml = data.replace('</body>', `${bridgeScript}\n</body>`);
+      }
+      res.send(modifiedHtml);
+    });
+  });
+
+  // Serve files via HTTP for server mode (UNC paths or Docker-mounted paths)
+  expressApp.get('/api/file/*', (req, res) => {
+    try {
+      // Extract file path from URL (everything after /api/file/)
+      const filePath = decodeURIComponent(req.path.replace('/api/file/', ''));
+      
+      // Validate path (UNC paths on Windows, absolute paths in Docker)
+      if (isDockerContainer()) {
+        // In Docker, require absolute paths starting with /
+        if (!filePath.startsWith('/') && !isUncPath(filePath)) {
+          res.status(400).send('Invalid path: Docker server mode requires absolute paths (e.g., /mnt/network-share/path/to/file.stl)');
+          return;
+        }
+      } else {
+        // On Windows, require UNC paths
+        if (!isUncPath(filePath)) {
+          res.status(400).send('Invalid path: Server mode requires UNC paths');
+          return;
+        }
+      }
+      
+      // Check if file exists
+      if (!fs.existsSync(filePath)) {
+        res.status(404).send('File not found');
+        return;
+      }
+      
+      // Set appropriate content type
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeTypes = {
+        '.stl': 'application/octet-stream',
+        '.3mf': 'application/octet-stream',
+        '.zip': 'application/zip',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg'
+      };
+      
+      if (mimeTypes[ext]) {
+        res.setHeader('Content-Type', mimeTypes[ext]);
+      }
+      
+      // Stream the file
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
+      
+      fileStream.on('error', (error) => {
+        console.error('Error serving file:', error);
+        if (!res.headersSent) {
+          res.status(500).send('Error reading file');
+        }
+      });
+    } catch (error) {
+      console.error('Error in file serving endpoint:', error);
+      res.status(500).send('Error serving file');
+    }
+  });
+
+  // Serve static assets
+  expressApp.use(express.static(appDir, {
+    setHeaders: (res, filePath) => {
+      // Set proper MIME types
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeTypes = {
+        '.html': 'text/html',
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon',
+        '.bmp': 'image/bmp',
+        '.webp': 'image/webp'
+      };
+      if (mimeTypes[ext]) {
+        res.setHeader('Content-Type', mimeTypes[ext]);
+      }
+    }
+  }));
+
+  // Handle 404 - serve index.html for SPA routing (with bridge injection)
+  expressApp.get('*', (req, res) => {
+    // Don't inject bridge for static assets
+    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
+      return; // Let express.static handle it
+    }
+    
+    const htmlPath = path.join(appDir, 'index.html');
+    fs.readFile(htmlPath, 'utf8', (err, data) => {
+      if (err) {
+        res.status(500).send('Error loading index.html');
+        return;
+      }
+      // Inject server-bridge.js script before closing body tag
+      const bridgeScript = '<script src="/server-bridge.js"></script>';
+      const modifiedHtml = data.replace('</body>', `${bridgeScript}\n</body>`);
+      res.send(modifiedHtml);
+    });
+  });
+
+  // Start server
+  httpServer = expressApp.listen(PORT, HOST, () => {
+    console.log(`Printventory server mode started`);
+    console.log(`Server running at http://${HOST}:${PORT}`);
+    console.log(`Access from remote browsers: http://<your-ip>:${PORT}`);
+    console.log(`Server mode requires UNC paths for all file operations`);
+  });
+
+  // Create WebSocket server for IPC bridge
+  const wss = new WebSocket.Server({ server: httpServer });
+  const pendingRequests = new Map();
+  const wsClients = new Set(); // Track all connected clients
+
+  wss.on('connection', (ws) => {
+    console.log('WebSocket client connected');
+    wsClients.add(ws);
+
+    ws.on('message', async (message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        const { id, channel, args, type } = data;
+        
+        // Handle event sends (fire and forget) - these are events, not IPC handlers
+        if (type === 'send') {
+          // These are events that should be broadcast to all clients
+          // In server mode, broadcast to all WebSocket clients
+          // In normal mode, trigger the ipcMain.on() handler which sends to the renderer
+          if (isServerMode && global.broadcastEvent) {
+            // Broadcast to all WebSocket clients (they'll receive as type: 'event')
+            global.broadcastEvent(channel, ...(args || []));
+          } else {
+            // In normal mode, trigger the ipcMain.on() handler
+            // Create a mock event object to trigger the handler
+            const mockEvent = {
+              sender: mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null
+            };
+            
+            // Get all listeners for this channel and trigger them
+            const listeners = ipcMain.listeners(channel);
+            if (listeners.length > 0) {
+              listeners.forEach(listener => {
+                try {
+                  listener(mockEvent, ...(args || []));
+                } catch (error) {
+                  console.error(`Error in ipcMain.on('${channel}') handler:`, error);
+                }
+              });
+            } else if (mainWindow && !mainWindow.isDestroyed()) {
+              // If no listeners, send directly to the renderer
+              mainWindow.webContents.send(channel, ...(args || []));
+            }
+          }
+          return; // Don't try to handle as IPC call
+        }
+
+        // Create a mock event object for IPC handlers
+        const mockEvent = {
+          sender: {
+            send: (eventChannel, ...eventArgs) => {
+              // Broadcast event to all WebSocket clients in server mode
+              if (isServerMode && global.broadcastEvent) {
+                global.broadcastEvent(eventChannel, ...eventArgs);
+              } else {
+                // Send event back via WebSocket to this specific client
+                ws.send(JSON.stringify({
+                  type: 'event',
+                  channel: eventChannel,
+                  args: eventArgs
+                }));
+              }
+            }
+          }
+        };
+
+        // Call IPC handlers directly instead of through hidden window
+        // This is more reliable and faster
+        try {
+          // Create a mock event object for IPC handlers
+          const mockEvent = {
+            sender: {
+              send: (eventChannel, ...eventArgs) => {
+                // Broadcast event to all WebSocket clients in server mode
+                if (isServerMode && global.broadcastEvent) {
+                  global.broadcastEvent(eventChannel, ...eventArgs);
+                } else {
+                  // Send event back via WebSocket to this specific client
+                  ws.send(JSON.stringify({
+                    type: 'event',
+                    channel: eventChannel,
+                    args: eventArgs
+                  }));
+                }
+              }
+            }
+          };
+          
+          // Check if handler exists
+          const handler = ipcMain.listeners('handle-' + channel)?.[0];
+          if (!handler) {
+            // Try to find the handler in the registered handlers
+            // IPC handlers are registered with ipcMain.handle, so we need to trigger them
+            // Use the hidden window as fallback if direct call doesn't work
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              // Wait if window is still loading
+              if (mainWindow.webContents.isLoading()) {
+                await new Promise(resolve => {
+                  const timeout = setTimeout(resolve, 5000);
+                  mainWindow.webContents.once('did-finish-load', () => {
+                    clearTimeout(timeout);
+                    resolve();
+                  });
+                });
+              }
+              
+              // Stringify args for safe injection into JavaScript code
+              const argsJson = JSON.stringify(args || []);
+              
+              const result = await mainWindow.webContents.executeJavaScript(`
+                (async () => {
+                  try {
+                    if (window.electron) {
+                      const args = ${argsJson};
+                      
+                      // Convert channel name to method name (e.g., 'save-setting' -> 'saveSetting')
+                      const methodName = '${channel}'.split('-').map((word, i) => 
+                        i === 0 ? word : word.charAt(0).toUpperCase() + word.slice(1)
+                      ).join('');
+                      
+                      // Use the specific method if it exists (e.g., saveSetting, getSetting, purgeModels)
+                      // This ensures all arguments are passed correctly
+                      if (window.electron[methodName] && typeof window.electron[methodName] === 'function') {
+                        // Call the method with the appropriate number of arguments
+                        const result = args.length === 0 
+                          ? await window.electron[methodName]()
+                          : await window.electron[methodName](...args);
+                        return result;
+                      } else if (window.electron.invoke && typeof window.electron.invoke === 'function') {
+                        // Fallback: use window.electron.invoke (available through preload script)
+                        // Note: preload.js invoke only accepts one data argument, so we pass args as an array
+                        const result = await window.electron.invoke('${channel}', args);
+                        return result;
+                      } else {
+                        throw new Error('window.electron methods not available');
+                      }
+                    } else {
+                      throw new Error('window.electron not available');
+                    }
+                  } catch (error) {
+                    console.error('Hidden window - invoke error:', error);
+                    throw error;
+                  }
+                })()
+              `);
+              ws.send(JSON.stringify({
+                id,
+                type: 'result',
+                result
+              }));
+            } else {
+              throw new Error(`IPC handler '${channel}' not found`);
+            }
+          } else {
+            // Call the handler directly
+            const result = await handler(mockEvent, ...(args || []));
+            ws.send(JSON.stringify({
+              id,
+              type: 'result',
+              result
+            }));
+          }
+        } catch (error) {
+          console.error('Error executing IPC call:', error);
+          ws.send(JSON.stringify({
+            id,
+            type: 'error',
+            error: error.message || String(error)
+          }));
+        }
+      } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: error.message
+        }));
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('WebSocket client disconnected');
+      wsClients.delete(ws);
+    });
+
+    ws.on('error', (error) => {
+      console.error('WebSocket error:', error);
+      wsClients.delete(ws);
+    });
+  });
+  
+  // Broadcast events to all WebSocket clients
+  function broadcastEvent(channel, ...args) {
+    const message = JSON.stringify({
+      type: 'event',
+      channel,
+      args
+    });
+    wsClients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(message);
+        } catch (error) {
+          console.error('Error broadcasting event:', error);
+        }
+      }
+    });
+  }
+  
+  // Store broadcast function globally for use in IPC handlers
+  global.broadcastEvent = broadcastEvent;
+  
+  // Helper function to send events (works in both normal and server mode)
+  global.sendEvent = function(event, channel, ...args) {
+    if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent(channel, ...args);
+    } else if (event && event.sender) {
+      event.sender.send(channel, ...args);
+    }
+  };
+
+  httpServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Please stop the other application or use a different port.`);
+    } else {
+      console.error('Server error:', err);
+    }
+    process.exit(1);
+  });
+}
+
 let db;
 let mainWindow;
 let isGeneratingHashes = false; // Track hash generation state
+
+// IPC handler to expose server mode
+ipcMain.handle('is-server-mode', () => {
+  return isServerMode;
+});
 
 // Handle single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -258,7 +738,11 @@ if (!gotTheLock) {
     try {
       // Initialize database first
       if (!initializeDatabase()) {
-        dialog.showErrorBox('Database Error', 'Failed to initialize database. The application will now quit.');
+        if (isServerMode) {
+          console.error('Database Error: Failed to initialize database. The application will now quit.');
+        } else {
+          dialog.showErrorBox('Database Error', 'Failed to initialize database. The application will now quit.');
+        }
         app.quit();
         return;
       }
@@ -274,30 +758,49 @@ if (!gotTheLock) {
         console.error('Error updating currentVersion in database:', versionError);
       }
 
-      // Check for updates before creating window
-      try {
-        await checkForUpdates();
-      } catch (updateError) {
-        console.error('Error checking version on startup:', updateError);
-        // Continue with app startup even if version check fails
+      // Check for updates before creating window (skip in server mode)
+      if (!isServerMode) {
+        try {
+          await checkForUpdates();
+        } catch (updateError) {
+          console.error('Error checking version on startup:', updateError);
+          // Continue with app startup even if version check fails
+        }
       }
 
-      // Now create the window
-      createWindow();
+      // Server mode: start HTTP server and create hidden window for IPC
+      if (isServerMode) {
+        startHttpServer();
+        // Create a hidden BrowserWindow to handle IPC (preload script needs a window)
+        await createHiddenWindow();
+        // Don't quit when all windows are closed in server mode
+        app.on('window-all-closed', () => {
+          // Keep the app running in server mode
+        });
+      } else {
+        // Normal mode: create window
+        createWindow();
 
-      app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
-          createWindow();
-        }
-      });
+        app.on('activate', () => {
+          if (BrowserWindow.getAllWindows().length === 0) {
+            createWindow();
+          }
+        });
 
-      createApplicationMenu();
+        createApplicationMenu();
+      }
       
-      // Track application usage after initialization
-      await trackAppUsage();
+      // Track application usage after initialization (skip in server mode)
+      if (!isServerMode) {
+        await trackAppUsage();
+      }
     } catch (error) {
       console.error('Error during app initialization:', error);
-      dialog.showErrorBox('Startup Error', 'Failed to start application properly.');
+      if (isServerMode) {
+        console.error('Startup Error: Failed to start application properly.');
+      } else {
+        dialog.showErrorBox('Startup Error', 'Failed to start application properly.');
+      }
       app.quit();
     }
   });
@@ -783,6 +1286,12 @@ function createWindow() {
           }
         },
         {
+          label: 'Server Mode Info',
+          click: () => {
+            mainWindow.webContents.send('open-server-mode-info');
+          }
+        },
+        {
           label: 'Support Printventory',
           click: async () => {
             await shell.openExternal('https://printventory.com/support.html');
@@ -934,6 +1443,12 @@ function createApplicationMenu() {
           label: 'Quick Start Guide',
           click: () => {
             mainWindow.webContents.send('open-guide');
+          }
+        },
+        {
+          label: 'Server Mode Info',
+          click: () => {
+            mainWindow.webContents.send('open-server-mode-info');
           }
         },
         {
@@ -1181,20 +1696,29 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
       }).join('\n');
       const moreFiles = filesToDelete.length > 20 ? `\n... and ${filesToDelete.length - 20} more file(s)` : '';
       
-      const result = await dialog.showMessageBox(dialogWindow || undefined, {
-        type: 'warning',
-        title: 'Confirm File Removal',
-        message: `The scan found ${filesToDelete.length} file${filesToDelete.length === 1 ? '' : 's'} in the library that no longer exist on disk.`,
-        detail: `These files will be removed from the library (files are not deleted from disk):\n\n${fileList}${moreFiles}\n\nDo you want to proceed?`,
-        buttons: ['Remove from Library', 'Skip'],
-        defaultId: 1,
-        cancelId: 1,
-      });
+      // In server mode, auto-remove files without showing dialog
+      if (isServerMode) {
+        // Auto-remove in server mode
+        for (const file of filesToDelete) {
+          db.prepare('DELETE FROM models WHERE id = ?').run(file.id);
+        }
+        console.log(`Server mode: Removed ${filesToDelete.length} non-existent files from library`);
+      } else {
+        const result = await dialog.showMessageBox(dialogWindow || undefined, {
+          type: 'warning',
+          title: 'Confirm File Removal',
+          message: `The scan found ${filesToDelete.length} file${filesToDelete.length === 1 ? '' : 's'} in the library that no longer exist on disk.`,
+          detail: `These files will be removed from the library (files are not deleted from disk):\n\n${fileList}${moreFiles}\n\nDo you want to proceed?`,
+          buttons: ['Remove from Library', 'Skip'],
+          defaultId: 1,
+          cancelId: 1,
+        });
 
-      // If user clicked "Skip", return 0 without deleting
-      if (result.response === 1) {
-        console.log(`User skipped removal of ${filesToDelete.length} non-existent files from directory ${scanDirectoryPath}`);
-        return 0;
+        // If user clicked "Skip", return 0 without deleting
+        if (result.response === 1) {
+          console.log(`User skipped removal of ${filesToDelete.length} non-existent files from directory ${scanDirectoryPath}`);
+          return 0;
+        }
       }
     }
 
@@ -1226,6 +1750,13 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
 // Update the scan-directory handler to use a more efficient scanning process
 ipcMain.handle('scan-directory', async (event, directoryPath) => {
   try {
+    // Validate UNC path in server mode
+    try {
+      validateUncPath(directoryPath, 'scan-directory');
+    } catch (validationError) {
+      throw new Error(validationError.message);
+    }
+    
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
     
@@ -1234,8 +1765,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     const enableZipArchives = zipSetting && zipSetting.value === '1';
     
     // First, remove any non-existent files from the scanned directory
-    // Pass the window so we can show a confirmation dialog if needed
-    const window = BrowserWindow.fromWebContents(event.sender);
+    // Pass the window so we can show a confirmation dialog if needed (null in server mode)
+    const window = isServerMode ? null : BrowserWindow.fromWebContents(event.sender);
     const removedCount = await removeNonExistentFiles(directoryPath, window);
     if (removedCount > 0) {
       event.sender.send('db-cleanup', {
@@ -1353,7 +1884,18 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             })();
 
             worker.terminate();
+            
             resolve({ files, totalFiles, newFilesCount });
+            
+            // Send refresh-grid event to update the UI after scanning completes
+            // Use setTimeout to ensure the promise resolves first and database is fully updated
+            setTimeout(() => {
+              if (isServerMode && global.broadcastEvent) {
+                global.broadcastEvent('refresh-grid');
+              } else {
+                event.sender.send('refresh-grid');
+              }
+            }, 100);
           } catch (error) {
             worker.terminate();
             reject(error);
@@ -1748,6 +2290,12 @@ ipcMain.handle('save-setting', async (event, key, value) => {
   try {
     console.log('Main Process - Saving setting:', key, value);
     
+    // Ensure database is initialized
+    if (!db) {
+      console.error('Database not initialized when saving setting');
+      return false;
+    }
+    
     // If this is the CollectUsage setting being changed, track the change
     if (key === 'CollectUsage') {
       const oldValue = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
@@ -1769,15 +2317,20 @@ ipcMain.handle('save-setting', async (event, key, value) => {
     const result = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
     console.log('Database update result:', result);
     
+    // Verify the save worked
+    const verify = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    console.log(`Verified setting '${key}' saved as:`, verify?.value);
+    
+    // Force a sync to disk to ensure the change is persisted for all settings
+    // This is especially important in server mode where multiple clients might be accessing the database
+    db.pragma('synchronous = FULL');
+    db.pragma('journal_mode = WAL');
+    db.prepare('PRAGMA wal_checkpoint(FULL)').run();
+    
     // Verify the update
     if (key === 'CollectUsage') {
       const newValue = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
       console.log('CollectUsage - Verified new value in database:', newValue);
-      
-      // Force a sync to disk to ensure the change is persisted
-      db.pragma('synchronous = FULL');
-      db.pragma('journal_mode = WAL');
-      db.prepare('PRAGMA wal_checkpoint(FULL)').run();
     }
     
     return true;
@@ -1981,6 +2534,13 @@ async function saveThumbnail(filePath, thumbnail) {
 
 ipcMain.handle('show-item-in-folder', async (event, filePath) => {
   try {
+    // Validate UNC path in server mode
+    try {
+      validateUncPath(filePath, 'show-item-in-folder');
+    } catch (validationError) {
+      throw new Error(validationError.message);
+    }
+    
     // If it's a zip entry, extract the zip path
     const pathInfo = parseZipPath(filePath);
     const pathToShow = pathInfo.isZipEntry ? pathInfo.zipPath : filePath;
@@ -2319,6 +2879,18 @@ ipcMain.handle('check-files-exist', async (_, filePaths) => {
 
 // Update the trash-file handler with simpler path normalization
 ipcMain.handle('trash-file', async (event, filePath) => {
+  try {
+    // Validate UNC path in server mode
+    try {
+      validateUncPath(filePath, 'trash-file');
+    } catch (validationError) {
+      throw new Error(validationError.message);
+    }
+  } catch (error) {
+    console.error('Error in trash-file handler:', error);
+    throw error;
+  }
+  
   // Simple path normalization - replace all backslashes with forward slashes
   const normalizedPath = filePath.replace(/\\/g, "/");
   console.log('trash-file handler received path:', filePath);
@@ -2351,6 +2923,13 @@ ipcMain.handle('trash-file', async (event, filePath) => {
 // Update or add this handler in main.js
 ipcMain.handle('delete-file', async (event, filePath) => {
   try {
+    // Validate UNC path in server mode
+    try {
+      validateUncPath(filePath, 'delete-file');
+    } catch (validationError) {
+      throw new Error(validationError.message);
+    }
+    
     console.log('main: delete-file handler called with:', filePath);
     const result = await deleteFile(filePath);
     
@@ -3274,8 +3853,10 @@ function getDatabasePath() {
     let userDataPath;
     if (process.platform === 'darwin') { // macOS
       userDataPath = path.join(app.getPath('userData'), 'data');
-    } else { // Windows
+    } else if (process.platform === 'win32') { // Windows
       userDataPath = path.join(process.env.LOCALAPPDATA, 'Printventory', 'data');
+    } else { // Linux and other Unix-like systems
+      userDataPath = path.join(app.getPath('userData'), 'data');
     }
 
     // Ensure the directory exists
@@ -4833,7 +5414,8 @@ async function saveModel(modelData) {
     }
 
     // Now handle tags in a separate transaction if we have a valid model ID
-    if (modelId && tags && Array.isArray(tags) && tags.length > 0) {
+    // Note: We need to process tags even if the array is empty (to remove all tags)
+    if (modelId && tags && Array.isArray(tags)) {
       try {
         console.log(`Processing ${tags.length} tags for model ID ${modelId}`);
         
@@ -4871,32 +5453,36 @@ async function saveModel(modelData) {
             }
           }
 
-          // Process each tag individually
-          for (const tagName of tags) {
-            if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
-              const trimmedTagName = tagName.trim();
-              try {
-                console.log(`Processing tag: "${trimmedTagName}"`);
-                
-                // First ensure the tag exists in the tags table
-                db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
-                
-                // Get the tag ID directly
-                const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
-                
-                if (tagRow && tagRow.id) {
-                  console.log(`Found tag ID ${tagRow.id} for "${trimmedTagName}"`);
+          // Process each tag individually (only if there are tags to add)
+          if (tags.length > 0) {
+            for (const tagName of tags) {
+              if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
+                const trimmedTagName = tagName.trim();
+                try {
+                  console.log(`Processing tag: "${trimmedTagName}"`);
                   
-                  // Now create the relationship with the known IDs
-                  db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
-                } else {
-                  console.warn(`Could not find tag ID for "${trimmedTagName}" after insertion`);
+                  // First ensure the tag exists in the tags table
+                  db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
+                  
+                  // Get the tag ID directly
+                  const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
+                  
+                  if (tagRow && tagRow.id) {
+                    console.log(`Found tag ID ${tagRow.id} for "${trimmedTagName}"`);
+                    
+                    // Now create the relationship with the known IDs
+                    db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
+                  } else {
+                    console.warn(`Could not find tag ID for "${trimmedTagName}" after insertion`);
+                  }
+                } catch (singleTagError) {
+                  console.error(`Error processing tag "${trimmedTagName}":`, singleTagError);
+                  // Continue with other tags
                 }
-              } catch (singleTagError) {
-                console.error(`Error processing tag "${trimmedTagName}":`, singleTagError);
-                // Continue with other tags
               }
             }
+          } else {
+            console.log('Tags array is empty - all tags have been removed from this model');
           }
         })();
       } catch (tagError) {
@@ -4912,18 +5498,20 @@ async function saveModel(modelData) {
               // Delete existing tags first
               db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
               
-              // Re-insert the tags we were trying to save
-              for (const tagName of tags) {
-                if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
-                  const trimmedTagName = tagName.trim();
-                  try {
-                    db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
-                    const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
-                    if (tagRow && tagRow.id) {
-                      db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
+              // Re-insert the tags we were trying to save (only if there are tags)
+              if (tags.length > 0) {
+                for (const tagName of tags) {
+                  if (tagName && typeof tagName === 'string' && tagName.trim() !== '') {
+                    const trimmedTagName = tagName.trim();
+                    try {
+                      db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(trimmedTagName);
+                      const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(trimmedTagName);
+                      if (tagRow && tagRow.id) {
+                        db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)').run(modelId, tagRow.id);
+                      }
+                    } catch (retryError) {
+                      console.error(`Error retrying tag "${trimmedTagName}":`, retryError);
                     }
-                  } catch (retryError) {
-                    console.error(`Error retrying tag "${trimmedTagName}":`, retryError);
                   }
                 }
               }

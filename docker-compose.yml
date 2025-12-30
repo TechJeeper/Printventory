@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  printventory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: printventory-server
+    ports:
+      - "5000:5000"
+    volumes:
+      # Persist database and application data
+      # On Linux, Electron stores user data in ~/.config/Printventory
+      - printventory-data:/root/.config/Printventory
+      # Mount network shares for accessing files
+      # Option 1: Mount SMB/CIFS share (recommended for network shares)
+      # First, install cifs-utils on the host: sudo apt-get install cifs-utils
+      # Then mount on host: sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass
+      # Then uncomment: - /mnt/network-share:/mnt/network-share:ro
+      # Option 2: Mount local directory (if files are on the Docker host)
+      # - /path/to/local/files:/mnt/models:ro
+    environment:
+      - DISPLAY=:99
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+    restart: unless-stopped
+    # Optional: Set resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2G
+    #     reservations:
+    #       memory: 512M
+
+volumes:
+  printventory-data:
+    driver: local
+
