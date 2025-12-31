@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.24.0",
+  "version": "1.24.1",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -103,7 +103,8 @@
     ],
     "asarUnpack": [
       "scan-worker.js",
-      "node_modules/node-stream-zip/**/*"
+      "node_modules/node-stream-zip/**/*",
+      "node_modules/better-sqlite3/**/*"
     ],
     "directories": {
       "buildResources": ".",
