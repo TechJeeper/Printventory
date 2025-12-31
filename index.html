@@ -654,6 +654,18 @@
         <form method="dialog">
           <h3>Theme Settings</h3>
           <div class="form-group">
+            <label for="ui-theme">UI Theme:</label>
+            <select id="ui-theme">
+              <option value="modern-cyan">Modern Cyan (Default)</option>
+              <option value="modern-purple">Modern Purple</option>
+              <option value="modern-green">Modern Green</option>
+              <option value="modern-orange">Modern Orange</option>
+              <option value="modern-pink">Modern Pink</option>
+              <option value="dark-minimal">Dark Minimal</option>
+            </select>
+            <div class="setting-description">Change the overall color scheme of the application</div>
+          </div>
+          <div class="form-group">
             <label for="model-background-color">Model Background Color:</label>
             <select id="model-background-color">
               <option value="#070147">Dark Blue</option>
@@ -662,6 +674,7 @@
               <option value="#1a0f3c">Navy Purple</option>
               <option value="#0a0a23">Midnight Blue</option>
             </select>
+            <div class="setting-description">Background color for 3D model thumbnails</div>
           </div>
           <div class="dialog-buttons">
             <button type="submit" id="save-settings">Save</button>

@@ -38,3 +38,4 @@ files.forEach(file => {
 
 console.log(`Cleanup complete. Removed ${cleaned} item(s).`);
 
+

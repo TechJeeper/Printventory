@@ -194,6 +194,33 @@ To build for Windows:
 npm run build:win
 ```
 
+#### Build for Linux AppImage (from Windows)
+
+To build a Linux AppImage from Windows, you need either WSL (Windows Subsystem for Linux) or Docker:
+
+**Prerequisites:**
+- **Option 1 (Recommended)**: WSL with Node.js installed
+  - Install WSL: `wsl --install`
+  - Install Node.js in WSL: `wsl sudo apt-get update && wsl sudo apt-get install -y nodejs npm`
+- **Option 2**: Docker Desktop
+  - Install from: https://www.docker.com/products/docker-desktop
+
+**Build Command:**
+
+```bash
+npm run build:linux
+```
+
+Or using PowerShell:
+
+```powershell
+.\scripts\build-linux-appimage.ps1
+```
+
+The script will automatically detect and use WSL if available, otherwise it will fall back to Docker. The AppImage will be generated in the `dist` directory.
+
+**Note**: The first build may take longer as dependencies need to be installed in the Linux environment.
+
 All build outputs will be generated in the `dist` directory.
 
 ## Docker Deployment (Linux Server Mode)
@@ -210,9 +237,158 @@ Printventory can be deployed as a Docker container for easy server mode deployme
 - Clone the repository and build the Docker image yourself
 - See "Building the Docker Image" section below
 
-**Option 3: Docker Hub (if available)**
-- Pull pre-built image: `docker pull yourusername/printventory:latest`
-- Run: `docker run -d -p 5000:5000 -v printventory-data:/root/.config/Printventory yourusername/printventory:latest`
+**Option 3: Docker Hub (Recommended for Quick Deployment)**
+- Pull and run the pre-built image from Docker Hub
+- No need to build from source - see "Pulling from Docker Hub" section below
+
+### Pulling from Docker Hub
+
+If the Printventory Docker image has been published to Docker Hub, you can pull and run it directly without building from source.
+
+#### Prerequisites
+
+- [Docker](https://www.docker.com/get-started) installed
+- Docker Desktop running (if on Windows/Mac)
+
+#### Pulling the Image
+
+**Pull the latest version:**
+```bash
+docker pull printventory/printventory:latest
+```
+
+**Pull a specific version:**
+```bash
+docker pull printventory/printventory:1.23.0
+```
+
+The image is available on Docker Hub at: [https://hub.docker.com/r/printventory/printventory](https://hub.docker.com/r/printventory/printventory)
+
+#### Running with Docker Run
+
+**Basic run command:**
+```bash
+docker run -d \
+  --name printventory-server \
+  -p 5000:5000 \
+  -v printventory-data:/root/.config/Printventory \
+  --restart unless-stopped \
+  printventory/printventory:latest
+```
+
+**With network share mounted (Windows - mapped drive):**
+```bash
+# First, map the network share: net use Z: \\server\share /persistent:yes
+docker run -d \
+  --name printventory-server \
+  -p 5000:5000 \
+  -v printventory-data:/root/.config/Printventory \
+  -v Z:/:/mnt/network-share:ro \
+  --restart unless-stopped \
+  printventory/printventory:latest
+```
+
+**With network share mounted (Linux - SMB/CIFS):**
+```bash
+# First, mount on host: sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass
+docker run -d \
+  --name printventory-server \
+  -p 5000:5000 \
+  -v printventory-data:/root/.config/Printventory \
+  -v /mnt/network-share:/mnt/network-share:ro \
+  --restart unless-stopped \
+  printventory/printventory:latest
+```
+
+#### Running with Docker Compose
+
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3.8'
+
+services:
+  printventory:
+    image: printventory/printventory:latest
+    container_name: printventory-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - printventory-data:/root/.config/Printventory
+      # Uncomment to mount network share (Windows - mapped drive):
+      # - Z:/:/mnt/network-share:ro
+      # Uncomment to mount network share (Linux - SMB/CIFS):
+      # - /mnt/network-share:/mnt/network-share:ro
+    restart: unless-stopped
+
+volumes:
+  printventory-data:
+    driver: local
+```
+
+Then run:
+```bash
+docker compose up -d
+```
+
+#### Accessing the Server
+
+Once the container is running, access Printventory from your browser:
+
+- **Local machine:** `http://localhost:5000`
+- **Network access:** `http://<your-ip>:5000`
+
+#### Managing the Container
+
+**View logs:**
+```bash
+docker logs printventory-server
+# Follow logs in real-time:
+docker logs -f printventory-server
+```
+
+**Stop the container:**
+```bash
+docker stop printventory-server
+```
+
+**Start the container:**
+```bash
+docker start printventory-server
+```
+
+**Restart the container:**
+```bash
+docker restart printventory-server
+```
+
+**Remove the container:**
+```bash
+docker stop printventory-server
+docker rm printventory-server
+```
+
+**Update to latest version:**
+```bash
+docker pull yourusername/printventory:latest
+docker stop printventory-server
+docker rm printventory-server
+docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root/.config/Printventory --restart unless-stopped yourusername/printventory:latest
+```
+
+#### Using Network Paths
+
+When running from Docker Hub, remember:
+- **Windows UNC paths** (`\\server\share\path`) won't work directly
+- **Mount network shares** into the container first (see examples above)
+- **Use Linux-style paths** inside the container: `/mnt/network-share/path/to/file`
+
+#### Docker Hub Repository
+
+The Printventory Docker image is available on Docker Hub at:
+```
+https://hub.docker.com/r/printventory/printventory
+```
 
 ### Prerequisites
 

@@ -157,3 +157,4 @@ console.log('To distribute:');
 console.log(`  1. Upload ${path.basename(dockerDistZip)} to your release page`);
 console.log('  2. Users can extract and run: docker-compose up -d');
 
+

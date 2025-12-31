@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.23.0",
+  "version": "1.24.0",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -9,7 +9,15 @@
     "build": "electron-builder -mw",
     "build:mac": "electron-builder --mac --universal",
     "build:win": "electron-builder -w --config.nsis.differentialPackage=false && node scripts/cleanup-win-build.js",
+    "build:linux": "node scripts/build-linux-appimage.js",
+    "build:linux:internal": "electron-builder --linux --x64",
     "build:docker": "node scripts/create-docker-distribution.js",
+    "docker:build": "node scripts/docker-hub-push.js build",
+    "docker:tag": "node scripts/docker-hub-push.js tag",
+    "docker:push": "node scripts/docker-hub-push.js push",
+    "docker:push:version": "node scripts/docker-hub-push.js push-version",
+    "docker:push:latest": "node scripts/docker-hub-push.js push-latest",
+    "docker:hub:all": "node scripts/docker-hub-push.js all",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "TechJeeper Designs",
@@ -35,6 +43,18 @@
     "win": {
       "target": "nsis",
       "icon": "logo.ico"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "logo.png",
+      "category": "Utility"
     },
     "nsis": {
       "oneClick": false,

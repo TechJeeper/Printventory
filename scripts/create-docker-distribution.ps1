@@ -124,3 +124,4 @@ Write-Host "To distribute:"
 Write-Host "  1. Upload $dockerDistZip to your release page"
 Write-Host "  2. Users can extract and run: docker-compose up -d"
 
+

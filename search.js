@@ -426,13 +426,20 @@ export function initializeCombinedSearch() {
   clearButton.addEventListener("click", async () => {
     console.log("Clear filter search button clicked");
     searchInput.value = "";
+    clearButton.classList.add("hidden");
     clearButton.style.display = "none";
     await performCombinedSearch();
     searchInput.focus();
   });
 
   searchInput.addEventListener("input", () => {
-    clearButton.style.display = searchInput.value.trim() ? "block" : "none";
+    if (searchInput.value.trim()) {
+      clearButton.classList.remove("hidden");
+      clearButton.style.display = "block";
+    } else {
+      clearButton.classList.add("hidden");
+      clearButton.style.display = "none";
+    }
   });
 }
 

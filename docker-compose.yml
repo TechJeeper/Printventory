@@ -13,11 +13,19 @@ services:
       # On Linux, Electron stores user data in ~/.config/Printventory
       - printventory-data:/root/.config/Printventory
       # Mount network shares for accessing files
-      # Option 1: Mount SMB/CIFS share (recommended for network shares)
+      # For Windows Docker Desktop:
+      # 1. Map network share to drive: net use Z: \\msi\folder1 /persistent:yes
+      # 2. Uncomment the line below to mount it into the container
+      # - Z:/:/mnt/msi-folder1:ro
+      # Then use Linux paths in Printventory: /mnt/msi-folder1/path/to/file
+      # 
+      # Option 1: Mount mapped Windows network drive (Windows Docker Desktop)
+      # - Z:/:/mnt/msi-folder1:ro
+      # Option 2: Mount SMB/CIFS share directly (Linux host)
       # First, install cifs-utils on the host: sudo apt-get install cifs-utils
       # Then mount on host: sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass
       # Then uncomment: - /mnt/network-share:/mnt/network-share:ro
-      # Option 2: Mount local directory (if files are on the Docker host)
+      # Option 3: Mount local directory (if files are on the Docker host)
       # - /path/to/local/files:/mnt/models:ro
     environment:
       - DISPLAY=:99

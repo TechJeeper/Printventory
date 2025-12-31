@@ -2463,12 +2463,86 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('save-settings')?.addEventListener('click', async () => {
     const color = document.getElementById('model-background-color').value;
-    // Update CSS variable
+    const theme = document.getElementById('ui-theme')?.value || 'modern-cyan';
+    
+    // Update CSS variable for model background
     document.documentElement.style.setProperty('--model-background-color', color);
+    
+    // Update UI theme
+    document.body.setAttribute('data-theme', theme);
+    
     // Save to settings
     await window.electron.saveSetting('modelBackgroundColor', color);
+    await window.electron.saveSetting('uiTheme', theme);
+    
+    // Apply theme colors dynamically
+    applyThemeColors(theme);
+    
     settingsDialog.close();
   });
+
+  // Function to apply theme colors
+  function applyThemeColors(theme) {
+    const root = document.documentElement;
+    switch(theme) {
+      case 'modern-purple':
+        root.style.setProperty('--primary-accent', '#a855f7');
+        root.style.setProperty('--primary-accent-hover', '#c084fc');
+        root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #a855f7 0%, #c084fc 100%)');
+        root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #b866ff 0%, #d094ff 100%)');
+        root.style.setProperty('--primary-shadow', 'rgba(168, 85, 247, 0.3)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(168, 85, 247, 0.4)');
+        break;
+      case 'modern-green':
+        root.style.setProperty('--primary-accent', '#4ade80');
+        root.style.setProperty('--primary-accent-hover', '#22c55e');
+        root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #4ade80 0%, #22c55e 100%)');
+        root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #5ae890 0%, #2dd66f 100%)');
+        root.style.setProperty('--primary-shadow', 'rgba(34, 197, 94, 0.3)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(34, 197, 94, 0.4)');
+        break;
+      case 'modern-orange':
+        root.style.setProperty('--primary-accent', '#fb923c');
+        root.style.setProperty('--primary-accent-hover', '#f97316');
+        root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #fb923c 0%, #f97316 100%)');
+        root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #ffa34c 0%, #ff8326 100%)');
+        root.style.setProperty('--primary-shadow', 'rgba(249, 115, 22, 0.3)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(249, 115, 22, 0.4)');
+        break;
+      case 'modern-pink':
+        root.style.setProperty('--primary-accent', '#f472b6');
+        root.style.setProperty('--primary-accent-hover', '#ec4899');
+        root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #f472b6 0%, #ec4899 100%)');
+        root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #ff82c6 0%, #fc58a9 100%)');
+        root.style.setProperty('--primary-shadow', 'rgba(236, 72, 153, 0.3)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(236, 72, 153, 0.4)');
+        break;
+      case 'dark-minimal':
+        root.style.setProperty('--primary-accent', '#9ca3af');
+        root.style.setProperty('--primary-accent-hover', '#d1d5db');
+        root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)');
+        root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #9ca3af 0%, #6b7280 100%)');
+        root.style.setProperty('--primary-shadow', 'rgba(75, 85, 99, 0.3)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(75, 85, 99, 0.4)');
+        break;
+      default: // modern-cyan
+        root.style.setProperty('--primary-accent', '#00d4ff');
+        root.style.setProperty('--primary-accent-hover', '#5b9fff');
+        root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%)');
+        root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #00e5ff 0%, #6ba8ff 100%)');
+        root.style.setProperty('--primary-shadow', 'rgba(91, 159, 255, 0.3)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(91, 159, 255, 0.4)');
+    }
+  }
+
+  // Load theme on startup
+  const savedTheme = await window.electron.getSetting('uiTheme') || 'modern-cyan';
+  document.body.setAttribute('data-theme', savedTheme);
+  const uiThemeSelect = document.getElementById('ui-theme');
+  if (uiThemeSelect) {
+    uiThemeSelect.value = savedTheme;
+  }
+  applyThemeColors(savedTheme);
 
   // Add dismiss button handler
   document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
@@ -10130,6 +10204,64 @@ async function initializeApp() {
         const colorPicker = document.getElementById('model-background-color');
         if (colorPicker) {
           colorPicker.value = backgroundColor;
+        }
+      }
+      
+      // Load UI theme
+      const savedTheme = await window.electron.getSetting('uiTheme') || 'modern-cyan';
+      document.body.setAttribute('data-theme', savedTheme);
+      const uiThemeSelect = document.getElementById('ui-theme');
+      if (uiThemeSelect) {
+        uiThemeSelect.value = savedTheme;
+      }
+      
+      // Apply theme colors if function exists
+      if (typeof applyThemeColors === 'function') {
+        applyThemeColors(savedTheme);
+      } else {
+        // Fallback: apply theme colors inline
+        const root = document.documentElement;
+        switch(savedTheme) {
+          case 'modern-purple':
+            root.style.setProperty('--primary-accent', '#a855f7');
+            root.style.setProperty('--primary-accent-hover', '#c084fc');
+            root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #a855f7 0%, #c084fc 100%)');
+            root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #b866ff 0%, #d094ff 100%)');
+            root.style.setProperty('--primary-shadow', 'rgba(168, 85, 247, 0.3)');
+            root.style.setProperty('--primary-shadow-hover', 'rgba(168, 85, 247, 0.4)');
+            break;
+          case 'modern-green':
+            root.style.setProperty('--primary-accent', '#4ade80');
+            root.style.setProperty('--primary-accent-hover', '#22c55e');
+            root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #4ade80 0%, #22c55e 100%)');
+            root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #5ae890 0%, #2dd66f 100%)');
+            root.style.setProperty('--primary-shadow', 'rgba(34, 197, 94, 0.3)');
+            root.style.setProperty('--primary-shadow-hover', 'rgba(34, 197, 94, 0.4)');
+            break;
+          case 'modern-orange':
+            root.style.setProperty('--primary-accent', '#fb923c');
+            root.style.setProperty('--primary-accent-hover', '#f97316');
+            root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #fb923c 0%, #f97316 100%)');
+            root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #ffa34c 0%, #ff8326 100%)');
+            root.style.setProperty('--primary-shadow', 'rgba(249, 115, 22, 0.3)');
+            root.style.setProperty('--primary-shadow-hover', 'rgba(249, 115, 22, 0.4)');
+            break;
+          case 'modern-pink':
+            root.style.setProperty('--primary-accent', '#f472b6');
+            root.style.setProperty('--primary-accent-hover', '#ec4899');
+            root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #f472b6 0%, #ec4899 100%)');
+            root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #ff82c6 0%, #fc58a9 100%)');
+            root.style.setProperty('--primary-shadow', 'rgba(236, 72, 153, 0.3)');
+            root.style.setProperty('--primary-shadow-hover', 'rgba(236, 72, 153, 0.4)');
+            break;
+          case 'dark-minimal':
+            root.style.setProperty('--primary-accent', '#9ca3af');
+            root.style.setProperty('--primary-accent-hover', '#d1d5db');
+            root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)');
+            root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #9ca3af 0%, #6b7280 100%)');
+            root.style.setProperty('--primary-shadow', 'rgba(75, 85, 99, 0.3)');
+            root.style.setProperty('--primary-shadow-hover', 'rgba(75, 85, 99, 0.4)');
+            break;
         }
       }
     } catch (error) {
