@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.24.1",
+  "version": "1.26.0",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -12,7 +12,7 @@
     "build:linux": "node scripts/build-linux-appimage.js",
     "build:linux:internal": "electron-builder --linux --x64",
     "build:docker": "node scripts/create-docker-distribution.js",
-    "docker:build": "node scripts/docker-hub-push.js build",
+    "docker:build": "nod e scripts/docker-hub-push.js build",
     "docker:tag": "node scripts/docker-hub-push.js tag",
     "docker:push": "node scripts/docker-hub-push.js push",
     "docker:push:version": "node scripts/docker-hub-push.js push-version",

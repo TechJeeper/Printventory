@@ -426,6 +426,109 @@ function startHttpServer() {
     }
   });
 
+  // Download endpoint for server mode - handles both regular files and zip entries
+  expressApp.get('/api/download/*', async (req, res) => {
+    try {
+      // Extract file path from URL (everything after /api/download/)
+      const filePath = decodeURIComponent(req.path.replace('/api/download/', ''));
+      
+      // Check if this is a zip entry
+      const pathInfo = parseZipPath(filePath);
+      let actualFilePath = filePath;
+      let fileName = path.basename(filePath);
+      let fileData = null;
+      
+      if (pathInfo.isZipEntry) {
+        // Extract zip entry to temp file and stream it
+        try {
+          const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+          actualFilePath = tempPath;
+          fileName = path.basename(pathInfo.entryPath);
+        } catch (error) {
+          console.error('Error extracting zip entry:', error);
+          res.status(500).send('Error extracting file from zip');
+          return;
+        }
+      }
+      
+      // Validate path (UNC paths on Windows, absolute paths in Docker)
+      // Normalize temp dir path for comparison
+      const normalizedTempDir = os.tmpdir().replace(/\\/g, '/');
+      const normalizedFilePath = actualFilePath.replace(/\\/g, '/');
+      
+      if (isDockerContainer()) {
+        // In Docker, require absolute paths starting with /
+        if (!normalizedFilePath.startsWith('/') && !isUncPath(actualFilePath)) {
+          // For temp files from zip extraction, allow them
+          if (!normalizedFilePath.includes(normalizedTempDir)) {
+            res.status(400).send('Invalid path: Docker server mode requires absolute paths');
+            return;
+          }
+        }
+      } else {
+        // On Windows, require UNC paths (except temp files)
+        if (!isUncPath(actualFilePath) && !normalizedFilePath.includes(normalizedTempDir)) {
+          res.status(400).send('Invalid path: Server mode requires UNC paths');
+          return;
+        }
+      }
+      
+      // Check if file exists
+      if (!fs.existsSync(actualFilePath)) {
+        res.status(404).send('File not found');
+        return;
+      }
+      
+      // Set appropriate content type
+      const ext = path.extname(fileName).toLowerCase();
+      const mimeTypes = {
+        '.stl': 'application/octet-stream',
+        '.3mf': 'application/octet-stream',
+        '.zip': 'application/zip',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg'
+      };
+      
+      if (mimeTypes[ext]) {
+        res.setHeader('Content-Type', mimeTypes[ext]);
+      }
+      
+      // Set Content-Disposition header to trigger download with proper filename
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+      
+      // Stream the file
+      const fileStream = fs.createReadStream(actualFilePath);
+      fileStream.pipe(res);
+      
+      fileStream.on('error', (error) => {
+        console.error('Error serving download:', error);
+        if (!res.headersSent) {
+          res.status(500).send('Error reading file');
+        }
+      });
+      
+      // Clean up temp file after streaming (for zip entries)
+      if (pathInfo.isZipEntry) {
+        fileStream.on('end', () => {
+          // Clean up temp file asynchronously
+          setTimeout(() => {
+            try {
+              if (fs.existsSync(actualFilePath)) {
+                fs.unlinkSync(actualFilePath);
+              }
+            } catch (cleanupError) {
+              console.error('Error cleaning up temp file:', cleanupError);
+            }
+          }, 1000);
+        });
+      }
+    } catch (error) {
+      console.error('Error in download endpoint:', error);
+      res.status(500).send('Error serving download');
+    }
+  });
+
   // Serve static assets
   expressApp.use(express.static(appDir, {
     setHeaders: (res, filePath) => {
@@ -3187,7 +3290,43 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   const isZipEntry = filePaths.length === 1 && filePaths[0].includes('::');
   const pathInfo = filePaths.length === 1 ? parseZipPath(filePaths[0]) : null;
   
-  let menuItems = [
+  let menuItems = [];
+  
+  // Add "Download" option for server/docker mode at the top
+  if ((isServerMode || isDockerContainer()) && filePaths.length === 1) {
+    menuItems.push({
+      label: 'Download',
+      click: async () => {
+        try {
+          console.log('Download clicked for file:', filePaths[0]);
+          // Send download event to renderer
+          // In server mode, use broadcastEvent to send to all WebSocket clients
+          if (isServerMode && global.broadcastEvent) {
+            console.log('Broadcasting download-model event via WebSocket');
+            global.broadcastEvent('download-model', filePaths[0]);
+          } else {
+            // In normal mode, use event.sender.send
+            console.log('Sending download-model event via event.sender');
+            event.sender.send('download-model', filePaths[0]);
+          }
+        } catch (error) {
+          console.error('Error triggering download:', error);
+          const win = BrowserWindow.fromWebContents(event.sender);
+          if (win) {
+            dialog.showMessageBox(win, {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not download file',
+              detail: error.message
+            });
+          }
+        }
+      }
+    });
+    menuItems.push({ type: 'separator' });
+  }
+  
+  menuItems.push(
     {
       label: 'Open File',
       enabled: filePaths.length === 1,
@@ -3234,7 +3373,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         }
       }
     }
-  ];
+  );
   
   // Add extract options for zip entries
   if (isZipEntry && pathInfo && filePaths.length === 1) {
@@ -3587,6 +3726,193 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     });
   }
 
+  // Check if any selected files are 3MF files
+  const has3MFFiles = filePaths.some(fp => {
+    const ext = path.extname(fp).toLowerCase();
+    // Handle zip entries - check the entry path extension
+    if (fp.includes('::')) {
+      const entryPath = fp.split('::')[1];
+      return path.extname(entryPath).toLowerCase() === '.3mf';
+    }
+    return ext === '.3mf';
+  });
+  
+  // Add "Pull Metadata" option for 3MF files
+  if (has3MFFiles) {
+    menuItems.push({
+      label: 'Pull Metadata',
+      click: async () => {
+        try {
+          // Filter to only 3MF files
+          const threeMFFiles = filePaths.filter(fp => {
+            const ext = path.extname(fp).toLowerCase();
+            if (fp.includes('::')) {
+              const entryPath = fp.split('::')[1];
+              return path.extname(entryPath).toLowerCase() === '.3mf';
+            }
+            return ext === '.3mf';
+          });
+          
+          if (threeMFFiles.length === 0) {
+            return;
+          }
+          
+          // Check existing models to see if any have data that will be overwritten
+          const modelsWithData = [];
+          for (const filePath of threeMFFiles) {
+            const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+            if (model) {
+              const hasData = (model.designer && model.designer.trim()) ||
+                             (model.parentModel && model.parentModel.trim()) ||
+                             (model.notes && model.notes.trim()) ||
+                             (model.license && model.license.trim());
+              if (hasData) {
+                modelsWithData.push({
+                  filePath,
+                  fileName: model.fileName || path.basename(filePath),
+                  designer: model.designer,
+                  parentModel: model.parentModel,
+                  notes: model.notes,
+                  license: model.license
+                });
+              }
+            }
+          }
+          
+          // Show confirmation dialog if any models have existing data
+          const win = BrowserWindow.fromWebContents(event.sender);
+          if (modelsWithData.length > 0) {
+            const message = modelsWithData.length === 1
+              ? `This will overwrite existing metadata for:\n\n${modelsWithData[0].fileName}\n\nExisting data:\n${modelsWithData[0].designer ? `Designer: ${modelsWithData[0].designer}\n` : ''}${modelsWithData[0].parentModel ? `Parent Model: ${modelsWithData[0].parentModel}\n` : ''}${modelsWithData[0].notes ? `Notes: ${modelsWithData[0].notes.substring(0, 50)}${modelsWithData[0].notes.length > 50 ? '...' : ''}\n` : ''}${modelsWithData[0].license ? `License: ${modelsWithData[0].license}\n` : ''}\n\nContinue?`
+              : `This will overwrite existing metadata for ${modelsWithData.length} model(s).\n\nContinue?`;
+            
+            const confirm = await dialog.showMessageBox(win, {
+              type: 'warning',
+              title: 'Confirm Metadata Overwrite',
+              message: message,
+              buttons: ['Yes', 'No'],
+              defaultId: 1,
+              cancelId: 1
+            });
+            
+            if (confirm.response !== 0) {
+              return; // User cancelled
+            }
+          }
+          
+          // Process each file
+          const results = [];
+          let successCount = 0;
+          let errorCount = 0;
+          let noMetadataCount = 0;
+          
+          for (const filePath of threeMFFiles) {
+            try {
+              const metadata = await extract3MFMetadata(filePath);
+              
+              if (metadata && (metadata.designer || metadata.parentModel || metadata.notes || metadata.license)) {
+                // Get or create model in database
+                let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+                
+                if (!existingModel) {
+                  // Create new model entry
+                  const fileName = path.basename(filePath);
+                  const finalFileName = filePath.includes('::') 
+                    ? filePath.split('::').pop() 
+                    : fileName;
+                  const dateAdded = new Date().toISOString();
+                  
+                  db.prepare(`
+                    INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                  `).run(
+                    filePath,
+                    finalFileName,
+                    metadata.designer || null,
+                    metadata.parentModel || null,
+                    metadata.notes || null,
+                    metadata.license || null,
+                    dateAdded
+                  );
+                  
+                  results.push({ filePath, success: true, action: 'created' });
+                  successCount++;
+                } else {
+                  // Update existing model - overwrite all fields
+                  db.prepare(`
+                    UPDATE models 
+                    SET designer = ?, parentModel = ?, notes = ?, license = ?
+                    WHERE filePath = ?
+                  `).run(
+                    metadata.designer || null,
+                    metadata.parentModel || null,
+                    metadata.notes || null,
+                    metadata.license || null,
+                    filePath
+                  );
+                  
+                  results.push({ filePath, success: true, action: 'updated' });
+                  successCount++;
+                }
+              } else {
+                results.push({ filePath, success: false, error: 'No metadata found in 3MF file' });
+                noMetadataCount++;
+              }
+            } catch (error) {
+              console.error(`Error processing ${filePath}:`, error);
+              results.push({ filePath, success: false, error: error.message });
+              errorCount++;
+            }
+          }
+          
+          // Refresh the grid
+          event.sender.send('refresh-grid');
+          
+          // Show completion message
+          let message = '';
+          if (successCount > 0) {
+            message = `Successfully pulled metadata from ${successCount} file(s).`;
+          }
+          
+          const parts = [];
+          if (noMetadataCount > 0) {
+            parts.push(`${noMetadataCount} file(s) didn't have metadata`);
+          }
+          if (errorCount > 0) {
+            parts.push(`${errorCount} file(s) had errors`);
+          }
+          
+          if (parts.length > 0) {
+            if (message) {
+              message += '\n\n' + parts.join('.\n');
+            } else {
+              message = parts.join('.\n');
+            }
+          }
+          
+          if (!message) {
+            message = 'No files processed.';
+          }
+          
+          await dialog.showMessageBox(win, {
+            type: 'info',
+            title: 'Metadata Pull Complete',
+            message: message
+          });
+        } catch (error) {
+          console.error('Error pulling metadata:', error);
+          const win = BrowserWindow.fromWebContents(event.sender);
+          await dialog.showMessageBox(win, {
+            type: 'error',
+            title: 'Error',
+            message: 'Could not pull metadata',
+            detail: error.message
+          });
+        }
+      }
+    });
+  }
+
   // Add "Add Image" option for single file selection
   if (filePaths.length === 1) {
     menuItems.push({
@@ -3649,6 +3975,27 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             type: 'error',
             title: 'Error',
             message: 'Could not add image',
+            detail: error.message
+          });
+        }
+      }
+    });
+  }
+
+  // Add "Download" option for server/docker mode
+  if ((isServerMode || isDockerContainer()) && filePaths.length === 1) {
+    menuItems.push({
+      label: 'Download',
+      click: async () => {
+        try {
+          // Send download event to renderer
+          event.sender.send('download-model', filePaths[0]);
+        } catch (error) {
+          console.error('Error triggering download:', error);
+          dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+            type: 'error',
+            title: 'Error',
+            message: 'Could not download file',
             detail: error.message
           });
         }
@@ -3912,6 +4259,111 @@ async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
   }
 }
 
+// Helper function to parse 3MF model XML and extract metadata
+function parse3MFModelXML(xmlContent) {
+  const metadata = {
+    designer: null,
+    parentModel: null,
+    notes: null,
+    license: null
+  };
+
+  try {
+    // Extract metadata values using regex
+    // Pattern: <metadata name="FieldName">value</metadata>
+    const metadataPattern = /<metadata\s+name="([^"]+)"[^>]*>([^<]*)<\/metadata>/gi;
+    let match;
+
+    while ((match = metadataPattern.exec(xmlContent)) !== null) {
+      const fieldName = match[1].trim();
+      const fieldValue = match[2].trim();
+
+      // Map XML metadata names to database fields
+      if (fieldName === 'Designer' && fieldValue) {
+        metadata.designer = fieldValue;
+      } else if (fieldName === 'Title' && fieldValue) {
+        metadata.parentModel = fieldValue;
+      } else if (fieldName === 'Description' && fieldValue) {
+        metadata.notes = fieldValue;
+      } else if (fieldName === 'License' && fieldValue) {
+        metadata.license = fieldValue;
+      }
+    }
+  } catch (error) {
+    console.error('Error parsing 3MF model XML:', error);
+  }
+
+  return metadata;
+}
+
+// Helper function to extract metadata from a 3MF file
+async function extract3MFMetadata(filePath) {
+  try {
+    // Check if this is a zip entry
+    const pathInfo = parseZipPath(filePath);
+    let actualFilePath = filePath;
+    let shouldCleanup = false;
+    
+    if (pathInfo.isZipEntry) {
+      // Extract to temp file first
+      try {
+        actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+        shouldCleanup = true;
+      } catch (error) {
+        console.error('Error extracting zip entry for 3MF metadata:', error);
+        return null;
+      }
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return null;
+    }
+    
+    // Use JSZip to extract the 3MF file (which is a zip file)
+    const zip = new JSZip();
+    const data = await fs.promises.readFile(actualFilePath);
+    const contents = await zip.loadAsync(data);
+    
+    // Parse 3dmodel.model XML file to extract metadata
+    const modelXmlPath = '3D/3dmodel.model';
+    const altModelXmlPath = '/3D/3dmodel.model';
+    
+    // Try both path variations (with and without leading slash)
+    let modelXmlFile = contents.files[modelXmlPath] || contents.files[altModelXmlPath];
+    
+    if (modelXmlFile && !modelXmlFile.dir) {
+      const xmlContent = await modelXmlFile.async('string');
+      const parsedMetadata = parse3MFModelXML(xmlContent);
+      
+      // Clean up temp file if needed
+      if (shouldCleanup && actualFilePath !== filePath) {
+        try {
+          await fs.promises.unlink(actualFilePath);
+        } catch (cleanupError) {
+          console.error('Error cleaning up temp file:', cleanupError);
+        }
+      }
+      
+      return parsedMetadata;
+    } else {
+      // Clean up temp file if needed
+      if (shouldCleanup && actualFilePath !== filePath) {
+        try {
+          await fs.promises.unlink(actualFilePath);
+        } catch (cleanupError) {
+          console.error('Error cleaning up temp file:', cleanupError);
+        }
+      }
+      return null;
+    }
+  } catch (error) {
+    console.error('Error extracting 3MF metadata:', error);
+    return null;
+  }
+}
+
 ipcMain.handle('get3MFImages', async (event, filePath) => {
   // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
@@ -3962,6 +4414,107 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       const file = contents.files[filename];
       console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
     });
+    
+    // Parse 3dmodel.model XML file to extract metadata
+    try {
+      const modelXmlPath = '3D/3dmodel.model';
+      const altModelXmlPath = '/3D/3dmodel.model';
+      
+      // Try both path variations (with and without leading slash)
+      let modelXmlFile = contents.files[modelXmlPath] || contents.files[altModelXmlPath];
+      
+      if (modelXmlFile && !modelXmlFile.dir) {
+        console.log('Found 3dmodel.model file, parsing metadata...');
+        const xmlContent = await modelXmlFile.async('string');
+        const parsedMetadata = parse3MFModelXML(xmlContent);
+        
+        // Update database if we found any metadata
+        if (parsedMetadata.designer || parsedMetadata.parentModel || parsedMetadata.notes || parsedMetadata.license) {
+          console.log('Parsed metadata from 3dmodel.model:', parsedMetadata);
+          
+          // Use original filePath for database lookup (not actualFilePath which might be a temp file)
+          const dbFilePath = filePath;
+          
+          // Get the model from database to check existing values
+          let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(dbFilePath);
+          
+          // If model doesn't exist, create it (similar to add-multiple-thumbnails handler)
+          if (!existingModel) {
+            console.log('Model not found in database, creating entry with metadata...');
+            const fileName = path.basename(dbFilePath);
+            // Handle zip entry paths - extract just the entry name
+            const finalFileName = dbFilePath.includes('::') 
+              ? dbFilePath.split('::').pop() 
+              : fileName;
+            const dateAdded = new Date().toISOString();
+            
+            db.prepare(`
+              INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              dbFilePath,
+              finalFileName,
+              parsedMetadata.designer || null,
+              parsedMetadata.parentModel || null,
+              parsedMetadata.notes || null,
+              parsedMetadata.license || null,
+              dateAdded
+            );
+            
+            console.log(`Created model entry for ${dbFilePath} with metadata`);
+          } else {
+            // Model exists - only update fields that are empty/null in the database
+            const updates = {};
+            const conditions = [];
+            const values = [];
+            
+            if (parsedMetadata.designer && (!existingModel.designer || existingModel.designer.trim() === '')) {
+              updates.designer = parsedMetadata.designer;
+              values.push(parsedMetadata.designer);
+              conditions.push('designer = ?');
+            }
+            
+            if (parsedMetadata.parentModel && (!existingModel.parentModel || existingModel.parentModel.trim() === '')) {
+              updates.parentModel = parsedMetadata.parentModel;
+              values.push(parsedMetadata.parentModel);
+              conditions.push('parentModel = ?');
+            }
+            
+            if (parsedMetadata.notes && (!existingModel.notes || existingModel.notes.trim() === '')) {
+              updates.notes = parsedMetadata.notes;
+              values.push(parsedMetadata.notes);
+              conditions.push('notes = ?');
+            }
+            
+            if (parsedMetadata.license && (!existingModel.license || existingModel.license.trim() === '')) {
+              updates.license = parsedMetadata.license;
+              values.push(parsedMetadata.license);
+              conditions.push('license = ?');
+            }
+            
+            // Update database if we have any fields to update
+            if (Object.keys(updates).length > 0) {
+              values.push(dbFilePath);
+              const updateStmt = db.prepare(`
+                UPDATE models 
+                SET ${conditions.join(', ')} 
+                WHERE filePath = ?
+              `);
+              updateStmt.run(...values);
+              console.log(`Updated model metadata for ${dbFilePath}:`, updates);
+            } else {
+              console.log('Model already has values for all metadata fields, skipping update');
+            }
+          }
+        } else {
+          console.log('No metadata found in 3dmodel.model file');
+        }
+      } else {
+        console.log('3dmodel.model file not found in 3MF archive');
+      }
+    } catch (metadataError) {
+      console.warn('Error parsing 3MF metadata (continuing with thumbnail extraction):', metadataError);
+    }
     
     // Helper to check if file is an image and not a system file
     const isImage = (path) => {
@@ -4124,6 +4677,151 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
   } catch (error) {
     console.error('Error extracting STL from 3MF:', error);
     return null;
+  }
+});
+
+// Handler to pull metadata from 3MF files
+ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
+  try {
+    const filePathsArray = Array.isArray(filePaths) ? filePaths : [filePaths];
+    
+    // Filter to only 3MF files
+    const threeMFFiles = filePathsArray.filter(fp => {
+      const ext = path.extname(fp).toLowerCase();
+      // Handle zip entries - check the entry path extension
+      if (fp.includes('::')) {
+        const entryPath = fp.split('::')[1];
+        return path.extname(entryPath).toLowerCase() === '.3mf';
+      }
+      return ext === '.3mf';
+    });
+    
+    if (threeMFFiles.length === 0) {
+      throw new Error('No 3MF files selected');
+    }
+    
+    // Check existing models to see if any have data that will be overwritten
+    const modelsWithData = [];
+    for (const filePath of threeMFFiles) {
+      const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+      if (model) {
+        const hasData = (model.designer && model.designer.trim()) ||
+                       (model.parentModel && model.parentModel.trim()) ||
+                       (model.notes && model.notes.trim()) ||
+                       (model.license && model.license.trim());
+        if (hasData) {
+          modelsWithData.push({
+            filePath,
+            fileName: model.fileName || path.basename(filePath),
+            designer: model.designer,
+            parentModel: model.parentModel,
+            notes: model.notes,
+            license: model.license
+          });
+        }
+      }
+    }
+    
+    // Show confirmation dialog if any models have existing data
+    if (modelsWithData.length > 0) {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const message = modelsWithData.length === 1
+        ? `This will overwrite existing metadata for:\n\n${modelsWithData[0].fileName}\n\nExisting data:\n${modelsWithData[0].designer ? `Designer: ${modelsWithData[0].designer}\n` : ''}${modelsWithData[0].parentModel ? `Parent Model: ${modelsWithData[0].parentModel}\n` : ''}${modelsWithData[0].notes ? `Notes: ${modelsWithData[0].notes.substring(0, 50)}${modelsWithData[0].notes.length > 50 ? '...' : ''}\n` : ''}${modelsWithData[0].license ? `License: ${modelsWithData[0].license}\n` : ''}\n\nContinue?`
+        : `This will overwrite existing metadata for ${modelsWithData.length} model(s).\n\nContinue?`;
+      
+      const confirm = await dialog.showMessageBox(win, {
+        type: 'warning',
+        title: 'Confirm Metadata Overwrite',
+        message: message,
+        buttons: ['Yes', 'No'],
+        defaultId: 1,
+        cancelId: 1
+      });
+      
+      if (confirm.response !== 0) {
+        return { success: false, cancelled: true };
+      }
+    }
+    
+    // Process each file
+    const results = [];
+    let successCount = 0;
+    let errorCount = 0;
+    let noMetadataCount = 0;
+    
+    for (const filePath of threeMFFiles) {
+      try {
+        const metadata = await extract3MFMetadata(filePath);
+        
+        if (metadata && (metadata.designer || metadata.parentModel || metadata.notes || metadata.license)) {
+          // Get or create model in database
+          let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+          
+          if (!existingModel) {
+            // Create new model entry
+            const fileName = path.basename(filePath);
+            const finalFileName = filePath.includes('::') 
+              ? filePath.split('::').pop() 
+              : fileName;
+            const dateAdded = new Date().toISOString();
+            
+            db.prepare(`
+              INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              filePath,
+              finalFileName,
+              metadata.designer || null,
+              metadata.parentModel || null,
+              metadata.notes || null,
+              metadata.license || null,
+              dateAdded
+            );
+            
+            results.push({ filePath, success: true, action: 'created' });
+            successCount++;
+          } else {
+            // Update existing model - overwrite all fields
+            db.prepare(`
+              UPDATE models 
+              SET designer = ?, parentModel = ?, notes = ?, license = ?
+              WHERE filePath = ?
+            `).run(
+              metadata.designer || null,
+              metadata.parentModel || null,
+              metadata.notes || null,
+              metadata.license || null,
+              filePath
+            );
+            
+            results.push({ filePath, success: true, action: 'updated' });
+            successCount++;
+          }
+        } else {
+          results.push({ filePath, success: false, error: 'No metadata found in 3MF file' });
+          noMetadataCount++;
+        }
+      } catch (error) {
+        console.error(`Error processing ${filePath}:`, error);
+        results.push({ filePath, success: false, error: error.message });
+        errorCount++;
+      }
+    }
+    
+    // Refresh the grid
+    event.sender.send('refresh-grid');
+    
+    return {
+      success: true,
+      processed: threeMFFiles.length,
+      successCount,
+      errorCount,
+      noMetadataCount,
+      results
+    };
+  } catch (error) {
+    console.error('Error pulling 3MF metadata:', error);
+    throw error;
   }
 });
 
@@ -4853,6 +5551,18 @@ ipcMain.handle('get-models-without-thumbnails', async () => {
     return modelsWithoutThumbnails;
   } catch (error) {
     console.error('Error fetching models without thumbnails:', error);
+    return [];
+  }
+});
+
+ipcMain.handle('get-models-with-default-thumbnails', async () => {
+  try {
+    const modelsWithDefaultThumbnails = db.prepare(`
+      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
+    `).all();
+    return modelsWithDefaultThumbnails;
+  } catch (error) {
+    console.error('Error fetching models with default thumbnails:', error);
     return [];
   }
 });

@@ -66,6 +66,43 @@ function buildWithWSL() {
     process.exit(1);
   }
   
+  // Clean any existing native module builds to ensure fresh rebuild
+  console.log('Cleaning existing native module builds...');
+  try {
+    execSync(`wsl bash -c "cd '${wslProjectRoot}' && rm -rf node_modules/better-sqlite3/build"`, { stdio: 'inherit' });
+  } catch (error) {
+    // Ignore errors if directory doesn't exist
+  }
+  
+  // Explicitly rebuild native modules for Electron on Linux
+  // Use @electron/rebuild which is more reliable than electron-builder install-app-deps
+  console.log('Rebuilding native modules for Electron on Linux...');
+  try {
+    execSync(`wsl bash -c "cd '${wslProjectRoot}' && npx @electron/rebuild --version=\$(node -p 'require(\\\"electron/package.json\\\").version')"`, { stdio: 'inherit' });
+  } catch (error) {
+    console.error('Failed to rebuild native modules for Electron');
+    console.error('Trying alternative method...');
+    // Fallback to electron-builder install-app-deps
+    try {
+      execSync(`wsl bash -c "cd '${wslProjectRoot}' && npx electron-builder install-app-deps"`, { stdio: 'inherit' });
+    } catch (fallbackError) {
+      console.error('Both rebuild methods failed. Please ensure build tools are installed in WSL:');
+      console.error('  wsl sudo apt-get update');
+      console.error('  wsl sudo apt-get install -y build-essential python3');
+      process.exit(1);
+    }
+  }
+  
+  // Verify the native module was built correctly
+  console.log('Verifying native module build...');
+  try {
+    const nativeModulePath = `node_modules/better-sqlite3/build/Release/better_sqlite3.node`;
+    execSync(`wsl bash -c "cd '${wslProjectRoot}' && test -f '${nativeModulePath}' && file '${nativeModulePath}'"`, { stdio: 'inherit' });
+    console.log('✓ Native module built successfully');
+  } catch (error) {
+    console.warn('⚠ Warning: Could not verify native module build');
+  }
+  
   // Build the AppImage
   console.log('Building AppImage in WSL...\n');
   try {
@@ -114,6 +151,13 @@ COPY package*.json ./
 
 # Install dependencies
 RUN npm install && npm cache clean --force
+
+# Clean any existing native module builds to ensure fresh rebuild
+RUN rm -rf node_modules/better-sqlite3/build || true
+
+# Explicitly rebuild native modules for Electron on Linux
+# Use @electron/rebuild which is more reliable
+RUN npx @electron/rebuild --version=$(node -p 'require("electron/package.json").version') || npx electron-builder install-app-deps
 
 # Copy application files
 COPY . .

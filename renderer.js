@@ -1628,62 +1628,71 @@ window.addEventListener('focus', () => {
 });
 
 // Add or update the loadDuplicateFiles function
-async function loadDuplicateFiles() {
+async function loadDuplicateFiles(skipHashCheck = false) {
   try {
-    // First check for models without file hash
-    const modelsWithoutHashCount = await window.electron.getModelsWithoutHash();
-    
-    // If there are models without hash, ask the user if they want to generate hashes
-    if (modelsWithoutHashCount > 0) {
-      const response = await window.electron.showMessage(
-        'Generate File Hashes',
-        `${modelsWithoutHashCount} models don't have file hashes which are needed for de-duplication. Would you like to generate the hashes now?`,
-        ['Yes', 'No']
-      );
+    // First check for models without file hash (unless we're skipping the check)
+    if (!skipHashCheck) {
+      const modelsWithoutHashCount = await window.electron.getModelsWithoutHash();
       
-      if (response === 'Yes') {
-        // Show progress dialog
-        const progressDialog = document.createElement('dialog');
-        progressDialog.className = 'progress-dialog';
-        progressDialog.innerHTML = `
-          <h3>Generating File Hashes</h3>
-          <div class="progress-container">
-            <progress id="hash-progress" value="0" max="100"></progress>
-            <div id="hash-progress-text">0/${modelsWithoutHashCount}</div>
-          </div>
-          <p style="margin-top: 15px; color: #666;">
-            File hashes are needed for de-duplication. This may take some time for large files.
-          </p>
-        `;
-        document.body.appendChild(progressDialog);
-        progressDialog.showModal();
+      // If there are models without hash, ask the user if they want to generate hashes
+      if (modelsWithoutHashCount > 0) {
+        const response = await window.electron.showMessage(
+          'Generate File Hashes',
+          `${modelsWithoutHashCount} models don't have file hashes which are needed for de-duplication. Would you like to generate the hashes now?`,
+          ['Yes', 'No']
+        );
         
-        // Set up progress listener
-        window.electron.onHashGenerationProgress((progress) => {
-          const progressBar = document.getElementById('hash-progress');
-          const progressText = document.getElementById('hash-progress-text');
+        if (response === 'Yes') {
+          // Show progress dialog
+          const progressDialog = document.createElement('dialog');
+          progressDialog.className = 'progress-dialog';
+          progressDialog.innerHTML = `
+            <h3>Generating File Hashes</h3>
+            <div class="progress-container">
+              <progress id="hash-progress" value="0" max="100"></progress>
+              <div id="hash-progress-text">0/${modelsWithoutHashCount}</div>
+            </div>
+            <p style="margin-top: 15px; color: #666;">
+              File hashes are needed for de-duplication. This may take some time for large files.
+            </p>
+          `;
+          document.body.appendChild(progressDialog);
+          progressDialog.showModal();
           
-          if (progressBar && progressText) {
-            const percentage = (progress.processed / progress.total) * 100;
-            progressBar.value = percentage;
-            progressText.textContent = `${progress.processed}/${progress.total}`;
+          // Set up progress listener
+          let isCompleting = false; // Flag to prevent multiple completion calls
+          const progressListener = (progress) => {
+            const progressBar = document.getElementById('hash-progress');
+            const progressText = document.getElementById('hash-progress-text');
             
-            // Close dialog when complete
-            if (progress.processed >= progress.total) {
-              setTimeout(() => {
-                progressDialog.close();
-                progressDialog.remove();
-                
-                // Reload duplicate files now that we have generated hashes
-                loadDuplicateFiles();
-              }, 500);
+            if (progressBar && progressText) {
+              const percentage = (progress.processed / progress.total) * 100;
+              progressBar.value = percentage;
+              progressText.textContent = `${progress.processed}/${progress.total}`;
+              
+              // Close dialog when complete (only once)
+              if (progress.processed >= progress.total && !isCompleting) {
+                isCompleting = true;
+                setTimeout(() => {
+                  progressDialog.close();
+                  progressDialog.remove();
+                  
+                  // Reload duplicate files now that we have generated hashes
+                  // Skip hash check to prevent loop
+                  loadDuplicateFiles(true);
+                }, 500);
+              }
             }
-          }
-        });
-        
-        // Start hash generation
-        await window.electron.generateMissingHashes();
-        return; // Exit early - we'll reload when hash generation is complete
+          };
+          
+          // Set up the listener
+          window.electron.onHashGenerationProgress(progressListener);
+          
+          // Start hash generation
+          await window.electron.generateMissingHashes();
+          return; // Exit early - we'll reload when hash generation is complete
+        }
+        // If user clicked "No", continue to show duplicates for models that have hashes
       }
     }
     
@@ -2287,8 +2296,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const tag = document.createElement('div');
         tag.className = 'tag';
         tag.setAttribute('data-tag-name', selectedTag);
+        tag.setAttribute('title', selectedTag); // Show full tag name on hover
         tag.innerHTML = `
-          ${selectedTag}
+          <span class="tag-text">${selectedTag}</span>
           <span class="tag-remove">×</span>
         `;
         
@@ -2547,6 +2557,89 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add dismiss button handler
   document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
     welcomeDialog.close();
+  });
+
+  // Notes modal handlers
+  const notesModal = document.getElementById('notes-modal-dialog');
+  const notesModalTextarea = document.getElementById('notes-modal-textarea');
+  const openNotesModalButton = document.getElementById('open-notes-modal-button');
+  const saveNotesButton = document.getElementById('save-notes-button');
+  const cancelNotesButton = document.getElementById('cancel-notes-button');
+  const modelNotesTextarea = document.getElementById('model-notes');
+
+  // Open notes modal
+  openNotesModalButton?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Get fresh references to ensure we have the latest values
+    const currentNotesTextarea = document.getElementById('model-notes');
+    const currentModalTextarea = document.getElementById('notes-modal-textarea');
+    const currentModal = document.getElementById('notes-modal-dialog');
+    
+    if (currentModal && currentModalTextarea && currentNotesTextarea) {
+      // Always read the current value from the textarea
+      currentModalTextarea.value = currentNotesTextarea.value || '';
+      currentModal.showModal();
+      // Focus the textarea after a short delay to ensure modal is fully rendered
+      setTimeout(() => {
+        currentModalTextarea.focus();
+      }, 100);
+    }
+  });
+
+  // Save notes from modal
+  saveNotesButton?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    // Get fresh references to ensure we have the latest elements
+    const currentModalTextarea = document.getElementById('notes-modal-textarea');
+    const currentNotesTextarea = document.getElementById('model-notes');
+    const currentModal = document.getElementById('notes-modal-dialog');
+    
+    if (currentModal && currentModalTextarea && currentNotesTextarea) {
+      const newValue = currentModalTextarea.value || '';
+      // Update the main textarea with the new value
+      currentNotesTextarea.value = newValue;
+      
+      // Trigger change event to auto-save
+      const changeEvent = new Event('change', { bubbles: true });
+      currentNotesTextarea.dispatchEvent(changeEvent);
+      
+      currentModal.close();
+    }
+  });
+
+  // Cancel notes modal
+  cancelNotesButton?.addEventListener('click', () => {
+    if (notesModal) {
+      notesModal.close();
+    }
+  });
+
+  // Handle form submission (e.g., pressing Enter in textarea)
+  const notesModalForm = notesModal?.querySelector('form');
+  notesModalForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    // Get fresh references
+    const currentModalTextarea = document.getElementById('notes-modal-textarea');
+    const currentNotesTextarea = document.getElementById('model-notes');
+    
+    if (currentModalTextarea && currentNotesTextarea) {
+      const newValue = currentModalTextarea.value || '';
+      currentNotesTextarea.value = newValue;
+      
+      // Trigger change event to auto-save
+      const changeEvent = new Event('change', { bubbles: true });
+      currentNotesTextarea.dispatchEvent(changeEvent);
+      
+      notesModal.close();
+    }
+  });
+
+  // Close modal on backdrop click
+  notesModal?.addEventListener('click', (e) => {
+    if (e.target === notesModal) {
+      notesModal.close();
+    }
   });
 
   // Update the save model button handler (single edit)
@@ -3472,8 +3565,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       filteredTags.forEach(tag => {
         const tagElement = document.createElement('div');
         tagElement.className = 'tag';
+        tagElement.setAttribute('title', tag.name); // Show full tag name on hover
         tagElement.innerHTML = `
-          ${tag.name}
+          <span class="tag-text">${tag.name}</span>
           <span class="tag-count">${tag.model_count}</span>
           <span class="tag-remove">×</span>
         `;
@@ -6647,6 +6741,73 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
+  // Add download handler for server/docker mode (only register once)
+  if (!window._downloadHandlerRegistered) {
+    window._downloadHandlerRegistered = true;
+    const activeDownloads = new Set(); // Track active downloads to prevent duplicates
+    
+    window.electron.on('download-model', async (filePath) => {
+      // Prevent duplicate downloads of the same file
+      if (activeDownloads.has(filePath)) {
+        console.log('Download already in progress for:', filePath);
+        return;
+      }
+      
+      activeDownloads.add(filePath);
+      console.log('Download handler triggered with filePath:', filePath);
+      
+      try {
+        // Check if in server mode
+        const serverMode = await window.electron.isServerMode().catch(() => false);
+        if (!serverMode) {
+          console.error('Download only available in server mode');
+          alert('Download is only available in server mode');
+          return;
+        }
+
+        console.log('Server mode confirmed, constructing download URL');
+        // Construct download URL - use /api/download/ endpoint which handles zip entries
+        const encodedPath = encodeURIComponent(filePath);
+        const downloadUrl = `/api/download/${encodedPath}`;
+        console.log('Download URL:', downloadUrl);
+
+        // Try using direct link first (simpler and more reliable)
+        // This works better when the server sets Content-Disposition header
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = ''; // Let server set filename via Content-Disposition
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        
+        // Get filename from path for logging
+        let fileName = filePath;
+        if (fileName.includes('::')) {
+          fileName = fileName.split('::')[1] || fileName.split('::')[0];
+        }
+        fileName = fileName.split(/[/\\]/).pop() || fileName;
+        
+        console.log('Triggering download via direct link for:', fileName);
+        link.click();
+        
+        // Clean up link after a short delay
+        setTimeout(() => {
+          if (document.body.contains(link)) {
+            document.body.removeChild(link);
+          }
+          // Remove from active downloads after a delay to allow download to start
+          setTimeout(() => {
+            activeDownloads.delete(filePath);
+          }, 2000);
+        }, 100);
+      } catch (error) {
+        console.error('Error downloading file:', error);
+        activeDownloads.delete(filePath);
+        // Show error message to user
+        alert(`Error downloading file: ${error.message}`);
+      }
+    });
+  }
+
   // Add near the top of your DOMContentLoaded event listener
   document.addEventListener('DOMContentLoaded', async () => {
     // ... existing code ...
@@ -9093,8 +9254,9 @@ async function addTagToModel(tagName, containerId) {
   const tag = document.createElement('div');
   tag.className = 'tag';
   tag.setAttribute('data-tag-name', tagName);
+  tag.setAttribute('title', tagName); // Show full tag name on hover
   tag.innerHTML = `
-    ${tagName}
+    <span class="tag-text">${tagName}</span>
     <span class=\"tag-remove\">×</span>
   `;
 
@@ -9556,7 +9718,7 @@ function createListViewHeader() {
   designerHeader.style.alignItems = 'center';
   designerHeader.style.flexShrink = '0';
   designerHeader.style.width = '180px';
-  const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
+  const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#a855f7"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
   designerHeader.appendChild(designerIcon);
   const designerText = document.createElement('span');
   designerText.textContent = 'Designer';
@@ -11565,7 +11727,7 @@ function createModelItem(model, viewMode = null) {
     designerColumn.style.overflow = 'hidden';
     
     // Add designer icon
-    const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#e3e3e3"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
+    const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#a855f7"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
     designerColumn.appendChild(designerIcon);
     
     const designerText = document.createElement('span');
@@ -11632,6 +11794,7 @@ function createModelItem(model, viewMode = null) {
           const tagsSpan = tagsColumn.querySelector('.tags-info');
           if (tagsSpan) {
             tagsSpan.textContent = tagsText;
+            tagsSpan.setAttribute('title', tagsText); // Show full tag list on hover
             tagsSpan.style.color = '#aaa';
           }
         } else {
@@ -11647,6 +11810,9 @@ function createModelItem(model, viewMode = null) {
     const tagsSpan = document.createElement('span');
     tagsSpan.className = 'tags-info';
     tagsSpan.textContent = tagsDisplay || '—';
+    if (tagsDisplay) {
+      tagsSpan.setAttribute('title', tagsDisplay); // Show full tag list on hover
+    }
     tagsSpan.style.fontSize = '12px';
     tagsSpan.style.color = tagsDisplay ? '#aaa' : '#666';
     tagsSpan.style.overflow = 'hidden';
@@ -12061,7 +12227,7 @@ function createModelItem(model, viewMode = null) {
       // Tags already available, display them immediately
       tagsItem.innerHTML = `
         <span class="metadata-icon">🏷️</span>
-        <span class="metadata-value tags-info" style="color: #ccc">${tagsDisplay}</span>
+        <span class="metadata-value tags-info" style="color: #ccc" title="${tagsDisplay}">${tagsDisplay}</span>
       `;
       metadataContainer.appendChild(tagsItem);
     } else {
@@ -12090,6 +12256,7 @@ function createModelItem(model, viewMode = null) {
                 const tagsValueSpan = tagsItem.querySelector('.tags-info');
                 if (tagsValueSpan) {
                   tagsValueSpan.textContent = tagsText;
+                  tagsValueSpan.setAttribute('title', tagsText); // Show full tag list on hover
                   tagsValueSpan.style.color = '#ccc';
                 }
                 return;
@@ -12467,7 +12634,7 @@ function renderVirtualGrid(models) {
 
         const buffer = 2; // extra rows to render before and after the visible area
         // Account for vertical gap when calculating visible rows
-        const rowHeightWithGap = itemHeight + verticalGap;
+        const rowHeightWithGap = itemHeight + currentVerticalGap;
         const startRow = Math.max(0, Math.floor(scrollTop / rowHeightWithGap) - buffer);
         const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / rowHeightWithGap) + buffer);
 

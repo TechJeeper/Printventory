@@ -178,7 +178,8 @@ contextBridge.exposeInMainWorld('electron', {
   commitTransaction: () => ipcRenderer.invoke('database:commit-transaction'),
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),
   getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references'),
-  showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options)
+  showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options),
+  pull3MFMetadata: (filePaths) => ipcRenderer.invoke('pull-3mf-metadata', filePaths)
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {
