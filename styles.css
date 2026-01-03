@@ -1390,6 +1390,9 @@ header {
 
 #add-new-designer-button,
 #add-new-parent-button,
+#add-new-license-button,
+#bulk-add-designer-button,
+#bulk-add-parent-button,
 #add-tag-button {
   padding: 8px 16px;
   background: linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%);
@@ -1410,6 +1413,9 @@ header {
 
 #add-new-designer-button:hover,
 #add-new-parent-button:hover,
+#add-new-license-button:hover,
+#bulk-add-designer-button:hover,
+#bulk-add-parent-button:hover,
 #add-tag-button:hover {
   transform: translateY(-2px) scale(1.05);
   box-shadow: 0 6px 20px rgba(91, 159, 255, 0.4);
@@ -2451,7 +2457,8 @@ header {
   background-color: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  color: #aaa;
+  color: #fff;
+  font-weight: bold;
   cursor: pointer;
   font-size: 14px;
   transition: all 0.2s;
@@ -2463,7 +2470,8 @@ header {
 }
 
 .metadata-tab.active {
-  color: #007bff;
+  color: #fff;
+  font-weight: bold;
   border-bottom-color: #007bff;
   background-color: rgba(0, 123, 255, 0.1);
 }
@@ -3637,15 +3645,52 @@ header {
 }
 
 .slicer-entry .input-with-icon {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
+  position: relative;
+  width: 100%;
+}
+
+.slicer-entry .input-with-icon input {
+  padding: 12px 90px 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  transition: all 0.3s ease;
+  box-sizing: border-box;
+  margin-bottom: 0;
+}
+
+.slicer-entry .input-with-icon input:focus {
+  outline: none;
+  border-color: #00d4ff;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1), 0 4px 12px rgba(0, 212, 255, 0.2);
 }
 
 .slicer-entry .icon-button {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  margin: 0;
+}
+
+.slicer-entry .browse-slicer-button {
+  right: 44px;
+  z-index: 10;
+}
+
+.slicer-entry .remove-slicer-button {
+  right: 4px;
+  z-index: 11;
 }
 
 .remove-slicer-button {

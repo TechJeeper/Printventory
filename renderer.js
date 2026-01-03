@@ -1627,15 +1627,31 @@ window.addEventListener('focus', () => {
   }
 });
 
+// Flag to prevent multiple hash generation dialogs from showing
+let isHashDialogShowing = false;
+// Flag to track if we're currently checking for hashes (prevents race conditions)
+let isCheckingForHashes = false;
+
+// Flag to prevent multiple thumbnail generation dialogs from showing
+let isThumbnailDialogShowing = false;
+
 // Add or update the loadDuplicateFiles function
 async function loadDuplicateFiles(skipHashCheck = false) {
   try {
     // First check for models without file hash (unless we're skipping the check)
     if (!skipHashCheck) {
+      // Check if a hash dialog is already showing or if we're currently checking
+      if (isHashDialogShowing || isCheckingForHashes) {
+        return; // Exit early if dialog is already showing or check is in progress
+      }
+      
+      isCheckingForHashes = true; // Set flag before checking
       const modelsWithoutHashCount = await window.electron.getModelsWithoutHash();
+      isCheckingForHashes = false; // Reset flag after checking
       
       // If there are models without hash, ask the user if they want to generate hashes
       if (modelsWithoutHashCount > 0) {
+        isHashDialogShowing = true; // Set flag before showing dialog
         const response = await window.electron.showMessage(
           'Generate File Hashes',
           `${modelsWithoutHashCount} models don't have file hashes which are needed for de-duplication. Would you like to generate the hashes now?`,
@@ -1677,6 +1693,9 @@ async function loadDuplicateFiles(skipHashCheck = false) {
                   progressDialog.close();
                   progressDialog.remove();
                   
+                  // Reset flag after hash generation completes
+                  isHashDialogShowing = false;
+                  
                   // Reload duplicate files now that we have generated hashes
                   // Skip hash check to prevent loop
                   loadDuplicateFiles(true);
@@ -1689,10 +1708,27 @@ async function loadDuplicateFiles(skipHashCheck = false) {
           window.electron.onHashGenerationProgress(progressListener);
           
           // Start hash generation
-          await window.electron.generateMissingHashes();
+          try {
+            await window.electron.generateMissingHashes();
+          } catch (error) {
+            console.error('Error generating hashes:', error);
+            // Reset flags on error
+            isHashDialogShowing = false;
+            isCheckingForHashes = false;
+            // Close progress dialog
+            progressDialog.close();
+            progressDialog.remove();
+            await window.electron.showMessage('Error', 'Failed to generate file hashes');
+            return;
+          }
           return; // Exit early - we'll reload when hash generation is complete
+        } else {
+          // If user clicked "No", reset flag and continue to show duplicates for models that have hashes
+          isHashDialogShowing = false;
         }
-        // If user clicked "No", continue to show duplicates for models that have hashes
+      } else {
+        // No models without hash, ensure flag is reset
+        isHashDialogShowing = false;
       }
     }
     
@@ -1846,6 +1882,9 @@ async function loadDuplicateFiles(skipHashCheck = false) {
     
   } catch (error) {
     console.error('Error loading duplicates:', error);
+    // Reset flags in case of error
+    isHashDialogShowing = false;
+    isCheckingForHashes = false;
     await window.electron.showMessage('Error', 'Failed to load duplicate files');
   }
 }
@@ -2960,8 +2999,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     tagDialog.close();
   });
 
-  // Add fetch button event listeners
-  document.getElementById('fetch-source-button')?.addEventListener('click', async () => {
+  // Add open in browser button event listeners
+  document.getElementById('open-source-button')?.addEventListener('click', async () => {
     const sourceInput = document.getElementById('model-source');
     const url = sourceInput.value.trim();
     
@@ -2971,152 +3010,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     try {
-      if (url.includes('thangs.com')) {
-        // Extract designer and model name from URL
-        const urlParts = url.split('/');
-        const designerIndex = urlParts.indexOf('designer');
-        
-        if (designerIndex !== -1 && designerIndex + 1 < urlParts.length) {
-          const designer = urlParts[designerIndex + 1];
-          
-          // Find the model name after "3d-model/"
-          const modelIndex = urlParts.indexOf('3d-model');
-          if (modelIndex !== -1 && modelIndex + 1 < urlParts.length) {
-            let modelName = urlParts[modelIndex + 1];
-            // Clean up the model name by replacing URL encoding
-            modelName = decodeURIComponent(modelName)
-              .replace(/-/g, ' ')  // Replace hyphens with spaces
-              .replace(/\.stl$|\.3mf$/i, ''); // Remove file extension if present
-            
-            // Update the designer field
-            const designerSelect = document.getElementById('model-designer');
-            if (!Array.from(designerSelect.options).some(opt => opt.value === designer)) {
-              const option = document.createElement('option');
-              option.value = designer;
-              option.textContent = designer;
-              designerSelect.appendChild(option);
-            }
-            designerSelect.value = designer;
-
-            // Update the parent model field
-            const parentSelect = document.getElementById('model-parent');
-            if (!Array.from(parentSelect.options).some(opt => opt.value === modelName)) {
-              const option = document.createElement('option');
-              option.value = modelName;
-              option.textContent = modelName;
-              parentSelect.appendChild(option);
-            }
-            parentSelect.value = modelName;
-
-            // Trigger auto-save for both fields
-            const filePath = getCurrentModelFilePath();
-            await autoSaveModel('designer', designer, filePath);
-            await autoSaveModel('parentModel', modelName, filePath);
-          }
-        }
-      } else if (url.includes('makerworld.com')) {
-        try {
-          // Use window.electron to fetch the page content to avoid CORS issues
-          const pageData = await window.electron.fetchMakerWorldPage(url);
-          
-          if (pageData) {
-            let designer = pageData.designer;
-            let modelName = pageData.modelName;
-
-            // Update the designer field
-            const designerSelect = document.getElementById('model-designer');
-            if (designer && !Array.from(designerSelect.options).some(opt => opt.value === designer)) {
-              const option = document.createElement('option');
-              option.value = designer;
-              option.textContent = designer;
-              designerSelect.appendChild(option);
-            }
-            if (designer) {
-              designerSelect.value = designer;
-            }
-
-            // Update the parent model field
-            const parentSelect = document.getElementById('model-parent');
-            if (modelName && !Array.from(parentSelect.options).some(opt => opt.value === modelName)) {
-              const option = document.createElement('option');
-              option.value = modelName;
-              option.textContent = modelName;
-              parentSelect.appendChild(option);
-            }
-            if (modelName) {
-              parentSelect.value = modelName;
-            }
-
-            // Trigger auto-save for both fields
-            const filePath = getCurrentModelFilePath();
-            if (designer) {
-              await autoSaveModel('designer', designer, filePath);
-            }
-            if (modelName) {
-              await autoSaveModel('parentModel', modelName, filePath);
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching MakerWorld page:', error);
-          await window.electron.showMessage('Error', 'Failed to fetch MakerWorld page details: ' + error.message);
-        }
-      } else {
-        await window.electron.showMessage('Error', 'Only Thangs.com and Makerworld.com URLs are currently supported');
+      // Validate URL format
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        await window.electron.showMessage('Error', 'Please enter a valid URL starting with http:// or https://');
+        return;
       }
+      
+      await window.electron.openExternal(url);
     } catch (error) {
-      console.error('Error fetching page:', error);
-      await window.electron.showMessage('Error', 'Failed to fetch page details: ' + error.message);
+      console.error('Error opening URL:', error);
+      await window.electron.showMessage('Error', 'Failed to open URL: ' + error.message);
     }
   });
 
-  document.getElementById('multi-fetch-source-button')?.addEventListener('click', async () => {
-    const sourceUrl = document.getElementById('multi-source').value.trim();
-    if (!sourceUrl || !sourceUrl.includes('thangs.com')) return;
+  document.getElementById('multi-open-source-button')?.addEventListener('click', async () => {
+    const sourceInput = document.getElementById('multi-source');
+    const url = sourceInput.value.trim();
+    
+    if (!url) {
+      await window.electron.showMessage('Error', 'Please enter a source URL');
+      return;
+    }
 
     try {
-      const urlParts = sourceUrl.split('/');
-      const designerIndex = urlParts.indexOf('designer');
-      
-      if (designerIndex !== -1 && designerIndex + 1 < urlParts.length) {
-        const designer = urlParts[designerIndex + 1];
-        
-        const modelIndex = urlParts.indexOf('3d-model');
-        if (modelIndex !== -1 && modelIndex + 1 < urlParts.length) {
-          let modelName = urlParts[modelIndex + 1];
-          modelName = decodeURIComponent(modelName)
-            .replace(/-/g, ' ')
-            .replace(/\.stl$|\.3mf$/i, '');
-
-          // Update multi-edit designer dropdown
-          const designerSelect = document.getElementById('multi-designer');
-          if (!Array.from(designerSelect.options).some(opt => opt.value === designer)) {
-            const option = document.createElement('option');
-            option.value = designer;
-            option.textContent = designer;
-            designerSelect.appendChild(option);
-          }
-          designerSelect.value = designer;
-
-          // Update multi-edit parent model dropdown
-          const parentSelect = document.getElementById('multi-parent');
-          if (!Array.from(parentSelect.options).some(opt => opt.value === modelName)) {
-            const option = document.createElement('option');
-            option.value = modelName;
-            option.textContent = modelName;
-            parentSelect.appendChild(option);
-          }
-          parentSelect.value = modelName;
-
-          // Save changes to all selected models
-          await autoSaveMultipleModels('designer', designer);
-          await autoSaveMultipleModels('parentModel', modelName);
-        }
+      // Validate URL format
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        await window.electron.showMessage('Error', 'Please enter a valid URL starting with http:// or https://');
+        return;
       }
+      
+      await window.electron.openExternal(url);
     } catch (error) {
-      console.error('Error fetching source data:', error);
-      await window.electron.showMessage('Error', 'Failed to fetch source details: ' + error.message);
+      console.error('Error opening URL:', error);
+      await window.electron.showMessage('Error', 'Failed to open URL: ' + error.message);
     }
   });
+
 
   // Add scan directory button event listener
   document.getElementById('scan-directory-button')?.addEventListener('click', async () => {
@@ -3761,10 +3690,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     metadataList.innerHTML = '';
     
     try {
-      // Get all metadata if we don't have it yet or if no search term
-      if (allMetadata.length === 0 || !searchTerm) {
-        allMetadata = await window.electron.getAllMetadata();
-      }
+      // Always refresh metadata to ensure we have the latest data
+      allMetadata = await window.electron.getAllMetadata();
       
       // Filter metadata by type and search term
       let filteredMetadata = allMetadata.filter(item => item.type === type);
@@ -3951,37 +3878,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     initializeMetadataSearch();
   });
 
-  // Add event listener for generating missing thumbnails
-  window.electron.onGenerateMissingThumbnails(async (_event) => {
-    try {
-      const modelsWithoutThumbs = await window.electron.getModelsWithDefaultThumbnails();
-      
-      if (modelsWithoutThumbs.length === 0) {
-        await window.electron.showMessage('Information', 'All models already have thumbnails. Nothing to generate.');
-        return;
-      }
-      
-      const userChoice = await window.electron.showMessage(
-        'Generate Thumbnails',
-        `${modelsWithoutThumbs.length} models need thumbnails. Would you like to generate them now?`,
-        ['Yes', 'No']
-      );
-      
-      if (userChoice === 'Yes') {
-        await generateThumbnailsForModels(modelsWithoutThumbs);
-        await window.electron.showMessage('Success', 'Thumbnail generation completed successfully.');
-        
-        // Refresh the grid to show the new thumbnails
-        const sortSelect = document.getElementById('sort-select');
-        const models = await window.electron.getAllModels(sortSelect.value);
-        await renderFiles(models);
-      }
-    } catch (error) {
-      console.error('Error generating missing thumbnails:', error);
-      await window.electron.showMessage('Error', 'Failed to generate thumbnails: ' + error.message);
-    }
-  });
-
   // Handle regenerate thumbnails from Tools menu
   window.electron.on('regenerate-thumbnails', async () => {
     try {
@@ -4022,6 +3918,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Handle generate missing thumbnails from Tools menu
   window.electron.on('generate-missing-thumbnails', async () => {
+    // Check if a thumbnail dialog is already showing
+    if (isThumbnailDialogShowing) {
+      return; // Exit early if dialog is already showing
+    }
+    
     try {
       // Get models without thumbnails (NULL, empty, or default '3d.png')
       const modelsWithoutThumbs = await window.electron.getModelsWithoutThumbnails();
@@ -4031,6 +3932,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
       
+      isThumbnailDialogShowing = true; // Set flag before showing dialog
       // Ask for user confirmation
       const userChoice = await window.electron.showMessage(
         'Generate Missing Thumbnails',
@@ -4051,15 +3953,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Generate thumbnails for models without them
         await generateThumbnailsForModels(fullModels);
         
+        isThumbnailDialogShowing = false; // Reset flag after generation completes
         await window.electron.showMessage('Success', 'Thumbnail generation completed successfully.');
         
         // Refresh the grid to show the new thumbnails
         const sortSelect = document.getElementById('sort-select');
         const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
         await renderFiles(models);
+      } else {
+        isThumbnailDialogShowing = false; // Reset flag if user clicks "No"
       }
     } catch (error) {
       console.error('Error generating missing thumbnails:', error);
+      isThumbnailDialogShowing = false; // Reset flag on error
       await window.electron.showMessage('Error', 'Failed to generate missing thumbnails: ' + error.message);
     }
   });
@@ -5715,6 +5621,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let batchTagGenerationInProgress = false;
   let expectedBatchCount = 0;
   let reviewDialogOpen = false;
+  let rateLimitDialogShown = false; // Track if rate limit dialog has been shown during current batch
 
   // Listen for the 'tags-generated' event from the main process
   window.electron.on('tags-generated', async (filePath, tags, errorMessage) => {
@@ -5726,7 +5633,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           ? errorMessage.split('Rate limit exceeded: ')[1]
           : 'API rate limit has been exceeded. Please try again later.';
         
-        await window.electron.showMessage('Rate Limit Exceeded', detailedMessage);
+        // Only show dialog once per batch operation to prevent flooding
+        const isBatchOperation = batchTagGenerationInProgress;
+        if (!isBatchOperation || !rateLimitDialogShown) {
+          await window.electron.showMessage('Rate Limit Exceeded', detailedMessage);
+          if (isBatchOperation) {
+            rateLimitDialogShown = true; // Mark as shown for this batch
+          }
+        }
         return;
       }
       
@@ -5807,6 +5721,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     expectedBatchCount = 1;
     pendingTagData = [modelData];
     reviewDialogOpen = false; // Reset dialog state
+    rateLimitDialogShown = false; // Reset rate limit dialog flag
     showTagPreviewDialog(pendingTagData);
   });
 
@@ -5816,6 +5731,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     expectedBatchCount = count;
     pendingTagData = [];
     reviewDialogOpen = false;
+    rateLimitDialogShown = false; // Reset rate limit dialog flag for new batch
     
     // Pre-populate with all models so they appear immediately
     if (filePaths && filePaths.length > 0) {
@@ -5847,6 +5763,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Listen for batch tag generation complete
   window.electron.on('batch-tag-generation-complete', async () => {
     batchTagGenerationInProgress = false;
+    rateLimitDialogShown = false; // Reset rate limit dialog flag when batch completes
     
     // Update the dialog one final time to show completion status
     if (reviewDialogOpen && pendingTagData.length > 0) {
@@ -10013,7 +9930,8 @@ async function handleDeleteSelected() {
       await renderFiles(models);
 
       // Reload and reopen the dedup dialog with fresh data
-      await loadDuplicateFiles();
+      // Skip hash check since we just deleted files and don't need to check again
+      await loadDuplicateFiles(true);
       dialog.showModal();
 
     } catch (error) {

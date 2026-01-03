@@ -1406,6 +1406,12 @@ function createWindow() {
             await shell.openExternal('https://discord.gg/JXcZHT77ua');
           }
         },
+        {
+          label: 'Patreon',
+          click: async () => {
+            await shell.openExternal('https://patreon.com/Printventory');
+          }
+        },
         { type: 'separator' },
         {
           label: 'Debug Console',
@@ -1564,6 +1570,12 @@ function createApplicationMenu() {
           label: 'Discord',
           click: async () => {
             await shell.openExternal('https://discord.gg/JXcZHT77ua');
+          }
+        },
+        {
+          label: 'Patreon',
+          click: async () => {
+            await shell.openExternal('https://patreon.com/Printventory');
           }
         },
         { type: 'separator' },
@@ -1750,9 +1762,25 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
     // First, collect files that would be deleted
     for (const model of allModels) {
       // Only check files that are within the scanned directory
-      const normalizedScanPath = normalizePath(scanDirectoryPath);
-      const normalizedFilePath = normalizePath(model.filePath);
-      if (normalizedFilePath.startsWith(normalizedScanPath)) {
+      // Normalize paths and ensure consistent trailing slash handling
+      let normalizedScanPath = normalizePath(scanDirectoryPath);
+      let normalizedFilePath = normalizePath(model.filePath);
+      
+      // Remove trailing slashes for consistent comparison (except for root paths)
+      if (normalizedScanPath.endsWith('/') && normalizedScanPath.length > 1) {
+        normalizedScanPath = normalizedScanPath.slice(0, -1);
+      }
+      if (normalizedFilePath.endsWith('/') && normalizedFilePath.length > 1) {
+        normalizedFilePath = normalizedFilePath.slice(0, -1);
+      }
+      
+      // Check if file is within the scanned directory
+      // Also handle case-insensitive comparison on Windows
+      const isWithinScanDir = process.platform === 'win32' 
+        ? normalizedFilePath.toLowerCase().startsWith(normalizedScanPath.toLowerCase())
+        : normalizedFilePath.startsWith(normalizedScanPath);
+      
+      if (isWithinScanDir) {
         const pathInfo = parseZipPath(model.filePath);
         let fileExists = false;
         
@@ -1766,10 +1794,36 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
           }
         } else {
           // For regular files, check if the file exists
-          fileExists = fs.existsSync(model.filePath);
+          // Use a more robust check that handles path normalization issues
+          try {
+            // First try the path as stored
+            try {
+              await fs.promises.access(model.filePath, fs.constants.F_OK);
+              fileExists = true;
+            } catch (accessError) {
+              // If access fails, try normalizing the path (handles forward/backslash issues)
+              const normalizedPath = path.normalize(model.filePath);
+              if (normalizedPath !== model.filePath) {
+                try {
+                  await fs.promises.access(normalizedPath, fs.constants.F_OK);
+                  fileExists = true;
+                } catch (normalizedError) {
+                  fileExists = false;
+                }
+              } else {
+                fileExists = false;
+              }
+            }
+          } catch (error) {
+            // If any error occurs during existence check, log it but don't throw
+            console.error(`Error checking file existence for ${model.filePath}:`, error);
+            fileExists = false;
+          }
         }
         
         if (!fileExists) {
+          // Log for debugging - can be removed in production if too verbose
+          debugLog(`File marked as non-existent: ${model.filePath}`);
           filesToDelete.push({
             filePath: model.filePath,
             id: model.id
