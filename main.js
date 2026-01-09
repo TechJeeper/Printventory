@@ -239,6 +239,8 @@ function debugLog(...args) {
 // Server mode detection
 const isServerMode = process.argv.includes('--server');
 let httpServer = null;
+let wss = null; // WebSocket server
+let wsClients = null; // WebSocket clients Set
 
 // UNC Path Validation Functions
 function isUncPath(path) {
@@ -583,9 +585,9 @@ function startHttpServer() {
   });
 
   // Create WebSocket server for IPC bridge
-  const wss = new WebSocket.Server({ server: httpServer });
+  wss = new WebSocket.Server({ server: httpServer });
   const pendingRequests = new Map();
-  const wsClients = new Set(); // Track all connected clients
+  wsClients = new Set(); // Track all connected clients
 
   wss.on('connection', (ws) => {
     console.log('WebSocket client connected');
@@ -812,6 +814,107 @@ function startHttpServer() {
   });
 }
 
+// Stop HTTP server function
+function stopHttpServer() {
+  return new Promise((resolve) => {
+    if (!httpServer) {
+      console.log('HTTP server is not running');
+      resolve();
+      return;
+    }
+
+    console.log('Stopping HTTP server...');
+
+    // Close all WebSocket connections gracefully
+    if (wsClients && wsClients.size > 0) {
+      console.log(`Closing ${wsClients.size} WebSocket connection(s)...`);
+      wsClients.forEach((ws) => {
+        try {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.close(1000, 'Server restarting');
+          }
+        } catch (error) {
+          console.error('Error closing WebSocket connection:', error);
+        }
+      });
+      wsClients.clear();
+    }
+
+    // Close WebSocket server
+    if (wss) {
+      try {
+        wss.close(() => {
+          console.log('WebSocket server closed');
+        });
+      } catch (error) {
+        console.error('Error closing WebSocket server:', error);
+      }
+      wss = null;
+    }
+
+    // Close HTTP server
+    httpServer.close(() => {
+      console.log('HTTP server closed');
+      httpServer = null;
+      wsClients = null;
+      // Clear global broadcast function
+      global.broadcastEvent = null;
+      global.sendEvent = null;
+      resolve();
+    });
+
+    // Force close after timeout if graceful shutdown doesn't complete
+    setTimeout(() => {
+      if (httpServer) {
+        console.log('Force closing HTTP server...');
+        try {
+          httpServer.close();
+        } catch (error) {
+          console.error('Error force closing server:', error);
+        }
+        httpServer = null;
+        wsClients = null;
+        wss = null;
+        global.broadcastEvent = null;
+        global.sendEvent = null;
+        resolve();
+      }
+    }, 5000);
+  });
+}
+
+// Restart HTTP server function
+async function restartHttpServer() {
+  try {
+    console.log('Restarting HTTP server...');
+    
+    // Return success immediately so response can be sent via WebSocket
+    // The actual restart will happen asynchronously after a delay
+    // to allow the WebSocket response to be sent first
+    setTimeout(async () => {
+      try {
+        // Stop the server
+        await stopHttpServer();
+        
+        // Wait a brief moment to ensure port is released
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Restart the server
+        startHttpServer();
+        
+        console.log('HTTP server restarted successfully');
+      } catch (error) {
+        console.error('Error during server restart:', error);
+      }
+    }, 100); // Small delay to allow WebSocket response to be sent
+    
+    return { success: true, message: 'Server restart initiated' };
+  } catch (error) {
+    console.error('Error initiating server restart:', error);
+    return { success: false, message: error.message || 'Failed to initiate server restart' };
+  }
+}
+
 let db;
 let mainWindow;
 let isGeneratingHashes = false; // Track hash generation state
@@ -819,6 +922,14 @@ let isGeneratingHashes = false; // Track hash generation state
 // IPC handler to expose server mode
 ipcMain.handle('is-server-mode', () => {
   return isServerMode;
+});
+
+// IPC handler to restart server
+ipcMain.handle('restart-server', async () => {
+  if (!isServerMode) {
+    return { success: false, message: 'Not in server mode' };
+  }
+  return await restartHttpServer();
 });
 
 // Handle single instance lock
@@ -1220,7 +1331,7 @@ function initializeDefaultSettings() {
       { key: 'tosAcceptedDate', value: null },
       { key: 'theme', value: 'light' },
       { key: 'apiKey', value: null },
-      { key: 'aiModel', value: 'gpt-4o-mini' },
+      { key: 'aiModel', value: 'gpt-5-nano' },
       { key: 'maxThumbnailSize', value: '300' },
       { key: 'maxConcurrentRenders', value: '3' },
       { key: 'lastVersionCheck', value: new Date().toISOString() },
@@ -1256,6 +1367,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: Math.min(1600, width),
     height: Math.min(1000, height),
+    backgroundColor: '#1e1e2e', // Match app's dark theme to prevent white flash
+    show: false, // Don't show until ready to prevent white flash
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -1347,22 +1460,23 @@ function createWindow() {
           click: () => mainWindow.webContents.send('start-print-roulette')
         },
         {
-          label: 'Backup/Restore',
-          click: () => mainWindow.webContents.send('open-backup-restore')
-        },
-        {
           label: 'De-Dup',
           click: () => {
             mainWindow.webContents.send('open-dedup');
           }
         },
+        { type: 'separator' },
         {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
         },
         {
-          label: 'Metadata Editor',
+          label: 'Metadata Manager',
           click: () => mainWindow.webContents.send('open-metadata-editor')
+        },
+        {
+          label: 'Backup/Restore',
+          click: () => mainWindow.webContents.send('open-backup-restore')
         },
         { type: 'separator' },
         {
@@ -1389,17 +1503,22 @@ function createWindow() {
           }
         },
         {
-          label: 'Server Mode Info',
+          label: 'Library Stats',
           click: () => {
-            mainWindow.webContents.send('open-server-mode-info');
+            mainWindow.webContents.send('open-stats');
           }
         },
         {
-          label: 'Support Printventory',
+          label: 'About',
           click: async () => {
-            await shell.openExternal('https://printventory.com/support.html');
+            // Send event to renderer to open the about dialog
+            mainWindow.webContents.send('open-about');
+            
+            // Log for debugging
+            console.log('About menu item clicked');
           }
         },
+        { type: 'separator' },
         {
           label: 'Discord',
           click: async () => {
@@ -1412,20 +1531,28 @@ function createWindow() {
             await shell.openExternal('https://patreon.com/Printventory');
           }
         },
+        {
+          label: 'Support Printventory',
+          click: async () => {
+            await shell.openExternal('https://printventory.com/support.html');
+          }
+        },
+        {
+          label: 'GitHub',
+          click: async () => {
+            await shell.openExternal('https://github.com/TechJeeper/Printventory');
+          }
+        },
         { type: 'separator' },
+        {
+          label: 'Server Mode Info',
+          click: async () => {
+            await shell.openExternal('https://github.com/TechJeeper/Printventory?tab=readme-ov-file#server-mode');
+          }
+        },
         {
           label: 'Debug Console',
           click: () => mainWindow.webContents.openDevTools()
-        },
-        {
-          label: 'About',
-          click: async () => {
-            // Send event to renderer to open the about dialog
-            mainWindow.webContents.send('open-about');
-            
-            // Log for debugging
-            console.log('About menu item clicked');
-          }
         }
       ]
     }
@@ -1513,22 +1640,23 @@ function createApplicationMenu() {
           click: () => mainWindow.webContents.send('start-print-roulette')
         },
         {
-          label: 'Backup/Restore',
-          click: () => mainWindow.webContents.send('open-backup-restore')
-        },
-        {
           label: 'De-Dup',
           click: () => {
             mainWindow.webContents.send('open-dedup');
           }
         },
+        { type: 'separator' },
         {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
         },
         {
-          label: 'Metadata Editor',
+          label: 'Metadata Manager',
           click: () => mainWindow.webContents.send('open-metadata-editor')
+        },
+        {
+          label: 'Backup/Restore',
+          click: () => mainWindow.webContents.send('open-backup-restore')
         },
         { type: 'separator' },
         {
@@ -1555,17 +1683,22 @@ function createApplicationMenu() {
           }
         },
         {
-          label: 'Server Mode Info',
+          label: 'Library Stats',
           click: () => {
-            mainWindow.webContents.send('open-server-mode-info');
+            mainWindow.webContents.send('open-stats');
           }
         },
         {
-          label: 'Support Printventory',
+          label: 'About',
           click: async () => {
-            await shell.openExternal('https://printventory.com/support.html');
+            // Send event to renderer to open the about dialog
+            mainWindow.webContents.send('open-about');
+            
+            // Log for debugging
+            console.log('About menu item clicked');
           }
         },
+        { type: 'separator' },
         {
           label: 'Discord',
           click: async () => {
@@ -1578,20 +1711,28 @@ function createApplicationMenu() {
             await shell.openExternal('https://patreon.com/Printventory');
           }
         },
+        {
+          label: 'Support Printventory',
+          click: async () => {
+            await shell.openExternal('https://printventory.com/support.html');
+          }
+        },
+        {
+          label: 'GitHub',
+          click: async () => {
+            await shell.openExternal('https://github.com/TechJeeper/Printventory');
+          }
+        },
         { type: 'separator' },
+        {
+          label: 'Server Mode Info',
+          click: async () => {
+            await shell.openExternal('https://github.com/TechJeeper/Printventory?tab=readme-ov-file#server-mode');
+          }
+        },
         {
           label: 'Debug Console',
           click: () => mainWindow.webContents.openDevTools()
-        },
-        {
-          label: 'About',
-          click: async () => {
-            // Send event to renderer to open the about dialog
-            mainWindow.webContents.send('open-about');
-            
-            // Log for debugging
-            console.log('About menu item clicked');
-          }
         }
       ]
     }
@@ -3221,6 +3362,69 @@ ipcMain.handle('get-all-metadata', async () => {
   }
 });
 
+ipcMain.handle('get-stats', async () => {
+  try {
+    // Total model count
+    const totalModels = db.prepare('SELECT COUNT(*) as count FROM models').get();
+    const totalCount = totalModels ? totalModels.count : 0;
+
+    // File type breakdown
+    const stlCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) LIKE '%.stl'").get();
+    const threeMfCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) LIKE '%.3mf'").get();
+    
+    // Archived models (models inside ZIP files)
+    const archivedCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE filePath LIKE '%::%'").get();
+    
+    // Models with metadata
+    const withDesigner = db.prepare("SELECT COUNT(*) as count FROM models WHERE designer IS NOT NULL AND designer != ''").get();
+    const withParentModel = db.prepare("SELECT COUNT(*) as count FROM models WHERE parentModel IS NOT NULL AND parentModel != ''").get();
+    const withLicense = db.prepare("SELECT COUNT(*) as count FROM models WHERE license IS NOT NULL AND license != ''").get();
+    const withTags = db.prepare("SELECT COUNT(DISTINCT model_id) as count FROM model_tags").get();
+    
+    // Tag statistics
+    const totalTags = db.prepare('SELECT COUNT(*) as count FROM tags').get();
+    const mostUsedTag = db.prepare(`
+      SELECT t.name, COUNT(mt.model_id) as count 
+      FROM tags t 
+      JOIN model_tags mt ON t.id = mt.tag_id 
+      GROUP BY t.id, t.name 
+      ORDER BY count DESC 
+      LIMIT 1
+    `).get();
+    
+    // Calculate percentages
+    const calculatePercentage = (count) => {
+      if (totalCount === 0) return 0;
+      return ((count / totalCount) * 100).toFixed(1);
+    };
+    
+    return {
+      totalModels: totalCount,
+      fileTypes: {
+        stl: stlCount ? stlCount.count : 0,
+        threeMf: threeMfCount ? threeMfCount.count : 0
+      },
+      archivedModels: archivedCount ? archivedCount.count : 0,
+      percentages: {
+        withDesigner: calculatePercentage(withDesigner ? withDesigner.count : 0),
+        withParentModel: calculatePercentage(withParentModel ? withParentModel.count : 0),
+        withLicense: calculatePercentage(withLicense ? withLicense.count : 0),
+        withTags: calculatePercentage(withTags ? withTags.count : 0)
+      },
+      tags: {
+        total: totalTags ? totalTags.count : 0,
+        mostUsed: mostUsedTag ? {
+          name: mostUsedTag.name,
+          count: mostUsedTag.count
+        } : null
+      }
+    };
+  } catch (error) {
+    console.error('Error getting stats:', error);
+    throw error;
+  }
+});
+
 ipcMain.handle('rename-metadata', async (event, type, oldName, newName) => {
   try {
     if (!oldName || !newName || oldName.trim() === '' || newName.trim() === '') {
@@ -3864,7 +4068,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             try {
               const metadata = await extract3MFMetadata(filePath);
               
-              if (metadata && (metadata.designer || metadata.parentModel || metadata.notes || metadata.license)) {
+              // Filter metadata based on user settings
+              const filteredMetadata = filter3MFMetadataBySettings(metadata);
+              
+              if (filteredMetadata && (filteredMetadata.designer || filteredMetadata.parentModel || filteredMetadata.notes || filteredMetadata.license)) {
                 // Get or create model in database
                 let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
                 
@@ -3882,10 +4089,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                   `).run(
                     filePath,
                     finalFileName,
-                    metadata.designer || null,
-                    metadata.parentModel || null,
-                    metadata.notes || null,
-                    metadata.license || null,
+                    filteredMetadata.designer || null,
+                    filteredMetadata.parentModel || null,
+                    filteredMetadata.notes || null,
+                    filteredMetadata.license || null,
                     dateAdded
                   );
                   
@@ -3898,10 +4105,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                     SET designer = ?, parentModel = ?, notes = ?, license = ?
                     WHERE filePath = ?
                   `).run(
-                    metadata.designer || null,
-                    metadata.parentModel || null,
-                    metadata.notes || null,
-                    metadata.license || null,
+                    filteredMetadata.designer || null,
+                    filteredMetadata.parentModel || null,
+                    filteredMetadata.notes || null,
+                    filteredMetadata.license || null,
                     filePath
                   );
                   
@@ -4036,27 +4243,6 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     });
   }
 
-  // Add "Download" option for server/docker mode
-  if ((isServerMode || isDockerContainer()) && filePaths.length === 1) {
-    menuItems.push({
-      label: 'Download',
-      click: async () => {
-        try {
-          // Send download event to renderer
-          event.sender.send('download-model', filePaths[0]);
-        } catch (error) {
-          console.error('Error triggering download:', error);
-          dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
-            type: 'error',
-            title: 'Error',
-            message: 'Could not download file',
-            detail: error.message
-          });
-        }
-      }
-    });
-  }
-
   // Add separator before file operations
   menuItems.push({ type: 'separator' });
 
@@ -4165,7 +4351,20 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   );
 
   const menu = Menu.buildFromTemplate(menuItems);
-  menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
+  
+  // Get the window - use helper function that handles server mode
+  const win = getWindowFromEvent(event);
+  
+  // In Docker/server mode, use mainWindow if available, or popup without window parameter
+  if (win) {
+    menu.popup({ window: win });
+  } else if (mainWindow && !mainWindow.isDestroyed()) {
+    // Fallback to mainWindow in server/Docker mode
+    menu.popup({ window: mainWindow });
+  } else {
+    // Last resort: popup without window (uses current focused window)
+    menu.popup();
+  }
 });
 
 // Update the deleteFile function
@@ -4313,6 +4512,47 @@ async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
   }
 }
 
+// Helper function to clean HTML entities and special characters from description text
+function cleanDescriptionText(text) {
+  if (!text) return text;
+  
+  let cleaned = text;
+  
+  // First, decode double-encoded HTML entities (e.g., &amp;lt; becomes &lt;, &amp;#34; becomes &#34;)
+  // This handles cases where entities are encoded multiple times
+  let previousCleaned = '';
+  while (cleaned !== previousCleaned) {
+    previousCleaned = cleaned;
+    cleaned = cleaned.replace(/&amp;(#?\w+;)/g, '&$1');
+  }
+  
+  // Decode common HTML entities
+  cleaned = cleaned.replace(/&lt;/g, '<');
+  cleaned = cleaned.replace(/&gt;/g, '>');
+  cleaned = cleaned.replace(/&quot;/g, '"');
+  cleaned = cleaned.replace(/&#34;/g, '"');
+  cleaned = cleaned.replace(/&#39;/g, "'");
+  cleaned = cleaned.replace(/&apos;/g, "'");
+  cleaned = cleaned.replace(/&nbsp;/g, ' ');
+  cleaned = cleaned.replace(/&#160;/g, ' ');
+  cleaned = cleaned.replace(/&amp;/g, '&');
+  
+  // Remove HTML tags (including nested tags and multiline)
+  cleaned = cleaned.replace(/<[^>]*>/g, '');
+  
+  // Decode any remaining numeric entities (decimal and hexadecimal)
+  cleaned = cleaned.replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(parseInt(dec, 10)));
+  cleaned = cleaned.replace(/&#x([0-9a-fA-F]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)));
+  
+  // Clean up whitespace - replace multiple spaces/newlines/tabs with single space
+  cleaned = cleaned.replace(/\s+/g, ' ');
+  
+  // Trim leading/trailing whitespace
+  cleaned = cleaned.trim();
+  
+  return cleaned;
+}
+
 // Helper function to parse 3MF model XML and extract metadata
 function parse3MFModelXML(xmlContent) {
   const metadata = {
@@ -4325,12 +4565,16 @@ function parse3MFModelXML(xmlContent) {
   try {
     // Extract metadata values using regex
     // Pattern: <metadata name="FieldName">value</metadata>
-    const metadataPattern = /<metadata\s+name="([^"]+)"[^>]*>([^<]*)<\/metadata>/gi;
+    // Updated to handle multiline content and CDATA sections
+    const metadataPattern = /<metadata\s+name="([^"]+)"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/metadata>/gis;
     let match;
 
     while ((match = metadataPattern.exec(xmlContent)) !== null) {
       const fieldName = match[1].trim();
-      const fieldValue = match[2].trim();
+      let fieldValue = match[2].trim();
+      
+      // If the value is in a CDATA section, it's already extracted by the regex
+      // Otherwise, handle any remaining encoding
 
       // Map XML metadata names to database fields
       if (fieldName === 'Designer' && fieldValue) {
@@ -4338,7 +4582,7 @@ function parse3MFModelXML(xmlContent) {
       } else if (fieldName === 'Title' && fieldValue) {
         metadata.parentModel = fieldValue;
       } else if (fieldName === 'Description' && fieldValue) {
-        metadata.notes = fieldValue;
+        metadata.notes = cleanDescriptionText(fieldValue);
       } else if (fieldName === 'License' && fieldValue) {
         metadata.license = fieldValue;
       }
@@ -4348,6 +4592,44 @@ function parse3MFModelXML(xmlContent) {
   }
 
   return metadata;
+}
+
+// Helper function to filter 3MF metadata based on user settings
+function filter3MFMetadataBySettings(metadata) {
+  const filtered = {
+    designer: null,
+    parentModel: null,
+    notes: null,
+    license: null
+  };
+  
+  try {
+    // Get settings from database (default to '1' if not set)
+    const enableDesigner = db.prepare('SELECT value FROM settings WHERE key = ?').get('enable3MFDesigner');
+    const enableParentModel = db.prepare('SELECT value FROM settings WHERE key = ?').get('enable3MFParentModel');
+    const enableLicense = db.prepare('SELECT value FROM settings WHERE key = ?').get('enable3MFLicense');
+    const enableNotes = db.prepare('SELECT value FROM settings WHERE key = ?').get('enable3MFNotes');
+    
+    // Include field if setting is '1' or not set (default enabled)
+    if (metadata.designer && (enableDesigner?.value === '1' || !enableDesigner)) {
+      filtered.designer = metadata.designer;
+    }
+    if (metadata.parentModel && (enableParentModel?.value === '1' || !enableParentModel)) {
+      filtered.parentModel = metadata.parentModel;
+    }
+    if (metadata.license && (enableLicense?.value === '1' || !enableLicense)) {
+      filtered.license = metadata.license;
+    }
+    if (metadata.notes && (enableNotes?.value === '1' || !enableNotes)) {
+      filtered.notes = metadata.notes;
+    }
+  } catch (error) {
+    console.error('Error filtering 3MF metadata by settings:', error);
+    // On error, return original metadata (fail open)
+    return metadata;
+  }
+  
+  return filtered;
 }
 
 // Helper function to extract metadata from a 3MF file
@@ -4482,9 +4764,12 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
         const xmlContent = await modelXmlFile.async('string');
         const parsedMetadata = parse3MFModelXML(xmlContent);
         
+        // Filter metadata based on user settings
+        const filteredMetadata = filter3MFMetadataBySettings(parsedMetadata);
+        
         // Update database if we found any metadata
-        if (parsedMetadata.designer || parsedMetadata.parentModel || parsedMetadata.notes || parsedMetadata.license) {
-          console.log('Parsed metadata from 3dmodel.model:', parsedMetadata);
+        if (filteredMetadata.designer || filteredMetadata.parentModel || filteredMetadata.notes || filteredMetadata.license) {
+          console.log('Parsed metadata from 3dmodel.model:', filteredMetadata);
           
           // Use original filePath for database lookup (not actualFilePath which might be a temp file)
           const dbFilePath = filePath;
@@ -4508,10 +4793,10 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
             `).run(
               dbFilePath,
               finalFileName,
-              parsedMetadata.designer || null,
-              parsedMetadata.parentModel || null,
-              parsedMetadata.notes || null,
-              parsedMetadata.license || null,
+              filteredMetadata.designer || null,
+              filteredMetadata.parentModel || null,
+              filteredMetadata.notes || null,
+              filteredMetadata.license || null,
               dateAdded
             );
             
@@ -4522,27 +4807,27 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
             const conditions = [];
             const values = [];
             
-            if (parsedMetadata.designer && (!existingModel.designer || existingModel.designer.trim() === '')) {
-              updates.designer = parsedMetadata.designer;
-              values.push(parsedMetadata.designer);
+            if (filteredMetadata.designer && (!existingModel.designer || existingModel.designer.trim() === '')) {
+              updates.designer = filteredMetadata.designer;
+              values.push(filteredMetadata.designer);
               conditions.push('designer = ?');
             }
             
-            if (parsedMetadata.parentModel && (!existingModel.parentModel || existingModel.parentModel.trim() === '')) {
-              updates.parentModel = parsedMetadata.parentModel;
-              values.push(parsedMetadata.parentModel);
+            if (filteredMetadata.parentModel && (!existingModel.parentModel || existingModel.parentModel.trim() === '')) {
+              updates.parentModel = filteredMetadata.parentModel;
+              values.push(filteredMetadata.parentModel);
               conditions.push('parentModel = ?');
             }
             
-            if (parsedMetadata.notes && (!existingModel.notes || existingModel.notes.trim() === '')) {
-              updates.notes = parsedMetadata.notes;
-              values.push(parsedMetadata.notes);
+            if (filteredMetadata.notes && (!existingModel.notes || existingModel.notes.trim() === '')) {
+              updates.notes = filteredMetadata.notes;
+              values.push(filteredMetadata.notes);
               conditions.push('notes = ?');
             }
             
-            if (parsedMetadata.license && (!existingModel.license || existingModel.license.trim() === '')) {
-              updates.license = parsedMetadata.license;
-              values.push(parsedMetadata.license);
+            if (filteredMetadata.license && (!existingModel.license || existingModel.license.trim() === '')) {
+              updates.license = filteredMetadata.license;
+              values.push(filteredMetadata.license);
               conditions.push('license = ?');
             }
             
@@ -4807,7 +5092,10 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
       try {
         const metadata = await extract3MFMetadata(filePath);
         
-        if (metadata && (metadata.designer || metadata.parentModel || metadata.notes || metadata.license)) {
+        // Filter metadata based on user settings
+        const filteredMetadata = filter3MFMetadataBySettings(metadata);
+        
+        if (filteredMetadata && (filteredMetadata.designer || filteredMetadata.parentModel || filteredMetadata.notes || filteredMetadata.license)) {
           // Get or create model in database
           let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
           
@@ -4825,10 +5113,10 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
             `).run(
               filePath,
               finalFileName,
-              metadata.designer || null,
-              metadata.parentModel || null,
-              metadata.notes || null,
-              metadata.license || null,
+              filteredMetadata.designer || null,
+              filteredMetadata.parentModel || null,
+              filteredMetadata.notes || null,
+              filteredMetadata.license || null,
               dateAdded
             );
             
@@ -4841,10 +5129,10 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
               SET designer = ?, parentModel = ?, notes = ?, license = ?
               WHERE filePath = ?
             `).run(
-              metadata.designer || null,
-              metadata.parentModel || null,
-              metadata.notes || null,
-              metadata.license || null,
+              filteredMetadata.designer || null,
+              filteredMetadata.parentModel || null,
+              filteredMetadata.notes || null,
+              filteredMetadata.license || null,
               filePath
             );
             
@@ -5583,9 +5871,9 @@ function getSettings() {
   
   return {
     apiKey: apiKeyRow ? apiKeyRow.value : null,
-    apiEndpoint: apiEndpointRow ? apiEndpointRow.value : 'https://api.openai.com/v1',
-    aiModel: aiModelRow ? aiModelRow.value : 'gpt-4o-mini',
-    aiService: aiServiceRow ? aiServiceRow.value : 'openai',
+    apiEndpoint: apiEndpointRow ? apiEndpointRow.value : 'https://js.puter.com/v2/',
+    aiModel: aiModelRow ? aiModelRow.value : 'gpt-5-nano',
+    aiService: aiServiceRow ? aiServiceRow.value : 'puter',
     aiTagMaxTags: aiTagMaxTagsRow ? parseInt(aiTagMaxTagsRow.value) || 10 : 10,
     aiTagUseCategories: aiTagUseCategoriesRow ? aiTagUseCategoriesRow.value === '1' : false,
     aiTagUseJsonResponse: true, // Always use JSON response format

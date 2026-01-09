@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "1.26.2",
+  "version": "1.29.0",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -12,7 +12,7 @@
     "build:linux": "node scripts/build-linux-appimage.js",
     "build:linux:internal": "electron-builder --linux --x64",
     "build:docker": "node scripts/create-docker-distribution.js",
-    "docker:build": "nod e scripts/docker-hub-push.js build",
+    "docker:build": "node scripts/docker-hub-push.js build",
     "docker:tag": "node scripts/docker-hub-push.js tag",
     "docker:push": "node scripts/docker-hub-push.js push",
     "docker:push:version": "node scripts/docker-hub-push.js push-version",
@@ -21,7 +21,7 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "TechJeeper Designs",
-  "license": "ISC",
+  "license": "MIT",
   "build": {
     "appId": "com.printventory.app",
     "mac": {

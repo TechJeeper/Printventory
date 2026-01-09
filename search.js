@@ -318,7 +318,7 @@ export function updateFilterIndicator(count) {
   });
 }
 
-export function initializeCombinedSearch() {
+export async function initializeCombinedSearch() {
   const searchInput = document.getElementById("search-filter-input");
   const searchButton = document.getElementById("filter-search-button");
   const clearButton = document.getElementById("clear-filter-search-button");
@@ -352,13 +352,40 @@ export function initializeCombinedSearch() {
   // Handle sort-select separately
   const sortSelect = document.getElementById('sort-select');
   if (sortSelect) {
+    // Preserve the current value before cloning
+    const currentValue = sortSelect.value;
+    
     // Remove any existing event listeners
     const newSortSelect = sortSelect.cloneNode(true);
     sortSelect.parentNode.replaceChild(newSortSelect, sortSelect);
     
+    // Load saved sort preference and set it (this will override the current value if a saved preference exists)
+    const savedSortOption = await window.electron.getSetting('sortOption');
+    if (savedSortOption) {
+      // Validate that the saved option is a valid sort option
+      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc'];
+      if (validOptions.includes(savedSortOption)) {
+        newSortSelect.value = savedSortOption;
+      } else {
+        // If saved value is invalid, use the current value
+        newSortSelect.value = currentValue;
+      }
+    } else {
+      // If no saved preference, use the current value (which might be the default)
+      newSortSelect.value = currentValue;
+    }
+    
     // Add new event listener specifically for sort
     newSortSelect.addEventListener('change', async (e) => {
-      console.log(`Sort changed: ${e.target.value}`);
+      const sortValue = e.target.value;
+      console.log(`Sort changed: ${sortValue}`);
+      
+      // Save the sort preference to the database
+      try {
+        await window.electron.saveSetting('sortOption', sortValue);
+      } catch (error) {
+        console.error('Error saving sort preference:', error);
+      }
       
       // Just re-run performCombinedSearch which will use the current sort option
       await performCombinedSearch();
@@ -444,9 +471,9 @@ export function initializeCombinedSearch() {
 }
 
 // Make sure renderFiles is accessible
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   console.log("Initializing combined search from search.js");
-  initializeCombinedSearch();
+  await initializeCombinedSearch();
   
   // Ensure renderFiles is accessible
   if (typeof renderFiles === 'function') {

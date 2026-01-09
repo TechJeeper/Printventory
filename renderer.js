@@ -639,6 +639,7 @@ async function updateModelElement(filePath) {
         if (designerValueSpan) {
           designerValueSpan.textContent = hasDesigner ? designerValue : '—';
           designerValueSpan.style.color = hasDesigner ? '#ccc' : '#666';
+          designerValueSpan.setAttribute('title', hasDesigner ? designerValue : '');
           console.log('updateModelElement: Updated designer to', designerValueSpan.textContent);
         }
         // Update clickability
@@ -683,6 +684,7 @@ async function updateModelElement(filePath) {
         if (sourceValueSpan) {
           sourceValueSpan.textContent = sourceValue || '—';
           sourceValueSpan.style.color = sourceValue ? '#ccc' : '#666';
+          sourceValueSpan.setAttribute('title', sourceValue || '');
           console.log('updateModelElement: Updated source to', sourceValueSpan.textContent);
         }
       } else {
@@ -707,6 +709,7 @@ async function updateModelElement(filePath) {
         if (parentValueSpan) {
           parentValueSpan.textContent = parentValue || '—';
           parentValueSpan.style.color = parentValue ? '#ccc' : '#666';
+          parentValueSpan.setAttribute('title', parentValue || '');
           console.log('updateModelElement: Updated parentModel to', parentValueSpan.textContent);
         }
         // Update clickability
@@ -751,6 +754,7 @@ async function updateModelElement(filePath) {
         if (licenseValueSpan) {
           licenseValueSpan.textContent = licenseValue || '—';
           licenseValueSpan.style.color = licenseValue ? '#ccc' : '#666';
+          licenseValueSpan.setAttribute('title', licenseValue || '');
           console.log('updateModelElement: Updated license to', licenseValueSpan.textContent);
         }
         // Update clickability
@@ -794,6 +798,7 @@ async function updateModelElement(filePath) {
               const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
               if (tagsValueSpan) {
                 tagsValueSpan.textContent = tagsText;
+                tagsValueSpan.setAttribute('title', tagsText);
                 tagsValueSpan.style.color = '#ccc';
               }
             }
@@ -803,6 +808,7 @@ async function updateModelElement(filePath) {
         if (tagsValueSpan) {
           tagsValueSpan.textContent = tagsDisplay || '—';
           tagsValueSpan.style.color = tagsDisplay ? '#ccc' : '#666';
+          tagsValueSpan.setAttribute('title', tagsDisplay || '');
         } else {
           console.warn('Tags value span not found in tags item');
         }
@@ -1280,12 +1286,13 @@ async function showModelDetails(filePath) {
           await populateModelLicenseDropdown(null, 'multi-license');
           await populateParentModelDropdown(null, 'multi-parent');
           await populateTagSelect('multi-tag-select', 'multi-tags');
+          await populateRemoveTagSelect();
         } catch (error) {
           console.error('Error populating multi-edit dropdowns:', error);
         }
         // ****************************************
 
-        showMultiEditPanel(); // *** ADDED CALL TO ATTACH LISTENERS ***
+        await showMultiEditPanel(); // *** ADDED CALL TO ATTACH LISTENERS ***
         
         // Update the selected count
         updateSelectedCount();
@@ -1496,6 +1503,22 @@ async function showModelDetails(filePath) {
       if (!element) return;
 
       const handler = async (e) => {
+        // Verify that we still have a valid model selected before saving
+        // Check both the path tree container and the current model details path
+        const pathTreeContainer = document.getElementById('path-tree-container');
+        const pathFromContainer = pathTreeContainer?.getAttribute('data-file-path') || '';
+        const currentPath = pathFromContainer || getCurrentModelFilePath() || currentModelDetailsPath;
+        
+        // If no path exists or it doesn't match the original filePath, don't save
+        if (!currentPath || currentPath !== filePath || !pathFromContainer) {
+          console.log('No valid model selected, ignoring checkbox change');
+          // Revert the checkbox to its previous state
+          if (config.type === 'checkbox') {
+            e.target.checked = !e.target.checked;
+          }
+          return;
+        }
+        
         const value = config.type === 'checkbox' ? e.target.checked : e.target.value;
         await autoSaveModel(config.field, value, filePath);
       };
@@ -1528,9 +1551,10 @@ async function showModelDetails(filePath) {
     // Show the details panel
     detailsPanel.classList.remove('hidden');
 
-    // Hide multi-edit panel if it's open
+    // Hide multi-edit panel if it's open and clear its form fields
     const multiEditPanel = document.getElementById('multi-edit-panel');
     multiEditPanel.classList.add('hidden');
+    clearMultiEditFormFields(); // Clear form fields when switching to single-edit mode
 
     // Maintain selection state
     document.querySelectorAll('.file-item').forEach(item => {
@@ -1897,9 +1921,8 @@ async function checkTermsOfService() {
     const termsDialog = document.getElementById('terms-of-service-dialog');
     const acceptButton = document.getElementById('accept-terms');
     const declineButton = document.getElementById('decline-terms');
-    const closeButton = document.querySelector('#terms-of-service-dialog .close');
 
-    if (!termsDialog || !acceptButton || !declineButton || !closeButton) {
+    if (!termsDialog || !acceptButton || !declineButton) {
       console.error('Terms of Service dialog elements not found');
       return false; // Return false if dialog elements are not found
     }
@@ -1908,21 +1931,42 @@ async function checkTermsOfService() {
       termsDialog.showModal();
       
       return new Promise((resolve) => {
-        acceptButton.addEventListener('click', async () => {
+        const acceptHandler = async () => {
+          // Remove event listeners first to prevent double-clicks
+          acceptButton.removeEventListener('click', acceptHandler);
+          declineButton.removeEventListener('click', declineHandler);
+          
+          // Save TOS acceptance to database
           await window.electron.saveSetting('tosAcceptedDate', new Date().toISOString());
+          
+          // Close the terms dialog
           termsDialog.close();
+          
+          // Small delay to ensure dialog closes before showing welcome
+          await new Promise(resolve => setTimeout(resolve, 200));
+          
+          // Show welcome dialog if this is the first run
+          const hasRunBefore = await window.electron.getSetting('hasRunBefore');
+          if (!hasRunBefore) {
+            const welcomeDialog = document.getElementById('welcome-message');
+            if (welcomeDialog) {
+              welcomeDialog.showModal();
+              await window.electron.saveSetting('hasRunBefore', 'true');
+            }
+          }
+          
           resolve(true); // Resolve promise when accepted
-        });
+        };
 
-        declineButton.addEventListener('click', () => {
+        const declineHandler = () => {
+          acceptButton.removeEventListener('click', acceptHandler);
+          declineButton.removeEventListener('click', declineHandler);
           window.electron.quitApp();
           resolve(false); // Resolve promise when declined
-        });
+        };
 
-        closeButton.addEventListener('click', () => {
-          window.electron.quitApp();
-          resolve(false); // Resolve promise when closed
-        });
+        acceptButton.addEventListener('click', acceptHandler);
+        declineButton.addEventListener('click', declineHandler);
       });
     }
     return true; // Return true if already accepted
@@ -1990,6 +2034,43 @@ function createMenuDropdown(label, items) {
   return menuContainer;
 }
 
+// Shared function to initialize and open STL Home dialog
+window.openSTLHomeDialog = async function() {
+  const stlHomeDialog = document.getElementById('stl-home-dialog');
+  if (!stlHomeDialog) return;
+  
+  // Check if we're in server mode
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  
+  // Load the current STL Home setting (if any)
+  const dir = await window.electron.getSetting('stlHome');
+  const directoryInput = document.getElementById('stl-home-directory');
+  if (directoryInput) {
+    directoryInput.value = dir || "";
+  }
+  
+  // Load the update frequency setting (default to 60 minutes)
+  const updateFrequency = await window.electron.getSetting('stlHomeUpdateFrequency');
+  const updateFrequencyInput = document.getElementById('stl-home-update-frequency');
+  const updateFrequencyGroup = document.getElementById('stl-home-update-frequency-group');
+  const chooseButton = document.getElementById('choose-stl-home-button');
+  
+  if (serverMode) {
+    // In server mode: hide Choose Directory button, show Update Frequency
+    if (chooseButton) chooseButton.style.display = 'none';
+    if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'block';
+    if (updateFrequencyInput) {
+      updateFrequencyInput.value = updateFrequency || '60';
+    }
+  } else {
+    // In normal mode: show Choose Directory button, hide Update Frequency
+    if (chooseButton) chooseButton.style.display = 'block';
+    if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'none';
+  }
+  
+  stlHomeDialog.showModal();
+};
+
 // Function to create server mode menu bar
 function createServerMenuBar() {
   const menuBar = document.createElement('div');
@@ -2021,24 +2102,75 @@ function createServerMenuBar() {
     }},
     { label: 'Print Roulette', action: () => window.electron.send('start-print-roulette') },
     { label: '---', action: null },
+    { label: 'Backup/Restore', action: () => {
+      const dialog = document.getElementById('backup-restore-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        // Fallback: trigger the event which will open the dialog via the listener
+        window.electron.send('open-backup-restore');
+      }
+    }},
     { label: 'Purge Models', action: () => {
       const dialog = document.getElementById('purge-models-dialog');
       if (dialog) {
         dialog.showModal();
+      }
+    }},
+    { label: '---', action: null },
+    { label: 'Restart Server', action: async () => {
+      // Show confirmation dialog
+      const confirmed = confirm('Are you sure you want to restart the server? All connected clients will be disconnected temporarily.');
+      if (!confirmed) {
+        return;
+      }
+      
+      try {
+        // Show loading feedback
+        const loadingMsg = document.createElement('div');
+        loadingMsg.id = 'restart-server-loading';
+        loadingMsg.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #2c2c2c; color: white; padding: 20px; border-radius: 8px; z-index: 10001; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+        loadingMsg.textContent = 'Restarting server...';
+        document.body.appendChild(loadingMsg);
+        
+        // Call restart server
+        const result = await window.electron.invoke('restart-server');
+        
+        // Remove loading message
+        const loadingElement = document.getElementById('restart-server-loading');
+        if (loadingElement) {
+          loadingElement.remove();
+        }
+        
+        if (result && result.success) {
+          // Show success message briefly
+          const successMsg = document.createElement('div');
+          successMsg.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #4a9eff; color: white; padding: 20px; border-radius: 8px; z-index: 10001; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+          successMsg.textContent = 'Server restarted successfully';
+          document.body.appendChild(successMsg);
+          setTimeout(() => {
+            if (successMsg.parentNode) {
+              successMsg.remove();
+            }
+          }, 2000);
+        } else {
+          // Show error message
+          alert('Failed to restart server: ' + (result?.message || 'Unknown error'));
+        }
+      } catch (error) {
+        // Remove loading message if it exists
+        const loadingElement = document.getElementById('restart-server-loading');
+        if (loadingElement) {
+          loadingElement.remove();
+        }
+        console.error('Error restarting server:', error);
+        alert('Failed to restart server: ' + (error.message || 'Unknown error'));
       }
     }}
   ]);
   
   // Settings menu
   const settingsMenu = createMenuDropdown('Settings', [
-    { label: 'Application Settings', action: () => {
-      const settingsDialog = document.getElementById('settings-dialog');
-      if (settingsDialog) {
-        settingsDialog.showModal();
-      } else {
-        window.electron.send('open-settings');
-      }
-    }},
     { label: 'AI Config', action: () => {
       const dialog = document.getElementById('ai-config-dialog');
       if (dialog) {
@@ -2071,13 +2203,8 @@ function createServerMenuBar() {
         window.electron.send('open-slicer-settings');
       }
     }},
-    { label: 'STL Home', action: () => {
-      const dialog = document.getElementById('stl-home-dialog');
-      if (dialog) {
-        dialog.showModal();
-      } else {
-        window.electron.send('open-stl-home');
-      }
+    { label: 'STL Home', action: async () => {
+      await window.openSTLHomeDialog();
     }},
     { label: 'Theme Settings', action: () => {
       window.electron.send('open-theme-settings');
@@ -2143,7 +2270,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const hasRunBefore = await window.electron.getSetting('hasRunBefore');
   if (!hasRunBefore) {
     const welcomeDialog = document.getElementById('welcome-message');
-    welcomeDialog.showModal();
+    if (welcomeDialog) {
+      welcomeDialog.showModal();
+    }
     await window.electron.saveSetting('hasRunBefore', 'true');
   }
 
@@ -2256,52 +2385,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
   
-  // Proceed to check for updates and initialize the application
+  // Proceed to initialize the application
+  // Update checks are handled in initializeApp() to avoid duplicates
   debugLog('DOM fully loaded and parsed');
-  console.log('Checking for updates on startup...');
-  const welcomeDialog = document.getElementById('welcome-message');
-  
-  // Check for updates first
-  let currentVersion;
-  try {
-    currentVersion = await window.electron.getSetting('currentVersion');
-    const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
-    const latestVersion = await window.electron.checkForUpdates(isBeta);
-    const lastDeclinedVersion = await window.electron.getSetting('lastDeclinedVersion');
-    
-    console.log('Version check results:', { 
-      currentVersion, 
-      latestVersion, 
-      lastDeclinedVersion,
-      isBeta 
-    });
-    
-    // Only show prompt if it's a new version and not the one user previously declined
-    if (latestVersion && 
-        latestVersion !== currentVersion && 
-        latestVersion > currentVersion && 
-        latestVersion !== lastDeclinedVersion) {
-      const shouldUpdate = await window.electron.showMessage(
-        'Update Available',
-        `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
-        ['Yes', 'No']
-      );
-      
-      if (shouldUpdate === 'Yes') {
-        await window.electron.openUpdatePage(isBeta);
-      } else {
-        // Store the declined version
-        console.log('User declined update, storing version:', latestVersion);
-        await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
-      }
-    }
-
-    // Store the latest version after check
-    await window.electron.saveSetting('latestVersion', latestVersion);
-    await window.electron.saveSetting('lastUpdateCheck', new Date().toISOString());
-  } catch (error) {
-    console.error('Error checking for updates:', error);
-  }
 
   const fileGrid = document.querySelector('.file-grid');
   const settingsDialog = document.getElementById('settings-dialog');
@@ -2311,6 +2397,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const addTagButton = document.getElementById('add-tag-button');
   const licenseSelect = document.getElementById('license-select');
   const newDesignerDialog = document.getElementById('new-designer-dialog');
+  const welcomeDialog = document.getElementById('welcome-message');
 
   // Initialize license filter
   if (licenseSelect) {
@@ -2369,7 +2456,9 @@ document.addEventListener('DOMContentLoaded', async () => {
           viewLibMsg.textContent = `Showing All ${models.length} Models`;
         }
       } else {
-        welcomeDialog.showModal();
+        if (welcomeDialog) {
+          welcomeDialog.showModal();
+        }
         const viewLibMsg = document.getElementById("view-library-message");
         if (viewLibMsg) { 
           viewLibMsg.style.display = "none"; 
@@ -2379,7 +2468,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error loading models:', error);
     }
   } else {
-    welcomeDialog.showModal();
+    if (welcomeDialog) {
+      welcomeDialog.showModal();
+    }
   }
 
   // Once the initial models have been rendered, hide the loading overlay.
@@ -2411,11 +2502,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         await populateModelLicenseDropdown(null, 'multi-license');
         await populateParentModelDropdown(null, 'multi-parent');
         await populateTagSelect('multi-tag-select', 'multi-tags');
+        await populateRemoveTagSelect();
       } catch (error) {
         console.error('Error populating multi-edit dropdowns:', error);
       }
       
-      showMultiEditPanel(); // Call to attach listeners
+      await showMultiEditPanel(); // Call to attach listeners
       
       multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } else {
@@ -2763,6 +2855,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (multiTagSelect) {
         multiTagSelect.value = '';
       }
+      
+      // Reset selection tracking to ensure tags are cleared on next selection
+      previousSelectionHash = '';
 
       // Reapply filters to refresh the view
       await refreshModelDisplay();
@@ -2825,24 +2920,46 @@ document.addEventListener('DOMContentLoaded', async () => {
       const sourceDropdownId = newParentDialog.dataset.sourceDropdown || 'model-parent';
       
       if (newParentName) {
-        const parentSelect = document.getElementById(sourceDropdownId);
-        if (parentSelect) {
-          const option = document.createElement('option');
-          option.value = newParentName;
-          option.textContent = newParentName;
-          parentSelect.appendChild(option);
-          parentSelect.value = newParentName;
-          
-          // Trigger auto-save
-          if (sourceDropdownId === 'multi-parent') {
-            await autoSaveMultipleModels('parentModel', newParentName);
-          } else {
-            const filePath = getCurrentModelFilePath();
+        // Trigger auto-save first
+        if (sourceDropdownId === 'multi-parent') {
+          await autoSaveMultipleModels('parentModel', newParentName);
+        } else if (sourceDropdownId === 'parent-select') {
+          // For filter dropdown, we need to save to a model first
+          // This shouldn't normally happen, but handle it gracefully
+          const filePath = getCurrentModelFilePath();
+          if (filePath) {
             await autoSaveModel('parentModel', newParentName, filePath);
           }
+        } else {
+          const filePath = getCurrentModelFilePath();
+          await autoSaveModel('parentModel', newParentName, filePath);
+        }
 
-          // Update the filter dropdown
-          await populateParentModelFilter();
+        // Repopulate all parent model dropdowns to ensure consistency
+        await populateParentModelFilter(); // Filter dropdown
+        if (sourceDropdownId === 'model-parent') {
+          await populateParentModelDropdown(newParentName, 'model-parent');
+        } else if (sourceDropdownId === 'multi-parent') {
+          await populateParentModelDropdown(newParentName, 'multi-parent');
+        } else if (sourceDropdownId === 'parent-select') {
+          // Filter dropdown - already repopulated by populateParentModelFilter
+          const parentSelect = document.getElementById('parent-select');
+          if (parentSelect) {
+            parentSelect.value = newParentName;
+          }
+        } else {
+          // Fallback: manually add to the source dropdown if it's not one of the standard ones
+          const parentSelect = document.getElementById(sourceDropdownId);
+          if (parentSelect) {
+            const optionExists = Array.from(parentSelect.options).some(opt => opt.value === newParentName);
+            if (!optionExists) {
+              const option = document.createElement('option');
+              option.value = newParentName;
+              option.textContent = newParentName;
+              parentSelect.appendChild(option);
+            }
+            parentSelect.value = newParentName;
+          }
         }
         
         // Clear the input and close the dialog
@@ -2880,11 +2997,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Rest of initialization...
     await initializeTags();
     await populateTagFilter();
+    initializeListButtons();
   });
 
   // Remove the other DOMContentLoaded listener that's adding filter change handlers
 
   await initializeTags();
+  initializeListButtons();
 
   // Update the tag filter event listener
   document.getElementById('tag-filter').addEventListener('change', async (event) => {
@@ -3066,7 +3185,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     if (serverMode) {
       // In server mode, prompt for UNC path via text input
-      const uncPath = prompt('Enter UNC path to scan (e.g., \\\\server\\share\\path):');
+      // Pre-fill with STL Home if it's set
+      const stlHome = await window.electron.getSetting('stlHome');
+      const defaultPath = stlHome && stlHome.trim() !== '' ? stlHome.trim() : '';
+      const promptMessage = defaultPath 
+        ? `Enter UNC path to scan (e.g., \\\\server\\share\\path):\n\nCurrent STL Home: ${defaultPath}`
+        : 'Enter UNC path to scan (e.g., \\\\server\\share\\path):';
+      const uncPath = prompt(promptMessage, defaultPath);
       if (!uncPath || uncPath.trim() === '') return;
       directoryPath = [uncPath.trim()];
     } else {
@@ -3178,6 +3303,217 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Stats dialog handler
+  const statsDialog = document.getElementById('stats-dialog');
+  if (statsDialog) {
+    // Clean up charts when dialog closes (set up once, not per-open)
+    statsDialog.addEventListener('close', () => {
+      if (fileTypeChart) {
+        fileTypeChart.destroy();
+        fileTypeChart = null;
+      }
+      if (metadataChart) {
+        metadataChart.destroy();
+        metadataChart = null;
+      }
+    });
+  }
+  
+  window.electron.onOpenStats(async () => {
+    const dialog = document.getElementById('stats-dialog');
+    if (dialog) {
+      try {
+        await initializeStatsDialog();
+        dialog.showModal();
+      } catch (error) {
+        console.error('Error showing stats dialog:', error);
+      }
+    } else {
+      console.error('Stats dialog element not found');
+    }
+  });
+
+  // Chart instances storage
+  let fileTypeChart = null;
+  let metadataChart = null;
+
+  // Initialize stats dialog with data
+  async function initializeStatsDialog() {
+    try {
+      const stats = await window.electron.getStats();
+      
+      // Update total models
+      document.getElementById('stats-total-models').textContent = stats.totalModels.toLocaleString();
+      
+      // Update file types
+      document.getElementById('stats-type-3mf').textContent = stats.fileTypes.threeMf.toLocaleString();
+      document.getElementById('stats-type-stl').textContent = stats.fileTypes.stl.toLocaleString();
+      
+      // Update archived models
+      document.getElementById('stats-archived').textContent = stats.archivedModels.toLocaleString();
+      
+      // Update percentages
+      document.getElementById('stats-percent-designer').textContent = stats.percentages.withDesigner + '%';
+      document.getElementById('stats-percent-parent').textContent = stats.percentages.withParentModel + '%';
+      document.getElementById('stats-percent-license').textContent = stats.percentages.withLicense + '%';
+      document.getElementById('stats-percent-tags').textContent = stats.percentages.withTags + '%';
+      
+      // Update tags
+      document.getElementById('stats-total-tags').textContent = stats.tags.total.toLocaleString();
+      const mostUsedTagElement = document.getElementById('stats-most-used-tag');
+      if (stats.tags.mostUsed) {
+        mostUsedTagElement.textContent = `${stats.tags.mostUsed.name} (${stats.tags.mostUsed.count})`;
+      } else {
+        mostUsedTagElement.textContent = 'None';
+      }
+      
+      // Destroy existing charts if they exist
+      if (fileTypeChart) {
+        fileTypeChart.destroy();
+        fileTypeChart = null;
+      }
+      if (metadataChart) {
+        metadataChart.destroy();
+        metadataChart = null;
+      }
+      
+      // Create pie chart for file types
+      const fileTypeCanvas = document.getElementById('file-type-chart');
+      if (fileTypeCanvas && typeof Chart !== 'undefined') {
+        const ctx = fileTypeCanvas.getContext('2d');
+        fileTypeChart = new Chart(ctx, {
+          type: 'pie',
+          data: {
+            labels: ['3MF', 'STL'],
+            datasets: [{
+              data: [stats.fileTypes.threeMf, stats.fileTypes.stl],
+              backgroundColor: [
+                'rgba(74, 158, 255, 0.8)',
+                'rgba(0, 212, 255, 0.8)'
+              ],
+              borderColor: [
+                'rgba(74, 158, 255, 1)',
+                'rgba(0, 212, 255, 1)'
+              ],
+              borderWidth: 1
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: {
+                position: 'bottom',
+                labels: {
+                  color: '#e0e0e0',
+                  font: {
+                    size: 10
+                  },
+                  padding: 8,
+                  boxWidth: 12
+                }
+              },
+              tooltip: {
+                callbacks: {
+                  label: function(context) {
+                    const label = context.label || '';
+                    const value = context.parsed || 0;
+                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                    const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                    return `${label}: ${value.toLocaleString()} (${percentage}%)`;
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      
+      // Create bar chart for metadata completion
+      const metadataCanvas = document.getElementById('metadata-chart');
+      if (metadataCanvas && typeof Chart !== 'undefined') {
+        const ctx = metadataCanvas.getContext('2d');
+        metadataChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: ['Designer', 'Parent', 'License', 'Tags'],
+            datasets: [{
+              label: 'Completion %',
+              data: [
+                parseFloat(stats.percentages.withDesigner),
+                parseFloat(stats.percentages.withParentModel),
+                parseFloat(stats.percentages.withLicense),
+                parseFloat(stats.percentages.withTags)
+              ],
+              backgroundColor: [
+                'rgba(74, 158, 255, 0.8)',
+                'rgba(0, 212, 255, 0.8)',
+                'rgba(91, 159, 255, 0.8)',
+                'rgba(107, 170, 255, 0.8)'
+              ],
+              borderColor: [
+                'rgba(74, 158, 255, 1)',
+                'rgba(0, 212, 255, 1)',
+                'rgba(91, 159, 255, 1)',
+                'rgba(107, 170, 255, 1)'
+              ],
+              borderWidth: 1
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis: 'y',
+            scales: {
+              x: {
+                beginAtZero: true,
+                max: 100,
+                ticks: {
+                  color: '#e0e0e0',
+                  font: {
+                    size: 9
+                  },
+                  callback: function(value) {
+                    return value + '%';
+                  }
+                },
+                grid: {
+                  color: 'rgba(255, 255, 255, 0.1)'
+                }
+              },
+              y: {
+                ticks: {
+                  color: '#e0e0e0',
+                  font: {
+                    size: 9
+                  }
+                },
+                grid: {
+                  color: 'rgba(255, 255, 255, 0.1)'
+                }
+              }
+            },
+            plugins: {
+              legend: {
+                display: false
+              },
+              tooltip: {
+                callbacks: {
+                  label: function(context) {
+                    return context.parsed.x.toFixed(1) + '%';
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error initializing stats dialog:', error);
+      throw error;
+    }
+  }
+
   // Website link handler
   document.getElementById('website-link')?.addEventListener('click', (e) => {
     e.preventDefault();
@@ -3279,30 +3615,37 @@ document.addEventListener('DOMContentLoaded', async () => {
       const sourceDropdownId = newLicenseDialog.dataset.sourceDropdown || 'model-license';
       
       if (newLicenseName) {
-        // Add the new license to the dropdown
-        const licenseSelect = document.getElementById(sourceDropdownId);
-        if (licenseSelect) {
-          const option = document.createElement('option');
-          option.value = newLicenseName;
-          option.textContent = newLicenseName;
-          licenseSelect.appendChild(option);
-          licenseSelect.value = newLicenseName;
-          
-          // Trigger auto-save
-          if (sourceDropdownId === 'multi-license') {
-            await autoSaveMultipleModels('license', newLicenseName);
-          } else {
-            const filePath = getCurrentModelFilePath();
+        // Trigger auto-save first
+        if (sourceDropdownId === 'multi-license') {
+          await autoSaveMultipleModels('license', newLicenseName);
+        } else if (sourceDropdownId === 'license-select') {
+          // For filter dropdown, we need to save to a model first
+          const filePath = getCurrentModelFilePath();
+          if (filePath) {
             await autoSaveModel('license', newLicenseName, filePath);
           }
+        } else {
+          const filePath = getCurrentModelFilePath();
+          await autoSaveModel('license', newLicenseName, filePath);
         }
         
         // Clear the input and close the dialog immediately
         document.getElementById('new-license-name').value = '';
         document.getElementById('new-license-dialog').close();
         
-        // Update the license filter dropdown
-        await populateLicenseFilter();
+        // Update all license dropdowns - repopulate from database to avoid duplicates
+        await populateLicenseFilter(); // Filter dropdown
+        if (sourceDropdownId === 'model-license') {
+          await populateModelLicenseDropdown(newLicenseName, 'model-license');
+        } else if (sourceDropdownId === 'multi-license') {
+          await populateModelLicenseDropdown(newLicenseName, 'multi-license');
+        } else if (sourceDropdownId === 'license-select') {
+          // Filter dropdown - already repopulated by populateLicenseFilter
+          const licenseSelect = document.getElementById('license-select');
+          if (licenseSelect) {
+            licenseSelect.value = newLicenseName;
+          }
+        }
       }
     });
   }
@@ -4390,39 +4733,34 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Update the About dialog content in index.html
   const tosContent = `
-  <h4>Welcome to Printventory</h4>
-  <p>By using Printventory, you agree to these terms. Please read them carefully.</p>
-
-  <h4>1. Acceptance of Terms</h4>
-  <p>By accessing and using Printventory, you accept and agree to be bound by the terms and conditions of this agreement.</p>
-
-  <h4>2. Use License</h4>
-  <p>Permission is granted to use Printventory for personal and commercial use subject to the following conditions:</p>
-  <ul>
-    <li>You may not modify, copy, or redistribute the software.</li>
-    <li>You may not reverse engineer or decompile the software.</li>
-    <li>This license may be terminated if you violate any terms.</li>
-  </ul>
-
-  <h4>3. Data and Risk Disclaimer</h4>
-  <p>You acknowledge and agree that:</p>
-  <ul>
-    <li>Use of this software is entirely at your own risk</li>
-    <li>You are solely responsible for backing up your data</li>
-    <li>The developers assume no liability for any data loss, corruption, or damage</li>
-    <li>No guarantee is made regarding the reliability or security of data stored using this application</li>
-  </ul>
-
-  <h4>4. Disclaimer</h4>
-  <p>The software is provided "as is", without warranty of any kind, express or implied. This includes but is not limited to:</p>
-  <ul>
-    <li>No warranty of merchantability</li>
-    <li>No warranty of fitness for a particular purpose</li>
-    <li>No warranty regarding data integrity or preservation</li>
-  </ul>
-
-  <h4>5. Limitations</h4>
-  <p>In no event shall the authors or copyright holders be liable for any claim, damages, data loss, or other liability, whether in an action of contract, tort or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.</p>
+  <h4>MIT License</h4>
+  <p class="tos-copyright">Copyright (c) 2025 Printventory</p>
+  <p>
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+  </p>
+  <p>
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+  </p>
+  <p class="tos-warning">
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+  </p>
+  <p>
+    <strong>Data and Risk Disclaimer:</strong> You are solely responsible for backing up your data. 
+    Use of this software is entirely at your own risk. The developers assume no liability for any 
+    data loss, corruption, or damage.
+  </p>
   `;
 
   // Add near the top where other constants are defined
@@ -5025,10 +5363,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       await window.electron.saveSetting('lastUpdateCheck', new Date().toISOString());
 
       // Compare versions
-      if (latestVersion !== currentVersion && 
-          latestVersion > currentVersion && 
-          latestVersion !== lastDeclinedVersion) {
-        // Always show update prompt if there's an update, even on startup
+      // For manual checks (silent=false), ignore lastDeclinedVersion so user can check again
+      // For automatic checks (silent=true), respect lastDeclinedVersion to avoid re-prompting
+      const shouldCheckDeclined = silent; // Only check declined version on automatic checks
+      const isUpdateAvailable = latestVersion && 
+                                latestVersion !== currentVersion && 
+                                compareVersions(latestVersion, currentVersion) > 0;
+      const shouldShowPrompt = isUpdateAvailable && 
+                               (!shouldCheckDeclined || latestVersion !== lastDeclinedVersion);
+      
+      if (shouldShowPrompt) {
+        // Always show update prompt if there's an update
         const shouldUpdate = await window.electron.showMessage(
           'Update Available',
           `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
@@ -5043,10 +5388,20 @@ document.addEventListener('DOMContentLoaded', async () => {
           await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
         }
       } else if (!silent) {
-        await window.electron.showMessage(
-          'Up to Date',
-          'You are running the latest version.'
-        );
+        // For manual checks, show appropriate message
+        if (isUpdateAvailable && latestVersion === lastDeclinedVersion) {
+          // Update available but was previously declined
+          await window.electron.showMessage(
+            'Update Previously Declined',
+            `Version ${latestVersion} is available, but you previously declined this update. You can still update by visiting the website.`
+          );
+        } else {
+          // Actually up to date
+          await window.electron.showMessage(
+            'Up to Date',
+            'You are running the latest version.'
+          );
+        }
       }
     } catch (error) {
       console.error('Error checking for updates:', error);
@@ -5117,6 +5472,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         // Add new event listener
         collectUsageCheckbox.addEventListener('change', collectUsageChangeHandler);
+      }
+
+      // Set up close X button
+      const closeXButton = document.querySelector('.about-close-x');
+      if (closeXButton) {
+        // Remove any existing event listeners by cloning and replacing
+        const newCloseButton = closeXButton.cloneNode(true);
+        closeXButton.parentNode.replaceChild(newCloseButton, closeXButton);
+        
+        newCloseButton.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const dialog = document.getElementById('about-dialog');
+          if (dialog) {
+            dialog.close();
+          }
+        });
+      }
+
+      // Set up license link
+      const licenseLink = document.getElementById('license-link');
+      if (licenseLink) {
+        licenseLink.addEventListener('click', async (e) => {
+          e.preventDefault();
+          await window.electron.openExternal('https://github.com/TechJeeper/Printventory/blob/main/LICENSE.txt');
+        });
       }
     } catch (error) {
       console.error('Error initializing about dialog:', error);
@@ -5206,15 +5587,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update the parent directory click handler to show the clear button
 
   // Open STL Home dialog when the main process sends the event
-  window.electron.onOpenSTLHome(() => {
-    const stlHomeDialog = document.getElementById('stl-home-dialog');
-    if (stlHomeDialog) {
-      // Load the current STL Home setting (if any)
-      window.electron.getSetting('stlHome').then(dir => {
-        document.getElementById('stl-home-directory').value = dir || "";
-      });
-      stlHomeDialog.showModal();
-    }
+  window.electron.onOpenSTLHome(async () => {
+    await window.openSTLHomeDialog();
   });
 
   // Handler for "Choose Directory" button in the STL Home dialog
@@ -5236,9 +5610,73 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('stl-home-directory').value = "";
     // Save an empty string, effectively clearing the STL Home setting
     await window.electron.saveSetting('stlHome', "");
+    
+    // Stop periodic scanning if in server mode
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    if (serverMode) {
+      stopPeriodicSTLHomeScan();
+    }
+    
     // Close the dialog
     document.getElementById('stl-home-dialog').close();
   });
+
+  // Periodic STL Home scanning for server mode
+  let stlHomeScanInterval = null;
+
+  async function startPeriodicSTLHomeScan() {
+    // Stop any existing interval
+    stopPeriodicSTLHomeScan();
+    
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    if (!serverMode) return;
+    
+    const stlHome = await window.electron.getSetting('stlHome');
+    if (!stlHome || stlHome.trim() === "") return;
+    
+    const updateFrequency = await window.electron.getSetting('stlHomeUpdateFrequency');
+    const frequencyMinutes = parseInt(updateFrequency) || 60;
+    const frequencyMs = frequencyMinutes * 60 * 1000;
+    
+    console.log(`Starting periodic STL Home scan. Frequency: ${frequencyMinutes} minutes`);
+    
+    // Perform initial scan
+    await performSTLHomeScan(stlHome);
+    
+    // Set up periodic scanning
+    stlHomeScanInterval = setInterval(async () => {
+      const currentStlHome = await window.electron.getSetting('stlHome');
+      if (currentStlHome && currentStlHome.trim() !== "") {
+        await performSTLHomeScan(currentStlHome);
+      } else {
+        stopPeriodicSTLHomeScan();
+      }
+    }, frequencyMs);
+  }
+
+  function stopPeriodicSTLHomeScan() {
+    if (stlHomeScanInterval) {
+      clearInterval(stlHomeScanInterval);
+      stlHomeScanInterval = null;
+      console.log('Stopped periodic STL Home scan');
+    }
+  }
+
+  async function performSTLHomeScan(stlHomeDir) {
+    try {
+      console.log(`Performing periodic STL Home scan: ${stlHomeDir}`);
+      // Use background scan to avoid disrupting the UI
+      await scanAndRenderDirectory(stlHomeDir, true);
+      
+      // Refresh filters after scanning
+      await populateDesignerDropdown();
+      await populateParentModelFilter();
+      await populateTagFilter();
+      await populateLicenseFilter();
+    } catch (error) {
+      console.error('Error during periodic STL Home scan:', error);
+    }
+  }
 
   // Handler for saving the STL Home setting (via form submit)
   document.getElementById('stl-home-dialog').addEventListener('submit', async (event) => {
@@ -5246,11 +5684,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     const stlDir = document.getElementById('stl-home-directory').value.trim();
     // Save the STL Home directory to settings (blank by default if nothing selected)
     await window.electron.saveSetting('stlHome', stlDir);
+    
+    // Save update frequency if in server mode
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    if (serverMode) {
+      const updateFrequency = document.getElementById('stl-home-update-frequency').value;
+      await window.electron.saveSetting('stlHomeUpdateFrequency', updateFrequency);
+      
+      // Restart periodic scanning if STL Home is set
+      if (stlDir && stlDir.trim() !== "") {
+        startPeriodicSTLHomeScan();
+      } else {
+        stopPeriodicSTLHomeScan();
+      }
+    }
+    
     document.getElementById('stl-home-dialog').close();
   });
 
   // On startup, if an STL Home directory is specified, automatically scan it.
   const stlHome = await window.electron.getSetting('stlHome');
+  
   if (stlHome && stlHome.trim() !== "") {
     console.log("STL Home is set. Scanning directory:", stlHome);
     // You can use your existing scan/render function (e.g., scanAndRenderDirectory)
@@ -5261,6 +5715,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await populateParentModelFilter();
     await populateTagFilter();
     await populateLicenseFilter();
+    
+    // If in server mode, start periodic scanning (reuse serverMode from line 2121)
+    if (serverMode) {
+      startPeriodicSTLHomeScan();
+    }
   }
 
   // Add event listener for "View Entire Library" button
@@ -5417,7 +5876,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.electron.getSetting('apiEndpoint').then((value) => {
       const endpointEl = document.getElementById('ai-endpoint');
       if (endpointEl) {
-        endpointEl.value = value || 'https://api.openai.com/v1';
+        endpointEl.value = value || 'https://js.puter.com/v2/';
         
         // Add input event listener for real-time persistence
         endpointEl.addEventListener('input', async () => {
@@ -5430,7 +5889,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.electron.getSetting('aiModel').then((value) => {
       const modelEl = document.getElementById('ai-model');
       if (modelEl) {
-        modelEl.value = value || 'gpt-4o-mini';
+        modelEl.value = value || 'gpt-5-nano';
         
         // Add input event listener for real-time persistence
         modelEl.addEventListener('input', async () => {
@@ -5443,7 +5902,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.electron.getSetting('aiService').then((value) => {
       const serviceEl = document.getElementById('ai-service-select');
       if (serviceEl) {
-        serviceEl.value = value || 'openai';
+        serviceEl.value = value || 'puter';
         
         // Update UI based on current service
         const apiKeyEl = document.getElementById('ai-api-key');
@@ -5553,7 +6012,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('save-ai-config')?.addEventListener('click', async (event) => {
     event.preventDefault();
-    const service = document.getElementById('ai-service-select')?.value || 'openai';
+    const service = document.getElementById('ai-service-select')?.value || 'puter';
     const apiKey = service === 'puter' ? '' : (document.getElementById('ai-api-key')?.value || '');
     const endpoint = document.getElementById('ai-endpoint')?.value || (service === 'puter' ? 'https://js.puter.com/v2/' : 'https://api.openai.com/v1');
     const model = document.getElementById('ai-model')?.value || (service === 'puter' ? 'gpt-5-nano' : 'gpt-4o-mini');
@@ -5592,11 +6051,35 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     
-    // Load current setting
+    // Load current settings
     const enableZipArchives = await window.electron.getSetting('enableZipArchives');
     const checkbox = document.getElementById('enable-zip-archives');
     if (checkbox) {
       checkbox.checked = enableZipArchives === '1';
+    }
+    
+    // Load 3MF metadata settings (default to '1' if not set)
+    const enable3MFDesigner = await window.electron.getSetting('enable3MFDesigner');
+    const enable3MFParentModel = await window.electron.getSetting('enable3MFParentModel');
+    const enable3MFLicense = await window.electron.getSetting('enable3MFLicense');
+    const enable3MFNotes = await window.electron.getSetting('enable3MFNotes');
+    
+    const designerCheckbox = document.getElementById('enable-3mf-designer');
+    const parentModelCheckbox = document.getElementById('enable-3mf-parent-model');
+    const licenseCheckbox = document.getElementById('enable-3mf-license');
+    const notesCheckbox = document.getElementById('enable-3mf-notes');
+    
+    if (designerCheckbox) {
+      designerCheckbox.checked = enable3MFDesigner === '1' || enable3MFDesigner === null;
+    }
+    if (parentModelCheckbox) {
+      parentModelCheckbox.checked = enable3MFParentModel === '1' || enable3MFParentModel === null;
+    }
+    if (licenseCheckbox) {
+      licenseCheckbox.checked = enable3MFLicense === '1' || enable3MFLicense === null;
+    }
+    if (notesCheckbox) {
+      notesCheckbox.checked = enable3MFNotes === '1' || enable3MFNotes === null;
     }
     
     dialog.showModal();
@@ -5608,6 +6091,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     const enableZipArchives = checkbox?.checked ? '1' : '0';
     
     await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+    
+    // Save 3MF metadata settings
+    const designerCheckbox = document.getElementById('enable-3mf-designer');
+    const parentModelCheckbox = document.getElementById('enable-3mf-parent-model');
+    const licenseCheckbox = document.getElementById('enable-3mf-license');
+    const notesCheckbox = document.getElementById('enable-3mf-notes');
+    
+    await window.electron.saveSetting('enable3MFDesigner', designerCheckbox?.checked ? '1' : '0');
+    await window.electron.saveSetting('enable3MFParentModel', parentModelCheckbox?.checked ? '1' : '0');
+    await window.electron.saveSetting('enable3MFLicense', licenseCheckbox?.checked ? '1' : '0');
+    await window.electron.saveSetting('enable3MFNotes', notesCheckbox?.checked ? '1' : '0');
     
     document.getElementById('file-type-settings-dialog').close();
   });
@@ -5622,6 +6116,96 @@ document.addEventListener('DOMContentLoaded', async () => {
   let expectedBatchCount = 0;
   let reviewDialogOpen = false;
   let rateLimitDialogShown = false; // Track if rate limit dialog has been shown during current batch
+
+  // Helper function to normalize file paths for comparison
+  function normalizeFilePath(path) {
+    return path ? path.replace(/\\/g, '/').toLowerCase().trim() : '';
+  }
+
+  // Helper function to get filePath from modelData (checks both locations)
+  function getFilePathFromModelData(modelData) {
+    return modelData.model?.filePath || modelData.filePath;
+  }
+
+  // Helper function to deduplicate model data array
+  function deduplicateModelData(modelsData) {
+    const deduplicated = new Map();
+    
+    for (const modelData of modelsData) {
+      const filePath = getFilePathFromModelData(modelData);
+      if (!filePath) continue;
+      
+      const normalizedPath = normalizeFilePath(filePath);
+      const existing = deduplicated.get(normalizedPath);
+      
+      // Prefer entry with actual tags over "Generating..." entries or empty tags
+      if (!existing) {
+        deduplicated.set(normalizedPath, modelData);
+      } else {
+        const existingHasTags = existing.generatedTags !== undefined && existing.generatedTags.length > 0;
+        const newHasTags = modelData.generatedTags !== undefined && modelData.generatedTags.length > 0;
+        const existingIsGenerating = existing.generatedTags === undefined;
+        const newIsGenerating = modelData.generatedTags === undefined;
+        
+        // Always prefer entry with actual tags
+        if (newHasTags && !existingHasTags) {
+          // New has tags, existing doesn't - replace
+          deduplicated.set(normalizedPath, modelData);
+        } else if (existingHasTags && !newHasTags) {
+          // Existing has tags, new doesn't - keep existing
+          // (don't replace)
+        } else if (newIsGenerating && !existingIsGenerating) {
+          // New is generating, existing has some result - keep existing
+          // (don't replace)
+        } else if (existingIsGenerating && !newIsGenerating) {
+          // Existing is generating, new has result - replace
+          deduplicated.set(normalizedPath, modelData);
+        } else {
+          // Both in same state - keep existing (first one wins)
+          // (don't replace)
+        }
+      }
+    }
+    
+    return Array.from(deduplicated.values());
+  }
+
+  // Helper function to update or add model data to pendingTagData (ensures no duplicates)
+  function updatePendingTagData(filePath, tagData) {
+    const normalizedFilePath = normalizeFilePath(filePath);
+    
+    // First, remove ALL entries with this filePath (in case there are duplicates)
+    // This ensures we never have multiple entries for the same file
+    const beforeCount = pendingTagData.length;
+    pendingTagData = pendingTagData.filter(d => {
+      const dPath1 = normalizeFilePath(d.filePath);
+      const dPath2 = normalizeFilePath(getFilePathFromModelData(d));
+      return (dPath1 !== normalizedFilePath) && (dPath2 !== normalizedFilePath);
+    });
+    
+    // Then add the new/updated entry
+    pendingTagData.push(tagData);
+    
+    // Always deduplicate after update to ensure no duplicates
+    // This is a final safeguard
+    const beforeDedup = pendingTagData.length;
+    pendingTagData = deduplicateModelData(pendingTagData);
+    
+    // Debug: log if we removed duplicates
+    if (beforeCount !== pendingTagData.length || beforeDedup !== pendingTagData.length) {
+      console.log(`updatePendingTagData: Removed duplicates for ${filePath}. Before: ${beforeCount}, After filter: ${pendingTagData.length + 1}, After dedup: ${pendingTagData.length}`);
+    }
+  }
+
+  // Function to update the tag preview dialog (for real-time updates)
+  function updateTagPreviewDialog() {
+    if (!reviewDialogOpen) return;
+    // CRITICAL: Always deduplicate before showing to prevent duplicates from rapid updates
+    // This is especially important when multiple tags arrive quickly
+    pendingTagData = deduplicateModelData(pendingTagData);
+    // showTagPreviewDialog will use pendingTagData when dialog is open (ignores parameter)
+    showTagPreviewDialog(pendingTagData);
+  }
 
   // Listen for the 'tags-generated' event from the main process
   window.electron.on('tags-generated', async (filePath, tags, errorMessage) => {
@@ -5656,7 +6240,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       if (isBatchOperation) {
         // Store or update tag data for this model (even if tags are empty)
-        const existingIndex = pendingTagData.findIndex(d => d.filePath === filePath);
         const tagData = {
           filePath: filePath,
           model: model,
@@ -5665,19 +6248,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           errorMessage: errorMessage || null
         };
         
-        if (existingIndex >= 0) {
-          // Update existing entry
-          pendingTagData[existingIndex] = tagData;
-        } else {
-          // Add new entry
-          pendingTagData.push(tagData);
-        }
+        // Use helper function to update pendingTagData (ensures no duplicates)
+        updatePendingTagData(filePath, tagData);
         
         // Update the review dialog in real-time
         if (reviewDialogOpen) {
           updateTagPreviewDialog();
         } else if (batchTagGenerationInProgress) {
           // Show the dialog when first model arrives
+          // pendingTagData is already deduplicated by updatePendingTagData
           showTagPreviewDialog(pendingTagData);
         }
       } else {
@@ -5701,7 +6280,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (reviewDialogOpen) {
           updateTagPreviewDialog();
         } else {
-          showTagPreviewDialog(pendingTagData);
+          // Deduplicate before showing
+          const uniquePendingData = deduplicateModelData(pendingTagData);
+          showTagPreviewDialog(uniquePendingData);
         }
         
         // Show message if no tags were generated (but don't block)
@@ -5722,7 +6303,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     pendingTagData = [modelData];
     reviewDialogOpen = false; // Reset dialog state
     rateLimitDialogShown = false; // Reset rate limit dialog flag
-    showTagPreviewDialog(pendingTagData);
+    // Deduplicate before showing (should be single item, but be safe)
+    const uniquePendingData = deduplicateModelData(pendingTagData);
+    showTagPreviewDialog(uniquePendingData);
   });
 
   // Listen for batch tag generation start
@@ -5753,8 +6336,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     
     // Show the review dialog immediately with all models (some may show "Generating...")
-    if (pendingTagData.length > 0) {
-      showTagPreviewDialog(pendingTagData);
+    // Deduplicate before showing to prevent any duplicates
+    const uniquePendingData = deduplicateModelData(pendingTagData);
+    if (uniquePendingData.length > 0) {
+      showTagPreviewDialog(uniquePendingData);
     } else {
       showTagPreviewDialog([]);
     }
@@ -5765,20 +6350,40 @@ document.addEventListener('DOMContentLoaded', async () => {
     batchTagGenerationInProgress = false;
     rateLimitDialogShown = false; // Reset rate limit dialog flag when batch completes
     
+    // Wait a tiny bit to ensure all pending tag updates have completed
+    // This prevents race conditions where the last tag update hasn't finished
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
     // Update the dialog one final time to show completion status
+    // CRITICAL: Ensure pendingTagData is fully deduplicated before final refresh
     if (reviewDialogOpen && pendingTagData.length > 0) {
-      updateTagPreviewDialog();
+      // Debug: Log before deduplication
+      console.log('batch-tag-generation-complete: Before dedup, pendingTagData has', pendingTagData.length, 'entries');
+      pendingTagData.forEach((d, i) => {
+        const path = getFilePathFromModelData(d);
+        const hasTags = d.generatedTags !== undefined && d.generatedTags.length > 0;
+        const isGenerating = d.generatedTags === undefined;
+        console.log(`  [${i}] ${path}: hasTags=${hasTags}, isGenerating=${isGenerating}, tags=${d.generatedTags?.length || 0}`);
+      });
+      
+      // Force deduplication one more time before final update
+      // This ensures no duplicates from rapid tag generation events
+      const beforeCount = pendingTagData.length;
+      pendingTagData = deduplicateModelData(pendingTagData);
+      const afterCount = pendingTagData.length;
+      
+      if (beforeCount !== afterCount) {
+        console.log(`batch-tag-generation-complete: Removed ${beforeCount - afterCount} duplicates. Now have ${afterCount} entries`);
+      }
+      
+      // Use showTagPreviewDialog directly with the deduplicated data
+      // Don't call updateTagPreviewDialog which might use stale data
+      showTagPreviewDialog(pendingTagData);
     }
     
     // Don't auto-close - let the user review what happened (even if no tags)
     // They can see which models failed and which succeeded
   });
-
-  // Function to update the tag preview dialog (for real-time updates)
-  function updateTagPreviewDialog() {
-    if (!reviewDialogOpen) return;
-    showTagPreviewDialog(pendingTagData);
-  }
 
   // Function to show tag preview dialog (now handles multiple models)
   function showTagPreviewDialog(modelsData) {
@@ -5791,20 +6396,53 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    // Update pendingTagData to match what we're showing
-    if (modelsData.length > 0 || !batchTagGenerationInProgress) {
-      pendingTagData = modelsData;
+    // Check if dialog is open BEFORE we use it (fix race condition)
+    const isDialogOpen = dialog.open || false;
+    reviewDialogOpen = isDialogOpen;
+
+    // When dialog is already open, ALWAYS use pendingTagData as the single source of truth
+    // This prevents stale data from being displayed and ensures consistency
+    let dataToDeduplicate;
+    if (isDialogOpen) {
+      // Dialog is open - ONLY use pendingTagData (ignore passed parameter)
+      // pendingTagData is already updated by updatePendingTagData before this is called
+      dataToDeduplicate = pendingTagData;
+    } else {
+      // Dialog not open yet - use passed data (first time opening)
+      dataToDeduplicate = modelsData;
     }
     
-    // Track if dialog is open
-    reviewDialogOpen = dialog.open || false;
+    // Deduplicate models by filePath - prefer entries with actual tags over "Generating..." entries
+    const beforeDedup = dataToDeduplicate.length;
+    const uniqueModelsData = deduplicateModelData(dataToDeduplicate);
+    const afterDedup = uniqueModelsData.length;
+    
+    // Debug: Log if duplicates were found
+    if (beforeDedup !== afterDedup) {
+      console.log(`showTagPreviewDialog: Found ${beforeDedup - afterDedup} duplicates. Before: ${beforeDedup}, After: ${afterDedup}`);
+      // Log what was removed
+      const removed = dataToDeduplicate.filter(d1 => {
+        const path1 = normalizeFilePath(getFilePathFromModelData(d1));
+        return !uniqueModelsData.some(d2 => {
+          const path2 = normalizeFilePath(getFilePathFromModelData(d2));
+          return path1 === path2;
+        });
+      });
+      removed.forEach(d => {
+        const path = getFilePathFromModelData(d);
+        console.log(`  Removed duplicate: ${path}, hasTags=${d.generatedTags?.length > 0}, isGenerating=${d.generatedTags === undefined}`);
+      });
+    }
+    
+    // Update pendingTagData to match what we're showing (single source of truth)
+    pendingTagData = uniqueModelsData;
 
     // Hide single model info, show batch info if multiple models
-    if (modelsData.length === 1) {
+    if (uniqueModelsData.length === 1) {
       // Single model - show model info
       if (modelInfoEl) {
         modelInfoEl.style.display = 'block';
-        const model = modelsData[0].model;
+        const model = uniqueModelsData[0].model;
         const modelNameEl = document.getElementById('tag-preview-model-name');
         const modelPathEl = document.getElementById('tag-preview-model-path');
         
@@ -5844,21 +6482,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log(`Total checkbox states saved: ${checkboxStates.size}`);
     }
 
-    // Clear container
+    // Clear container completely to prevent duplicates
     container.innerHTML = '';
 
     // Get merge strategy from settings
     window.electron.getSetting('aiTagMergeStrategy').then((strategy) => {
       const mergeStrategy = strategy || 'merge';
 
-      // Create a scrollable container for multiple models
+      // Create a container for multiple models (scrolling handled by parent)
       const modelsContainer = document.createElement('div');
-      modelsContainer.style.maxHeight = '500px';
-      modelsContainer.style.overflowY = 'auto';
-      modelsContainer.style.paddingRight = '8px';
 
       // Process each model - use for...of to support async operations
-      for (const [index, modelData] of modelsData.entries()) {
+      for (const [index, modelData] of uniqueModelsData.entries()) {
         const { model, generatedTags, existingTags, errorMessage } = modelData;
         const fileName = model.fileName || model.filePath?.split(/[/\\]/).pop() || 'Unknown';
         const filePath = model.filePath || 'Unknown path';
@@ -6047,6 +6682,60 @@ document.addEventListener('DOMContentLoaded', async () => {
           });
 
           modelSection.appendChild(tagList);
+
+          // Add Select All / Clear Selection buttons
+          const buttonContainer = document.createElement('div');
+          buttonContainer.style.display = 'flex';
+          buttonContainer.style.gap = '12px';
+          buttonContainer.style.marginTop = '8px';
+
+          const selectAllBtn = document.createElement('button');
+          selectAllBtn.textContent = 'Select All';
+          selectAllBtn.style.background = 'none';
+          selectAllBtn.style.border = 'none';
+          selectAllBtn.style.color = '#fff';
+          selectAllBtn.style.cursor = 'pointer';
+          selectAllBtn.style.fontSize = '13px';
+          selectAllBtn.style.padding = '4px 0';
+          selectAllBtn.style.textDecoration = 'underline';
+          selectAllBtn.style.textUnderlineOffset = '2px';
+          selectAllBtn.addEventListener('mouseenter', () => {
+            selectAllBtn.style.opacity = '0.7';
+          });
+          selectAllBtn.addEventListener('mouseleave', () => {
+            selectAllBtn.style.opacity = '1';
+          });
+          selectAllBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const checkboxes = tagList.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => cb.checked = true);
+          });
+
+          const clearSelectionBtn = document.createElement('button');
+          clearSelectionBtn.textContent = 'Clear Selection';
+          clearSelectionBtn.style.background = 'none';
+          clearSelectionBtn.style.border = 'none';
+          clearSelectionBtn.style.color = '#fff';
+          clearSelectionBtn.style.cursor = 'pointer';
+          clearSelectionBtn.style.fontSize = '13px';
+          clearSelectionBtn.style.padding = '4px 0';
+          clearSelectionBtn.style.textDecoration = 'underline';
+          clearSelectionBtn.style.textUnderlineOffset = '2px';
+          clearSelectionBtn.addEventListener('mouseenter', () => {
+            clearSelectionBtn.style.opacity = '0.7';
+          });
+          clearSelectionBtn.addEventListener('mouseleave', () => {
+            clearSelectionBtn.style.opacity = '1';
+          });
+          clearSelectionBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const checkboxes = tagList.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => cb.checked = false);
+          });
+
+          buttonContainer.appendChild(selectAllBtn);
+          buttonContainer.appendChild(clearSelectionBtn);
+          modelSection.appendChild(buttonContainer);
         } else {
           // Show status for models with no tags
           const noTagsDiv = document.createElement('div');
@@ -6106,7 +6795,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const applyButton = document.getElementById('tag-preview-apply');
       if (applyButton) {
         // Check if any models are still generating tags (generatedTags === undefined)
-        const stillGenerating = modelsData.some(modelData => modelData.generatedTags === undefined);
+        const stillGenerating = uniqueModelsData.some(modelData => modelData.generatedTags === undefined);
         
         if (stillGenerating) {
           // Disable button if tags are still being generated
@@ -7431,15 +8120,69 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ... existing code ...
 });
 
-function updateSelectedCount() {
+async function updateSelectedCount() {
   const countElement = document.querySelector('.selected-count');
   if (countElement) {
     countElement.textContent = `${selectedModels.size} model${selectedModels.size !== 1 ? 's' : ''} selected`;
   }
+  
+  // Clear tags when selection changes significantly (new group of files selected)
+  clearTagsOnSelectionChange();
+  
+  // Clear multi-edit form fields when no models are selected
+  if (selectedModels.size === 0 && isMultiSelectMode) {
+    clearMultiEditFormFields();
+  }
+
+  // Refresh the remove tag dropdown when selection changes (if in multi-edit mode)
+  if (isMultiSelectMode && selectedModels.size > 0) {
+    await populateRemoveTagSelect();
+  }
+}
+
+// Track previous selection to detect when a completely new selection is made
+let previousSelectionHash = '';
+
+function clearTagsOnSelectionChange() {
+  // Create a hash of current selection to detect complete selection changes
+  const currentSelectionHash = selectedModels.size > 0 
+    ? Array.from(selectedModels).sort().join('|')
+    : '';
+  
+  // If selection was cleared (went from >0 to 0), mark for clearing on next selection
+  if (previousSelectionHash && selectedModels.size === 0) {
+    previousSelectionHash = ''; // Reset so next selection is treated as new
+    return;
+  }
+  
+  // If this is a completely new selection (no overlap with previous), clear tags
+  if (previousSelectionHash && currentSelectionHash && 
+      previousSelectionHash !== currentSelectionHash && 
+      selectedModels.size > 0) {
+    // Check if there's any overlap - if no overlap, it's a completely new selection
+    const previousFiles = new Set(previousSelectionHash.split('|'));
+    const currentFiles = new Set(currentSelectionHash.split('|'));
+    const hasOverlap = Array.from(currentFiles).some(file => previousFiles.has(file));
+    
+    // If no overlap, clear tags as this is a completely new selection
+    if (!hasOverlap) {
+      const multiTagsContainer = document.getElementById('multi-tags');
+      if (multiTagsContainer) {
+        multiTagsContainer.innerHTML = '';
+      }
+      const multiTagSelect = document.getElementById('multi-tag-select');
+      if (multiTagSelect) {
+        multiTagSelect.value = '';
+      }
+    }
+  }
+  
+  // Update tracking variable
+  previousSelectionHash = currentSelectionHash;
 }
 
 // Update the toggleModelSelection function`
-function toggleModelSelection(fileElement, filePath) {
+async function toggleModelSelection(fileElement, filePath) {
   if (!isMultiSelectMode) {
     const wasSelected = fileElement.classList.contains('selected');
     
@@ -7476,7 +8219,7 @@ function toggleModelSelection(fileElement, filePath) {
       selectedModels.add(filePath);
       fileElement.classList.add('selected');
     }
-    updateSelectedCount();
+    await updateSelectedCount(); // This will clear form fields if selection is now 0
   }
 }
 
@@ -8882,6 +9625,7 @@ document.addEventListener('keydown', async (event) => {
         await populateModelLicenseDropdown(null, 'multi-license');
         await populateParentModelDropdown(null, 'multi-parent');
         await populateTagSelect('multi-tag-select', 'multi-tags');
+        await populateRemoveTagSelect();
       } catch (error) {
         console.error('Error populating multi-edit dropdowns:', error);
       }
@@ -8966,29 +9710,26 @@ document.getElementById('new-designer-dialog').addEventListener('submit', async 
   const sourceDropdownId = event.target.closest('dialog').dataset.sourceDropdown;
   
   if (newDesignerName) {
-    // Add the new designer to the dropdown
-    const designerSelect = document.getElementById(sourceDropdownId);
-    if (designerSelect) {
-      const option = document.createElement('option');
-      option.value = newDesignerName;
-      option.textContent = newDesignerName;
-      designerSelect.appendChild(option);
-      designerSelect.value = newDesignerName;
+    // Trigger auto-save first (before repopulating dropdowns)
+    if (sourceDropdownId === 'multi-designer') {
+      await autoSaveMultipleModels('designer', newDesignerName);
+    } else if (sourceDropdownId === 'designer-select') {
+      // For filter dropdown, we need to save to a model first
+      const filePath = getCurrentModelFilePath();
+      if (filePath) {
+        await autoSaveModel('designer', newDesignerName, filePath);
+      }
+    } else {
+      const filePath = getCurrentModelFilePath();
+      await autoSaveModel('designer', newDesignerName, filePath);
     }
     
     // Clear the input and close the dialog immediately
     document.getElementById('new-designer-name').value = '';
     document.getElementById('new-designer-dialog').close();
     
-    // Trigger auto-save and updates after dialog is closed
-    if (sourceDropdownId === 'multi-designer') {
-      await autoSaveMultipleModels('designer', newDesignerName);
-    } else {
-      const filePath = getCurrentModelFilePath();
-      await autoSaveModel('designer', newDesignerName, filePath);
-    }
-    
     // Update all designer dropdowns - both filter and model dropdowns
+    // This repopulates from the database, avoiding duplicates
     await populateDesignerDropdown(); // Filter dropdown on left side
     // Preserve the selection for the dropdown that was just updated
     await populateModelDesignerDropdown(
@@ -8999,6 +9740,14 @@ document.getElementById('new-designer-dialog').addEventListener('submit', async 
       sourceDropdownId === 'model-designer' ? newDesignerName : null, 
       'model-designer'
     ); // Single-edit dropdown
+    
+    // Set the value on the source dropdown after repopulation
+    if (sourceDropdownId === 'designer-select') {
+      const designerSelect = document.getElementById('designer-select');
+      if (designerSelect) {
+        designerSelect.value = newDesignerName;
+      }
+    }
   }
 });
 
@@ -9019,38 +9768,7 @@ document.getElementById('cancel-parent-button')?.addEventListener('click', () =>
   dialog.close();
 });
 
-// Update the parent model dialog submit handler to match designer exactly
-document.getElementById('new-parent-dialog').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const newParentName = document.getElementById('new-parent-name').value.trim();
-  const sourceDropdownId = event.target.closest('dialog').dataset.sourceDropdown || 'model-parent';
-  
-  if (newParentName) {
-    const parentSelect = document.getElementById(sourceDropdownId);
-    if (parentSelect) {
-      const option = document.createElement('option');
-      option.value = newParentName;
-      option.textContent = newParentName;
-      parentSelect.appendChild(option);
-      parentSelect.value = newParentName;
-    }
-    
-    // Clear the input and close the dialog immediately
-    document.getElementById('new-parent-name').value = '';
-    document.getElementById('new-parent-dialog').close();
-    
-    // Trigger auto-save and updates after dialog is closed
-    if (sourceDropdownId === 'multi-parent') {
-      await autoSaveMultipleModels('parentModel', newParentName);
-    } else {
-      const filePath = getCurrentModelFilePath();
-      await autoSaveModel('parentModel', newParentName, filePath);
-    }
-
-    // Update the filter dropdown
-    await populateParentModelFilter();
-  }
-});
+// Duplicate event listener removed - handled in DOMContentLoaded above
 
 // Update the parent model button click handler to match designer exactly
 document.querySelectorAll('.add-parent-button, #add-new-parent-button').forEach(button => {
@@ -9150,6 +9868,197 @@ async function populateTagSelect(selectId = 'tag-select', containerId = 'model-t
     });
   } catch (error) {
     console.error('Error fetching tags:', error);
+  }
+}
+
+// Refresh the tags displayed in the multi-tags container
+async function refreshMultiEditTags() {
+  const multiTagsContainer = document.getElementById('multi-tags');
+  if (!multiTagsContainer) {
+    return;
+  }
+
+  // Clear existing tags
+  multiTagsContainer.innerHTML = '';
+
+  // Check if any models are selected
+  if (selectedModels.size === 0) {
+    return;
+  }
+
+  try {
+    // Get all selected file paths
+    const filePaths = Array.from(selectedModels);
+    
+    // Load tags for each model in parallel
+    const tagPromises = filePaths.map(async (filePath) => {
+      try {
+        const model = await window.electron.getModel(filePath);
+        return model && model.tags ? (Array.isArray(model.tags) ? model.tags : []) : [];
+      } catch (error) {
+        console.error(`Error loading tags for ${filePath}:`, error);
+        return [];
+      }
+    });
+
+    const allTagsArrays = await Promise.all(tagPromises);
+    
+    // Collect unique tags across all selected files
+    const uniqueTags = new Set();
+    allTagsArrays.forEach(tags => {
+      if (Array.isArray(tags)) {
+        tags.forEach(tag => {
+          if (tag && typeof tag === 'string') {
+            const normalizedTag = tag.trim();
+            if (normalizedTag) {
+              uniqueTags.add(normalizedTag);
+            }
+          }
+        });
+      }
+    });
+
+    // Sort tags alphabetically
+    const sortedTags = Array.from(uniqueTags).sort((a, b) => a.localeCompare(b));
+
+    // Display tags in the container with remove functionality
+    sortedTags.forEach(tagName => {
+      // Check if tag already exists visually
+      const existingTag = Array.from(multiTagsContainer.children)
+        .find(tag => tag.getAttribute('data-tag-name') === tagName);
+      
+      if (!existingTag) {
+        // Create tag element with remove functionality
+        const tag = document.createElement('div');
+        tag.className = 'tag';
+        tag.setAttribute('data-tag-name', tagName);
+        tag.setAttribute('title', tagName);
+        tag.innerHTML = `
+          <span class="tag-text">${tagName}</span>
+          <span class="tag-remove">×</span>
+        `;
+        
+        // Add remove handler with auto-save
+        tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
+          tag.remove();
+          // Auto-save the updated tags after REMOVAL
+          const currentTags = Array.from(multiTagsContainer.querySelectorAll('.tag'))
+            .map(t => t.getAttribute('data-tag-name'));
+          
+          // Use replaceTags: true to replace tags instead of merging
+          await autoSaveMultipleModels('tags', currentTags, { replaceTags: true });
+          
+          // Refresh the remove tag dropdown after removal
+          await populateRemoveTagSelect();
+        });
+        
+        multiTagsContainer.appendChild(tag);
+      }
+    });
+  } catch (error) {
+    console.error('Error refreshing multi-edit tags:', error);
+  }
+}
+
+// Populate the remove tag dropdown with tags from selected files
+async function populateRemoveTagSelect() {
+  const removeTagSelect = document.getElementById('multi-tag-remove-select');
+  if (!removeTagSelect) {
+    console.error('multi-tag-remove-select element not found');
+    return;
+  }
+
+  // Clear existing options except the default
+  removeTagSelect.innerHTML = '<option value="">Select a tag to remove...</option>';
+
+  // Check if any models are selected
+  if (selectedModels.size === 0) {
+    const noTagsOption = document.createElement('option');
+    noTagsOption.value = '';
+    noTagsOption.textContent = 'No files selected';
+    noTagsOption.disabled = true;
+    removeTagSelect.appendChild(noTagsOption);
+    return;
+  }
+
+  try {
+    // Get all selected file paths
+    const filePaths = Array.from(selectedModels);
+    
+    // Load tags for each model in parallel
+    const tagPromises = filePaths.map(async (filePath) => {
+      try {
+        const model = await window.electron.getModel(filePath);
+        return model && model.tags ? (Array.isArray(model.tags) ? model.tags : []) : [];
+      } catch (error) {
+        console.error(`Error loading tags for ${filePath}:`, error);
+        return [];
+      }
+    });
+
+    const allTagsArrays = await Promise.all(tagPromises);
+    
+    // Collect unique tags across all selected files
+    // Use Set to automatically ensure uniqueness
+    const uniqueTags = new Set();
+    allTagsArrays.forEach(tags => {
+      if (Array.isArray(tags)) {
+        // First deduplicate tags within each model (in case a model has duplicate tags)
+        const modelUniqueTags = new Set();
+        tags.forEach(tag => {
+          // Normalize tag: trim whitespace and ensure it's a non-empty string
+          if (tag && typeof tag === 'string') {
+            const normalizedTag = tag.trim();
+            if (normalizedTag) {
+              modelUniqueTags.add(normalizedTag);
+            }
+          }
+        });
+        // Add all unique tags from this model to the overall set
+        modelUniqueTags.forEach(tag => uniqueTags.add(tag));
+      }
+    });
+
+    // Convert Set to array and sort alphabetically
+    // Set already ensures uniqueness, so no need for additional deduplication
+    const sortedTags = Array.from(uniqueTags).sort((a, b) => a.localeCompare(b));
+    
+    // Double-check for duplicates (defensive programming)
+    const finalUniqueTags = [];
+    const seenTags = new Set();
+    sortedTags.forEach(tag => {
+      if (!seenTags.has(tag)) {
+        seenTags.add(tag);
+        finalUniqueTags.push(tag);
+      }
+    });
+
+    // Populate dropdown
+    if (finalUniqueTags.length === 0) {
+      const noTagsOption = document.createElement('option');
+      noTagsOption.value = '';
+      noTagsOption.textContent = 'No tags to remove';
+      noTagsOption.disabled = true;
+      removeTagSelect.appendChild(noTagsOption);
+    } else {
+      finalUniqueTags.forEach(tagName => {
+        // Additional check to prevent duplicate options in the DOM
+        const existingOption = Array.from(removeTagSelect.options).find(opt => opt.value === tagName);
+        if (!existingOption) {
+          const option = document.createElement('option');
+          option.value = tagName;
+          option.textContent = tagName;
+          removeTagSelect.appendChild(option);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error populating remove tag select:', error);
+    const errorOption = document.createElement('option');
+    errorOption.value = '';
+    errorOption.textContent = 'Error loading tags';
+    errorOption.disabled = true;
+    removeTagSelect.appendChild(errorOption);
   }
 }
 
@@ -9393,62 +10302,9 @@ document.querySelectorAll('.add-tag-button').forEach(button => {
 });
 
 // Update the dialog submit handlers to use the stored dropdown IDs
-document.getElementById('new-designer-dialog').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const newDesignerName = document.getElementById('new-designer-name').value.trim();
-  const sourceDropdownId = event.target.closest('dialog').dataset.sourceDropdown;
-  
-  if (newDesignerName) {
-    // Add the new designer to the dropdown
-    const designerSelect = document.getElementById(sourceDropdownId);
-    const option = document.createElement('option');
-    option.value = newDesignerName;
-    option.textContent = newDesignerName;
-    designerSelect.appendChild(option);
-    
-    // Select the new designer
-    designerSelect.value = newDesignerName;
-    
-    // Clear the input
-    document.getElementById('new-designer-name').value = '';
-    
-    // Close the dialog
-    document.getElementById('new-designer-dialog').close();
-  }
-});
+// Duplicate event listener removed - handled at line 9210
 
-// Parent Model Dialog Submit Handler
-document.getElementById('new-parent-dialog').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const newParentName = document.getElementById('new-parent-name').value.trim();
-  const sourceDropdownId = event.target.closest('dialog').dataset.sourceDropdown || 'model-parent';
-  
-  if (newParentName) {
-    const parentSelect = document.getElementById(sourceDropdownId);
-    if (parentSelect) {
-      const option = document.createElement('option');
-      option.value = newParentName;
-      option.textContent = newParentName;
-      parentSelect.appendChild(option);
-      parentSelect.value = newParentName;
-    }
-    
-    // Clear the input and close the dialog immediately
-    document.getElementById('new-parent-name').value = '';
-    document.getElementById('new-parent-dialog').close();
-    
-    // Trigger auto-save and updates after dialog is closed
-    if (sourceDropdownId === 'multi-parent') {
-      await autoSaveMultipleModels('parentModel', newParentName);
-    } else {
-      const filePath = getCurrentModelFilePath();
-      await autoSaveModel('parentModel', newParentName, filePath);
-    }
-
-    // Update the filter dropdown
-    await populateParentModelFilter();
-  }
-});
+// Duplicate event listener removed - handled in DOMContentLoaded above
 
 // Parent Model Button Click Handler
 document.querySelectorAll('.add-parent-button, #add-new-parent-button').forEach(button => {
@@ -9503,6 +10359,95 @@ document.getElementById('multi-tag-select').addEventListener('change', async () 
     document.getElementById('multi-tag-select').value = ''; // Reset selection
   }
 });
+
+// Handle remove tag dropdown change event
+async function handleRemoveTagSelect() {
+  const removeTagSelect = document.getElementById('multi-tag-remove-select');
+  if (!removeTagSelect) {
+    return;
+  }
+
+  const tagToRemove = removeTagSelect.value;
+  if (!tagToRemove) {
+    return;
+  }
+
+  try {
+    // Get all selected file paths
+    const filePaths = Array.from(selectedModels);
+    
+    if (filePaths.length === 0) {
+      console.warn('No models selected for tag removal');
+      return;
+    }
+
+    // Show confirmation dialog
+    const confirmResult = await window.electron.showMessageBox({
+      type: 'warning',
+      title: 'Remove Tag',
+      message: `Are you sure you want to remove the tag "${tagToRemove}" from ${filePaths.length} selected file${filePaths.length === 1 ? '' : 's'}?`,
+      buttons: ['Yes', 'No'],
+      defaultId: 1,
+      cancelId: 1
+    });
+
+    // If user clicked "No" (response === 1) or cancelled, reset dropdown and return
+    if (confirmResult.response !== 0) {
+      removeTagSelect.value = '';
+      return;
+    }
+
+    // Load all models and remove the tag from each
+    const modelUpdates = [];
+    for (const filePath of filePaths) {
+      try {
+        const model = await window.electron.getModel(filePath);
+        if (model && model.tags) {
+          const tags = Array.isArray(model.tags) ? model.tags : [];
+          // Remove the tag from the array
+          const updatedTags = tags.filter(tag => tag !== tagToRemove);
+          model.tags = updatedTags.sort();
+          modelUpdates.push({ filePath, model });
+        }
+      } catch (error) {
+        console.error(`Error loading model ${filePath} for tag removal:`, error);
+      }
+    }
+
+    // Save all updated models using autoSaveMultipleModels with replaceTags
+    if (modelUpdates.length > 0) {
+      // For each model, we need to save with its updated tags
+      // We'll use the batch update approach
+      const modelDataBatch = modelUpdates.map(({ model }) => model);
+      try {
+        await window.electron.updateModelsBatch(modelDataBatch);
+        console.log(`Successfully removed tag '${tagToRemove}' from ${modelUpdates.length} models`);
+      } catch (error) {
+        console.error('Error in batch update for tag removal:', error);
+        // Fallback to individual saves
+        for (const { model } of modelUpdates) {
+          await window.electron.saveModel(model).catch(err => {
+            console.error(`Error saving model ${model.filePath}:`, err);
+          });
+        }
+      }
+
+      // Update UI elements
+      for (const { filePath } of modelUpdates) {
+        await updateModelElement(filePath);
+      }
+    }
+
+    // Reset dropdown and refresh the remove tag list
+    removeTagSelect.value = '';
+    await populateRemoveTagSelect();
+    
+    // Refresh the add tag dropdown to reflect any changes
+    await populateTagSelect('multi-tag-select', 'multi-tags');
+  } catch (error) {
+    console.error('Error removing tag:', error);
+  }
+}
 
 async function parseSourceUrl(url) {
   try {
@@ -10069,8 +11014,12 @@ async function populateParentModelDropdown(selectedParent, elementId = 'model-pa
 
   try {
     const parents = await window.electron.getParentModels();
+    // Use a Set to track unique parent values to prevent duplicates
+    const seenParents = new Set();
+    
     parents.forEach(parent => {
-      if (parent) { // Only add non-empty parent models
+      if (parent && !seenParents.has(parent)) { // Only add non-empty, unique parent models
+        seenParents.add(parent);
         const option = document.createElement('option');
         option.value = parent;
         option.textContent = parent;
@@ -10093,8 +11042,12 @@ async function populateParentModelFilter() {
   parentSelect.innerHTML += '<option value="__none__">None</option>';
   try {
     const parents = await window.electron.getParentModels();
+    // Use a Set to track unique parent values to prevent duplicates
+    const seenParents = new Set();
+    
     parents.forEach(parent => {
-      if (parent) { // Only add non-empty parent models
+      if (parent && !seenParents.has(parent)) { // Only add non-empty, unique parent models
+        seenParents.add(parent);
         const option = document.createElement('option');
         option.value = parent;
         option.textContent = parent;
@@ -10191,6 +11144,38 @@ function exitMultiEditMode() {
     }
   });
 
+  // Clear the current model details path to prevent stale event handlers
+  currentModelDetailsPath = null;
+  currentModelDetailsAbort = true;
+  
+  // Remove event listeners from model details form fields by cloning them
+  const modelDetailsFields = [
+    'model-printed',
+    'model-source',
+    'model-notes',
+    'model-designer',
+    'model-license',
+    'model-parent'
+  ];
+  
+  modelDetailsFields.forEach(fieldId => {
+    const element = document.getElementById(fieldId);
+    if (element) {
+      // Clone and replace to remove all event listeners
+      const newElement = element.cloneNode(true);
+      element.parentNode.replaceChild(newElement, element);
+      
+      // Reset element states
+      if (fieldId === 'model-printed') {
+        newElement.checked = false;
+      } else if (newElement.tagName === 'SELECT') {
+        newElement.value = '';
+      } else if (newElement.tagName === 'INPUT') {
+        newElement.value = '';
+      }
+    }
+  });
+  
   // Clear the form
   const pathTreeContainer = document.getElementById('path-tree-container');
   if (pathTreeContainer) {
@@ -10221,6 +11206,9 @@ function exitMultiEditMode() {
     // Optionally refresh the dropdown options
     populateTagSelect('multi-tag-select', 'multi-tags');
   }
+  
+  // Reset selection tracking to ensure tags are cleared on next selection
+  previousSelectionHash = '';
   
   console.log('Exited multi-edit mode and cleared tags');
 }
@@ -10261,15 +11249,279 @@ window.addEventListener('webglcontextlost', (event) => {
   sharedRenderer = null;
 }, false);
 
+// Searchable list dialog functionality
+async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filter', containerId = null, isRemove = false) {
+  const dialog = document.getElementById('searchable-list-dialog');
+  const titleElement = document.getElementById('searchable-list-title');
+  const searchInput = document.getElementById('searchable-list-search');
+  const itemsList = document.getElementById('searchable-list-items');
+  const cancelButton = document.getElementById('searchable-list-cancel');
+  
+  if (!dialog || !titleElement || !searchInput || !itemsList) {
+    console.error('Searchable list dialog elements not found');
+    return;
+  }
+  
+  // Set title based on field type
+  const titles = {
+    designer: 'Select Designer',
+    parent: 'Select Parent Model',
+    license: 'Select License',
+    tag: isRemove ? 'Remove Tag' : 'Select Tag'
+  };
+  titleElement.textContent = titles[fieldType] || 'Select Item';
+  
+  // Clear previous content
+  searchInput.value = '';
+  itemsList.innerHTML = '';
+  
+  // Fetch data based on field type
+  let items = [];
+  try {
+    switch (fieldType) {
+      case 'designer':
+        items = await window.electron.getDesigners();
+        break;
+      case 'parent':
+        items = await window.electron.getParentModels();
+        // Remove duplicates
+        items = [...new Set(items.filter(p => p))];
+        break;
+      case 'license':
+        items = await window.electron.getLicenses();
+        break;
+      case 'tag':
+        if (isRemove && targetSelectId === 'multi-tag-remove-select') {
+          // For remove tags, get tags from selected files only
+          if (selectedModels.size === 0) {
+            items = [];
+          } else {
+            const filePaths = Array.from(selectedModels);
+            const tagPromises = filePaths.map(async (filePath) => {
+              try {
+                const model = await window.electron.getModel(filePath);
+                return model && model.tags ? (Array.isArray(model.tags) ? model.tags : []) : [];
+              } catch (error) {
+                console.error(`Error loading tags for ${filePath}:`, error);
+                return [];
+              }
+            });
+            const allTagsArrays = await Promise.all(tagPromises);
+            // Collect unique tags
+            const uniqueTags = new Set();
+            allTagsArrays.forEach(tags => {
+              if (Array.isArray(tags)) {
+                tags.forEach(tag => {
+                  if (tag && typeof tag === 'string') {
+                    const normalizedTag = tag.trim();
+                    if (normalizedTag) {
+                      uniqueTags.add(normalizedTag);
+                    }
+                  }
+                });
+              }
+            });
+            items = Array.from(uniqueTags);
+          }
+        } else {
+          // For add tags, get all tags
+          const tags = await window.electron.getAllTags();
+          items = tags.map(t => t.name);
+        }
+        break;
+      default:
+        console.error('Unknown field type:', fieldType);
+        return;
+    }
+    
+    // Sort items alphabetically
+    items.sort((a, b) => a.localeCompare(b));
+    
+    // Filter out empty values
+    items = items.filter(item => item && item.trim() !== '');
+    
+    if (items.length === 0) {
+      const li = document.createElement('li');
+      li.textContent = 'No items found';
+      li.style.color = '#888';
+      li.style.cursor = 'default';
+      itemsList.appendChild(li);
+    } else {
+      // Render items
+      renderListItems(items, itemsList, '');
+    }
+  } catch (error) {
+    console.error('Error fetching items for searchable list:', error);
+    const li = document.createElement('li');
+    li.textContent = 'Error loading items';
+    li.style.color = '#ff4444';
+    li.style.cursor = 'default';
+    itemsList.appendChild(li);
+    return;
+  }
+  
+  // Handle item selection
+  const handleItemClick = (itemValue) => {
+    dialog.close();
+    
+    const targetSelect = document.getElementById(targetSelectId);
+    if (!targetSelect) {
+      console.error('Target select element not found:', targetSelectId);
+      return;
+    }
+    
+    // Set the value in the dropdown
+    targetSelect.value = itemValue;
+    
+    // For remove tags, trigger the remove handler
+    if (isRemove && targetSelectId === 'multi-tag-remove-select') {
+      // Trigger the change event which will call handleRemoveTagSelect
+      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (fieldType === 'tag' && mode !== 'filter' && containerId) {
+      // For tags in edit mode, use addTagToModel
+      addTagToModel(itemValue, containerId);
+    } else if (mode === 'edit' || mode === 'multi') {
+      // For edit/multi mode, trigger auto-save
+      const fieldMap = {
+        designer: 'designer',
+        parent: 'parentModel',
+        license: 'license'
+      };
+      
+      if (fieldMap[fieldType]) {
+        const filePath = mode === 'edit' ? getCurrentModelFilePath() : null;
+        if (mode === 'multi') {
+          autoSaveMultipleModels(fieldMap[fieldType], itemValue);
+        } else if (filePath) {
+          autoSaveModel(fieldMap[fieldType], itemValue, filePath);
+        }
+      }
+      
+      // Trigger change event after setting value
+      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (mode === 'filter') {
+      // For filter mode, trigger filter update
+      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  };
+  
+  // Render list items function
+  function renderListItems(itemsToRender, listElement, searchTerm) {
+    listElement.innerHTML = '';
+    
+    if (itemsToRender.length === 0) {
+      const li = document.createElement('li');
+      li.textContent = 'No items found';
+      li.style.color = '#888';
+      li.style.cursor = 'default';
+      listElement.appendChild(li);
+      return;
+    }
+    
+    itemsToRender.forEach(item => {
+      const li = document.createElement('li');
+      li.textContent = item;
+      li.addEventListener('click', () => handleItemClick(item));
+      listElement.appendChild(li);
+    });
+  }
+  
+  // Handle search input with debounce
+  let searchTimeout;
+  const handleSearch = (e) => {
+    const searchTerm = e.target.value;
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      const filtered = items.filter(item => 
+        item.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+      renderListItems(filtered, itemsList, searchTerm);
+    }, 200);
+  };
+  
+  searchInput.addEventListener('input', handleSearch);
+  
+  // Handle cancel button
+  const handleCancel = () => {
+    dialog.close();
+  };
+  cancelButton.addEventListener('click', handleCancel);
+  
+  // Close on Escape key
+  const handleKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      dialog.close();
+    }
+  };
+  dialog.addEventListener('keydown', handleKeyDown);
+  
+  // Clean up event listeners when dialog closes
+  dialog.addEventListener('close', () => {
+    searchInput.removeEventListener('input', handleSearch);
+    cancelButton.removeEventListener('click', handleCancel);
+    dialog.removeEventListener('keydown', handleKeyDown);
+  }, { once: true });
+  
+  // Show dialog
+  dialog.showModal();
+  
+  // Focus search input
+  requestAnimationFrame(() => {
+    searchInput.focus();
+  });
+}
+
+// Helper function to get current model file path
+function getCurrentModelFilePath() {
+  const modelDetails = document.getElementById('model-details');
+  if (modelDetails && !modelDetails.classList.contains('hidden')) {
+    const pathContainer = document.getElementById('path-tree-container');
+    if (pathContainer && pathContainer.dataset.filePath) {
+      return pathContainer.dataset.filePath;
+    }
+  }
+  return null;
+}
+
+// Initialize List button event listeners
+function initializeListButtons() {
+  document.querySelectorAll('.list-button').forEach(button => {
+    // Remove existing listeners to avoid duplicates
+    const newButton = button.cloneNode(true);
+    button.parentNode.replaceChild(newButton, button);
+    
+    newButton.addEventListener('click', async () => {
+      const fieldType = newButton.dataset.field;
+      const targetSelectId = newButton.dataset.target;
+      const mode = newButton.dataset.mode || 'filter';
+      const containerId = newButton.dataset.container || null;
+      const isRemove = newButton.dataset.remove === 'true';
+      
+      await showSearchableListDialog(fieldType, targetSelectId, mode, containerId, isRemove);
+    });
+  });
+}
+
 // Remove all existing DOMContentLoaded event listeners and create a single one
 // Place this at the end of the file, after all function declarations
 
 // First, declare all initialization functions outside of any event listeners
 async function initializeApp() {
   try {
+    // Load saved sort preference before initializing search
+    const savedSortOption = await window.electron.getSetting('sortOption');
+    const sortSelect = document.getElementById('sort-select');
+    if (sortSelect && savedSortOption) {
+      // Validate that the saved option is a valid sort option
+      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc'];
+      if (validOptions.includes(savedSortOption)) {
+        sortSelect.value = savedSortOption;
+      }
+    }
+    
     // Initialize the combined search functionality from search.js
     if (typeof window.initializeCombinedSearch === 'function') {
-      window.initializeCombinedSearch();
+      await window.initializeCombinedSearch();
     }
     
     console.log('1. Starting initialization sequence');
@@ -10386,10 +11638,14 @@ async function initializeApp() {
     });
     
     // Only show prompt if it's a new version and not the one user previously declined
-    if (latestVersion && 
-        latestVersion !== currentVersion && 
-        compareVersions(latestVersion, currentVersion) > 0 && 
-        latestVersion !== lastDeclinedVersion) {
+    // This is an automatic check (silent=true), so respect lastDeclinedVersion
+    const isUpdateAvailable = latestVersion && 
+                              latestVersion !== currentVersion && 
+                              compareVersions(latestVersion, currentVersion) > 0;
+    const shouldShowPrompt = isUpdateAvailable && 
+                             latestVersion !== lastDeclinedVersion;
+    
+    if (shouldShowPrompt) {
       console.log('7. Update available - showing prompt');
       const shouldUpdate = await window.electron.showMessage(
         'Update Available',
@@ -10517,49 +11773,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   debugLog('DOM fully loaded and parsed');
 
-  // (update check and app initialization code already present)
-  try {
-    console.log('Checking for updates on startup...');
-    let currentVersion = await window.electron.getSetting('currentVersion');
-    const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
-    const latestVersion = await window.electron.checkForUpdates(isBeta);
-    const lastDeclinedVersion = await window.electron.getSetting('lastDeclinedVersion');
-    
-    console.log('Version check results:', { 
-      currentVersion, 
-      latestVersion, 
-      lastDeclinedVersion,
-      isBeta 
-    });
-    
-    if (
-      latestVersion &&
-      latestVersion !== currentVersion &&
-      compareVersions(latestVersion, currentVersion) > 0 &&
-      latestVersion !== lastDeclinedVersion
-    ) {
-      const shouldUpdate = await window.electron.showMessage(
-        'Update Available',
-        `Version ${latestVersion} is available. You are currently running version ${currentVersion}. Would you like to update?`,
-        ['Yes', 'No']
-      );
-      
-      if (shouldUpdate === 'Yes') {
-        await window.electron.openUpdatePage(isBeta);
-      } else {
-        console.log('User declined update, storing version:', latestVersion);
-        await window.electron.saveSetting('lastDeclinedVersion', latestVersion);
-      }
-    }
-    
-    await window.electron.saveSetting('latestVersion', latestVersion);
-    await window.electron.saveSetting('lastUpdateCheck', new Date().toISOString());
-
-  } catch (error) {
-    console.error('Error checking for updates:', error);
-  }
-
-  // Continue with normal initialization (which now includes the thumbnail prompting)
+  // Continue with normal initialization (which includes update checking)
   await initializeApp();
 
   // (Any additional event listeners and UI initialization code below)
@@ -10850,15 +12064,39 @@ function getModelFilePath() {
   return null;
 }
 
-// Add this code to set up event handlers for multi-edit mode controls
-function showMultiEditPanel() {
-  // Populate dropdowns with existing data - REMOVED redundant calls
-  // populateModelDesignerDropdown('', 'multi-designer');
-  // populateModelLicenseDropdown('', 'multi-license');
-  // populateParentModelDropdown('', 'multi-parent');
-  // populateTagSelect('multi-tag-select', 'multi-tags');
+// Helper function to clear all multi-edit form fields
+function clearMultiEditFormFields() {
+  // Clear the printed checkbox
+  const multiPrintedCheckbox = document.getElementById('multi-printed');
+  if (multiPrintedCheckbox) {
+    multiPrintedCheckbox.checked = false;
+  }
   
-  // Clear the multi-edit tag container to prevent stacking
+  // Clear the source input
+  const multiSourceInput = document.getElementById('multi-source');
+  if (multiSourceInput) {
+    multiSourceInput.value = '';
+  }
+  
+  // Clear the designer dropdown
+  const multiDesignerSelect = document.getElementById('multi-designer');
+  if (multiDesignerSelect) {
+    multiDesignerSelect.value = '';
+  }
+  
+  // Clear the parent dropdown
+  const multiParentSelect = document.getElementById('multi-parent');
+  if (multiParentSelect) {
+    multiParentSelect.value = '';
+  }
+  
+  // Clear the license dropdown
+  const multiLicenseSelect = document.getElementById('multi-license');
+  if (multiLicenseSelect) {
+    multiLicenseSelect.value = '';
+  }
+  
+  // Clear the multi-edit tag container
   const multiTagsContainer = document.getElementById('multi-tags');
   if (multiTagsContainer) {
     multiTagsContainer.innerHTML = '';
@@ -10869,6 +12107,40 @@ function showMultiEditPanel() {
   if (multiTagSelect) {
     multiTagSelect.value = '';
   }
+
+  // Reset the multi-tag-remove-select dropdown
+  const multiTagRemoveSelect = document.getElementById('multi-tag-remove-select');
+  if (multiTagRemoveSelect) {
+    multiTagRemoveSelect.value = '';
+    multiTagRemoveSelect.innerHTML = '<option value="">Select a tag to remove...</option>';
+  }
+}
+
+// Add this code to set up event handlers for multi-edit mode controls
+async function showMultiEditPanel() {
+  // Populate dropdowns with existing data - REMOVED redundant calls
+  // populateModelDesignerDropdown('', 'multi-designer');
+  // populateModelLicenseDropdown('', 'multi-license');
+  // populateParentModelDropdown('', 'multi-parent');
+  // populateTagSelect('multi-tag-select', 'multi-tags');
+  
+  // Always clear the multi-edit tag container to prevent tags from sticking
+  // This ensures that when a new selection is made, old tags don't persist
+  // Note: The container is hidden in multi-edit mode, but we still clear it
+  const multiTagsContainer = document.getElementById('multi-tags');
+  if (multiTagsContainer) {
+    multiTagsContainer.innerHTML = '';
+    multiTagsContainer.style.display = 'none'; // Hide the tag list in multi-edit mode
+  }
+  
+  // Reset the multi-tag-select dropdown
+  const multiTagSelect = document.getElementById('multi-tag-select');
+  if (multiTagSelect) {
+    multiTagSelect.value = '';
+  }
+  
+  // Also call the selection change handler to update tracking
+  clearTagsOnSelectionChange();
   
   // Force the checkbox to be unchecked at the start
   const multiPrintedCheckbox = document.getElementById('multi-printed');
@@ -10880,6 +12152,24 @@ function showMultiEditPanel() {
   const multiSourceInput = document.getElementById('multi-source');
   if (multiSourceInput) {
     multiSourceInput.value = '';
+  }
+  
+  // Only clear dropdowns if no models are selected
+  if (selectedModels.size === 0) {
+    const multiDesignerSelect = document.getElementById('multi-designer');
+    if (multiDesignerSelect) {
+      multiDesignerSelect.value = '';
+    }
+    
+    const multiParentSelect = document.getElementById('multi-parent');
+    if (multiParentSelect) {
+      multiParentSelect.value = '';
+    }
+    
+    const multiLicenseSelect = document.getElementById('multi-license');
+    if (multiLicenseSelect) {
+      multiLicenseSelect.value = '';
+    }
   }
   
   // Add change handlers for multi-edit controls
@@ -10967,6 +12257,28 @@ function showMultiEditPanel() {
   } else {
     console.error('Multi-tag-select element not found in showMultiEditPanel');
   }
+
+  // Set up remove tag select event listener
+  const removeTagSelectElement = document.getElementById('multi-tag-remove-select');
+  if (removeTagSelectElement) {
+    // Clone/replace to ensure any old listeners are gone
+    const newRemoveTagSelect = removeTagSelectElement.cloneNode(true);
+    removeTagSelectElement.parentNode.replaceChild(newRemoveTagSelect, removeTagSelectElement);
+
+    // Add the change listener
+    newRemoveTagSelect.addEventListener('change', async () => {
+      await handleRemoveTagSelect();
+    });
+    console.log('Multi-tag-remove-select event handler attached in showMultiEditPanel');
+
+    // Populate the remove tag dropdown
+    await populateRemoveTagSelect();
+  } else {
+    console.error('Multi-tag-remove-select element not found in showMultiEditPanel');
+  }
+  
+  // Initialize List buttons for multi-edit panel
+  initializeListButtons();
 }
 
 // Update the edit mode toggle handler to call showMultiEditPanel when entering multi-edit mode
@@ -11020,26 +12332,15 @@ document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.file-item.selected').forEach(item => {
           item.classList.remove('selected');
         });
+        
+        // Clear all multi-edit form fields
+        clearMultiEditFormFields();
+        
+        // Refresh the tag dropdown options
+        populateTagSelect('multi-tag-select', 'multi-tags');
+        
         updateSelectedCount(); // Update the count display
         
-        // Clear the multi-edit tag container to prevent tags from persisting
-        const multiTagsContainer = document.getElementById('multi-tags');
-        if (multiTagsContainer) {
-          multiTagsContainer.innerHTML = '';
-        }
-        
-        // Reset the multi-tag-select dropdown
-        const multiTagSelect = document.getElementById('multi-tag-select');
-        if (multiTagSelect) {
-          multiTagSelect.value = '';
-          // Refresh the dropdown options
-          populateTagSelect('multi-tag-select', 'multi-tags');
-        }
-        
-        // Optionally hide the multi-edit panel if preferred when selection is cleared
-        // exitMultiEditMode(); // Or just hide the panel like this:
-        // document.getElementById('multi-edit-panel').classList.add('hidden'); 
-        // document.getElementById('model-details').classList.remove('hidden');
         console.log('Selection cleared');
       }
     });
@@ -11926,7 +13227,7 @@ function createModelItem(model, viewMode = null) {
         directoryPart.style.cursor = 'pointer';
         directoryPart.innerHTML = `
           <span class="metadata-icon">📁</span>
-          <span class="metadata-value directory-link">${parentDir}</span>
+          <span class="metadata-value directory-link" title="${parentDir}">${parentDir}</span>
         `;
         directoryPart.addEventListener('click', async (e) => {
           e.preventDefault();
@@ -12034,7 +13335,7 @@ function createModelItem(model, viewMode = null) {
       
       designerItem.innerHTML = `
         <span class="metadata-icon">👤</span>
-        <span class="metadata-value designer-info" style="color: #ccc; display: inline-block;">${designerValue}</span>
+        <span class="metadata-value designer-info" style="color: #ccc; display: inline-block;" title="${designerValue}">${designerValue}</span>
       `;
       
       // Add click handler to filter by designer
@@ -12061,7 +13362,7 @@ function createModelItem(model, viewMode = null) {
       sourceItem.className = 'metadata-item source-item';
       sourceItem.innerHTML = `
         <span class="metadata-icon">🔗</span>
-        <span class="metadata-value source-info" style="color: #ccc">${sourceValue}</span>
+        <span class="metadata-value source-info" style="color: #ccc" title="${sourceValue}">${sourceValue}</span>
       `;
       metadataContainer.appendChild(sourceItem);
     }
@@ -12076,7 +13377,7 @@ function createModelItem(model, viewMode = null) {
       
       parentItem.innerHTML = `
         <span class="metadata-icon">📦</span>
-        <span class="metadata-value parent-info" style="color: #ccc">${parentValue}</span>
+        <span class="metadata-value parent-info" style="color: #ccc" title="${parentValue}">${parentValue}</span>
       `;
       
       // Add click handler to filter by parent model
@@ -12106,7 +13407,7 @@ function createModelItem(model, viewMode = null) {
       
       licenseItem.innerHTML = `
         <span class="metadata-icon">📜</span>
-        <span class="metadata-value license-info" style="color: #ccc">${licenseValue}</span>
+        <span class="metadata-value license-info" style="color: #ccc" title="${licenseValue}">${licenseValue}</span>
       `;
       
       // Add click handler to filter by license
@@ -12192,6 +13493,7 @@ function createModelItem(model, viewMode = null) {
               const tagsValueSpan = tagsItem.querySelector('.tags-info');
               if (tagsValueSpan) {
                 tagsValueSpan.textContent = tagsText;
+                tagsValueSpan.setAttribute('title', tagsText); // Show full tag list on hover
                 tagsValueSpan.style.color = '#ccc';
               }
             } else {

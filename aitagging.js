@@ -221,6 +221,25 @@ function parseTagsFromResponse(content, useJsonResponse = false) {
   return tags;
 }
 
+// Extract meaningful words from filename
+function extractKeywordsFromFilename(filename) {
+  if (!filename) return [];
+  
+  // Remove extension and path
+  const nameWithoutExt = filename.split(/[/\\]/).pop().replace(/\.[^/.]+$/, '');
+  
+  // Split by common separators and camelCase
+  const words = nameWithoutExt
+    .replace(/([a-z])([A-Z])/g, '$1 $2') // Split camelCase
+    .split(/[-_\s.]+/) // Split by dashes, underscores, spaces, dots
+    .map(word => word.trim())
+    .filter(word => word.length > 2) // Filter out very short words
+    .filter(word => !/^\d+$/.test(word)) // Filter out pure numbers
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()); // Capitalize first letter
+  
+  return [...new Set(words)]; // Remove duplicates
+}
+
 // Build prompt based on options
 function buildPrompt(options = {}, filename = null) {
   const maxTags = options.maxTags || DEFAULT_OPTIONS.maxTags;
@@ -228,41 +247,49 @@ function buildPrompt(options = {}, filename = null) {
   const useJsonResponse = options.useJsonResponse || false;
   const detailLevel = options.detailLevel || 'medium';
   
-  let prompt = `Analyze this image of a 3D model thumbnail and generate ${maxTags} category tags. `;
+  let prompt = `You are helping organize 3D models in a library. Analyze this image of a 3D model thumbnail and generate ${maxTags} useful category tags that will help users find and organize this model. `;
   
-  // Include filename information if available
+  // Extract and use filename keywords
+  let filenameKeywords = [];
   if (filename) {
-    // Extract just the filename without path for cleaner context
+    filenameKeywords = extractKeywordsFromFilename(filename);
     const fileNameOnly = filename.split(/[/\\]/).pop();
-    // Remove file extension for cleaner context
     const nameWithoutExt = fileNameOnly.replace(/\.[^/.]+$/, '');
+    
     prompt += `The filename is "${fileNameOnly}" (without extension: "${nameWithoutExt}"). `;
-    prompt += `Consider the filename as additional context, but prioritize what you see in the image. `;
+    
+    if (filenameKeywords.length > 0) {
+      prompt += `The filename contains these keywords: ${filenameKeywords.join(', ')}. `;
+      prompt += `Use these keywords as tags if they accurately describe what you see in the image. For example, if the filename contains "dragon" and you see a dragon in the image, include "Dragon" as a tag. `;
+    }
+    
+    prompt += `The filename provides important context - extract meaningful words from it and use them as tags when they match what you see. `;
   }
   
   prompt += `Focus ONLY on the 3D model itself - completely ignore any background, text, or UI elements. `;
-  prompt += `Do NOT use generic terms like "3D Model", "model", "object", "item", "tag", or "tags". `;
+  prompt += `Do NOT use generic terms like "3D Model", "model", "object", "item", "tag", "tags", "thing", "stuff", or "piece". `;
   
   // Adjust prompt based on detail level
   if (detailLevel === 'low') {
     prompt += `Generate very simple, broad category tags. Use the most basic, high-level classification. `;
-    prompt += `Examples: "Toy", "Part", "Container", "Figure", "Decorative", "Functional". `;
+    prompt += `Examples: "Toy", "Dragon", "Tool", "Mount", "Ball", "Car", "Part", "Container", "Figure", "Decorative", "Functional". `;
     prompt += `Use single-word tags only. Focus on the most general category the model belongs to. `;
   } else if (detailLevel === 'high') {
     prompt += `Generate detailed, specific tags that capture distinguishing features and characteristics. `;
     prompt += `Include descriptive details like style, complexity, articulation, or specific attributes. `;
-    prompt += `Examples: "Articulated Dragon", "Corner Bracket", "Storage Container", "Decorative Vase". `;
+    prompt += `Examples: "Articulated Dragon", "Corner Bracket", "Storage Container", "Decorative Vase", "Racing Car", "Action Figure". `;
     prompt += `Compound tags are acceptable when they add meaningful detail. `;
   } else {
     // Medium (default)
     prompt += `Generate general category tags that classify the model at a moderate level of detail. `;
-    prompt += `Use simple, single-word tags when possible. Examples: "Toy", "Dragon", "Part", "Mount", "Drawer", "Bracket", "Container", "Figure", "Vase", "Lamp", "Holder", "Organizer", "Decorative", "Functional". `;
+    prompt += `Use simple, single-word tags when possible. Good examples: "Toy", "Dragon", "Tool", "Mount", "Ball", "Car", "Part", "Drawer", "Bracket", "Container", "Figure", "Vase", "Lamp", "Holder", "Organizer", "Decorative", "Functional", "Bracket", "Mount", "Holder", "Stand", "Base". `;
     prompt += `Avoid overly specific tags like "corner-bracket" or "mounting-bracket" - use the general category "Bracket" or "Mount" instead. `;
-    prompt += `Avoid compound tags when a single general word works. For example, use "Toy" not "toy-car", use "Dragon" not "dragon-figure". `;
+    prompt += `Avoid compound tags when a single general word works. For example, use "Toy" not "toy-car", use "Dragon" not "dragon-figure", use "Car" not "car-model". `;
   }
   
   prompt += `Focus on the primary category, subject, or function of the model. `;
-  prompt += `Each tag should represent a distinct category or characteristic. `;
+  prompt += `Each tag should represent a distinct category or characteristic that helps organize the library. `;
+  prompt += `Tags should be practical and useful for finding models - think about what someone would search for. `;
   
   if (useCategories) {
     prompt += `Organize tags into these categories: object type, style, complexity, material. `;

@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electron', {
   getTagModelCount: (tagId) => ipcRenderer.invoke('get-tag-model-count', tagId),
   onOpenTagManager: (callback) => ipcRenderer.on('open-tag-manager', callback),
   getAllMetadata: () => ipcRenderer.invoke('get-all-metadata'),
+  getStats: () => ipcRenderer.invoke('get-stats'),
   renameMetadata: (type, oldName, newName) => ipcRenderer.invoke('rename-metadata', type, oldName, newName),
   deleteMetadata: (type, name) => ipcRenderer.invoke('delete-metadata', type, name),
   onOpenMetadataEditor: (callback) => ipcRenderer.on('open-metadata-editor', callback),
@@ -46,6 +47,11 @@ contextBridge.exposeInMainWorld('electron', {
   },
   onOpenServerModeInfo: (callback) => {
     ipcRenderer.on('open-server-mode-info', async () => {
+      await callback();
+    });
+  },
+  onOpenStats: (callback) => {
+    ipcRenderer.on('open-stats', async () => {
       await callback();
     });
   },

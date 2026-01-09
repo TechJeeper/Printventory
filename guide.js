@@ -84,68 +84,81 @@ function updateGuide() {
   const guideImage = document.getElementById("guide-image");
   const backButton = document.getElementById("guide-back-button");
   const nextButton = document.getElementById("guide-next-button");
+  const progressFill = document.getElementById("guide-progress-fill");
+  const progressText = document.getElementById("guide-progress-text");
 
   const page = guidePages[currentPage];
 
+  // Update progress indicator
+  const progress = ((currentPage + 1) / guidePages.length) * 100;
+  if (progressFill) {
+    progressFill.style.width = `${progress}%`;
+  }
+  if (progressText) {
+    progressText.textContent = `Page ${currentPage + 1} of ${guidePages.length}`;
+  }
+
   // Fade out the current content
-  guideText.style.opacity = 0; // Start with opacity 0
-  guideImage.style.opacity = 0; // Start with opacity 0
+  guideText.style.opacity = 0;
+  guideImage.style.opacity = 0;
 
   // Set a timeout to allow the fade-out to complete before changing content
   setTimeout(() => {
     // Clear existing contents before adding new content
-    guideText.innerHTML = ''; // Clear previous content
+    guideText.innerHTML = '';
 
-    // For pages 2 and 3 (indexes 1 and 2) show a two‐column layout (image on left, text on right)
+    // For pages 2 and 3 (indexes 1 and 2) show a two-column layout (image on left, text on right)
     if (currentPage === 1 || currentPage === 2) {
-      // Create a flex container to hold both image and text
-      const flexContainer = document.createElement("div");
-      flexContainer.style.display = "flex";
-      flexContainer.style.flexDirection = "row";
-      flexContainer.style.alignItems = "center";
-      flexContainer.style.gap = "1rem";
+      // Create a two-column container
+      const twoColumnContainer = document.createElement("div");
+      twoColumnContainer.className = "guide-two-column";
 
-      // Create the image element with fixed width and auto height
+      // Create the image element
       const imgElement = document.createElement("img");
       imgElement.src = page.image;
-      imgElement.style.width = "200px";
-      imgElement.style.height = "auto";
+      imgElement.alt = page.title;
 
       // Create a text container for the title and content
       const textContainer = document.createElement("div");
-      textContainer.style.flex = "1";
+      textContainer.className = "guide-text-content";
       textContainer.innerHTML = `<h3>${page.title}</h3><p>${page.content}</p>`;
 
-      // Append flex container
-      flexContainer.appendChild(imgElement);
-      flexContainer.appendChild(textContainer);
-      guideText.appendChild(flexContainer);
+      // Append to two-column container
+      twoColumnContainer.appendChild(imgElement);
+      twoColumnContainer.appendChild(textContainer);
+      guideText.appendChild(twoColumnContainer);
 
       // Hide the standalone guideImage element (not used in this layout)
       guideImage.style.display = "none";
     } else {
       // Default layout: show title and content in guideText, and if an image exists, display it.
-      guideText.innerHTML += `<h3>${page.title}</h3><p>${page.content}</p>`;
+      guideText.innerHTML = `<h3>${page.title}</h3><p>${page.content}</p>`;
       if (page.image) {
         guideImage.src = page.image;
+        guideImage.alt = page.title;
         guideImage.style.display = "block";
-        guideImage.style.width = "";
-        guideImage.style.height = "";
       } else {
         guideImage.style.display = "none";
       }
     }
 
     // Fade in the new content
-    guideText.style.opacity = 1; // Set opacity to 1 for fade-in
-    guideImage.style.opacity = 1; // Set opacity to 1 for fade-in
+    guideText.style.opacity = 1;
+    guideImage.style.opacity = 1;
 
     // Disable the Back button on the first page.
     backButton.disabled = currentPage === 0;
 
-    // Change Next button text to "Finish" on the last page.
-    nextButton.textContent = (currentPage === guidePages.length - 1) ? "Finish" : "Next";
-  }, 500); // Adjust the timeout duration to match the fade-out duration
+    // Update Next button text and icon
+    const nextButtonSpans = nextButton.querySelectorAll('span');
+    if (currentPage === guidePages.length - 1) {
+      // Last page: show "Finish" without arrow
+      nextButton.innerHTML = '<span>Finish</span>';
+    } else {
+      // Other pages: show "Next" with arrow
+      nextButton.innerHTML = '<span>Next</span><span class="guide-nav-icon">→</span>';
+    }
+  }, 400); // Smooth transition timing
 }
 
 // Increment the current page or close the guide if on the last page.
@@ -176,6 +189,8 @@ function showGuide() {
     // Add styles to ensure dialog has no black background
     guideDialog.style.backgroundColor = 'transparent';
     guideDialog.style.background = 'none';
+    // Focus the dialog for keyboard navigation
+    guideDialog.focus();
   } else {
     console.error('Guide dialog not found');
   }
@@ -194,6 +209,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const nextButton = document.getElementById("guide-next-button");
   const backButton = document.getElementById("guide-back-button");
   const closeButton = document.getElementById("guide-close-button");
+  const guideDialog = document.getElementById("quickstart-guide");
 
   if (nextButton) {
     nextButton.addEventListener("click", nextGuide);
@@ -203,6 +219,34 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   if (closeButton) {
     closeButton.addEventListener("click", closeGuide);
+  }
+
+  // Keyboard navigation support
+  if (guideDialog) {
+    guideDialog.addEventListener("keydown", (e) => {
+      // Only handle keyboard events when the dialog is open
+      if (!guideDialog.open) return;
+
+      // Prevent default behavior for arrow keys
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+      }
+
+      // Navigate with arrow keys
+      if (e.key === "ArrowLeft" && currentPage > 0) {
+        prevGuide();
+      } else if (e.key === "ArrowRight" && currentPage < guidePages.length - 1) {
+        nextGuide();
+      } else if (e.key === "Escape") {
+        closeGuide();
+      }
+    });
+
+    // Focus management: focus the dialog when it opens
+    guideDialog.addEventListener("close", () => {
+      // Reset to first page when closing
+      currentPage = 0;
+    });
   }
   
   // After the welcome dialog is dismissed, automatically show the guide.

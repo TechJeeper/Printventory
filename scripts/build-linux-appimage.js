@@ -146,11 +146,20 @@ RUN apt-get update && apt-get install -y \\
 
 WORKDIR /app
 
+# Configure npm for better network reliability
+RUN npm config set fetch-retries 5 && \\
+    npm config set fetch-retry-mintimeout 20000 && \\
+    npm config set fetch-retry-maxtimeout 120000 && \\
+    npm config set fetch-timeout 300000
+
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install && npm cache clean --force
+# Install dependencies with retry logic
+RUN npm install --loglevel=error || \\
+    (sleep 5 && npm install --loglevel=error) || \\
+    (sleep 10 && npm install --loglevel=error) && \\
+    npm cache clean --force
 
 # Clean any existing native module builds to ensure fresh rebuild
 RUN rm -rf node_modules/better-sqlite3/build || true
@@ -254,18 +263,18 @@ RUN npm run build:linux:internal
 
 // Main execution
 function main() {
-  if (checkWSL()) {
-    buildWithWSL();
-  } else if (checkDocker()) {
+  if (checkDocker()) {
     buildWithDocker();
+  } else if (checkWSL()) {
+    buildWithWSL();
   } else {
-    console.error('ERROR: Neither WSL nor Docker is available.');
+    console.error('ERROR: Neither Docker nor WSL is available.');
     console.error('\nTo build Linux AppImage from Windows, you need one of:');
-    console.error('1. WSL (Windows Subsystem for Linux) - Recommended');
+    console.error('1. Docker Desktop - Recommended');
+    console.error('   Install: https://www.docker.com/products/docker-desktop');
+    console.error('\n2. WSL (Windows Subsystem for Linux)');
     console.error('   Install: wsl --install');
     console.error('   Then install Node.js in WSL: sudo apt-get install nodejs npm');
-    console.error('\n2. Docker Desktop');
-    console.error('   Install: https://www.docker.com/products/docker-desktop');
     process.exit(1);
   }
 }

@@ -196,6 +196,7 @@
     'deleteTag': 'delete-tag',
     'getTagModelCount': 'get-tag-model-count',
     'getAllMetadata': 'get-all-metadata',
+    'getStats': 'get-stats',
     'renameMetadata': 'rename-metadata',
     'deleteMetadata': 'delete-metadata',
     'getModelTags': 'get-model-tags',
@@ -314,6 +315,12 @@
   
   window.electron.onOpenServerModeInfo = function(callback) {
     window.electron.on('open-server-mode-info', async () => {
+      await callback();
+    });
+  };
+  
+  window.electron.onOpenStats = function(callback) {
+    window.electron.on('open-stats', async () => {
       await callback();
     });
   };

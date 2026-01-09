@@ -11,12 +11,13 @@
   <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
   <script src="https://js.puter.com/v2/"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
 
 </head>
 
 
-<body>
+<body style="background-color: #1e1e2e;">
   <div class="sidebar">
     <img src="logo.png" alt="Printventory Logo" id="logo">
     <div class="model-stats">
@@ -76,22 +77,31 @@
       </div>
       <div class="form-group">
         <label for="designer-select">Select Designer:</label>
-        <select id="designer-select">
-          <option value="">All Designers</option>
-        </select>
+        <div class="dropdown-with-list">
+          <select id="designer-select">
+            <option value="">All Designers</option>
+          </select>
+          <button type="button" class="list-button icon-button" data-field="designer" data-target="designer-select" title="Search existing designers">☰</button>
+        </div>
       </div>
 
       <div class="form-group">
         <label for="parent-select">Select Parent Model:</label>
-        <select id="parent-select">
-          <option value="">All Parent Models</option>
-        </select>
+        <div class="dropdown-with-list">
+          <select id="parent-select">
+            <option value="">All Parent Models</option>
+          </select>
+          <button type="button" class="list-button icon-button" data-field="parent" data-target="parent-select" title="Search existing parent models">☰</button>
+        </div>
       </div>
       <div class="form-group">
         <label for="license-select">Select License:</label>
-        <select id="license-select">
-          <option value="">All Licenses</option>
-        </select>
+        <div class="dropdown-with-list">
+          <select id="license-select">
+            <option value="">All Licenses</option>
+          </select>
+          <button type="button" class="list-button icon-button" data-field="license" data-target="license-select" title="Search existing licenses">☰</button>
+        </div>
       </div>
       <div class="form-group">
         <label for="printed-select">Print Status:</label>
@@ -112,10 +122,13 @@
       </div>
       <div class="form-group">
         <label for="tag-filter">Filter by Tag:</label>
-        <div class="tags-input-container">
-          <select id="tag-filter">
-            <option value="">All Tags</option>
-          </select>
+        <div class="dropdown-with-list">
+          <div class="tags-input-container">
+            <select id="tag-filter">
+              <option value="">All Tags</option>
+            </select>
+          </div>
+          <button type="button" class="list-button icon-button" data-field="tag" data-target="tag-filter" title="Search existing tags">☰</button>
         </div>
       </div>
 
@@ -127,8 +140,8 @@
     <div id="model-details" class="model-details hidden">
       <h3>Model Details</h3>
       <div class="form-group checkbox-container">
-        <label for="model-printed">Printed:</label>
         <input type="checkbox" id="model-printed">
+        <label>Printed</label>
       </div>
       <div class="form-group">
         <label for="model-name">Name:</label>
@@ -139,7 +152,7 @@
         <div id="path-tree-container" class="path-tree-container"></div>
       </div>
       <div class="form-group">
-        <label for="model-source">Source:</label>
+        <label for="model-source">Source URL:</label>
         <div class="input-with-icon">
           <input type="text" id="model-source" placeholder="Enter source..." spellcheck="false">
           <button id="open-source-button" class="icon-button" title="Open in browser">↗</button>
@@ -149,6 +162,7 @@
       <div class="form-group">
         <label for="model-designer">Designer:</label>
         <div class="designer-input-container">
+          <button type="button" class="list-button icon-button" data-field="designer" data-target="model-designer" data-mode="edit" title="Search existing designers">☰</button>
           <select id="model-designer">
             <option value="Unknown">Unknown</option>
           </select>
@@ -158,6 +172,7 @@
       <div class="form-group">
         <label for="model-parent">Parent Model:</label>
         <div class="designer-input-container">
+          <button type="button" class="list-button icon-button" data-field="parent" data-target="model-parent" data-mode="edit" title="Search existing parent models">☰</button>
           <select id="model-parent">
             <option value="">None</option>
           </select>
@@ -168,6 +183,7 @@
       <div class="form-group">
         <label for="model-license">License:</label>
         <div class="designer-input-container">
+          <button type="button" class="list-button icon-button" data-field="license" data-target="model-license" data-mode="edit" title="Search existing licenses">☰</button>
           <select id="model-license" class="form-control"></select>
           <button type="button" id="add-new-license-button" class="icon-button">+</button>
         </div>
@@ -176,10 +192,10 @@
         <label>Tags:</label>
         <div class="tags-container">
           <div class="tags-input-container">
+            <button type="button" class="list-button icon-button" data-field="tag" data-target="tag-select" data-mode="edit" data-container="model-tags" title="Search existing tags">☰</button>
             <select id="tag-select">
               <option value="">Select a tag...</option>
             </select>
-            <button type="button" class="icon-button refresh-tags-button" title="Refresh tags">↻</button>
             <button type="button" id="add-tag-button" class="icon-button">+</button>
           </div>
           <div id="model-tags" class="tags-list"></div>
@@ -237,6 +253,20 @@
         </div>
       </form>
     </dialog>
+    <dialog id="searchable-list-dialog" class="modal">
+      <form method="dialog">
+        <h3 id="searchable-list-title">Select Item</h3>
+        <div class="form-group">
+          <input type="text" id="searchable-list-search" placeholder="Search..." autocomplete="off">
+        </div>
+        <div class="searchable-list-container">
+          <ul id="searchable-list-items" class="searchable-list"></ul>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="searchable-list-cancel">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="bulk-edit-dialog" class="modal">
       <form method="dialog">
         <h3>Edit Selected Models</h3>
@@ -285,8 +315,8 @@
       <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
       <p class="selected-count">0 models selected</p>
       <div class="form-group checkbox-container">
-        <label for="multi-printed">Printed:</label>
         <input type="checkbox" id="multi-printed">
+        <label>Printed</label>
       </div>
       <div class="form-group">
         <label for="multi-source">Source:</label>
@@ -298,6 +328,7 @@
       <div class="form-group">
         <label for="multi-designer">Designer:</label>
         <div class="designer-input-container">
+          <button type="button" class="list-button icon-button" data-field="designer" data-target="multi-designer" data-mode="multi" title="Search existing designers">☰</button>
           <select id="multi-designer">
             <option value="">Select Designer...</option>
             <option value="Unknown">Unknown</option>
@@ -308,6 +339,7 @@
       <div class="form-group">
         <label for="multi-parent">Parent Model:</label>
         <div class="designer-input-container">
+          <button type="button" class="list-button icon-button" data-field="parent" data-target="multi-parent" data-mode="multi" title="Search existing parent models">☰</button>
           <select id="multi-parent">
             <option value="">Select Parent...</option>
             <option value="none">None</option>
@@ -318,6 +350,7 @@
       <div class="form-group">
         <label for="multi-license">License:</label>
         <div class="designer-input-container">
+          <button type="button" class="list-button icon-button" data-field="license" data-target="multi-license" data-mode="multi" title="Search existing licenses">☰</button>
           <select id="multi-license" class="form-control"></select>
           <button type="button" class="icon-button add-license-button">+</button>
         </div>
@@ -326,13 +359,22 @@
         <label>Tags:</label>
         <div class="tags-container">
           <div class="tags-input-container">
+            <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-select" data-mode="multi" data-container="multi-tags" title="Search existing tags">☰</button>
             <select id="multi-tag-select">
               <option value="">Select a tag...</option>
             </select>
-            <button type="button" class="icon-button refresh-tags-button" title="Refresh tags">↻</button>
             <button type="button" class="icon-button add-tag-button">+</button>
           </div>
-          <div id="multi-tags" class="tags-list"></div>
+          <div id="multi-tags" class="tags-list" style="display: none;"></div>
+          <div style="margin-top: 8px;">
+            <label for="multi-tag-remove-select" style="display: block; margin-bottom: 4px;">Remove Tag:</label>
+            <div class="tags-input-container">
+              <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-remove-select" data-mode="multi" data-remove="true" title="Search tags to remove">☰</button>
+              <select id="multi-tag-remove-select" style="flex: 1;">
+                <option value="">Select a tag to remove...</option>
+              </select>
+            </div>
+          </div>
         </div>
       </div>
       <button id="multi-save-button"></button>
@@ -395,43 +437,45 @@
         </div>
       </form>
     </dialog>
-    <dialog id="terms-of-service-dialog" class="modal">
-      <div class="modal-content">
-        <div class="modal-header">
-          <span class="close">&times;</span>
+    <dialog id="terms-of-service-dialog" class="modal tos-dialog">
+      <div class="tos-dialog-content">
+        <div class="tos-header">
+          <img src="logo.png" alt="Printventory Logo" class="tos-logo">
           <h2>Terms of Service</h2>
         </div>
-        <div class="modal-body">
-          <h3>MIT License</h3>
-          <p>Copyright (c) 2025 Printventory</p>
-          <p>
-            Permission is hereby granted, free of charge, to any person obtaining a copy
-            of this software and associated documentation files (the "Software"), to deal
-            in the Software without restriction, including without limitation the rights
-            to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-            copies of the Software, and to permit persons to whom the Software is
-            furnished to do so, subject to the following conditions:
-          </p>
-          <p>
-            The above copyright notice and this permission notice shall be included in all
-            copies or substantial portions of the Software.
-          </p>
-          <p>
-            THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-            IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-            FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-            AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-            LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-            OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-            SOFTWARE.
-          </p>
-          <p>
-            By using this software, you agree to abide by the terms of this license.
-          </p>
+        <div class="tos-body">
+          <div class="tos-scroll-content">
+            <h3>MIT License</h3>
+            <p class="tos-copyright">Copyright (c) 2025 Printventory</p>
+            <p>
+              Permission is hereby granted, free of charge, to any person obtaining a copy
+              of this software and associated documentation files (the "Software"), to deal
+              in the Software without restriction, including without limitation the rights
+              to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+              copies of the Software, and to permit persons to whom the Software is
+              furnished to do so, subject to the following conditions:
+            </p>
+            <p>
+              The above copyright notice and this permission notice shall be included in all
+              copies or substantial portions of the Software.
+            </p>
+            <p class="tos-warning">
+              THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+              IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+              FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+              AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+              LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+              OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+              SOFTWARE.
+            </p>
+            <p>
+              By using this software, you agree to abide by the terms of this license.
+            </p>
+          </div>
         </div>
-        <div class="modal-footer">
-          <button id="accept-terms">I Accept</button>
-          <button id="decline-terms">I Decline</button>
+        <div class="tos-footer">
+          <button id="decline-terms" class="tos-button tos-button-decline">I Decline</button>
+          <button id="accept-terms" class="tos-button tos-button-accept">I Accept</button>
         </div>
       </div>
     </dialog>
@@ -468,6 +512,11 @@
           <button type="button" id="choose-stl-home-button" class="primary-button">Choose Directory</button>
           <button type="button" id="clear-stl-home-button" class="secondary-button">Clear Directory</button>
         </div>
+        <div class="form-group" id="stl-home-update-frequency-group" style="display: none;">
+          <label for="stl-home-update-frequency">Update Frequency (minutes):</label>
+          <input type="number" id="stl-home-update-frequency" min="1" max="1440" value="60">
+          <p class="setting-description">How frequently the STL Home directory will be scanned for new files.</p>
+        </div>
         <div class="dialog-buttons">
           <button type="submit" id="save-stl-home-button">Save</button>
           <button type="button" id="cancel-stl-home-button">Cancel</button>
@@ -499,6 +548,26 @@
           </div>
           <p class="setting-description">When enabled, Printventory will scan inside ZIP files for 3D models (STL and 3MF files). Each model found within a ZIP file will be indexed separately.</p>
         </div>
+        <div class="settings-group">
+          <h4>3MF Metadata</h4>
+          <p class="setting-description">When checked, if available, the model details will be pulled from the 3MF metadata when the 3MF file is added to the library. Not all 3MF models contain complete metadata.</p>
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="enable-3mf-designer" checked>
+            <label for="enable-3mf-designer">Designer</label>
+          </div>
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="enable-3mf-parent-model" checked>
+            <label for="enable-3mf-parent-model">Parent Model</label>
+          </div>
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="enable-3mf-license" checked>
+            <label for="enable-3mf-license">License Type</label>
+          </div>
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="enable-3mf-notes" checked>
+            <label for="enable-3mf-notes">Notes</label>
+          </div>
+        </div>
         <div class="dialog-buttons">
           <button type="button" id="save-file-type-settings">Save</button>
           <button type="button" id="cancel-file-type-settings">Cancel</button>
@@ -516,7 +585,7 @@
           <select id="ai-service-select">
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
-            <option value="puter">Puter.com</option>
+            <option value="puter" selected>Puter.com</option>
             <option value="custom">Custom</option>
           </select>
         </div>
@@ -530,7 +599,7 @@
         </div>
         <div class="form-group">
           <label for="ai-model">AI Model:</label>
-          <input type="text" id="ai-model" value="gpt-4o-mini" required>
+          <input type="text" id="ai-model" value="gpt-5-nano" required>
         </div>
         <hr style="margin: 20px 0;">
         <h4 style="margin-top: 0;">Tag Generation Settings</h4>
@@ -652,17 +721,31 @@
           <button id="dismiss-welcome">Get Started!</button>
         </div>
       </dialog>
-      <dialog id="quickstart-guide" class="modal" style="width: 80%; max-width: 1000px;">
-        <div class="guide-content" style="text-align: center; padding: 1rem;">
-          <h2>Quick Start Guide</h2>
-          <div class="guide-scroll-container">
-            <img id="guide-image" src="" alt="Guide Image" style="max-width: 100%; display: none; margin-bottom: 1rem;">
-            <div id="guide-text" style="font-size: 16px; color: #fff;"></div>
+      <dialog id="quickstart-guide" class="modal" style="width: 80%; max-width: 1000px;" tabindex="-1">
+        <div class="guide-content">
+          <div class="guide-header">
+            <h2>Quick Start Guide</h2>
+            <div class="guide-progress">
+              <div class="guide-progress-bar">
+                <div class="guide-progress-fill" id="guide-progress-fill"></div>
+              </div>
+              <div class="guide-progress-text" id="guide-progress-text">Page 1 of 5</div>
+            </div>
           </div>
-          <div class="dialog-buttons" style="justify-content: space-between;">
-            <button id="guide-back-button">Back</button>
-            <button id="guide-next-button">Next</button>
-            <button id="guide-close-button">Close</button>
+          <div class="guide-scroll-container">
+            <img id="guide-image" src="" alt="Guide Image" class="guide-image">
+            <div id="guide-text" class="guide-text"></div>
+          </div>
+          <div class="guide-navigation">
+            <button id="guide-back-button" class="guide-nav-button">
+              <span class="guide-nav-icon">←</span>
+              <span>Back</span>
+            </button>
+            <button id="guide-close-button" class="guide-nav-button guide-nav-button-secondary">Close</button>
+            <button id="guide-next-button" class="guide-nav-button">
+              <span>Next</span>
+              <span class="guide-nav-icon">→</span>
+            </button>
           </div>
         </div>
       </dialog>
@@ -741,45 +824,70 @@
       </dialog>
       <dialog id="about-dialog" class="modal">
         <form method="dialog">
-          <h2>About Printventory</h2>
+          <div class="about-header">
+            <button type="button" class="about-close-x" aria-label="Close">×</button>
+            <img src="logo.png" alt="Printventory Logo" class="about-logo">
+            <h2>Printventory</h2>
+            <p class="about-version-text" id="about-version">Version: Loading...</p>
+          </div>
           <div class="about-content">
-            <div class="version-row">
-              <p><strong><span id="about-version">Version: Loading...</span></strong></p>
-              <div class="checkbox-container">
-                <label for="beta-opt-in">Beta Updates</label>
-                <input type="checkbox" id="beta-opt-in">
+            <div class="about-main-column">
+              <div class="about-section">
+                <button type="button" id="check-updates-button" class="about-primary-button">
+                  <span class="button-icon">🔄</span>
+                  Check for Updates
+                </button>
+                <div class="about-options-row">
+                  <div class="about-option-item">
+                    <input type="checkbox" id="beta-opt-in">
+                    <label for="beta-opt-in">Beta Updates</label>
+                  </div>
+                </div>
               </div>
-            </div>
-            <button type="button" id="check-updates-button" class="full-width-button">Check for Updates</button>
-            <p><strong>Website:</strong> <a href="#" id="website-link" class="white-link">https://printventory.com</a></p>
-            
-            <!-- Analytics section -->
-            <div class="analytics-section" style="margin: 1.5rem 0; padding: 1rem; background: rgba(0,0,0,0.1); border-radius: 8px;">
-              <div class="checkbox-container" style="display: flex; align-items: center; margin-bottom: 0.5rem; white-space: nowrap;">
-                <input type="checkbox" id="collect-usage" style="margin-right: 10px; flex-shrink: 0;" checked>
-                <label for="collect-usage" style="font-weight: bold; flex-shrink: 0;">Enable Usage Reporting</label>
+
+              <div class="about-section">
+                <div class="about-link-item">
+                  <span class="link-icon">🌐</span>
+                  <a href="#" id="website-link" class="about-link">https://printventory.com</a>
+                </div>
               </div>
-              <p class="setting-description" style="margin: 0.5rem 0 0 0; font-size: 0.9rem; color: #888; line-height: 1.4;">
-                Help improve Printventory by allowing collection of basic usage data. No personal information is collected.  Reload the application to apply this setting.
-              </p>
+              
+              <div class="about-section about-card">
+                <div class="about-card-header">
+                  <span class="card-icon">📊</span>
+                  <h3>Usage Reporting</h3>
+                </div>
+                <div class="about-card-content">
+                  <div class="about-option-item">
+                    <input type="checkbox" id="collect-usage" checked>
+                    <label for="collect-usage">Enable Usage Reporting</label>
+                  </div>
+                  <p class="about-card-description">
+                    Help improve Printventory by allowing collection of basic usage data. No personal information is collected. Reload the application to apply this setting.
+                  </p>
+                </div>
+              </div>
             </div>
 
-            <div class="about-tos">
-              <h3>Terms of Service</h3>
-              <div class="about-tos-content">
-                <p>By using Printventory, you agree to these terms:</p>
-                <ul>
-                  <li>You may not modify, copy, or redistribute the software.</li>
-                  <li>You may not reverse engineer or decompile the software.</li>
-                  <li>This license may be terminated if you violate any terms.</li>
-                  <li>The software is provided "as is", without warranty.</li>
-                  <li>The developers assume no liability for any data loss or damage.</li>
-                </ul>
+            <div class="about-terms-column">
+              <div class="about-section about-card about-terms-card">
+                <div class="about-card-header">
+                  <span class="card-icon">📜</span>
+                  <h3>Terms of Service</h3>
+                </div>
+                <div class="about-card-content">
+                  <p class="about-card-description">Printventory is licensed under the MIT License:</p>
+                  <ul class="about-terms-list">
+                    <li>Free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell.</li>
+                    <li>Must include copyright and permission notices in all copies.</li>
+                    <li>Software provided "as is" without warranty.</li>
+                    <li>Authors not liable for claims, damages, or other liability.</li>
+                    <li>You are responsible for backing up your data.</li>
+                  </ul>
+                  <p class="about-card-description" style="margin-top: 0.75rem; font-size: 0.85em;">See <a href="#" id="license-link" style="color: #4a9eff;">LICENSE.txt</a> for full text.</p>
+                </div>
               </div>
             </div>
-          </div>
-          <div class="dialog-buttons">
-            <button type="submit">Close</button>
           </div>
         </form>
       </dialog>
@@ -858,6 +966,80 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                 <p><strong>Note:</strong> When running in Docker, the application automatically accepts Linux-style absolute paths (starting with <code>/</code>) instead of requiring UNC paths.</p>
                 
                 <p>For detailed Docker deployment instructions, see the README.md file.</p>
+              </div>
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="submit">Close</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="stats-dialog" class="modal">
+        <form method="dialog">
+          <h2>Library Statistics</h2>
+          <div class="stats-content">
+            <div class="stats-grid">
+              <div class="stats-section stats-summary">
+                <h3>Total Models</h3>
+                <div class="stats-value-large" id="stats-total-models">0</div>
+                <div class="stats-subsection">
+                  <div class="stats-row-compact">
+                    <span class="stats-label-small">Archived:</span>
+                    <span class="stats-value-small" id="stats-archived">0</span>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="stats-section stats-chart-section">
+                <h3>Model Types</h3>
+                <div class="stats-row-compact">
+                  <span class="stats-label-small">3MF:</span>
+                  <span class="stats-value-small" id="stats-type-3mf">0</span>
+                </div>
+                <div class="stats-row-compact">
+                  <span class="stats-label-small">STL:</span>
+                  <span class="stats-value-small" id="stats-type-stl">0</span>
+                </div>
+                <div class="chart-container-small">
+                  <canvas id="file-type-chart"></canvas>
+                </div>
+              </div>
+              
+              <div class="stats-section stats-chart-section">
+                <h3>Metadata Completion</h3>
+                <div class="chart-container-small">
+                  <canvas id="metadata-chart"></canvas>
+                </div>
+                <div class="stats-grid-compact">
+                  <div class="stats-row-compact">
+                    <span class="stats-label-tiny">Designer:</span>
+                    <span class="stats-value-tiny" id="stats-percent-designer">0%</span>
+                  </div>
+                  <div class="stats-row-compact">
+                    <span class="stats-label-tiny">Parent:</span>
+                    <span class="stats-value-tiny" id="stats-percent-parent">0%</span>
+                  </div>
+                  <div class="stats-row-compact">
+                    <span class="stats-label-tiny">License:</span>
+                    <span class="stats-value-tiny" id="stats-percent-license">0%</span>
+                  </div>
+                  <div class="stats-row-compact">
+                    <span class="stats-label-tiny">Tags:</span>
+                    <span class="stats-value-tiny" id="stats-percent-tags">0%</span>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="stats-section stats-tags">
+                <h3>Tags</h3>
+                <div class="stats-row-compact">
+                  <span class="stats-label-small">Total:</span>
+                  <span class="stats-value-small" id="stats-total-tags">0</span>
+                </div>
+                <div class="stats-row-compact">
+                  <span class="stats-label-small">Most Used:</span>
+                  <span class="stats-value-small" id="stats-most-used-tag">-</span>
+                </div>
               </div>
             </div>
           </div>

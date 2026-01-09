@@ -34,6 +34,15 @@ echo "Xvfb started successfully (PID: $XVFB_PID)"
 # Set DISPLAY environment variable
 export DISPLAY=:99
 
+# Disable dconf to prevent warnings in headless Docker environment
+export DCONF_DISABLE=1
+export GIO_USE_VFS=local
+export GIO_USE_VOLUME_MONITOR=unix
+
+# Ensure config directory exists with proper permissions
+mkdir -p /root/.config/Printventory
+chmod -R 755 /root/.config/Printventory
+
 # Start Electron in server mode
 echo "Starting Printventory server mode..."
 echo "DISPLAY is set to: $DISPLAY"

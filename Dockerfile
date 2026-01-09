@@ -58,8 +58,38 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
+# Set environment variables for npm and electron
+# Explicitly disable proxy settings that might interfere with Docker builds
+ENV HTTP_PROXY=""
+ENV HTTPS_PROXY=""
+ENV http_proxy=""
+ENV https_proxy=""
+ENV NO_PROXY="*"
+ENV no_proxy="*"
+# Configure npm to handle network issues better with retries
+ENV npm_config_fetch_retries=10
+ENV npm_config_fetch_retry_mintimeout=20000
+ENV npm_config_fetch_retry_maxtimeout=120000
+ENV npm_config_fetch_timeout=300000
+# Configure electron to download directly without proxy
+ENV ELECTRON_GET_USE_PROXY=false
+ENV ELECTRON_BUILDER_CACHE=/tmp/.electron-builder-cache
+# Use electron mirror (optional - uncomment to use a specific mirror)
+# ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+
 # Install npm dependencies (including devDependencies for Electron)
-RUN npm install && \
+# Install with retry logic and proper error handling
+RUN npm config set proxy null && \
+    npm config set https-proxy null && \
+    npm config set registry https://registry.npmjs.org/ && \
+    npm install || \
+    (echo "First install attempt failed, retrying..." && \
+     sleep 10 && \
+     npm install) || \
+    (echo "Second install attempt failed, retrying with clean cache..." && \
+     npm cache clean --force && \
+     sleep 10 && \
+     npm install) && \
     npm cache clean --force
 
 # Copy application files
@@ -77,6 +107,10 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV DISPLAY=:99
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Disable dconf to prevent warnings in headless Docker environment
+ENV DCONF_DISABLE=1
+ENV GIO_USE_VFS=local
+ENV GIO_USE_VOLUME_MONITOR=unix
 
 # Expose port 5000
 EXPOSE 5000

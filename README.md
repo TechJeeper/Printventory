@@ -112,6 +112,7 @@ http://192.168.1.100:5000
 - **Network Access**: The server listens on all network interfaces (0.0.0.0) on port 5000
 - **Firewall**: You may need to allow Printventory through your firewall to access it from other devices
 - **Network Security**: Server Mode is designed for local network use. For production deployments, consider additional security measures
+- **STL Home Setting**: The STL Home setting follows the same path format rules as regular scanning. See the [STL Home Setting](#stl-home-setting-server-mode) section below for details on automatic and periodic scanning.
 
 ### Use Cases
 
@@ -123,6 +124,35 @@ http://192.168.1.100:5000
 ### Docker Deployment
 
 Printventory can also be deployed as a Docker container for Linux server mode deployment. See the [Docker Deployment](#docker-deployment-linux-server-mode) section for detailed instructions.
+
+### STL Home Setting
+
+The STL Home setting allows automatic scanning of a directory on startup and, in server mode, periodic scanning for new files. This is particularly useful for keeping your library up-to-date automatically.
+
+#### Setting STL Home in Server Mode
+
+1. Access the Printventory web interface at `http://<your-ip>:5000`
+2. Navigate to **Settings → STL Home**
+3. Enter the directory path:
+   - **Windows Server Mode**: Use UNC path format (e.g., `\\server\share\models`)
+   - The path must be accessible from the server machine
+4. Configure the **Update Frequency** (default: 60 minutes):
+   - This determines how often the STL Home directory is automatically scanned for new files
+   - Range: 1-1440 minutes (1 minute to 24 hours)
+5. Click **Save**
+
+#### How It Works
+
+- **On Startup**: When Printventory starts in server mode, it automatically scans the STL Home directory if one is configured
+- **Periodic Scanning**: In server mode, Printventory will automatically scan the STL Home directory at the configured interval
+- **Path Requirements**: STL Home paths follow the same format rules as regular scanning:
+  - **Windows Server Mode**: Must use UNC paths (`\\server\share\path`)
+  - Paths are validated when saved
+- **Background Scanning**: Periodic scans run in the background and won't disrupt the web interface
+
+#### Clearing STL Home
+
+To disable automatic scanning, clear the STL Home directory field and save. This will stop both startup and periodic scanning.
 
 ### Getting Help
 
@@ -278,7 +308,11 @@ docker run -d \
 
 **With network share mounted (Windows - mapped drive):**
 ```bash
-# First, map the network share: net use Z: \\server\share /persistent:yes
+# Step 1: Map the network share to a drive letter on Windows
+net use Z: \\server\share /persistent:yes
+
+# Step 2: Run container with volume mount
+# Maps Windows Z: drive to /mnt/network-share inside container
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
@@ -286,11 +320,19 @@ docker run -d \
   -v Z:/:/mnt/network-share:ro \
   --restart unless-stopped \
   printventory/printventory:latest
+
+# Step 3: Use Linux-style paths in Printventory
+# Example: /mnt/network-share/models/myfile.stl
 ```
 
 **With network share mounted (Linux - SMB/CIFS):**
 ```bash
-# First, mount on host: sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass
+# Step 1: Mount the network share on the Linux host
+sudo mkdir -p /mnt/network-share
+sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass,uid=$(id -u),gid=$(id -g)
+
+# Step 2: Run container with volume mount
+# Maps host /mnt/network-share to /mnt/network-share inside container
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
@@ -298,6 +340,9 @@ docker run -d \
   -v /mnt/network-share:/mnt/network-share:ro \
   --restart unless-stopped \
   printventory/printventory:latest
+
+# Step 3: Use Linux-style paths in Printventory
+# Example: /mnt/network-share/models/myfile.stl
 ```
 
 #### Running with Docker Compose
@@ -314,11 +359,23 @@ services:
     ports:
       - "5000:5000"
     volumes:
+      # Persist database and application data
       - printventory-data:/root/.config/Printventory
-      # Uncomment to mount network share (Windows - mapped drive):
+      
+      # Option 1: Mount Windows mapped drive (Windows Docker Desktop)
+      # First, map network share: net use Z: \\server\share /persistent:yes
+      # Then uncomment the line below and use /mnt/network-share in Printventory
       # - Z:/:/mnt/network-share:ro
-      # Uncomment to mount network share (Linux - SMB/CIFS):
+      
+      # Option 2: Mount Linux SMB/CIFS share (Linux host)
+      # First, mount on host: sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass
+      # Then uncomment the line below and use /mnt/network-share in Printventory
       # - /mnt/network-share:/mnt/network-share:ro
+      
+      # Option 3: Mount local directory (if files are on Docker host)
+      # Example: mount host /home/user/models to /mnt/models in container
+      # Then use /mnt/models in Printventory
+      # - /home/user/models:/mnt/models:ro
     restart: unless-stopped
 
 volumes:
@@ -380,8 +437,9 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
 
 When running from Docker Hub, remember:
 - **Windows UNC paths** (`\\server\share\path`) won't work directly
-- **Mount network shares** into the container first (see examples above)
+- **Mount network shares** into the container first (see [Path Mapping Guide](#path-mapping-guide) above)
 - **Use Linux-style paths** inside the container: `/mnt/network-share/path/to/file`
+- **For automatic scanning**: Configure STL Home using the container path (see [STL Home Setting](#stl-home-setting) section)
 
 #### Docker Hub Repository
 
@@ -453,6 +511,55 @@ Or if running locally:
 http://localhost:5000
 ```
 
+### STL Home Setting
+
+The STL Home setting allows automatic scanning of a directory on startup and periodic scanning for new files in Docker mode. This is ideal for keeping your library synchronized with a network share or mounted directory.
+
+#### Setting STL Home in Docker Mode
+
+1. **Ensure your files are mounted** into the container (see [Path Mapping Guide](#path-mapping-guide) above)
+2. **Access the Printventory web interface** at `http://<your-server-ip>:5000` or `http://localhost:5000`
+3. **Navigate to Settings → STL Home**
+4. **Enter the directory path using the container path format:**
+   - Use Linux-style absolute paths (e.g., `/mnt/network-share/models`)
+   - The path must match a mounted volume in your Docker configuration
+   - Example: If you mounted `Z:/:/mnt/network-share:ro`, use `/mnt/network-share/path/to/models`
+5. **Configure the Update Frequency** (default: 60 minutes):
+   - This determines how often the STL Home directory is automatically scanned for new files
+   - Range: 1-1440 minutes (1 minute to 24 hours)
+   - Recommended: 60-120 minutes for most use cases
+6. **Click Save**
+
+#### How It Works in Docker
+
+- **On Container Startup**: When the Printventory container starts, it automatically scans the STL Home directory if one is configured
+- **Periodic Scanning**: The container will automatically scan the STL Home directory at the configured interval
+- **Path Requirements**: 
+  - Must use Linux-style absolute paths starting with `/`
+  - Path must correspond to a mounted volume in your Docker configuration
+  - Example: If volume mount is `- Z:/:/mnt/network-share:ro`, use `/mnt/network-share/path` in STL Home
+- **Background Scanning**: Periodic scans run in the background and won't disrupt the web interface
+- **Path Validation**: Paths are validated when saved - ensure the path exists inside the container
+
+#### Example Configuration
+
+**docker-compose.yml:**
+```yaml
+volumes:
+  - printventory-data:/root/.config/Printventory
+  - Z:/:/mnt/network-share:ro  # Windows mapped drive
+```
+
+**STL Home Setting in Printventory:**
+- Path: `/mnt/network-share/models`
+- Update Frequency: `60` minutes
+
+This will automatically scan `Z:\models` on the Windows host (mapped to `/mnt/network-share/models` in the container) every 60 minutes.
+
+#### Clearing STL Home
+
+To disable automatic scanning, clear the STL Home directory field and save. This will stop both startup and periodic scanning.
+
 ### Managing the Container
 
 **View logs:**
@@ -502,6 +609,75 @@ docker run --rm -v printventory-data:/data -v $(pwd):/backup alpine tar czf /bac
 docker run --rm -v printventory-data:/data -v $(pwd):/backup alpine sh -c "cd /data && tar xzf /backup/printventory-backup.tar.gz"
 ```
 
+### Path Mapping Guide
+
+Docker volumes allow you to map paths from your host machine (or network shares) into the container. Understanding this mapping is crucial for configuring Printventory to access your files.
+
+#### Understanding Volume Mounts
+
+Docker volume mounts use the format: `host-path:/container-path:options`
+
+- **host-path**: The path on your host machine (or a mapped network drive)
+- **/container-path**: The path inside the container where files will appear
+- **options**: Mount options like `ro` (read-only) or `rw` (read-write)
+
+**Important**: When using paths in Printventory, you must use the **container path** (`/container-path`), not the host path. The container path is what Printventory sees inside the Docker environment.
+
+#### Quick Reference Table
+
+| Host Path Type | Docker Volume Syntax | Container Path to Use in Printventory |
+|----------------|---------------------|--------------------------------------|
+| Windows mapped drive (Z:) | `- Z:/:/mnt/network-share:ro` | `/mnt/network-share/path/to/file` |
+| Linux mounted SMB share | `- /mnt/network-share:/mnt/network-share:ro` | `/mnt/network-share/path/to/file` |
+| Local Linux directory | `- /host/path:/mnt/models:ro` | `/mnt/models/path/to/file` |
+| Windows local directory | `- C:/models:/mnt/models:ro` | `/mnt/models/path/to/file` |
+
+#### Step-by-Step: Windows Docker Desktop
+
+1. **Map the network share to a drive letter:**
+   ```bash
+   net use Z: \\server\share /persistent:yes
+   ```
+   This makes the network share available as drive `Z:` on Windows.
+
+2. **Add the volume mount to docker-compose.yml:**
+   ```yaml
+   volumes:
+     - printventory-data:/root/.config/Printventory
+     - Z:/:/mnt/network-share:ro
+   ```
+   This maps Windows drive `Z:` to `/mnt/network-share` inside the container.
+
+3. **Use the container path in Printventory:**
+   - When scanning or setting STL Home, use: `/mnt/network-share/path/to/files`
+   - Do not use the Windows path (`Z:\path\to\files`) or UNC path (`\\server\share\path`)
+
+#### Step-by-Step: Linux Host
+
+1. **Install CIFS utilities (if mounting SMB shares):**
+   ```bash
+   sudo apt-get update
+   sudo apt-get install cifs-utils
+   ```
+
+2. **Mount the network share on the host:**
+   ```bash
+   sudo mkdir -p /mnt/network-share
+   sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass,uid=$(id -u),gid=$(id -g)
+   ```
+
+3. **Add the volume mount to docker-compose.yml:**
+   ```yaml
+   volumes:
+     - printventory-data:/root/.config/Printventory
+     - /mnt/network-share:/mnt/network-share:ro
+   ```
+   This maps the host mount point to the same path inside the container.
+
+4. **Use the container path in Printventory:**
+   - When scanning or setting STL Home, use: `/mnt/network-share/path/to/files`
+   - The path inside the container matches the host path in this example
+
 ### Network Shares and File Access
 
 **In Docker containers**, you cannot directly access Windows UNC paths (`\\server\share\path`). Instead, you need to mount network shares into the container.
@@ -538,10 +714,13 @@ If your files are on the Docker host machine:
 ```yaml
 volumes:
   - printventory-data:/root/.config/Printventory
+  # Maps host /host/path/to/models to /mnt/models inside container
   - /host/path/to/models:/mnt/models:ro
 ```
 
-Then use paths like: `/mnt/models/subdirectory`
+**Usage in Printventory:**
+- Use the container path: `/mnt/models/subdirectory`
+- Do not use the host path (`/host/path/to/models/subdirectory`)
 
 #### Option 3: Persistent SMB Mount (Auto-mount on boot)
 
@@ -552,6 +731,24 @@ To automatically mount on host reboot, add to `/etc/fstab`:
 ```
 
 **Note:** When running in Docker, the application automatically detects the container environment and accepts Linux-style absolute paths (starting with `/`) instead of requiring UNC paths.
+
+#### Troubleshooting Path Mapping Issues
+
+**Files not found in Printventory:**
+- Verify the volume mount is correct: `docker inspect printventory-server | grep -A 10 Mounts`
+- Check that the container path matches what you're using in Printventory
+- Ensure the host path exists and is accessible
+- For network shares, verify the share is mounted on the host before starting the container
+
+**Permission errors:**
+- Check file permissions on the host: `ls -la /mnt/network-share`
+- Ensure the mount includes appropriate `uid` and `gid` options for Linux mounts
+- For read-only mounts, verify `:ro` flag is set if you only need read access
+
+**Path format errors:**
+- Remember: Always use the **container path** (e.g., `/mnt/network-share/path`), not the host path
+- Container paths must start with `/` (Linux-style absolute paths)
+- UNC paths (`\\server\share`) will not work inside Docker containers
 
 ### Troubleshooting
 
@@ -629,7 +826,7 @@ Contributions are welcome! Please feel free to submit a Pull Request. When contr
 
 ## License
 
-This project is licensed under the ISC License - see the [LICENSE.txt](LICENSE.txt) file for details.
+This project is licensed under the MIT License - see the [LICENSE.txt](LICENSE.txt) file for details.
 
 ## Support
 
