@@ -1770,6 +1770,13 @@ header {
   margin-top: 20px;
 }
 
+/* Center close button in backup-restore dialog */
+#backup-restore-dialog .dialog-buttons {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
 #new-designer-name {
   width: 100%;
   padding: 8px;

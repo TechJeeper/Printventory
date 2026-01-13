@@ -3692,11 +3692,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  document.getElementById('save-backup-restore')?.addEventListener('click', () => {
-    document.getElementById('backup-restore-dialog').close();
+  document.getElementById('export-library-button')?.addEventListener('click', async () => {
+    try {
+      const success = await window.electron.exportLibrary();
+      if (success) {
+        await window.electron.showMessage('Success', 'Library exported successfully');
+      }
+    } catch (error) {
+      console.error('Export library error:', error);
+      await window.electron.showMessage('Error', 'Failed to export library');
+    }
   });
 
-  document.getElementById('cancel-backup-restore')?.addEventListener('click', () => {
+  document.getElementById('import-library-button')?.addEventListener('click', async () => {
+    try {
+      const result = await window.electron.showMessage(
+        'Confirm Import',
+        'This will merge the imported library with your current library. Existing models will be updated. Continue?',
+        ['Yes', 'No']
+      );
+      
+      if (result === 'Yes') {
+        const importResult = await window.electron.importLibrary();
+        if (importResult && importResult.success) {
+          const message = `Library imported successfully. ${importResult.imported} new models added, ${importResult.updated} models updated.`;
+          await window.electron.showMessage('Success', message);
+          // Refresh the grid to show imported models
+          if (typeof refreshModelDisplay === 'function') {
+            await refreshModelDisplay();
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Import library error:', error);
+      await window.electron.showMessage('Error', 'Failed to import library: ' + (error.message || 'Unknown error'));
+    }
+  });
+
+  document.getElementById('save-backup-restore')?.addEventListener('click', () => {
     document.getElementById('backup-restore-dialog').close();
   });
 
@@ -4075,26 +4108,59 @@ document.addEventListener('DOMContentLoaded', async () => {
           
           if (newName && newName.trim() !== '' && newName.trim() !== item.name) {
             try {
-              await window.electron.renameMetadata(type, item.name, newName.trim());
-              metadataEditorChanged = true; // Mark that changes were made
-              allMetadata = []; // Reset cache to force refresh
-              await refreshMetadataList(type, searchTerm);
-              // Refresh all relevant dropdowns
-              await refreshMetadataDropdowns();
-              // Force full grid re-render by clearing cache
-              const container = document.querySelector('.file-grid');
-              if (container) {
-                container.currentModels = null; // Clear cache to force re-render
+              // Check if the new name already exists (merge scenario)
+              const trimmedNewName = newName.trim();
+              const existingItem = allMetadata.find(m => 
+                m.type === type && 
+                m.name.toLowerCase() === trimmedNewName.toLowerCase() &&
+                m.name !== item.name
+              );
+              
+              let shouldProceed = true;
+              
+              // If merging, show confirmation dialog
+              if (existingItem) {
+                const confirmResult = await window.electron.showMessageBox({
+                  type: 'question',
+                  title: 'Merge Metadata',
+                  message: `A ${type === 'designer' ? 'designer' : type === 'parentModel' ? 'parent model' : 'license'} with the name "${trimmedNewName}" already exists.`,
+                  detail: `This will merge "${item.name}" (${item.model_count} model${item.model_count !== 1 ? 's' : ''}) into "${trimmedNewName}" (${existingItem.model_count} model${existingItem.model_count !== 1 ? 's' : ''}).`,
+                  buttons: ['Merge', 'Cancel'],
+                  defaultId: 0,
+                  cancelId: 1
+                });
+                
+                shouldProceed = confirmResult.response === 0;
               }
-              // Refresh the grid immediately to show updated metadata values
-              // Small delay to ensure database write is complete
-              await new Promise(resolve => setTimeout(resolve, 50));
-              if (typeof window.performCombinedSearch === 'function') {
-                await window.performCombinedSearch();
-              } else {
-                const sortSelect = document.getElementById('sort-select');
-                const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
-                await renderFiles(models);
+              
+              if (shouldProceed) {
+                const result = await window.electron.renameMetadata(type, item.name, trimmedNewName);
+                metadataEditorChanged = true; // Mark that changes were made
+                allMetadata = []; // Reset cache to force refresh
+                await refreshMetadataList(type, searchTerm);
+                // Refresh all relevant dropdowns
+                await refreshMetadataDropdowns();
+                // Force full grid re-render by clearing cache
+                const container = document.querySelector('.file-grid');
+                if (container) {
+                  container.currentModels = null; // Clear cache to force re-render
+                }
+                // Refresh the grid immediately to show updated metadata values
+                // Small delay to ensure database write is complete
+                await new Promise(resolve => setTimeout(resolve, 50));
+                if (typeof window.performCombinedSearch === 'function') {
+                  await window.performCombinedSearch();
+                } else {
+                  const sortSelect = document.getElementById('sort-select');
+                  const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+                  await renderFiles(models);
+                }
+                
+                // Show success message if merge occurred
+                if (result.merged) {
+                  await window.electron.showMessage('Success', 
+                    `Successfully merged "${item.name}" into "${trimmedNewName}". ${result.updated} model${result.updated !== 1 ? 's' : ''} updated.`);
+                }
               }
             } catch (error) {
               console.error('Error renaming metadata:', error);
@@ -10842,9 +10908,18 @@ async function handleDeleteSelected() {
     return;
   }
 
+  // Limit file list display to prevent dialog from becoming too tall
+  const maxFilesToShow = 20;
+  const fileList = selectedFiles.slice(0, maxFilesToShow).map(fp => {
+    // Extract filename from path (handle both Windows and Unix paths)
+    const parts = fp.split(/[/\\]/);
+    return parts[parts.length - 1];
+  }).join('\n');
+  const moreFiles = selectedFiles.length > maxFilesToShow ? `\n... and ${selectedFiles.length - maxFilesToShow} more file${selectedFiles.length - maxFilesToShow === 1 ? '' : 's'}` : '';
+
   const confirm = await window.electron.showMessage(
     'Confirm Delete',
-    `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${selectedFiles.join('\n')}`,
+    `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
     ['Yes', 'No']
   );
 

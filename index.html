@@ -1051,19 +1051,36 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       <dialog id="backup-restore-dialog" class="modal">
         <form method="dialog">
           <h3>Backup/Restore</h3>
-          <div class="form-group">
-            <label>Database Backup</label>
-            <p class="setting-description">Create a backup of your database to save your model information and settings.</p>
-            <button type="button" id="backup-button" class="full-width-button">Create Backup</button>
-          </div>
-          <div class="form-group">
-            <label>Database Restore</label>
-            <p class="setting-description">Restore your database from a previous backup. This will replace all current data.</p>
-            <button type="button" id="restore-button" class="full-width-button">Restore from Backup</button>
+          <div style="display: flex; gap: 30px; margin-bottom: 20px;">
+            <div style="flex: 1;">
+              <h4 style="margin: 0 0 15px 0; font-size: 16px; font-weight: 600; color: rgba(255, 255, 255, 0.9);">Database</h4>
+              <div class="form-group">
+                <label>Database Backup</label>
+                <p class="setting-description">Create a backup of your database to save your model information and settings.</p>
+                <button type="button" id="backup-button" class="full-width-button">Create Backup</button>
+              </div>
+              <div class="form-group">
+                <label>Database Restore</label>
+                <p class="setting-description">Restore your database from a previous backup. This will replace all current data.</p>
+                <button type="button" id="restore-button" class="full-width-button">Restore from Backup</button>
+              </div>
+            </div>
+            <div style="flex: 1;">
+              <h4 style="margin: 0 0 15px 0; font-size: 16px; font-weight: 600; color: rgba(255, 255, 255, 0.9);">Library</h4>
+              <div class="form-group">
+                <label>Library Export</label>
+                <p class="setting-description">Export your library (models and tags) as a JSON file for backup or sharing.</p>
+                <button type="button" id="export-library-button" class="full-width-button">Export Library</button>
+              </div>
+              <div class="form-group">
+                <label>Library Import</label>
+                <p class="setting-description">Import a library JSON file to merge models and tags into your current library.</p>
+                <button type="button" id="import-library-button" class="full-width-button">Import Library</button>
+              </div>
+            </div>
           </div>
           <div class="dialog-buttons">
             <button type="submit" id="save-backup-restore">Close</button>
-            <button type="button" id="cancel-backup-restore">Cancel</button>
           </div>
         </form>
       </dialog>

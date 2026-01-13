@@ -1,0 +1,55 @@
+FROM node:20-slim
+
+# Install build dependencies for AppImage and native modules
+RUN apt-get update && apt-get install -y \
+    g++ \
+    make \
+    python3 \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libatk1.0-0 \
+    libcairo-gobject2 \
+    libgtk-3-0 \
+    libgdk-pixbuf2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Configure npm for better network reliability
+RUN npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-timeout 300000
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies with retry logic
+RUN npm install --loglevel=error || \
+    (sleep 5 && npm install --loglevel=error) || \
+    (sleep 10 && npm install --loglevel=error) && \
+    npm cache clean --force
+
+# Clean any existing native module builds to ensure fresh rebuild
+RUN rm -rf node_modules/better-sqlite3/build || true
+
+# Explicitly rebuild native modules for Electron on Linux
+# Use @electron/rebuild which is more reliable
+RUN npx @electron/rebuild --version=$(node -p 'require("electron/package.json").version') || npx electron-builder install-app-deps
+
+# Copy application files
+COPY . .
+
+# Build AppImage
+RUN npm run build:linux:internal
+
+# The output will be in /app/dist

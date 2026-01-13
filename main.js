@@ -29,6 +29,7 @@ const analytics = {
       }
       
       console.log(`Tracking GA4 event: ${name} with params:`, params);
+      console.log(`App version being sent: ${version}`);
       
       // GA4 measurement ID and API secret
       const measurementId = 'G-N4766Y9R11';
@@ -39,10 +40,6 @@ const analytics = {
       
       // Add app_name parameter to identify this as an Electron app
       params.app_name = 'Printventory';
-      params.app_version = version;
-      
-      // Add OS platform information
-      params.os_platform = process.platform;
       
       // Add engagement parameters for better real-time tracking
       if (name === 'user_engagement') {
@@ -50,25 +47,52 @@ const analytics = {
         params.session_engaged = true;
       }
       
-      // Get model count (library size) from database
-      let modelCount = 0;
-      try {
-        const row = db.prepare("SELECT COUNT(*) AS total FROM models").get();
-        modelCount = row ? row.total : 0;
-      } catch (error) {
-        console.error('Error getting model count for analytics:', error);
-        // Continue with modelCount = 0 if query fails
+      // Get model count (library size) from database if not already provided in params
+      let modelCount = params.model_count;
+      if (modelCount === undefined) {
+        try {
+          const row = db.prepare("SELECT COUNT(*) AS total FROM models").get();
+          modelCount = row ? row.total : 0;
+        } catch (error) {
+          console.error('Error getting model count for analytics:', error);
+          // Continue with modelCount = 0 if query fails
+          modelCount = 0;
+        }
+      }
+      
+      // Ensure custom dimension parameters are set (matching custom dimensions: app_version, model_count, os_platform)
+      // These parameter names must match exactly the custom dimension parameter names in GA4
+      // GA4 requires numeric values for numeric custom dimensions, so ensure model_count is a number
+      if (params.app_version === undefined) {
+        params.app_version = version;
+      }
+      if (params.os_platform === undefined) {
+        params.os_platform = process.platform;
+      }
+      if (params.model_count === undefined) {
+        params.model_count = modelCount;
+      }
+      
+      // Ensure model_count is a number (GA4 custom dimensions may require specific types)
+      if (typeof params.model_count === 'string') {
+        params.model_count = parseInt(params.model_count, 10) || 0;
+      }
+      if (typeof params.model_count !== 'number') {
+        params.model_count = Number(params.model_count) || 0;
       }
       
       // Prepare user properties for GA4 - these persist across events and enable version-based segmentation
+      // User-scoped custom dimensions MUST be sent as user_properties
+      // The property names must match the custom dimension parameter names exactly in GA4 (case-sensitive)
+      // GA4 user_properties format: { property_name: { value: property_value } }
       const userProperties = {
-        app_version: version,
-        os_platform: process.platform,
-        os_version: os.release(),
-        electron_version: process.versions.electron,
-        node_version: process.versions.node,
-        architecture: process.arch,
-        model_count: modelCount
+        app_version: { value: String(params.app_version) },      // Custom dimension: App Version (User-scoped)
+        os_platform: { value: String(params.os_platform) },      // Custom dimension: OS Platform (User-scoped)
+        model_count: { value: Number(params.model_count) },      // Custom dimension: Model Count (User-scoped) - must be number
+        os_version: { value: os.release() },
+        electron_version: { value: process.versions.electron },
+        node_version: { value: process.versions.node },
+        architecture: { value: process.arch }
       };
       
       // Prepare the event data - following GA4 protocol exactly
@@ -87,14 +111,23 @@ const analytics = {
       // Convert to JSON
       const postData = JSON.stringify(eventData);
       
-      // Use debug endpoint only in development
-      const isDebug = process.env.NODE_ENV === 'development';
+      // Always use debug endpoint to see validation errors and ensure data is being received
+      // This helps troubleshoot issues with custom dimensions and event parameters
+      const isDebug = process.env.NODE_ENV === 'development' || process.env.GA4_DEBUG === 'true';
       const baseEndpoint = isDebug ? '/debug/mp/collect' : '/mp/collect';
+      
+      // Build query string with measurement_id and api_secret
+      let queryString = `measurement_id=${measurementId}&api_secret=${apiSecret}`;
+      // Always add debug_mode for better visibility during troubleshooting
+      // Remove this in production if you want to reduce debug noise
+      if (isDebug) {
+        queryString += '&debug_mode=true'; // Enable debugView in Google Analytics
+      }
       
       // Prepare the request options
       const options = {
         hostname: 'www.google-analytics.com',
-        path: `${baseEndpoint}?measurement_id=${measurementId}&api_secret=${apiSecret}`,
+        path: `${baseEndpoint}?${queryString}`,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -103,8 +136,24 @@ const analytics = {
       };
       
       // Log the full request for debugging
+      console.log('=== GA4 Analytics Event ===');
       console.log('GA4 request URL:', `https://${options.hostname}${options.path}`);
+      console.log('GA4 debug mode enabled:', isDebug);
+      console.log('GA4 event name:', name);
+      console.log('GA4 custom dimensions (event params):', {
+        app_version: params.app_version,
+        os_platform: params.os_platform,
+        model_count: params.model_count
+      });
+      console.log('GA4 user properties (custom dimensions):', JSON.stringify(userProperties, null, 2));
+      console.log('GA4 client_id:', clientId);
+      console.log('GA4 measurement_id:', measurementId);
+      if (isDebug) {
+        console.log('⚠️  Using debug endpoint - check GA4 DebugView: https://analytics.google.com/');
+        console.log('   Navigate to: Admin > DebugView to see real-time event validation');
+      }
       console.log('GA4 request body:', postData);
+      console.log('===========================');
       
       // Send the request
       return new Promise((resolve, reject) => {
@@ -119,11 +168,28 @@ const analytics = {
             console.log(`GA4 response status: ${res.statusCode}`);
             console.log(`GA4 response data: ${data}`);
             
+            // Parse response to check for validation messages
+            try {
+              const responseData = JSON.parse(data);
+              if (responseData.validationMessages && responseData.validationMessages.length > 0) {
+                console.error('GA4 validation errors:', JSON.stringify(responseData.validationMessages, null, 2));
+                responseData.validationMessages.forEach((msg, idx) => {
+                  console.error(`  Validation ${idx + 1}: ${msg.description} (Field: ${msg.fieldPath})`);
+                });
+              }
+            } catch (parseError) {
+              // Response might not be JSON, that's okay
+            }
+            
             if (res.statusCode >= 200 && res.statusCode < 300) {
               console.log('GA4 event sent successfully');
+              if (isDebug) {
+                console.log('Check GA4 DebugView for real-time event validation: https://analytics.google.com/');
+              }
               resolve(true);
             } else {
               console.error(`Error sending GA4 event: ${res.statusCode} ${data}`);
+              console.error('Check the response above for validation errors or API issues');
               resolve(false);
             }
           });
@@ -3125,6 +3191,155 @@ ipcMain.handle('restore-database', async () => {
   return false;
 });
 
+// Export library handler
+ipcMain.handle('export-library', async () => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Library',
+    defaultPath: 'printventory-library.json',
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePath) {
+    try {
+      // Get all models
+      const models = db.prepare('SELECT * FROM models').all();
+      
+      // For each model, get its tags
+      const modelsWithTags = models.map(model => {
+        const tags = db.prepare(`
+          SELECT t.name 
+          FROM tags t 
+          JOIN model_tags mt ON mt.tag_id = t.id 
+          WHERE mt.model_id = ?
+        `).all(model.id).map(t => t.name);
+        
+        return {
+          filePath: model.filePath,
+          fileName: model.fileName,
+          designer: model.designer,
+          source: model.source,
+          notes: model.notes,
+          printed: model.printed,
+          parentModel: model.parentModel,
+          license: model.license,
+          tags: tags || []
+        };
+      });
+      
+      // Create export object
+      const exportData = {
+        version: '1.0',
+        exportDate: new Date().toISOString(),
+        models: modelsWithTags
+      };
+      
+      // Write JSON file
+      await fs.promises.writeFile(result.filePath, JSON.stringify(exportData, null, 2), 'utf8');
+      
+      return true;
+    } catch (error) {
+      console.error('Export library error:', error);
+      throw error;
+    }
+  }
+  return false;
+});
+
+// Import library handler
+ipcMain.handle('import-library', async (event) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Library',
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] }
+    ],
+    properties: ['openFile']
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    try {
+      // Read and parse JSON file
+      const fileContent = await fs.promises.readFile(result.filePaths[0], 'utf8');
+      const importData = JSON.parse(fileContent);
+      
+      // Validate structure
+      if (!importData.models || !Array.isArray(importData.models)) {
+        throw new Error('Invalid library file format: missing models array');
+      }
+      
+      const totalModels = importData.models.length;
+      
+      // Show progress dialog
+      event.sender.send('show-progress-dialog', {
+        title: 'Importing Library',
+        message: 'Reading library file...',
+        total: totalModels
+      });
+      
+      // Import each model using saveModel function
+      let importedCount = 0;
+      let updatedCount = 0;
+      
+      for (let i = 0; i < importData.models.length; i++) {
+        const modelData = importData.models[i];
+        try {
+          // Check if model exists
+          const existingModel = db.prepare('SELECT id FROM models WHERE filePath = ?').get(modelData.filePath);
+          
+          // Use saveModel to handle insert/update and tags
+          await saveModel({
+            filePath: modelData.filePath,
+            fileName: modelData.fileName,
+            designer: modelData.designer || null,
+            source: modelData.source || null,
+            notes: modelData.notes || null,
+            printed: modelData.printed || 0,
+            parentModel: modelData.parentModel || null,
+            license: modelData.license || null,
+            tags: modelData.tags || []
+          });
+          
+          if (existingModel) {
+            updatedCount++;
+          } else {
+            importedCount++;
+          }
+          
+          // Update progress
+          event.sender.send('update-progress', {
+            current: i + 1,
+            total: totalModels,
+            message: `Importing model ${i + 1} of ${totalModels}...`
+          });
+        } catch (modelError) {
+          console.error(`Error importing model ${modelData.filePath}:`, modelError);
+          // Continue with other models, but still update progress
+          event.sender.send('update-progress', {
+            current: i + 1,
+            total: totalModels,
+            message: `Importing model ${i + 1} of ${totalModels}...`
+          });
+        }
+      }
+      
+      // Close progress dialog
+      event.sender.send('close-progress-dialog');
+      
+      // Notify renderer to refresh the view
+      mainWindow.webContents.send('refresh-grid');
+      
+      return { success: true, imported: importedCount, updated: updatedCount };
+    } catch (error) {
+      console.error('Import library error:', error);
+      // Close progress dialog on error
+      event.sender.send('close-progress-dialog');
+      throw error;
+    }
+  }
+  return false;
+});
+
 // Update these handlers to remove Promise wrappers and use synchronous API
 
 ipcMain.handle('get-duplicate-files', async () => {
@@ -3437,25 +3652,29 @@ ipcMain.handle('rename-metadata', async (event, type, oldName, newName) => {
       throw new Error('Invalid metadata type');
     }
 
-    // Check if new name already exists for this type
+    // Check if new name already exists for this type (for merge information)
     const existing = db.prepare(`
       SELECT COUNT(*) as count 
       FROM models 
       WHERE ${type} = ? AND ${type} IS NOT NULL AND ${type} != ''
     `).get(newName.trim());
     
-    if (existing && existing.count > 0) {
-      throw new Error(`A ${type} with that name already exists`);
-    }
+    const existingCount = existing ? existing.count : 0;
+    const isMerge = existingCount > 0;
 
-    // Update all models with the old name to the new name
+    // Update all models with the old name to the new name (merge if new name exists)
     const result = db.prepare(`
       UPDATE models 
       SET ${type} = ? 
       WHERE ${type} = ?
     `).run(newName.trim(), oldName.trim());
 
-    return { success: true, updated: result.changes };
+    return { 
+      success: true, 
+      updated: result.changes,
+      merged: isMerge,
+      existingCount: existingCount
+    };
   } catch (error) {
     console.error('Error renaming metadata:', error);
     throw error;
@@ -4278,10 +4497,15 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     {
       label: 'Remove from Library',
       click: async () => {
+        // Limit file list display to prevent dialog from becoming too tall
+        const maxFilesToShow = 20;
+        const fileList = filePaths.slice(0, maxFilesToShow).map(fp => path.basename(fp)).join('\n');
+        const moreFiles = filePaths.length > maxFilesToShow ? `\n... and ${filePaths.length - maxFilesToShow} more file${filePaths.length - maxFilesToShow === 1 ? '' : 's'}` : '';
+        
         const confirm = await dialog.showMessageBox({
           type: 'warning',
           title: 'Confirm Remove',
-          message: `Are you sure you want to remove ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${filePaths.join('\n')}`,
+          message: `Are you sure you want to remove ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${fileList}${moreFiles}`,
           buttons: ['Yes', 'No'],
           defaultId: 1,
           cancelId: 1,
@@ -4316,10 +4540,15 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     {
       label: 'Delete from Disk',  // Renamed from just "Delete"
       click: async () => {
+        // Limit file list display to prevent dialog from becoming too tall
+        const maxFilesToShow = 20;
+        const fileList = filePaths.slice(0, maxFilesToShow).map(fp => path.basename(fp)).join('\n');
+        const moreFiles = filePaths.length > maxFilesToShow ? `\n... and ${filePaths.length - maxFilesToShow} more file${filePaths.length - maxFilesToShow === 1 ? '' : 's'}` : '';
+        
         const confirm = await dialog.showMessageBox({
           type: 'warning',
           title: 'Confirm Delete',
-          message: `Are you sure you want to DELETE ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from disk?\nThis will permanently delete the files and cannot be undone!\n\nFiles:\n${filePaths.join('\n')}`,
+          message: `Are you sure you want to DELETE ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from disk?\nThis will permanently delete the files and cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
           buttons: ['Yes', 'No'],
           defaultId: 1,
           cancelId: 1,
@@ -6134,6 +6363,25 @@ async function trackAppUsage() {
     if (collectUsage && collectUsage.value === '1') {
       console.log('Usage tracking enabled, sending analytics data');
       
+      // Get model count (library size) from database for custom dimension
+      let modelCount = 0;
+      try {
+        const row = db.prepare("SELECT COUNT(*) AS total FROM models").get();
+        modelCount = row ? row.total : 0;
+      } catch (error) {
+        console.error('Error getting model count for startup tracking:', error);
+        // Continue with modelCount = 0 if query fails
+      }
+      
+      // Get OS platform
+      const osPlatform = process.platform;
+      
+      // Log the custom dimension values being sent on startup
+      console.log('Startup tracking - Custom dimensions:');
+      console.log(`  - OS Platform (os_platform): ${osPlatform}`);
+      console.log(`  - Printventory Version (app_version): ${version}`);
+      console.log(`  - Model Count (model_count): ${modelCount}`);
+      
       // Track application start event
       await analytics.event(clientId, 'Application', 'Start', {
         evLabel: `Version ${version}`,
@@ -6143,11 +6391,16 @@ async function trackAppUsage() {
       // Track active user
       await analytics.trackActiveUser(clientId);
       
-      // Send a custom app_open event (instead of session_start which is automatically tracked)
+      // Send a custom app_open event with explicit custom dimension parameters
+      // These match the custom dimensions: App Version, Model Count, OS Platform
+      // Using 'app_open' as the event name (GA4 standard event for app launches)
       await analytics.sendGA4Event(clientId, 'app_open', {
         app_name: 'Printventory',
-        app_version: version,
-        os_platform: process.platform
+        app_version: version,        // Custom dimension: App Version (User-scoped)
+        os_platform: osPlatform,     // Custom dimension: OS Platform (User-scoped)
+        model_count: modelCount,     // Custom dimension: Model Count (User-scoped)
+        // Add engagement time for better real-time tracking
+        engagement_time_msec: 1000
       });
       
       // Set up a periodic ping to keep the user active in real-time analytics

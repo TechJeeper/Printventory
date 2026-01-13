@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('electron', {
   onOpenBackupRestore: (callback) => ipcRenderer.on('open-backup-restore', callback),
   backupDatabase: () => ipcRenderer.invoke('backup-database'),
   restoreDatabase: () => ipcRenderer.invoke('restore-database'),
+  exportLibrary: () => ipcRenderer.invoke('export-library'),
+  importLibrary: () => ipcRenderer.invoke('import-library'),
   getDuplicateFiles: () => ipcRenderer.invoke('get-duplicate-files'),
   onOpenDeDup: (callback) => ipcRenderer.on('open-dedup', callback),
   checkFilesExist: (filePaths) => ipcRenderer.invoke('check-files-exist', filePaths),
