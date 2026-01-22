@@ -5,6 +5,55 @@ const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { Worker } = require('worker_threads');
+// 3MF preview worker/caching
+const preview3mfWorkers = new Map();
+const preview3mfCache = new Map();
+const PREVIEW_3MF_CACHE_LIMIT = 5;
+const PREVIEW_3MF_POOL_SIZE = 10;
+const preview3mfWorkerPool = [];
+
+function getPreview3mfCacheDir() {
+  return path.join(app.getPath('userData'), '3mf-preview-cache');
+}
+
+function acquirePreview3mfWorker(workerPath) {
+  const idle = preview3mfWorkerPool.find(entry => !entry.busy);
+  if (idle) {
+    idle.busy = true;
+    return idle;
+  }
+
+  if (preview3mfWorkerPool.length < PREVIEW_3MF_POOL_SIZE) {
+    const worker = new Worker(workerPath);
+    const entry = { worker, busy: true, temporary: false };
+    preview3mfWorkerPool.push(entry);
+    return entry;
+  }
+
+  // Fallback: temporary worker when pool is busy
+  return { worker: new Worker(workerPath), busy: true, temporary: true };
+}
+
+function releasePreview3mfWorker(entry) {
+  if (!entry) return;
+  if (entry.temporary) {
+    try {
+      entry.worker.terminate();
+    } catch (error) {
+      console.error('Error terminating temp 3MF preview worker:', error);
+    }
+    return;
+  }
+  entry.busy = false;
+}
+
+function removePreview3mfWorker(entry) {
+  if (!entry || entry.temporary) return;
+  const index = preview3mfWorkerPool.indexOf(entry);
+  if (index >= 0) {
+    preview3mfWorkerPool.splice(index, 1);
+  }
+}
 const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
@@ -308,6 +357,10 @@ let httpServer = null;
 let wss = null; // WebSocket server
 let wsClients = null; // WebSocket clients Set
 
+// Store pending context menu actions for server mode (browser access)
+const pendingContextMenus = new Map();
+let contextMenuRequestIdCounter = 0;
+
 // UNC Path Validation Functions
 function isUncPath(path) {
   if (!path || typeof path !== 'string') {
@@ -523,19 +576,32 @@ function startHttpServer() {
       // Normalize temp dir path for comparison
       const normalizedTempDir = os.tmpdir().replace(/\\/g, '/');
       const normalizedFilePath = actualFilePath.replace(/\\/g, '/');
+      let isServerManagedPath = false;
+      try {
+        const resolvedFilePath = path.resolve(actualFilePath);
+        const resolvedUserData = path.resolve(app.getPath('userData'));
+        const resolvedDbDir = path.resolve(path.dirname(getDatabasePath()));
+        isServerManagedPath =
+          resolvedFilePath === resolvedDbDir ||
+          resolvedFilePath.startsWith(resolvedUserData + path.sep) ||
+          resolvedFilePath.startsWith(resolvedDbDir + path.sep);
+      } catch (error) {
+        isServerManagedPath = false;
+      }
+      const isTempFile = normalizedFilePath.includes(normalizedTempDir);
       
       if (isDockerContainer()) {
         // In Docker, require absolute paths starting with /
         if (!normalizedFilePath.startsWith('/') && !isUncPath(actualFilePath)) {
           // For temp files from zip extraction, allow them
-          if (!normalizedFilePath.includes(normalizedTempDir)) {
+          if (!isTempFile) {
             res.status(400).send('Invalid path: Docker server mode requires absolute paths');
             return;
           }
         }
       } else {
         // On Windows, require UNC paths (except temp files)
-        if (!isUncPath(actualFilePath) && !normalizedFilePath.includes(normalizedTempDir)) {
+        if (!isUncPath(actualFilePath) && !isTempFile && !isServerManagedPath) {
           res.status(400).send('Invalid path: Server mode requires UNC paths');
           return;
         }
@@ -984,6 +1050,27 @@ async function restartHttpServer() {
 let db;
 let mainWindow;
 let isGeneratingHashes = false; // Track hash generation state
+let isHashGenerationScheduled = false;
+
+function scheduleBackgroundHashGeneration(reason) {
+  if (!isServerMode) return;
+  if (isGeneratingHashes || isHashGenerationScheduled) return;
+  isHashGenerationScheduled = true;
+  setTimeout(async () => {
+    if (isGeneratingHashes) {
+      isHashGenerationScheduled = false;
+      return;
+    }
+    try {
+      await calculateMissingHashesInternal(null);
+      console.log(`Background hash generation completed (${reason || 'auto'})`);
+    } catch (error) {
+      console.error('Background hash generation failed:', error);
+    } finally {
+      isHashGenerationScheduled = false;
+    }
+  }, 500);
+}
 
 // IPC handler to expose server mode
 ipcMain.handle('is-server-mode', () => {
@@ -1036,6 +1123,22 @@ if (!gotTheLock) {
         console.log('Updated currentVersion in database to:', version);
       } catch (versionError) {
         console.error('Error updating currentVersion in database:', versionError);
+      }
+
+      // Check for STL_HOME environment variable and set it if provided
+      // This allows Docker users to configure STL Home via docker-compose.yml
+      const stlHomeEnv = process.env.STL_HOME;
+      if (stlHomeEnv && stlHomeEnv.trim() !== '') {
+        try {
+          db.prepare(`
+            INSERT INTO settings (key, value) 
+            VALUES (?, ?) 
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+          `).run('stlHome', stlHomeEnv.trim());
+          console.log('STL_HOME environment variable set to:', stlHomeEnv.trim());
+        } catch (stlHomeError) {
+          console.error('Error setting STL_HOME from environment variable:', stlHomeError);
+        }
       }
 
       // Check for updates before creating window (skip in server mode)
@@ -1569,9 +1672,9 @@ function createWindow() {
           }
         },
         {
-          label: 'Library Stats',
-          click: () => {
-            mainWindow.webContents.send('open-stats');
+          label: 'FAQ',
+          click: async () => {
+            await shell.openExternal('https://printventory.com/faq.html');
           }
         },
         {
@@ -1610,6 +1713,12 @@ function createWindow() {
           }
         },
         { type: 'separator' },
+        {
+          label: 'Library Stats',
+          click: () => {
+            mainWindow.webContents.send('open-stats');
+          }
+        },
         {
           label: 'Server Mode Info',
           click: async () => {
@@ -1749,9 +1858,9 @@ function createApplicationMenu() {
           }
         },
         {
-          label: 'Library Stats',
-          click: () => {
-            mainWindow.webContents.send('open-stats');
+          label: 'FAQ',
+          click: async () => {
+            await shell.openExternal('https://printventory.com/faq.html');
           }
         },
         {
@@ -1790,6 +1899,12 @@ function createApplicationMenu() {
           }
         },
         { type: 'separator' },
+        {
+          label: 'Library Stats',
+          click: () => {
+            mainWindow.webContents.send('open-stats');
+          }
+        },
         {
           label: 'Server Mode Info',
           click: async () => {
@@ -2250,6 +2365,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             worker.terminate();
             
             resolve({ files, totalFiles, newFilesCount });
+
+            scheduleBackgroundHashGeneration('scan-directory');
             
             // Send refresh-grid event to update the UI after scanning completes
             // Use setTimeout to ensure the promise resolves first and database is fully updated
@@ -3102,6 +3219,38 @@ ipcMain.handle('show-input-dialog', async (event, options) => {
 
 // Update the backup-database handler
 ipcMain.handle('backup-database', async () => {
+  if (isServerMode) {
+    try {
+      const dbPath = getDatabasePath();
+      const dbDir = path.dirname(dbPath);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupPath = path.join(dbDir, `printventory-backup-${timestamp}.db`);
+
+      if (db.open) {
+        db.close();
+      }
+
+      await fs.promises.copyFile(dbPath, backupPath);
+
+      db = new Database(dbPath, { 
+        verbose: DEBUG ? console.log : null 
+      });
+
+      return { success: true, filePath: backupPath };
+    } catch (error) {
+      console.error('Backup error:', error);
+      try {
+        const dbPath = getDatabasePath();
+        db = new Database(dbPath, { 
+          verbose: DEBUG ? console.log : null 
+        });
+      } catch (reopenError) {
+        console.error('Error reopening database:', reopenError);
+      }
+      return { success: false, message: error.message };
+    }
+  }
+
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Save Database Backup',
     defaultPath: 'printventory-backup.db',
@@ -3145,7 +3294,41 @@ ipcMain.handle('backup-database', async () => {
 });
 
 // Update the restore-database handler
-ipcMain.handle('restore-database', async () => {
+ipcMain.handle('restore-database', async (event, payload = null) => {
+  if (isServerMode && payload && payload.base64) {
+    try {
+      const dbPath = getDatabasePath();
+      const buffer = Buffer.from(payload.base64, 'base64');
+
+      if (db.open) {
+        db.close();
+      }
+
+      await fs.promises.writeFile(dbPath, buffer);
+
+      db = new Database(dbPath, { 
+        verbose: DEBUG ? console.log : null 
+      });
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('refresh-grid');
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Restore error:', error);
+      try {
+        const dbPath = getDatabasePath();
+        db = new Database(dbPath, { 
+          verbose: DEBUG ? console.log : null 
+        });
+      } catch (reopenError) {
+        console.error('Error reopening database:', reopenError);
+      }
+      return { success: false, message: error.message };
+    }
+  }
+
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Restore Database from Backup',
     filters: [
@@ -3193,6 +3376,50 @@ ipcMain.handle('restore-database', async () => {
 
 // Export library handler
 ipcMain.handle('export-library', async () => {
+  const buildExportData = () => {
+    const models = db.prepare('SELECT * FROM models').all();
+    const modelsWithTags = models.map(model => {
+      const tags = db.prepare(`
+        SELECT t.name 
+        FROM tags t 
+        JOIN model_tags mt ON mt.tag_id = t.id 
+        WHERE mt.model_id = ?
+      `).all(model.id).map(t => t.name);
+      
+      return {
+        filePath: model.filePath,
+        fileName: model.fileName,
+        designer: model.designer,
+        source: model.source,
+        notes: model.notes,
+        printed: model.printed,
+        parentModel: model.parentModel,
+        license: model.license,
+        tags: tags || []
+      };
+    });
+
+    return {
+      version: '1.0',
+      exportDate: new Date().toISOString(),
+      models: modelsWithTags
+    };
+  };
+
+  if (isServerMode) {
+    try {
+      const exportData = buildExportData();
+      const exportDir = path.dirname(getDatabasePath());
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const exportPath = path.join(exportDir, `printventory-library-${timestamp}.json`);
+      await fs.promises.writeFile(exportPath, JSON.stringify(exportData, null, 2), 'utf8');
+      return { success: true, filePath: exportPath };
+    } catch (error) {
+      console.error('Export library error:', error);
+      return { success: false, message: error.message };
+    }
+  }
+
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Export Library',
     defaultPath: 'printventory-library.json',
@@ -3203,41 +3430,8 @@ ipcMain.handle('export-library', async () => {
 
   if (!result.canceled && result.filePath) {
     try {
-      // Get all models
-      const models = db.prepare('SELECT * FROM models').all();
-      
-      // For each model, get its tags
-      const modelsWithTags = models.map(model => {
-        const tags = db.prepare(`
-          SELECT t.name 
-          FROM tags t 
-          JOIN model_tags mt ON mt.tag_id = t.id 
-          WHERE mt.model_id = ?
-        `).all(model.id).map(t => t.name);
-        
-        return {
-          filePath: model.filePath,
-          fileName: model.fileName,
-          designer: model.designer,
-          source: model.source,
-          notes: model.notes,
-          printed: model.printed,
-          parentModel: model.parentModel,
-          license: model.license,
-          tags: tags || []
-        };
-      });
-      
-      // Create export object
-      const exportData = {
-        version: '1.0',
-        exportDate: new Date().toISOString(),
-        models: modelsWithTags
-      };
-      
-      // Write JSON file
+      const exportData = buildExportData();
       await fs.promises.writeFile(result.filePath, JSON.stringify(exportData, null, 2), 'utf8');
-      
       return true;
     } catch (error) {
       console.error('Export library error:', error);
@@ -3248,7 +3442,90 @@ ipcMain.handle('export-library', async () => {
 });
 
 // Import library handler
-ipcMain.handle('import-library', async (event) => {
+ipcMain.handle('import-library', async (event, payload = null) => {
+  const importLibraryData = async (importData) => {
+    if (!importData.models || !Array.isArray(importData.models)) {
+      throw new Error('Invalid library file format: missing models array');
+    }
+
+    const totalModels = importData.models.length;
+    if (event && event.sender) {
+      event.sender.send('show-progress-dialog', {
+        title: 'Importing Library',
+        message: 'Reading library file...',
+        total: totalModels
+      });
+    }
+
+    let importedCount = 0;
+    let updatedCount = 0;
+
+    for (let i = 0; i < importData.models.length; i++) {
+      const modelData = importData.models[i];
+      try {
+        const existingModel = db.prepare('SELECT id FROM models WHERE filePath = ?').get(modelData.filePath);
+
+        await saveModel({
+          filePath: modelData.filePath,
+          fileName: modelData.fileName,
+          designer: modelData.designer || null,
+          source: modelData.source || null,
+          notes: modelData.notes || null,
+          printed: modelData.printed || 0,
+          parentModel: modelData.parentModel || null,
+          license: modelData.license || null,
+          tags: modelData.tags || []
+        });
+
+        if (existingModel) {
+          updatedCount++;
+        } else {
+          importedCount++;
+        }
+
+        if (event && event.sender) {
+          event.sender.send('update-progress', {
+            current: i + 1,
+            total: totalModels,
+            message: `Importing model ${i + 1} of ${totalModels}...`
+          });
+        }
+      } catch (modelError) {
+        console.error(`Error importing model ${modelData.filePath}:`, modelError);
+        if (event && event.sender) {
+          event.sender.send('update-progress', {
+            current: i + 1,
+            total: totalModels,
+            message: `Importing model ${i + 1} of ${totalModels}...`
+          });
+        }
+      }
+    }
+
+    if (event && event.sender) {
+      event.sender.send('close-progress-dialog');
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('refresh-grid');
+    }
+
+    return { success: true, imported: importedCount, updated: updatedCount };
+  };
+
+  if (isServerMode && payload && payload.json) {
+    try {
+      const importData = JSON.parse(payload.json);
+      return await importLibraryData(importData);
+    } catch (error) {
+      console.error('Import library error:', error);
+      if (event && event.sender) {
+        event.sender.send('close-progress-dialog');
+      }
+      return { success: false, message: error.message };
+    }
+  }
+
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Import Library',
     filters: [
@@ -3259,81 +3536,14 @@ ipcMain.handle('import-library', async (event) => {
 
   if (!result.canceled && result.filePaths.length > 0) {
     try {
-      // Read and parse JSON file
       const fileContent = await fs.promises.readFile(result.filePaths[0], 'utf8');
       const importData = JSON.parse(fileContent);
-      
-      // Validate structure
-      if (!importData.models || !Array.isArray(importData.models)) {
-        throw new Error('Invalid library file format: missing models array');
-      }
-      
-      const totalModels = importData.models.length;
-      
-      // Show progress dialog
-      event.sender.send('show-progress-dialog', {
-        title: 'Importing Library',
-        message: 'Reading library file...',
-        total: totalModels
-      });
-      
-      // Import each model using saveModel function
-      let importedCount = 0;
-      let updatedCount = 0;
-      
-      for (let i = 0; i < importData.models.length; i++) {
-        const modelData = importData.models[i];
-        try {
-          // Check if model exists
-          const existingModel = db.prepare('SELECT id FROM models WHERE filePath = ?').get(modelData.filePath);
-          
-          // Use saveModel to handle insert/update and tags
-          await saveModel({
-            filePath: modelData.filePath,
-            fileName: modelData.fileName,
-            designer: modelData.designer || null,
-            source: modelData.source || null,
-            notes: modelData.notes || null,
-            printed: modelData.printed || 0,
-            parentModel: modelData.parentModel || null,
-            license: modelData.license || null,
-            tags: modelData.tags || []
-          });
-          
-          if (existingModel) {
-            updatedCount++;
-          } else {
-            importedCount++;
-          }
-          
-          // Update progress
-          event.sender.send('update-progress', {
-            current: i + 1,
-            total: totalModels,
-            message: `Importing model ${i + 1} of ${totalModels}...`
-          });
-        } catch (modelError) {
-          console.error(`Error importing model ${modelData.filePath}:`, modelError);
-          // Continue with other models, but still update progress
-          event.sender.send('update-progress', {
-            current: i + 1,
-            total: totalModels,
-            message: `Importing model ${i + 1} of ${totalModels}...`
-          });
-        }
-      }
-      
-      // Close progress dialog
-      event.sender.send('close-progress-dialog');
-      
-      // Notify renderer to refresh the view
-      mainWindow.webContents.send('refresh-grid');
-      
-      return { success: true, imported: importedCount, updated: updatedCount };
+      return await importLibraryData(importData);
     } catch (error) {
       console.error('Import library error:', error);
-      // Close progress dialog on error
-      event.sender.send('close-progress-dialog');
+      if (event && event.sender) {
+        event.sender.send('close-progress-dialog');
+      }
       throw error;
     }
   }
@@ -3768,6 +3978,43 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   const pathInfo = filePaths.length === 1 ? parseZipPath(filePaths[0]) : null;
   
   let menuItems = [];
+
+  // Add "Preview" option at the top
+  if (filePaths.length === 1) {
+    const fp = filePaths[0];
+    const ext = fp.includes('::')
+      ? path.extname(fp.split('::')[1] || '').toLowerCase()
+      : path.extname(fp).toLowerCase();
+    const isSupported = ext === '.stl' || ext === '.3mf';
+
+    if (isSupported) {
+      menuItems.push({
+        label: 'Preview',
+        click: async () => {
+          try {
+            console.log('Preview clicked for file:', fp);
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('preview-model', fp);
+            } else {
+              event.sender.send('preview-model', fp);
+            }
+          } catch (error) {
+            console.error('Error triggering preview:', error);
+            const win = BrowserWindow.fromWebContents(event.sender);
+            if (win) {
+              dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'Error',
+                message: 'Could not preview file',
+                detail: error.message
+              });
+            }
+          }
+        }
+      });
+      menuItems.push({ type: 'separator' });
+    }
+  }
   
   // Add "Download" option for server/docker mode at the top
   if ((isServerMode || isDockerContainer()) && filePaths.length === 1) {
@@ -4584,6 +4831,59 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   // Get the window - use helper function that handles server mode
   const win = getWindowFromEvent(event);
   
+  // In server mode accessed via browser (WebSocket), we can't show native menu
+  // Instead, return menu items as JSON so browser can render HTML context menu
+  if (isServerMode && !win) {
+    // Generate unique request ID for this context menu
+    const requestId = `ctx_${++contextMenuRequestIdCounter}_${Date.now()}`;
+    
+    // Store the menu items with their click handlers
+    pendingContextMenus.set(requestId, {
+      menuItems: menuItems,
+      filePaths: filePaths,
+      event: event,
+      timestamp: Date.now()
+    });
+    
+    // Clean up old menus (older than 5 minutes)
+    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+    for (const [id, menu] of pendingContextMenus.entries()) {
+      if (menu.timestamp < fiveMinutesAgo) {
+        pendingContextMenus.delete(id);
+      }
+    }
+    
+    // Serialize menu items for browser rendering
+    const serializedItems = menuItems.map((item, index) => {
+      if (item.type === 'separator') {
+        return { type: 'separator' };
+      }
+      const serialized = {
+        label: item.label,
+        enabled: item.enabled !== false, // Default to true if not specified
+        index: index
+      };
+      // Handle submenus
+      if (item.submenu) {
+        serialized.submenu = item.submenu.map((subItem, subIndex) => ({
+          label: subItem.label,
+          enabled: subItem.enabled !== false,
+          index: index,
+          subIndex: subIndex
+        }));
+      }
+      return serialized;
+    });
+    
+    // Return menu items instead of showing native menu
+    return {
+      type: 'html-menu',
+      requestId: requestId,
+      items: serializedItems,
+      filePaths: filePaths
+    };
+  }
+  
   // In Docker/server mode, use mainWindow if available, or popup without window parameter
   if (win) {
     menu.popup({ window: win });
@@ -4594,6 +4894,53 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     // Last resort: popup without window (uses current focused window)
     menu.popup();
   }
+  
+  // Return null for normal mode (menu already shown)
+  return null;
+});
+
+// IPC handler to execute context menu actions (for server mode browser access)
+ipcMain.handle('execute-context-menu-action', async (event, requestId, itemIndex, subIndex) => {
+  const menuData = pendingContextMenus.get(requestId);
+  if (!menuData) {
+    throw new Error('Context menu request not found or expired');
+  }
+  
+  const { menuItems, event: originalEvent } = menuData;
+  const menuItem = menuItems[itemIndex];
+  
+  if (!menuItem) {
+    throw new Error('Menu item not found');
+  }
+  
+  // Handle submenu items
+  if (subIndex !== undefined && subIndex !== null && menuItem.submenu) {
+    const subMenuItem = menuItem.submenu[subIndex];
+    if (!subMenuItem || !subMenuItem.click) {
+      throw new Error('Submenu item not found or has no action');
+    }
+    
+    // Create a mock event for the click handler
+    const mockEvent = {
+      sender: originalEvent.sender
+    };
+    
+    // Execute the submenu item's click handler
+    await subMenuItem.click(mockEvent);
+  } else if (menuItem.click) {
+    // Create a mock event for the click handler
+    const mockEvent = {
+      sender: originalEvent.sender
+    };
+    
+    // Execute the menu item's click handler
+    await menuItem.click(mockEvent);
+  }
+  
+  // Clean up after execution
+  pendingContextMenus.delete(requestId);
+  
+  return { success: true };
 });
 
 // Update the deleteFile function
@@ -5248,6 +5595,155 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
   }
 });
 
+// Read model file for preview (STL parsing in renderer)
+ipcMain.handle('read-model-file', async (event, filePath) => {
+  try {
+    // Handle zip entries
+    if (filePath.includes('::')) {
+      const pathInfo = parseZipPath(filePath);
+      const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+      const data = await fs.promises.readFile(tempPath);
+      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    }
+
+    const data = await fs.promises.readFile(filePath);
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  } catch (error) {
+    console.error(`Error reading model file ${filePath}:`, error);
+    throw error;
+  }
+});
+
+ipcMain.handle('parse-3mf-preview', async (event, filePath, requestId) => {
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+  let shouldCleanup = false;
+  let fileStat = null;
+
+  if (pathInfo.isZipEntry) {
+    actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    shouldCleanup = true;
+  }
+
+  try {
+    fileStat = await fs.promises.stat(actualFilePath);
+  } catch (error) {
+    console.error('Error statting 3MF preview file:', error);
+  }
+
+  const cacheKey = fileStat ? `${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
+  const cacheDir = getPreview3mfCacheDir();
+  const cacheHash = cacheKey ? crypto.createHash('sha256').update(cacheKey).digest('hex') : null;
+  const cachePath = cacheHash ? path.join(cacheDir, `${cacheHash}.json`) : null;
+
+  // In-memory cache
+  if (cacheKey && preview3mfCache.has(cacheKey)) {
+    const cached = preview3mfCache.get(cacheKey);
+    preview3mfCache.delete(cacheKey);
+    preview3mfCache.set(cacheKey, cached);
+    if (shouldCleanup && actualFilePath !== filePath) {
+      try { await fs.promises.unlink(actualFilePath); } catch {}
+    }
+    return cached;
+  }
+
+  // Disk cache
+  if (cachePath) {
+    try {
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+      const cachedJson = await fs.promises.readFile(cachePath, 'utf8');
+      const parsed = JSON.parse(cachedJson);
+      preview3mfCache.set(cacheKey, parsed);
+      if (preview3mfCache.size > PREVIEW_3MF_CACHE_LIMIT) {
+        const oldestKey = preview3mfCache.keys().next().value;
+        preview3mfCache.delete(oldestKey);
+      }
+      if (shouldCleanup && actualFilePath !== filePath) {
+        try { await fs.promises.unlink(actualFilePath); } catch {}
+      }
+      return parsed;
+    } catch (error) {
+      console.error('Error reading 3MF preview cache:', error);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const workerPath = path.join(__dirname, 'preview-3mf-worker-node.js');
+    const entry = acquirePreview3mfWorker(workerPath);
+    const worker = entry.worker;
+
+    const cleanup = async () => {
+      preview3mfWorkers.delete(requestId);
+      releasePreview3mfWorker(entry);
+      if (shouldCleanup && actualFilePath !== filePath) {
+        try { await fs.promises.unlink(actualFilePath); } catch {}
+      }
+    };
+
+    preview3mfWorkers.set(requestId, { worker, entry, reject, cleanup });
+
+    const onMessage = async (message) => {
+      const { ok, json, error, type, message: statusMessage } = message || {};
+      if (type === 'status') {
+        event.sender.send('3mf-preview-status', requestId, statusMessage);
+        return;
+      }
+
+      worker.off('message', onMessage);
+      await cleanup();
+      if (!ok) {
+        reject(new Error(error || 'Failed to parse 3MF'));
+        return;
+      }
+
+      if (cacheKey) {
+        preview3mfCache.set(cacheKey, json);
+        if (preview3mfCache.size > PREVIEW_3MF_CACHE_LIMIT) {
+          const oldestKey = preview3mfCache.keys().next().value;
+          preview3mfCache.delete(oldestKey);
+        }
+        if (cachePath) {
+          try {
+            await fs.promises.mkdir(cacheDir, { recursive: true });
+            await fs.promises.writeFile(cachePath, JSON.stringify(json));
+          } catch (cacheError) {
+            console.error('Error writing 3MF preview cache:', cacheError);
+          }
+        }
+      }
+
+      resolve(json);
+    };
+
+    const onError = async (error) => {
+      worker.off('error', onError);
+      await cleanup();
+      removePreview3mfWorker(entry);
+      reject(error);
+    };
+
+    worker.on('message', onMessage);
+    worker.on('error', onError);
+
+    worker.postMessage({ filePath: actualFilePath });
+  });
+});
+
+ipcMain.handle('cancel-3mf-preview', async (event, requestId) => {
+  const entry = preview3mfWorkers.get(requestId);
+  if (!entry) return;
+
+  try {
+    entry.worker.terminate();
+  } catch (error) {
+    console.error('Error terminating 3MF preview worker:', error);
+  }
+
+  removePreview3mfWorker(entry.entry);
+  await entry.cleanup?.();
+  entry.reject?.(new Error('Preview cancelled'));
+});
+
 // Handler to pull metadata from 3MF files
 ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
   try {
@@ -5573,6 +6069,13 @@ async function calculateMissingHashesInternal(event) {
     }
 
     isGeneratingHashes = false;
+
+    if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent('hash-generation-complete');
+    } else if (event && event.sender) {
+      event.sender.send('hash-generation-complete');
+    }
+
     return { calculated: calculatedCount, total: modelsWithMissingHashes.length };
   } catch (error) {
     isGeneratingHashes = false;
@@ -6468,6 +6971,7 @@ async function saveModelBatch(modelDataBatch) {
     });
     
     transaction();
+    scheduleBackgroundHashGeneration('save-model-batch');
     return true;
   } catch (error) {
     console.error('Error saving model batch:', error);
@@ -6640,6 +7144,7 @@ async function saveModel(modelData) {
 
     // First, handle the model data without tags
     let modelId;
+    let insertedNewModel = false;
     try {
       // Check if the model exists first
       const existingModel = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePath);
@@ -6710,6 +7215,7 @@ async function saveModel(modelData) {
         );
         
         modelId = result.lastInsertRowid;
+        insertedNewModel = true;
       }
       
       console.log(`Model saved with ID: ${modelId}`);
@@ -6831,6 +7337,9 @@ async function saveModel(modelData) {
       }
     }
 
+    if (insertedNewModel) {
+      scheduleBackgroundHashGeneration('save-model');
+    }
     return { success: true, modelId };
 
   } catch (error) {

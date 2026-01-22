@@ -301,7 +301,7 @@ The image is available on Docker Hub at: [https://hub.docker.com/r/printventory/
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v printventory-data:/root/.config/Printventory \
+  -v ./data:/root/.config/Printventory \
   --restart unless-stopped \
   printventory/printventory:latest
 ```
@@ -311,18 +311,20 @@ docker run -d \
 # Step 1: Map the network share to a drive letter on Windows
 net use Z: \\server\share /persistent:yes
 
-# Step 2: Run container with volume mount
+# Step 2: Run container with volume mount and STL_HOME environment variable
 # Maps Windows Z: drive to /mnt/network-share inside container
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v printventory-data:/root/.config/Printventory \
+  -v ./data:/root/.config/Printventory \
   -v Z:/:/mnt/network-share:ro \
+  -e STL_HOME=/mnt/network-share/models \
   --restart unless-stopped \
   printventory/printventory:latest
 
 # Step 3: Use Linux-style paths in Printventory
 # Example: /mnt/network-share/models/myfile.stl
+# STL Home is automatically configured via STL_HOME environment variable
 ```
 
 **With network share mounted (Linux - SMB/CIFS):**
@@ -331,18 +333,20 @@ docker run -d \
 sudo mkdir -p /mnt/network-share
 sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass,uid=$(id -u),gid=$(id -g)
 
-# Step 2: Run container with volume mount
+# Step 2: Run container with volume mount and STL_HOME environment variable
 # Maps host /mnt/network-share to /mnt/network-share inside container
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v printventory-data:/root/.config/Printventory \
+  -v ./data:/root/.config/Printventory \
   -v /mnt/network-share:/mnt/network-share:ro \
+  -e STL_HOME=/mnt/network-share/models \
   --restart unless-stopped \
   printventory/printventory:latest
 
 # Step 3: Use Linux-style paths in Printventory
 # Example: /mnt/network-share/models/myfile.stl
+# STL Home is automatically configured via STL_HOME environment variable
 ```
 
 #### Running with Docker Compose
@@ -359,8 +363,10 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # Persist database and application data
-      - printventory-data:/root/.config/Printventory
+      # Persist database and application data to local directory
+      # Database is stored in ./data directory on the host filesystem
+      # This ensures data persists when the image is updated
+      - ./data:/root/.config/Printventory
       
       # Option 1: Mount Windows mapped drive (Windows Docker Desktop)
       # First, map network share: net use Z: \\server\share /persistent:yes
@@ -376,11 +382,13 @@ services:
       # Example: mount host /home/user/models to /mnt/models in container
       # Then use /mnt/models in Printventory
       # - /home/user/models:/mnt/models:ro
+    environment:
+      # Optional: Set STL Home directory via environment variable
+      # This will automatically configure the STL Home setting in Printventory
+      # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
+      # The path must match a mounted volume in your Docker configuration
+      # - STL_HOME=/mnt/network-share/models
     restart: unless-stopped
-
-volumes:
-  printventory-data:
-    driver: local
 ```
 
 Then run:
@@ -427,10 +435,10 @@ docker rm printventory-server
 
 **Update to latest version:**
 ```bash
-docker pull yourusername/printventory:latest
+docker pull printventory/printventory:latest
 docker stop printventory-server
 docker rm printventory-server
-docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root/.config/Printventory --restart unless-stopped yourusername/printventory:latest
+docker run -d --name printventory-server -p 5000:5000 -v ./data:/root/.config/Printventory --restart unless-stopped printventory/printventory:latest
 ```
 
 #### Using Network Paths
@@ -479,7 +487,7 @@ docker build -t printventory:latest .
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v printventory-data:/root/.config/Printventory \
+  -v ./data:/root/.config/Printventory \
   --restart unless-stopped \
   printventory:latest
 ```
@@ -517,6 +525,21 @@ The STL Home setting allows automatic scanning of a directory on startup and per
 
 #### Setting STL Home in Docker Mode
 
+There are two ways to configure STL Home in Docker:
+
+**Option 1: Using Environment Variable (Recommended for Docker)**
+
+You can set the STL Home directory directly in your `docker-compose.yml` using the `STL_HOME` environment variable:
+
+```yaml
+environment:
+  - STL_HOME=/mnt/network-share/models
+```
+
+This will automatically configure the STL Home setting when the container starts. The setting will be visible in the Printventory web interface under **Settings → STL Home**.
+
+**Option 2: Using the Web Interface**
+
 1. **Ensure your files are mounted** into the container (see [Path Mapping Guide](#path-mapping-guide) above)
 2. **Access the Printventory web interface** at `http://<your-server-ip>:5000` or `http://localhost:5000`
 3. **Navigate to Settings → STL Home**
@@ -529,6 +552,8 @@ The STL Home setting allows automatic scanning of a directory on startup and per
    - Range: 1-1440 minutes (1 minute to 24 hours)
    - Recommended: 60-120 minutes for most use cases
 6. **Click Save**
+
+**Note**: If you set `STL_HOME` via environment variable, you can still adjust the Update Frequency through the web interface. The environment variable takes precedence for the directory path.
 
 #### How It Works in Docker
 
@@ -545,16 +570,27 @@ The STL Home setting allows automatic scanning of a directory on startup and per
 
 **docker-compose.yml:**
 ```yaml
-volumes:
-  - printventory-data:/root/.config/Printventory
-  - Z:/:/mnt/network-share:ro  # Windows mapped drive
+version: '3.8'
+
+services:
+  printventory:
+    image: printventory/printventory:latest
+    container_name: printventory-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/root/.config/Printventory
+      - Z:/:/mnt/network-share:ro  # Windows mapped drive
+    environment:
+      - STL_HOME=/mnt/network-share/models
+    restart: unless-stopped
 ```
 
-**STL Home Setting in Printventory:**
-- Path: `/mnt/network-share/models`
-- Update Frequency: `60` minutes
-
-This will automatically scan `Z:\models` on the Windows host (mapped to `/mnt/network-share/models` in the container) every 60 minutes.
+**Result:**
+- STL Home path is automatically set to `/mnt/network-share/models` on container startup
+- The setting will be visible in **Settings → STL Home** in the web interface
+- Update Frequency can be configured via the web interface (default: 60 minutes)
+- This will automatically scan `Z:\models` on the Windows host (mapped to `/mnt/network-share/models` in the container) every 60 minutes (or your configured interval)
 
 #### Clearing STL Home
 
@@ -592,21 +628,43 @@ docker-compose restart
 
 ### Data Persistence
 
-The Docker setup uses a named volume (`printventory-data`) to persist your database and application data. This ensures your data survives container restarts and updates.
+The Docker setup uses a local bind mount (`./data`) to persist your database and application data on the host filesystem. This ensures your data survives container restarts and image updates, and gives you direct access to the database files.
 
-**View volume location:**
-```bash
-docker volume inspect printventory-data
-```
+**Database location:**
+- The database is stored in the `./data` directory (relative to your `docker-compose.yml` file)
+- This directory is created automatically when you start the container
+- All database files and application data are stored here
 
-**Backup the volume:**
+**Backup the data:**
 ```bash
-docker run --rm -v printventory-data:/data -v $(pwd):/backup alpine tar czf /backup/printventory-backup.tar.gz -C /data .
+# On Linux/Mac
+tar czf printventory-backup.tar.gz -C ./data .
+
+# On Windows (PowerShell)
+Compress-Archive -Path .\data\* -DestinationPath printventory-backup.zip
 ```
 
 **Restore from backup:**
 ```bash
-docker run --rm -v printventory-data:/data -v $(pwd):/backup alpine sh -c "cd /data && tar xzf /backup/printventory-backup.tar.gz"
+# On Linux/Mac
+mkdir -p ./data
+tar xzf printventory-backup.tar.gz -C ./data
+
+# On Windows (PowerShell)
+Expand-Archive -Path printventory-backup.zip -DestinationPath .\data
+```
+
+**Migrating from named volume to local directory:**
+If you previously used a named volume and want to migrate to the local directory:
+```bash
+# Stop the container
+docker-compose down
+
+# Copy data from old volume to new location
+docker run --rm -v printventory-data:/source -v ${PWD}/data:/dest alpine sh -c "cp -r /source/. /dest/"
+
+# Start with new configuration
+docker-compose up -d
 ```
 
 ### Path Mapping Guide
@@ -643,7 +701,7 @@ Docker volume mounts use the format: `host-path:/container-path:options`
 2. **Add the volume mount to docker-compose.yml:**
    ```yaml
    volumes:
-     - printventory-data:/root/.config/Printventory
+     - ./data:/root/.config/Printventory
      - Z:/:/mnt/network-share:ro
    ```
    This maps Windows drive `Z:` to `/mnt/network-share` inside the container.
@@ -669,7 +727,7 @@ Docker volume mounts use the format: `host-path:/container-path:options`
 3. **Add the volume mount to docker-compose.yml:**
    ```yaml
    volumes:
-     - printventory-data:/root/.config/Printventory
+     - ./data:/root/.config/Printventory
      - /mnt/network-share:/mnt/network-share:ro
    ```
    This maps the host mount point to the same path inside the container.
@@ -699,7 +757,7 @@ Docker volume mounts use the format: `host-path:/container-path:options`
 3. **Add the mount to docker-compose.yml:**
    ```yaml
    volumes:
-     - printventory-data:/root/.config/Printventory
+     - ./data:/root/.config/Printventory
      - /mnt/network-share:/mnt/network-share:ro
    ```
 
@@ -713,7 +771,7 @@ If your files are on the Docker host machine:
 
 ```yaml
 volumes:
-  - printventory-data:/root/.config/Printventory
+  - ./data:/root/.config/Printventory
   # Maps host /host/path/to/models to /mnt/models inside container
   - /host/path/to/models:/mnt/models:ro
 ```
@@ -763,8 +821,9 @@ To automatically mount on host reboot, add to `/etc/fstab`:
 - Verify port mapping: `docker port printventory-server`
 
 **Database issues:**
-- Ensure the volume has write permissions
-- Check volume mount: `docker volume inspect printventory-data`
+- Ensure the `./data` directory has write permissions
+- Check that the directory exists: `ls -la ./data` (Linux/Mac) or `dir .\data` (Windows)
+- Verify the bind mount: `docker inspect printventory-server | grep -A 10 Mounts`
 
 ### Resource Requirements
 

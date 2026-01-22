@@ -75,6 +75,7 @@ contextBridge.exposeInMainWorld('electron', {
   onGenerateMissingThumbnails: (callback) => ipcRenderer.on('generate-missing-thumbnails', callback),
   onPingRequest: (callback) => ipcRenderer.on('ping', callback),
   showContextMenu: (filePath) => ipcRenderer.invoke('show-context-menu', filePath),
+  executeContextMenuAction: (requestId, itemIndex, subIndex) => ipcRenderer.invoke('execute-context-menu-action', requestId, itemIndex, subIndex),
   onRefreshGrid: (callback) => ipcRenderer.on('refresh-grid', callback),
   onThumbnailAdded: (callback) => ipcRenderer.on('thumbnail-added', (event, data) => callback(data)),
   onOpenThemeSettings: (callback) => ipcRenderer.on('open-theme-settings', callback),
@@ -143,6 +144,7 @@ contextBridge.exposeInMainWorld('electron', {
       'start-single-tag-generation',
       'start-batch-tag-generation',
       'batch-tag-generation-complete',
+      'hash-generation-complete',
       'show-input-dialog',
       'puter-ai-chat-request',
       'regenerate-thumbnails',
@@ -187,7 +189,17 @@ contextBridge.exposeInMainWorld('electron', {
   rollbackTransaction: () => ipcRenderer.invoke('database:rollback-transaction'),
   getAllModelReferences: () => ipcRenderer.invoke('get-all-model-references'),
   showInputDialog: (options) => ipcRenderer.invoke('show-input-dialog', options),
-  pull3MFMetadata: (filePaths) => ipcRenderer.invoke('pull-3mf-metadata', filePaths)
+  pull3MFMetadata: (filePaths) => ipcRenderer.invoke('pull-3mf-metadata', filePaths),
+  readModelFile: (filePath) => ipcRenderer.invoke('read-model-file', filePath),
+  parse3MFPreview: (filePath, requestId) => ipcRenderer.invoke('parse-3mf-preview', filePath, requestId),
+  cancel3MFPreview: (requestId) => ipcRenderer.invoke('cancel-3mf-preview', requestId),
+  on3MFPreviewStatus: (callback) => ipcRenderer.on('3mf-preview-status', (event, requestId, message) => callback(requestId, message)),
+  receive: (channel, callback) => {
+    const validChannels = ['preview-model', 'download-model'];
+    if (validChannels.includes(channel)) {
+      ipcRenderer.on(channel, (event, ...args) => callback(...args));
+    }
+  }
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {

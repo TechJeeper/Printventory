@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.0.0",
+  "version": "2.0.4",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -38,6 +38,10 @@
             "universal"
           ]
         }
+      ],
+      "asar": true,
+      "asarUnpack": [
+        "**/*.node"
       ]
     },
     "win": {
@@ -90,6 +94,9 @@
       "aitagging.js",
       "slicer.js",
       "guide.js",
+      "preview.js",
+      "preview-3mf-worker-node.js",
+      "threemf-loader-simple.js",
       "3d.png",
       "file-icon.png",
       "sidebar-bg.jpg",
@@ -98,13 +105,7 @@
       "search.js",
       "scan-worker.js",
       "server-bridge.js",
-      "installer.nsh",
-      "node_modules/**/*"
-    ],
-    "asarUnpack": [
-      "scan-worker.js",
-      "node_modules/node-stream-zip/**/*",
-      "node_modules/better-sqlite3/**/*"
+      "installer.nsh"
     ],
     "directories": {
       "buildResources": ".",
@@ -116,13 +117,13 @@
     "@electron/rebuild": "^4.0.2",
     "@playwright/test": "^1.57.0",
     "electron": "^39.2.4",
-    "electron-builder": "^26.0.12"
+    "electron-builder": "^26.5.0"
   },
   "dependencies": {
     "better-sqlite3": "^12.5.0",
     "electron-google-analytics": "^1.0.2",
     "express": "^4.18.2",
-    "ws": "^8.14.2",
+    "fflate": "^0.8.1",
     "fs": "^0.0.1-security",
     "fuse.js": "^7.1.0",
     "jszip": "^3.10.1",
@@ -131,7 +132,8 @@
     "openai": "^6.9.1",
     "puppeteer": "^24.31.0",
     "three": "^0.181.2",
-    "threejs-webworker-3mf-loader": "github:manyfold3d/threejs-webworker-3mf-loader",
-    "universal-analytics": "^0.5.3"
+    "universal-analytics": "^0.5.3",
+    "ws": "^8.14.2",
+    "xmldom": "^0.6.0"
   }
 }

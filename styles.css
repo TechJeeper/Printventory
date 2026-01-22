@@ -187,6 +187,8 @@ select option:not(:checked):not([selected]):not(:hover) {
   overflow-y: auto;
   resize: vertical;
   box-sizing: border-box;
+  background-image: none !important;
+  padding-right: 16px !important;
 }
 
 .notes-input-container .icon-button {
@@ -3026,6 +3028,44 @@ header {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
+.thumbnail-menu-button {
+  position: absolute;
+  bottom: 6px;
+  left: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  line-height: 1;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid #666;
+  color: #fff;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.thumbnail-menu-button:hover {
+  transform: none;
+}
+
+.thumbnail-menu-button::before {
+  display: none;
+}
+
+.thumbnail-container:hover .thumbnail-menu-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .thumbnail-container:hover {
   outline: 2px solid rgba(0, 150, 200, 0.5);
   box-shadow: 0 6px 20px rgba(0, 212, 255, 0.2);
@@ -5320,4 +5360,244 @@ header {
 
 .refresh-button:hover {
   color: #7bb8ff;
+}
+
+/* ===========================
+   Preview Modal Styles
+   =========================== */
+
+.preview-modal {
+  max-width: 90vw;
+  max-height: 90vh;
+  width: 1200px;
+  height: 800px;
+  padding: 0;
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  border-radius: 16px;
+  background: rgba(30, 30, 46, 0.95);
+  backdrop-filter: blur(20px);
+  overflow: hidden;
+}
+
+.preview-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+}
+
+.preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  position: relative;
+  z-index: 1001;
+}
+
+.preview-header h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  padding-right: 20px;
+}
+
+.preview-close-button {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 28px;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  padding: 0;
+  line-height: 1;
+  z-index: 1000;
+  position: relative;
+}
+
+.preview-close-button:hover {
+  background: rgba(255, 107, 107, 0.2);
+  border-color: rgba(255, 107, 107, 0.4);
+  transform: scale(1.05);
+}
+
+.preview-close-button:active {
+  transform: scale(0.95);
+}
+
+.preview-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.preview-canvas-container {
+  flex: 1;
+  position: relative;
+  background: #1a1a2e;
+  overflow: hidden;
+  min-height: 0;
+}
+
+#preview-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.preview-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(26, 26, 46, 0.95);
+  z-index: 5;
+  gap: 20px;
+  pointer-events: none;
+}
+
+.preview-loading > * {
+  pointer-events: auto;
+}
+
+.preview-loading p {
+  color: #fff;
+  font-size: 16px;
+  margin: 0;
+  white-space: pre-line;
+  text-align: center;
+}
+
+.preview-controls {
+  padding: 16px 24px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: nowrap;
+  position: relative;
+}
+
+.preview-control-group {
+  display: flex;
+  gap: 12px;
+  flex-wrap: nowrap;
+  justify-content: center;
+  align-items: center;
+}
+
+.preview-control-button {
+  padding: 10px 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  min-width: auto;
+}
+
+.preview-control-button:hover {
+  background: rgba(74, 158, 255, 0.2);
+  border-color: rgba(74, 158, 255, 0.4);
+  transform: translateY(-2px);
+}
+
+.preview-control-button:active {
+  transform: translateY(0);
+}
+
+.preview-control-button span {
+  font-size: 16px;
+}
+
+.preview-info {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+  margin-top: 4px;
+  justify-content: center;
+}
+
+.preview-instructions {
+  padding: 12px 24px;
+  background: rgba(74, 158, 255, 0.1);
+  border-top: 1px solid rgba(74, 158, 255, 0.2);
+  text-align: center;
+}
+
+.preview-instructions p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+}
+
+.preview-instructions strong {
+  color: #4a9eff;
+  font-weight: 600;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+  .preview-modal {
+    width: 95vw;
+    height: 85vh;
+  }
+}
+
+@media (max-width: 768px) {
+  .preview-control-group {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  .preview-info {
+    position: static;
+    transform: none;
+    width: 100%;
+    justify-content: center;
+  }
+  
+  .preview-instructions {
+    font-size: 12px;
+  }
+  
+  .preview-controls {
+    flex-wrap: wrap;
+  }
+  
+  .preview-control-button {
+    font-size: 13px;
+    padding: 8px 16px;
+  }
 }

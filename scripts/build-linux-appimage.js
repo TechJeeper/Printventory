@@ -152,8 +152,9 @@ RUN npm config set fetch-retries 5 && \\
     npm config set fetch-retry-maxtimeout 120000 && \\
     npm config set fetch-timeout 300000
 
-# Copy package files
+# Copy package files and scripts (needed for postinstall hook)
 COPY package*.json ./
+COPY scripts/ ./scripts/
 
 # Install dependencies with retry logic
 RUN npm install --loglevel=error || \\

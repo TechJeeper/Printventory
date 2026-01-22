@@ -3,7 +3,7 @@
 
 let slicerEntries = [];
 
-function createSlicerEntry(slicer = { name: '', path: '' }) {
+async function createSlicerEntry(slicer = { name: '', path: '' }) {
   const template = document.getElementById('slicer-entry-template');
   if (!template) {
     console.error('Slicer entry template not found');
@@ -26,35 +26,113 @@ function createSlicerEntry(slicer = { name: '', path: '' }) {
   nameInput.dataset.originalValue = slicer.name || '';
   pathInput.dataset.originalValue = slicer.path || '';
   
+  // Check if we're in server mode
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  
   // Add browse button handler
   const browseButton = entry.querySelector('.browse-slicer-button');
   browseButton.addEventListener('click', async (e) => {
     e.preventDefault();
     e.stopPropagation();
     
-    // Store current values before dialog
-    const currentValues = Array.from(document.querySelectorAll('.slicer-entry')).map(entry => ({
-      name: entry.querySelector('.slicer-name').value,
-      path: entry.querySelector('.slicer-path').value
-    }));
-    
-    const result = await window.electron.openSlicerDialog('Select Slicer');
-    
-    // Restore all values after dialog
-    document.querySelectorAll('.slicer-entry').forEach((entry, index) => {
-      if (currentValues[index]) {
-        entry.querySelector('.slicer-name').value = currentValues[index].name;
-        entry.querySelector('.slicer-path').value = currentValues[index].path;
+    if (serverMode) {
+      // In server mode: use HTML5 file input to open local file picker on user's workstation
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.style.display = 'none';
+      
+      // Set accept filter based on platform
+      // On Windows, filter for .exe files
+      // On macOS, we can't easily filter for .app (they're directories), so accept all
+      // On Linux, accept all files (executables typically have no extension)
+      if (navigator.platform.toLowerCase().includes('win')) {
+        fileInput.accept = '.exe,application/x-msdownload';
+      } else {
+        // For macOS and Linux, accept all files
+        fileInput.accept = '*/*';
       }
-    });
-    
-    // Update only this entry's path
-    if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
-      const thisEntry = e.target.closest('.slicer-entry');
-      const thisPathInput = thisEntry.querySelector('.slicer-path');
-      thisPathInput.value = result.filePaths[0];
+      
+      let fileSelected = false;
+      
+      fileInput.addEventListener('change', (event) => {
+        fileSelected = true;
+        const file = event.target.files[0];
+        if (file) {
+          // Try to get the full path
+          // In Electron (even in server mode via webview), file.path might be available
+          // In pure browser, we only get file.name due to security restrictions
+          if (file.path) {
+            // Electron provides the full path
+            pathInput.value = file.path;
+          } else {
+            // Pure browser - we only have the filename
+            // Show the filename and let user know they may need to complete the path
+            const fileName = file.name;
+            pathInput.value = fileName;
+            
+            // Show a helpful message
+            const message = 'Browser security only provides the filename. ' +
+              'If the path shown is incomplete, please manually enter the full path to the slicer executable.\n\n' +
+              'Example: C:\\Program Files\\PrusaSlicer\\prusa-slicer.exe';
+            setTimeout(() => {
+              alert(message);
+            }, 100);
+          }
+        }
+        // Clean up
+        setTimeout(() => {
+          if (fileInput.parentNode) {
+            fileInput.parentNode.removeChild(fileInput);
+          }
+        }, 100);
+      });
+      
+      // Add to DOM and trigger click
+      document.body.appendChild(fileInput);
+      
+      // Use a small delay to ensure the input is in the DOM
+      setTimeout(() => {
+        fileInput.click();
+        
+        // Clean up if no file is selected after a reasonable time (user cancelled)
+        setTimeout(() => {
+          if (!fileSelected && fileInput.parentNode) {
+            fileInput.parentNode.removeChild(fileInput);
+          }
+        }, 500);
+      }, 10);
+    } else {
+      // Normal mode: use file dialog
+      // Store current values before dialog
+      const currentValues = Array.from(document.querySelectorAll('.slicer-entry')).map(entry => ({
+        name: entry.querySelector('.slicer-name').value,
+        path: entry.querySelector('.slicer-path').value
+      }));
+      
+      const result = await window.electron.openSlicerDialog('Select Slicer');
+      
+      // Restore all values after dialog
+      document.querySelectorAll('.slicer-entry').forEach((entry, index) => {
+        if (currentValues[index]) {
+          entry.querySelector('.slicer-name').value = currentValues[index].name;
+          entry.querySelector('.slicer-path').value = currentValues[index].path;
+        }
+      });
+      
+      // Update only this entry's path
+      if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+        const thisEntry = e.target.closest('.slicer-entry');
+        const thisPathInput = thisEntry.querySelector('.slicer-path');
+        thisPathInput.value = result.filePaths[0];
+      }
     }
   });
+  
+  // In server mode, make the path input editable and update placeholder
+  if (serverMode) {
+    pathInput.removeAttribute('readonly');
+    pathInput.placeholder = 'Enter slicer path on your workstation';
+  }
   
   // Add remove button handler
   const removeButton = entry.querySelector('.remove-slicer-button');
@@ -70,7 +148,7 @@ function createSlicerEntry(slicer = { name: '', path: '' }) {
   return container;
 }
 
-function openSlicerSettings() {
+async function openSlicerSettings() {
   const dialog = document.getElementById('slicer-dialog');
   if (!dialog) return;
   
@@ -87,14 +165,14 @@ function openSlicerSettings() {
   
   // Load existing slicers
   window.electron.getSlicers()
-    .then(slicers => {
+    .then(async (slicers) => {
       if (slicers && slicers.length > 0) {
-        slicers.forEach(slicer => {
-          const entry = createSlicerEntry(slicer);
+        for (const slicer of slicers) {
+          const entry = await createSlicerEntry(slicer);
           if (entry) {
             slicerList.appendChild(entry);
           }
-        });
+        }
       }
     })
     .catch(err => {
@@ -141,11 +219,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   
   // Add new slicer button handler
-  document.getElementById('add-slicer-button')?.addEventListener('click', (e) => {
+  document.getElementById('add-slicer-button')?.addEventListener('click', async (e) => {
     e.preventDefault();
     e.stopPropagation();
     const slicerList = document.getElementById('slicer-list');
-    const entry = createSlicerEntry();
+    const entry = await createSlicerEntry();
     if (entry) {
       slicerList.appendChild(entry);
     }

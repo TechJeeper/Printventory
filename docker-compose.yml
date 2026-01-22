@@ -9,9 +9,10 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # Persist database and application data
+      # Persist database and application data to local directory
       # On Linux, Electron stores user data in ~/.config/Printventory
-      - printventory-data:/root/.config/Printventory
+      # Using bind mount to local ./data directory so data persists on host filesystem
+      - ./data:/root/.config/Printventory
       # Mount network shares for accessing files
       # For Windows Docker Desktop:
       # 1. Map network share to drive: net use Z: \\msi\folder1 /persistent:yes
@@ -35,6 +36,11 @@ services:
       - DCONF_DISABLE=1
       - GIO_USE_VFS=local
       - GIO_USE_VOLUME_MONITOR=unix
+      # Optional: Set STL Home directory via environment variable
+      # This will automatically configure the STL Home setting in Printventory
+      # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
+      # The path must match a mounted volume in your Docker configuration
+      # - STL_HOME=/mnt/network-share/models
     restart: unless-stopped
     # Optional: Set resource limits
     # deploy:
@@ -44,7 +50,9 @@ services:
     #     reservations:
     #       memory: 512M
 
-volumes:
-  printventory-data:
-    driver: local
+# Using bind mount instead of named volume for better control and persistence
+# Database is now stored in ./data directory on the host filesystem
+# volumes:
+#   printventory-data:
+#     driver: local
 

@@ -8,6 +8,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
   <script src="https://js.puter.com/v2/"></script>
@@ -699,6 +700,45 @@
         <p id="thumbnail-progress-text">0 / 0</p>
       </div>
     </dialog>
+
+    <!-- Preview Model Dialog -->
+    <dialog id="preview-dialog" class="modal preview-modal">
+      <div class="preview-container">
+        <div class="preview-header">
+          <h3 id="preview-model-name">Model Preview</h3>
+          <button type="button" id="close-preview" class="preview-close-button" title="Close">×</button>
+        </div>
+        <div class="preview-content">
+          <div id="preview-canvas-container" class="preview-canvas-container">
+            <div id="preview-loading" class="preview-loading">
+              <div class="loader"></div>
+              <p>Loading model...</p>
+            </div>
+            <canvas id="preview-canvas"></canvas>
+          </div>
+          <div class="preview-controls">
+            <div class="preview-control-group">
+              <button type="button" id="preview-reset-view" class="preview-control-button" title="Reset View">
+                <span>🔄</span> Reset View
+              </button>
+              <button type="button" id="preview-toggle-wireframe" class="preview-control-button" title="Toggle Wireframe">
+                <span>🔲</span> Wireframe
+              </button>
+              <button type="button" id="preview-toggle-axes" class="preview-control-button" title="Toggle Axes">
+                <span>📐</span> Axes
+              </button>
+            </div>
+            <div class="preview-info">
+              <span id="preview-file-type"></span>
+              <span id="preview-dimensions"></span>
+            </div>
+          </div>
+        </div>
+        <div class="preview-instructions">
+          <p><strong>Controls:</strong> Left click + drag to rotate • Right click + drag to pan • Scroll to zoom</p>
+        </div>
+      </div>
+    </dialog>
   </div>
   <div class="main-content">
     <main>
@@ -774,6 +814,34 @@
               <option value="#0a0a23">Midnight Blue</option>
             </select>
             <div class="setting-description">Background color for 3D model thumbnails</div>
+          </div>
+          <p class="setting-description" style="margin-top: 15px; margin-bottom: 5px; font-style: italic; color: #888;">
+            Note: These settings are for STLs and 3MFs without embedded data.
+          </p>
+          <div class="form-group">
+            <label for="render-color">Model Color:</label>
+            <select id="render-color">
+              <option value="#cccccc">Default (Light Gray)</option>
+              <option value="#333333">Dark Gray</option>
+              <option value="#000000">Black</option>
+              <option value="#ffffff">White</option>
+              <option value="#ff0000">Red</option>
+              <option value="#00ff00">Green</option>
+              <option value="#0000ff">Blue</option>
+              <option value="#ffff00">Yellow</option>
+              <option value="#ff00ff">Magenta</option>
+              <option value="#00ffff">Cyan</option>
+              <option value="rainbow">Rainbow</option>
+              <option value="pastel-rainbow">Pastel Rainbow</option>
+            </select>
+            <div class="setting-description">Color of the 3D model in thumbnails</div>
+          </div>
+          <div class="form-group checkbox-container" style="align-items: flex-start; margin-top: 15px;">
+            <input type="checkbox" id="render-lighting" checked>
+            <div>
+              <label for="render-lighting" style="font-weight: bold; margin-bottom: 4px; display: block;">Enable Advanced Lighting</label>
+              <div class="setting-description" style="margin-top: 0;">Adds ambient and directional lighting for better depth. Disabling may improve performance on lower-end devices.</div>
+            </div>
           </div>
           <div class="dialog-buttons">
             <button type="submit" id="save-settings">Save</button>
@@ -1185,16 +1253,11 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       }, 5000);
     });
   </script>
-  <script>
-    document.getElementById('website-link').addEventListener('click', (e) => {
-      e.preventDefault();
-      window.electron.openExternal('https://printventory.com');
-    });
-  </script>
   <script type="module" src="search.js"></script>
   <script src="renderer.js"></script>
   <script type="module" src="slicer.js"></script>
   <script src="guide.js"></script>
+  <script src="preview.js"></script>
 
   <!-- Add this template for slicer entries -->
   <template id="slicer-entry-template">

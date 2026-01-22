@@ -55,8 +55,9 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy package files
+# Copy package files and scripts (needed for postinstall hook)
 COPY package*.json ./
+COPY scripts/ ./scripts/
 
 # Set environment variables for npm and electron
 # Explicitly disable proxy settings that might interfere with Docker builds

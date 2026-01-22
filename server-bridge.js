@@ -32,6 +32,78 @@
   const maxReconnectAttempts = 5;
   const pendingRequests = new Map();
   let requestIdCounter = 0;
+
+  function showBrowserMessage(title, message, buttons = ['OK']) {
+    return new Promise((resolve) => {
+      const dialog = document.createElement('dialog');
+      const dialogId = `browser-message-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      dialog.id = dialogId;
+      dialog.style.cssText = `
+        background: #2d2d2d;
+        color: #fff;
+        border: 1px solid #555;
+        border-radius: 6px;
+        min-width: 320px;
+        max-width: 520px;
+        padding: 16px;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      `;
+      dialog.setAttribute('aria-modal', 'true');
+
+      const titleEl = document.createElement('div');
+      titleEl.textContent = title || 'Message';
+      titleEl.style.cssText = 'font-weight: 600; margin-bottom: 8px; font-size: 14px;';
+
+      const messageEl = document.createElement('div');
+      messageEl.textContent = message || '';
+      messageEl.style.cssText = 'font-size: 13px; line-height: 1.4; margin-bottom: 16px; white-space: pre-wrap;';
+
+      const buttonRow = document.createElement('div');
+      buttonRow.style.cssText = 'display: flex; gap: 8px; justify-content: flex-end;';
+
+      const cleanup = () => {
+        dialog.close();
+        dialog.remove();
+        if (styleTag) styleTag.remove();
+      };
+
+      buttons.forEach((label, index) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.style.cssText = `
+          padding: 6px 12px;
+          border: 1px solid #555;
+          border-radius: 4px;
+          background: ${index === 0 ? '#007bff' : '#444'};
+          color: #fff;
+          cursor: pointer;
+          font-size: 13px;
+        `;
+        btn.addEventListener('click', () => {
+          cleanup();
+          resolve({ label, index });
+        });
+        buttonRow.appendChild(btn);
+      });
+
+      dialog.appendChild(titleEl);
+      dialog.appendChild(messageEl);
+      dialog.appendChild(buttonRow);
+
+      const styleTag = document.createElement('style');
+      styleTag.textContent = `
+        #${dialogId}::backdrop {
+          background: rgba(0, 0, 0, 0.5);
+        }
+      `;
+
+      document.body.appendChild(styleTag);
+      document.body.appendChild(dialog);
+      dialog.showModal();
+    });
+  }
   
   function connect() {
     try {
@@ -210,6 +282,8 @@
     'showMessageBox': 'show-message-box',
     'backupDatabase': 'backup-database',
     'restoreDatabase': 'restore-database',
+    'exportLibrary': 'export-library',
+    'importLibrary': 'import-library',
     'getDuplicateFiles': 'get-duplicate-files',
     'checkFilesExist': 'check-files-exist',
     'deleteFile': 'delete-file',
@@ -250,7 +324,8 @@
     'openSlicerDialog': 'open-slicer-dialog',
     'openExternal': 'open-external',
     'quitApp': 'quitApp',
-    'showContextMenu': 'show-context-menu'
+    'showContextMenu': 'show-context-menu',
+    'executeContextMenuAction': 'execute-context-menu-action'
   };
   
   // Create proxy methods for all IPC calls
@@ -264,6 +339,30 @@
       return makeIpcCall(methodToChannel[method], ...args);
     };
   });
+
+  window.electron.showMessage = function(title, message, buttons = ['OK']) {
+    return showBrowserMessage(title, message, buttons).then(result => result.label);
+  };
+
+  window.electron.showMessageBox = function(options = {}) {
+    const title = options.title || 'Message';
+    const messageParts = [options.message, options.detail].filter(Boolean);
+    const message = messageParts.join('\n\n');
+    const buttons = options.buttons || ['OK'];
+    return showBrowserMessage(title, message, buttons).then(result => ({
+      response: result.index,
+      checkboxChecked: false
+    }));
+  };
+
+  window.electron.openExternal = function(url) {
+    try {
+      window.open(url, '_blank', 'noopener');
+    } catch (error) {
+      console.error('Error opening external URL:', error);
+    }
+    return Promise.resolve(true);
+  };
   
   // Special methods that don't map directly to IPC channels
   window.electron.isServerMode = function() {

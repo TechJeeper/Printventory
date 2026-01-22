@@ -58,6 +58,19 @@ function parseZipPath(filePath) {
   return { zipPath: filePath, entryPath: null, isZipEntry: false };
 }
 
+// Helper function to get model color based on settings
+function getModelColor() {
+  const colorSetting = window.currentRenderColor || '#cccccc';
+  
+  if (colorSetting === 'rainbow') {
+    return new THREE.Color().setHSL(Math.random(), 1.0, 0.5);
+  } else if (colorSetting === 'pastel-rainbow') {
+    return new THREE.Color().setHSL(Math.random(), 1.0, 0.8);
+  } else {
+    return new THREE.Color(colorSetting);
+  }
+}
+
 async function loadModel(filePath, options = {}) {
   const startTime = Date.now();
   console.log(`[DEBUG] loadModel: Start loading ${filePath}`);
@@ -218,14 +231,14 @@ async function loadModel(filePath, options = {}) {
               try {
                 let mesh;
                 if (object.isBufferGeometry) {
-                  if (!THREE.MeshPhongMaterial) {
-                    console.error('loadModel: THREE.MeshPhongMaterial not available');
-                    throw new Error('THREE.MeshPhongMaterial not initialized');
+                  if (!THREE.MeshStandardMaterial) {
+                    console.error('loadModel: THREE.MeshStandardMaterial not available');
+                    throw new Error('THREE.MeshStandardMaterial not initialized');
                   }
-                  const material = new THREE.MeshPhongMaterial({
-                    color: 0xcccccc,
-                    specular: 0x111111,
-                    shininess: 200
+                  const material = new THREE.MeshStandardMaterial({
+                    color: getModelColor(),
+                    metalness: 0.3,
+                    roughness: 0.4
                   });
                   if (!THREE.Mesh) {
                     console.error('loadModel: THREE.Mesh not available');
@@ -253,10 +266,10 @@ async function loadModel(filePath, options = {}) {
                       
                       // Handle both single materials and material arrays
                       // Create new material with explicit color to override any black/default materials
-                      const newMaterial = new THREE.MeshPhongMaterial({
-                        color: 0xcccccc,
-                        specular: 0x111111,
-                        shininess: 200
+                      const newMaterial = new THREE.MeshStandardMaterial({
+                        color: getModelColor(),
+                        metalness: 0.3,
+                        roughness: 0.4
                       });
                       
                       if (Array.isArray(child.material)) {
@@ -1662,8 +1675,14 @@ let isThumbnailDialogShowing = false;
 // Add or update the loadDuplicateFiles function
 async function loadDuplicateFiles(skipHashCheck = false) {
   try {
+    const serverMode = await window.electron.isServerMode().catch(() => false);
     // First check for models without file hash (unless we're skipping the check)
     if (!skipHashCheck) {
+      if (serverMode) {
+        // In server/docker mode hashes are generated in the background.
+        isHashDialogShowing = false;
+        isCheckingForHashes = false;
+      } else {
       // Check if a hash dialog is already showing or if we're currently checking
       if (isHashDialogShowing || isCheckingForHashes) {
         return; // Exit early if dialog is already showing or check is in progress
@@ -1754,6 +1773,7 @@ async function loadDuplicateFiles(skipHashCheck = false) {
         // No models without hash, ensure flag is reset
         isHashDialogShowing = false;
       }
+      }
     }
     
     const dialog = document.getElementById('dedup-dialog');
@@ -1799,6 +1819,50 @@ async function loadDuplicateFiles(skipHashCheck = false) {
     console.log('Loaded duplicates:', duplicates);
     console.log('Is generating hashes:', isGeneratingHashes);
     console.log('Include zip:', includeZip);
+    
+    // Check for missing thumbnails in duplicate groups and generate them if needed
+    if (duplicates && Object.keys(duplicates).length > 0) {
+      const modelsNeedingThumbnails = [];
+      
+      // Check each duplicate group for missing thumbnails
+      for (const [hash, files] of Object.entries(duplicates)) {
+        // Check the first file's thumbnail (since we use it for the preview)
+        const firstFile = files[0];
+        try {
+          const thumbnail = await window.electron.getThumbnail(firstFile.filePath);
+          // If thumbnail is null, empty, or the default placeholder, we need to generate it
+          if (!thumbnail || thumbnail === '3d.png' || thumbnail.trim() === '') {
+            console.log(`Missing thumbnail for duplicate: ${firstFile.filePath}`);
+            modelsNeedingThumbnails.push(firstFile.filePath);
+          }
+        } catch (error) {
+          console.error(`Error checking thumbnail for ${firstFile.filePath}:`, error);
+          // If we can't check, assume we need to generate
+          modelsNeedingThumbnails.push(firstFile.filePath);
+        }
+      }
+      
+      // Generate thumbnails if any are missing
+      if (modelsNeedingThumbnails.length > 0) {
+        console.log(`Generating ${modelsNeedingThumbnails.length} missing thumbnails for duplicate preview...`);
+        try {
+          // Generate thumbnails one at a time
+          for (const filePath of modelsNeedingThumbnails) {
+            try {
+              await generateThumbnail(filePath);
+              console.log(`Generated thumbnail for: ${filePath}`);
+            } catch (error) {
+              console.error(`Failed to generate thumbnail for ${filePath}:`, error);
+              // Continue with next file even if one fails
+            }
+          }
+          console.log('Thumbnail generation complete for duplicates');
+        } catch (error) {
+          console.error('Error generating thumbnails for duplicates:', error);
+          // Continue anyway to show the duplicates, even without thumbnails
+        }
+      }
+    }
     
     // Show warning if hashes are being generated
     if (isGeneratingHashes) {
@@ -2056,16 +2120,26 @@ window.openSTLHomeDialog = async function() {
   const chooseButton = document.getElementById('choose-stl-home-button');
   
   if (serverMode) {
-    // In server mode: hide Choose Directory button, show Update Frequency
+    // In server mode: hide Choose Directory button, show Update Frequency, make input editable
     if (chooseButton) chooseButton.style.display = 'none';
     if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'block';
     if (updateFrequencyInput) {
       updateFrequencyInput.value = updateFrequency || '60';
     }
+    // Make the input field editable in server mode so users can type paths
+    if (directoryInput) {
+      directoryInput.removeAttribute('readonly');
+      directoryInput.placeholder = 'Enter UNC path (e.g., \\\\server\\share\\path)';
+    }
   } else {
-    // In normal mode: show Choose Directory button, hide Update Frequency
+    // In normal mode: show Choose Directory button, hide Update Frequency, keep input readonly
     if (chooseButton) chooseButton.style.display = 'block';
     if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'none';
+    // Keep input readonly in normal mode (browse button is used)
+    if (directoryInput) {
+      directoryInput.setAttribute('readonly', 'readonly');
+      directoryInput.placeholder = 'No directory selected';
+    }
   }
   
   stlHomeDialog.showModal();
@@ -2086,6 +2160,11 @@ function createServerMenuBar() {
       const dialog = document.getElementById('dedup-dialog');
       if (dialog) {
         dialog.showModal();
+        const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
+        if (includeZipCheckbox) {
+          includeZipCheckbox.checked = false;
+        }
+        loadDuplicateFiles();
       } else {
         // Trigger the event which will open the dialog via the listener
         window.electron.send('open-dedup');
@@ -2221,9 +2300,13 @@ function createServerMenuBar() {
         window.electron.send('open-guide');
       }
     }},
-    { label: 'About', action: () => {
+    { label: 'About', action: async () => {
       const aboutDialog = document.getElementById('about-dialog');
-      if (aboutDialog) aboutDialog.showModal();
+      if (aboutDialog) {
+        aboutDialog.showModal();
+        bindAboutCloseButton();
+        await initializeAboutDialog();
+      }
     }}
   ]);
   
@@ -2593,6 +2676,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('model-background-color').value = backgroundColor;
   }
 
+  // Load render color setting
+  const renderColor = await window.electron.getSetting('renderColor');
+  if (renderColor) {
+    const renderColorSelect = document.getElementById('render-color');
+    if (renderColorSelect) {
+      renderColorSelect.value = renderColor;
+    }
+    window.currentRenderColor = renderColor;
+  } else {
+    window.currentRenderColor = '#cccccc';
+  }
+
+  // Load lighting setting
+  const renderLighting = await window.electron.getSetting('renderLighting');
+  if (renderLighting !== null && renderLighting !== undefined) {
+    const renderLightingCheckbox = document.getElementById('render-lighting');
+    if (renderLightingCheckbox) {
+      renderLightingCheckbox.checked = renderLighting === 'true';
+    }
+    window.currentRenderLighting = renderLighting === 'true';
+  } else {
+    window.currentRenderLighting = true; // Default to true
+  }
+
   // Settings dialog handlers
   window.electron.onOpenSettings(() => {
     settingsDialog.showModal();
@@ -2604,8 +2711,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('save-settings')?.addEventListener('click', async () => {
     const color = document.getElementById('model-background-color').value;
+    const renderColor = document.getElementById('render-color').value;
+    const renderLighting = document.getElementById('render-lighting').checked;
     const theme = document.getElementById('ui-theme')?.value || 'modern-cyan';
     
+    // Check if render settings changed
+    const oldRenderColor = window.currentRenderColor || '#cccccc';
+    const oldRenderLighting = window.currentRenderLighting !== undefined ? window.currentRenderLighting : true;
+    
+    const renderSettingsChanged = (oldRenderColor !== renderColor) || (oldRenderLighting !== renderLighting);
+
     // Update CSS variable for model background
     document.documentElement.style.setProperty('--model-background-color', color);
     
@@ -2614,12 +2729,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Save to settings
     await window.electron.saveSetting('modelBackgroundColor', color);
+    await window.electron.saveSetting('renderColor', renderColor);
+    await window.electron.saveSetting('renderLighting', renderLighting.toString());
     await window.electron.saveSetting('uiTheme', theme);
+    
+    // Update global variable
+    window.currentRenderColor = renderColor;
+    window.currentRenderLighting = renderLighting;
     
     // Apply theme colors dynamically
     applyThemeColors(theme);
     
     settingsDialog.close();
+
+    // Ask to regenerate thumbnails if color or lighting changed
+    if (renderSettingsChanged) {
+        const userChoice = await window.electron.showMessage(
+            'Regenerate Thumbnails?',
+            'You have changed model rendering settings. Would you like to regenerate all thumbnails to apply this change?',
+            ['Yes', 'No']
+        );
+
+        if (userChoice === 'Yes') {
+             // Get all models
+            const sortSelect = document.getElementById('sort-select');
+            const allModels = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+            
+            if (allModels.length > 0) {
+                 // Purge existing thumbnails to force regeneration
+                await window.electron.purgeThumbnails();
+                
+                // Regenerate thumbnails for all models
+                await generateThumbnailsForModels(allModels);
+                
+                await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+                
+                // Refresh the grid to show the new thumbnails
+                const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+                await renderFiles(models);
+            }
+        }
+    }
   });
 
   // Function to apply theme colors
@@ -3228,10 +3378,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderProgressContainer.classList.remove('hidden');
 
       // Listen for progress updates
+      // Note: scan progress events can arrive out-of-order because the scan worker
+      // processes many operations concurrently. Keep the displayed count monotonic.
+      let lastScanProcessed = 0;
       window.electron.onScanProgress((progress) => {
-        const percent = progress.total ? (progress.processed / progress.total) * 100 : 0;
+        const processedRaw = typeof progress?.processed === 'number' ? progress.processed : 0;
+        lastScanProcessed = Math.max(lastScanProcessed, processedRaw);
+        const percent = progress.total ? (lastScanProcessed / progress.total) * 100 : 0;
         progressBar.style.width = `${percent}%`;
-        progressText.textContent = `Checking files: ${progress.processed || 0}`;
+        progressText.textContent = `Checking files: ${lastScanProcessed}`;
       });
 
       window.electron.onDbProgress((progress) => {
@@ -3515,9 +3670,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Website link handler
-  document.getElementById('website-link')?.addEventListener('click', (e) => {
+  document.getElementById('website-link')?.addEventListener('click', async (e) => {
     e.preventDefault();
-    window.electron.showItemInFolder('https://printventory.com');
+    await window.electron.openExternal('https://printventory.com');
   });
 
   // Initialize new designer dialog handlers
@@ -3659,8 +3814,80 @@ document.addEventListener('DOMContentLoaded', async () => {
     dialog.showModal();
   });
 
+  async function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error);
+      reader.onload = () => {
+        const buffer = reader.result;
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+        }
+        resolve(btoa(binary));
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  async function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error);
+      reader.onload = () => resolve(reader.result || '');
+      reader.readAsText(file);
+    });
+  }
+
+  function promptForBackupFile() {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.db';
+      input.style.display = 'none';
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0] ? input.files[0] : null;
+        input.remove();
+        resolve(file);
+      });
+      document.body.appendChild(input);
+      input.click();
+    });
+  }
+
+  function promptForLibraryImportFile() {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.style.display = 'none';
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0] ? input.files[0] : null;
+        input.remove();
+        resolve(file);
+      });
+      document.body.appendChild(input);
+      input.click();
+    });
+  }
+
   document.getElementById('backup-button')?.addEventListener('click', async () => {
     try {
+      const serverMode = await window.electron.isServerMode().catch(() => false);
+      if (serverMode) {
+        const result = await window.electron.backupDatabase();
+        if (result && result.success && result.filePath) {
+          const downloadUrl = `/api/download/${encodeURIComponent(result.filePath)}`;
+          window.location.href = downloadUrl;
+          await window.electron.showMessage('Success', 'Database backup created successfully. Download should start shortly.');
+        } else {
+          await window.electron.showMessage('Error', result?.message || 'Failed to create database backup');
+        }
+        return;
+      }
+
       const success = await window.electron.backupDatabase();
       if (success) {
         await window.electron.showMessage('Success', 'Database backup created successfully');
@@ -3673,13 +3900,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('restore-button')?.addEventListener('click', async () => {
     try {
-      const result = await window.electron.showMessage(
+      const confirmResult = await window.electron.showMessage(
         'Confirm Restore',
         'Warning: Restoring from backup will replace all current data. This cannot be undone. Continue?',
         ['Yes', 'No']
       );
       
-      if (result === 'Yes') {
+      if (confirmResult === 'Yes') {
+        const serverMode = await window.electron.isServerMode().catch(() => false);
+        if (serverMode) {
+          const file = await promptForBackupFile();
+          if (!file) {
+            return;
+          }
+
+          const base64 = await readFileAsBase64(file);
+          const result = await window.electron.restoreDatabase({ base64 });
+          if (result && result.success) {
+            await window.electron.showMessage('Success', 'Database restored successfully. The application will now reload.');
+            window.location.reload();
+          } else {
+            await window.electron.showMessage('Error', result?.message || 'Failed to restore database');
+          }
+          return;
+        }
+
         const success = await window.electron.restoreDatabase();
         if (success) {
           await window.electron.showMessage('Success', 'Database restored successfully. The application will now reload.');
@@ -3694,6 +3939,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('export-library-button')?.addEventListener('click', async () => {
     try {
+      const serverMode = await window.electron.isServerMode().catch(() => false);
+      if (serverMode) {
+        const result = await window.electron.exportLibrary();
+        if (result && result.success && result.filePath) {
+          const downloadUrl = `/api/download/${encodeURIComponent(result.filePath)}`;
+          window.location.href = downloadUrl;
+          await window.electron.showMessage('Success', 'Library exported successfully. Download should start shortly.');
+        } else {
+          await window.electron.showMessage('Error', result?.message || 'Failed to export library');
+        }
+        return;
+      }
+
       const success = await window.electron.exportLibrary();
       if (success) {
         await window.electron.showMessage('Success', 'Library exported successfully');
@@ -3713,6 +3971,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
       
       if (result === 'Yes') {
+        const serverMode = await window.electron.isServerMode().catch(() => false);
+        if (serverMode) {
+          const file = await promptForLibraryImportFile();
+          if (!file) {
+            return;
+          }
+          const json = await readFileAsText(file);
+          const importResult = await window.electron.importLibrary({ json });
+          if (importResult && importResult.success) {
+            const message = `Library imported successfully. ${importResult.imported} new models added, ${importResult.updated} models updated.`;
+            await window.electron.showMessage('Success', message);
+            if (typeof refreshModelDisplay === 'function') {
+              await refreshModelDisplay();
+            }
+          } else {
+            await window.electron.showMessage('Error', importResult?.message || 'Failed to import library');
+          }
+          return;
+        }
+
         const importResult = await window.electron.importLibrary();
         if (importResult && importResult.success) {
           const message = `Library imported successfully. ${importResult.imported} new models added, ${importResult.updated} models updated.`;
@@ -4174,7 +4452,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const typeLabel = type === 'designer' ? 'Designer' : type === 'parentModel' ? 'Parent Model' : 'License';
           const response = await window.electron.showMessage(
             `Delete ${typeLabel}`,
-            `This ${typeLabel.toLowerCase()} is used by ${item.model_count} model(s). Are you sure you want to delete it?`,
+            `Delete for ${item.model_count} model${item.model_count !== 1 ? 's' : ''}?`,
             ['Yes', 'No']
           );
           
@@ -5162,8 +5440,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
   
-      const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
-      scene.add(light);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+    
+    // Check if advanced lighting is enabled (default true)
+    const useAdvancedLighting = window.currentRenderLighting !== undefined ? window.currentRenderLighting : true;
+    
+    if (useAdvancedLighting) {
+      const keyLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      keyLight.position.set(5, 10, 7.5); // Standard key light position
+      scene.add(keyLight);
+      
+      const fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
+      fillLight.position.set(-5, 5, -7.5); // Fill/Back light
+      scene.add(fillLight);
+    } else {
+      // Fallback to simple directional light if advanced lighting is disabled
+      const simpleLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      simpleLight.position.set(1, 1, 1).normalize();
+      scene.add(simpleLight);
+    }
   
       model = await loadModel(filePath, {
         optimizeGeometry: true,
@@ -5176,7 +5472,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   
       model.traverse(child => {
         if (child.isMesh) {
-          child.material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+          if (useAdvancedLighting) {
+             child.material = new THREE.MeshStandardMaterial({
+              color: getModelColor(),
+              metalness: 0.3,
+              roughness: 0.4
+            }); 
+          } else {
+             child.material = new THREE.MeshBasicMaterial({ color: getModelColor() });
+          }
         }
       });
   
@@ -5481,6 +5785,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Update the about dialog initialization
+  function bindAboutCloseButton() {
+    const dialog = document.getElementById('about-dialog');
+    const closeXButton = dialog?.querySelector('.about-close-x');
+    if (!dialog || !closeXButton) {
+      return;
+    }
+
+    if (closeXButton.dataset.bound === 'true') {
+      return;
+    }
+
+    closeXButton.dataset.bound = 'true';
+    closeXButton.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dialog.close();
+    });
+  }
+
   async function initializeAboutDialog() {
     try {
       // Get both versions
@@ -5541,21 +5864,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       // Set up close X button
-      const closeXButton = document.querySelector('.about-close-x');
-      if (closeXButton) {
-        // Remove any existing event listeners by cloning and replacing
-        const newCloseButton = closeXButton.cloneNode(true);
-        closeXButton.parentNode.replaceChild(newCloseButton, closeXButton);
-        
-        newCloseButton.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const dialog = document.getElementById('about-dialog');
-          if (dialog) {
-            dialog.close();
-          }
-        });
-      }
+      bindAboutCloseButton();
 
       // Set up license link
       const licenseLink = document.getElementById('license-link');
@@ -5592,6 +5901,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Remove any nested DOMContentLoaded listeners and consolidate into one
   document.addEventListener('DOMContentLoaded', async () => {
     try {
+      bindAboutCloseButton();
       // Initialize all settings first
       await initializeSettings();
       
@@ -5606,6 +5916,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const dialog = document.getElementById('about-dialog');
         if (dialog) {
           dialog.showModal();
+          bindAboutCloseButton();
           // Initialize after showing the dialog to ensure elements are in the DOM
           await initializeAboutDialog();
         }
@@ -7535,16 +7846,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         totalThumbnailsToGenerate = modelsWithoutThumbs.length;
         generatedThumbnailsCount = 0;
         
-        // Update progress UI
-        const progressDialog = document.getElementById('thumbnail-progress-dialog');
-        const progressBar = document.getElementById('thumbnail-progress-bar');
-        const progressText = document.getElementById('thumbnail-progress-text');
-        progressDialog.showModal();
-        
         // Process in batches
+        // UI is now handled inside generateThumbnailsForModels
         await generateThumbnailsForModels(modelsWithoutThumbs);
-        
-        progressDialog.close();
       }
     } catch (error) {
       console.error('Error in thumbnail generation:', error);
@@ -7630,23 +7934,56 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function generateThumbnailsForModels(models) {
     console.log(`[DEBUG] generateThumbnailsForModels: Starting thumbnail generation for ${models.length} models.`);
     const BATCH_SIZE = 1; // Process one at a time
-    const progressDialog = document.getElementById('thumbnail-progress-dialog');
-    const progressBar = document.getElementById('thumbnail-progress-bar');
-    const progressText = document.getElementById('thumbnail-progress-text');
+    
+    // New progress UI elements (Sidebar)
+    const progressSection = document.getElementById('progress-section');
+    const progressContainer = document.getElementById('progress-container');
+    const progressBar = document.getElementById('progress-bar');
+    const progressText = document.getElementById('progress-text');
+    const renderProgressContainer = document.getElementById('render-progress-container');
+    const renderProgressBar = document.getElementById('render-progress-bar');
+    const renderProgressText = document.getElementById('render-progress-text');
+    const stopButton = document.getElementById('stop-thumbnail-generation');
+
+    // Use render progress bar for thumbnail generation
+    const activeProgressBar = renderProgressBar;
+    const activeProgressText = renderProgressText;
     
     // Check if progress elements exist before proceeding
-    const hasProgressUI = progressDialog && progressBar && progressText;
+    const hasProgressUI = progressSection && activeProgressBar && activeProgressText;
     
     totalThumbnailsToGenerate = models.length;
     generatedThumbnailsCount = 0;
+    let isCancelled = false;
+
+    // Handle stop button
+    const handleStopClick = () => {
+        isCancelled = true;
+        if (activeProgressText) activeProgressText.textContent = 'Stopping...';
+    };
+    if (stopButton) {
+        // Remove existing listener if any (to avoid duplicates)
+        stopButton.replaceWith(stopButton.cloneNode(true));
+        const newStopButton = document.getElementById('stop-thumbnail-generation');
+        newStopButton.addEventListener('click', handleStopClick);
+        newStopButton.style.display = 'block';
+    }
 
     try {
-      // Show progress dialog if it exists
+      // Show progress section
       if (hasProgressUI) {
-        progressDialog.showModal();
+        progressSection.classList.remove('hidden');
+        renderProgressContainer.classList.remove('hidden');
+        // Hide the file scan progress as we are only generating thumbnails
+        if (progressContainer) progressContainer.classList.add('hidden'); 
+        
+        activeProgressBar.style.width = '0%';
+        activeProgressText.textContent = `Processing 0/${totalThumbnailsToGenerate} (0%)`;
       }
       
       for (let i = 0; i < models.length; i++) {
+        if (isCancelled) break;
+
         const model = models[i];
         let thumbnail = null;
         
@@ -7657,8 +7994,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           // Only update UI elements if they exist
           if (hasProgressUI) {
             const progress = Math.floor((i / totalThumbnailsToGenerate) * 100);
-            progressBar.style.width = `${progress}%`;
-            progressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
+            activeProgressBar.style.width = `${progress}%`;
+            activeProgressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
           }
           
           // 1. Try to get embedded thumbnail for 3MF
@@ -7731,17 +8068,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       // Update final progress
-      if (hasProgressUI) {
-        progressBar.style.width = '100%';
-        progressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
+      if (hasProgressUI && !isCancelled) {
+        activeProgressBar.style.width = '100%';
+        activeProgressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
       }
       
     } catch (error) {
       console.error('Error in thumbnail generation:', error);
     } finally {
-      // Close the dialog if it exists and was opened
-      if (hasProgressUI && progressDialog.open) {
-        progressDialog.close();
+      // Hide progress section after a short delay
+      if (hasProgressUI) {
+        setTimeout(() => {
+             progressSection.classList.add('hidden');
+        }, 2000);
       }
     }
   }
@@ -7827,6 +8166,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const thumbnailContainer = document.createElement('div');
         thumbnailContainer.className = 'thumbnail-container';
         thumbnailContainer.style.background = getComputedStyle(document.documentElement).getPropertyValue('--model-background-color');
+        addThumbnailMenuButton(thumbnailContainer, model.filePath);
         
         // Create print status indicator
         const printStatus = document.createElement('div');
@@ -8482,7 +8822,11 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
 
     const filesNeedingThumbnails = files.filter(file => !existingThumbnails.has(file.filePath));
     if (!background) {
-      progressText.textContent = `${filesNeedingThumbnails.length} models found`;
+      if (filesNeedingThumbnails.length > 0) {
+        progressText.textContent = `${filesNeedingThumbnails.length} models found`;
+      } else {
+        progressText.textContent = '';
+      }
       renderProgressBar.style.width = '0%';
       renderProgressText.textContent = `0 / ${filesNeedingThumbnails.length} models`;
       container.innerHTML = '';
@@ -9357,11 +9701,26 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
 
     renderer.setClearColor(0x000000, 0);
     
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(1, 1, 1).normalize();
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     scene.add(ambientLight);
-    scene.add(directionalLight);
+
+    // Check if advanced lighting is enabled (default true)
+    const useAdvancedLighting = window.currentRenderLighting !== undefined ? window.currentRenderLighting : true;
+
+    if (useAdvancedLighting) {
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      directionalLight.position.set(5, 10, 7.5);
+      scene.add(directionalLight);
+      
+      const fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
+      fillLight.position.set(-5, 5, -7.5);
+      scene.add(fillLight);
+    } else {
+       // Fallback to simple directional light if advanced lighting is disabled
+      const simpleLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      simpleLight.position.set(1, 1, 1).normalize();
+      scene.add(simpleLight);
+    }
 
     // Use loadModel function which has proper path encoding handling and embedded image check
     // loadModel is available globally via window.loadModel
@@ -11134,6 +11493,258 @@ async function populateParentModelFilter() {
   }
 }
 
+// Function to show HTML context menu (for server mode browser access)
+function showHtmlContextMenu(menuData, x, y, options = {}) {
+  const showClose = options.showClose === true;
+  // Remove any existing context menu
+  const existingMenu = document.getElementById('html-context-menu');
+  if (existingMenu) {
+    existingMenu.remove();
+  }
+  
+  // Create menu container
+  const menu = document.createElement('div');
+  menu.id = 'html-context-menu';
+  menu.style.cssText = `
+    position: fixed;
+    left: ${x}px;
+    top: ${y}px;
+    background-color: #2d2d2d;
+    border: 1px solid #555;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    z-index: 10000;
+    min-width: 200px;
+    padding: ${showClose ? '20px 0 4px 0' : '4px 0'};
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+  `;
+
+  if (showClose) {
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.textContent = 'x';
+    closeButton.style.cssText = `
+      position: absolute;
+      top: 4px;
+      right: 6px;
+      background: transparent;
+      border: none;
+      color: #ccc;
+      font-size: 14px;
+      cursor: pointer;
+      padding: 0;
+    `;
+    closeButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      menu.remove();
+    });
+    menu.appendChild(closeButton);
+  }
+  
+  // Create menu items
+  menuData.items.forEach((item, index) => {
+    if (item.type === 'separator') {
+      const separator = document.createElement('div');
+      separator.style.cssText = 'height: 1px; background-color: #555; margin: 4px 0;';
+      menu.appendChild(separator);
+      return;
+    }
+    
+    const menuItem = document.createElement('div');
+    menuItem.style.cssText = `
+      padding: 6px 20px;
+      color: ${item.enabled ? '#fff' : '#666'};
+      cursor: ${item.enabled ? 'pointer' : 'default'};
+      user-select: none;
+      position: relative;
+    `;
+    menuItem.textContent = item.label;
+    
+    if (item.enabled) {
+      menuItem.addEventListener('mouseenter', () => {
+        menuItem.style.backgroundColor = '#3d3d3d';
+      });
+      menuItem.addEventListener('mouseleave', () => {
+        menuItem.style.backgroundColor = 'transparent';
+      });
+      
+      // Handle submenus
+      if (item.submenu) {
+        menuItem.style.paddingRight = '30px';
+        const arrow = document.createElement('span');
+        arrow.textContent = '▶';
+        arrow.style.cssText = 'position: absolute; right: 8px; font-size: 10px;';
+        menuItem.appendChild(arrow);
+        
+        let submenuElement = null;
+        
+        menuItem.addEventListener('mouseenter', () => {
+          // Create submenu
+          if (!submenuElement) {
+            submenuElement = document.createElement('div');
+            submenuElement.style.cssText = `
+              position: absolute;
+              left: 100%;
+              top: 0;
+              background-color: #2d2d2d;
+              border: 1px solid #555;
+              border-radius: 4px;
+              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+              min-width: 200px;
+              padding: 4px 0;
+            `;
+            
+            item.submenu.forEach((subItem, subIndex) => {
+              const subMenuItem = document.createElement('div');
+              subMenuItem.style.cssText = `
+                padding: 6px 20px;
+                color: ${subItem.enabled ? '#fff' : '#666'};
+                cursor: ${subItem.enabled ? 'pointer' : 'default'};
+                user-select: none;
+              `;
+              subMenuItem.textContent = subItem.label;
+              
+              if (subItem.enabled) {
+                subMenuItem.addEventListener('mouseenter', () => {
+                  subMenuItem.style.backgroundColor = '#3d3d3d';
+                });
+                subMenuItem.addEventListener('mouseleave', () => {
+                  subMenuItem.style.backgroundColor = 'transparent';
+                });
+                
+                subMenuItem.addEventListener('click', async (e) => {
+                  e.stopPropagation();
+                  try {
+                    await window.electron.executeContextMenuAction(menuData.requestId, index, subIndex);
+                    menu.remove();
+                  } catch (error) {
+                    console.error('Error executing menu action:', error);
+                    alert('Error: ' + error.message);
+                  }
+                });
+              }
+              
+              submenuElement.appendChild(subMenuItem);
+            });
+            
+            menu.appendChild(submenuElement);
+          }
+          submenuElement.style.display = 'block';
+        });
+        
+        menuItem.addEventListener('mouseleave', () => {
+          if (submenuElement) {
+            // Delay hiding to allow moving to submenu
+            setTimeout(() => {
+              if (submenuElement && !submenuElement.matches(':hover') && !menuItem.matches(':hover')) {
+                submenuElement.style.display = 'none';
+              }
+            }, 100);
+          }
+        });
+      } else {
+        // Regular menu item click
+        menuItem.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            await window.electron.executeContextMenuAction(menuData.requestId, index, null);
+            menu.remove();
+          } catch (error) {
+            console.error('Error executing menu action:', error);
+            alert('Error: ' + error.message);
+          }
+        });
+      }
+    }
+    
+    menu.appendChild(menuItem);
+  });
+  
+  // Add to document
+  document.body.appendChild(menu);
+  
+  // Adjust position if menu goes off screen
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    menu.style.left = `${x - rect.width}px`;
+  }
+  if (rect.bottom > window.innerHeight) {
+    menu.style.top = `${y - rect.height}px`;
+  }
+  
+  // Close menu when clicking outside
+  const closeMenu = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+      document.removeEventListener('contextmenu', closeMenu);
+    }
+  };
+  
+  // Close on escape key
+  const handleEscape = (e) => {
+    if (e.key === 'Escape') {
+      menu.remove();
+      document.removeEventListener('keydown', handleEscape);
+      document.removeEventListener('click', closeMenu);
+      document.removeEventListener('contextmenu', closeMenu);
+    }
+  };
+  
+  setTimeout(() => {
+    document.addEventListener('click', closeMenu);
+    document.addEventListener('contextmenu', closeMenu);
+    document.addEventListener('keydown', handleEscape);
+  }, 10);
+}
+
+window.electron.on('hash-generation-complete', async () => {
+  try {
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    if (!serverMode) return;
+    const dialog = document.getElementById('dedup-dialog');
+    if (dialog && dialog.open) {
+      await loadDuplicateFiles(true);
+    }
+  } catch (error) {
+    console.error('Error refreshing duplicates after hash completion:', error);
+  }
+});
+
+function addThumbnailMenuButton(thumbnailContainer, filePath) {
+  if (!thumbnailContainer || !filePath) return;
+  if (thumbnailContainer.querySelector('.thumbnail-menu-button')) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'thumbnail-menu-button';
+  button.textContent = '...';
+  button.title = 'Menu';
+  button.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const rect = button.getBoundingClientRect();
+    const x = rect.left;
+    const y = rect.bottom;
+
+    try {
+      const menuResult = isMultiSelectMode && selectedModels.size > 1
+        ? await window.electron.showContextMenu(Array.from(selectedModels))
+        : await window.electron.showContextMenu(filePath);
+
+      if (menuResult && menuResult.type === 'html-menu') {
+        showHtmlContextMenu(menuResult, x, y, { showClose: true });
+      }
+    } catch (error) {
+      console.error('Error showing context menu:', error);
+    }
+  });
+
+  thumbnailContainer.appendChild(button);
+}
+
 // Add this function near other file rendering functions
 function addContextMenuHandler(fileElement, filePath) {
   // Remove any existing context menu handler to avoid duplicates
@@ -11152,13 +11763,21 @@ function addContextMenuHandler(fileElement, filePath) {
     
     e.stopPropagation(); // Prevent event bubbling after we've handled it
     
+    // Get click coordinates for positioning HTML menu
+    const x = e.clientX;
+    const y = e.clientY;
+    
     // If multi-edit mode is active and more than one model is selected,
     // send the entire selection. Otherwise, use the single filePath.
-    if (isMultiSelectMode && selectedModels.size > 1) {
-      await window.electron.showContextMenu(Array.from(selectedModels));
-    } else {
-      await window.electron.showContextMenu(filePath);
+    const menuResult = isMultiSelectMode && selectedModels.size > 1
+      ? await window.electron.showContextMenu(Array.from(selectedModels))
+      : await window.electron.showContextMenu(filePath);
+    
+    // Check if server returned HTML menu data (server mode via browser)
+    if (menuResult && menuResult.type === 'html-menu') {
+      showHtmlContextMenu(menuResult, x, y);
     }
+    // Otherwise, native menu was shown (normal mode)
   };
   
   // Store handler reference for potential removal
@@ -12482,6 +13101,7 @@ function createModelItem(model, viewMode = null) {
   // Thumbnail container with size based on view mode
   const thumbnailContainer = document.createElement('div');
   thumbnailContainer.className = 'thumbnail-container';
+  addThumbnailMenuButton(thumbnailContainer, model.filePath);
 
   // Parse thumbnails to check if multiple exist
   const parseThumbnails = (thumbnailString) => {
@@ -12765,17 +13385,38 @@ function createModelItem(model, viewMode = null) {
                 break;
               }
             }
-            const visibleItem = fileItem ? fileItem.querySelector('.thumbnail-container') : null;
-            if (visibleItem) {
-               const img = document.createElement('img');
-               img.src = thumbnail;
-               img.style.width = thumbSize.width;
-               img.style.height = thumbSize.height;
-               visibleItem.innerHTML = '';
-               visibleItem.appendChild(img);
+            
+            if (fileItem) {
+              // Force a refresh of the entire item to ensure all styling and event listeners are reapplied
+              const itemIndex = parseInt(fileItem.dataset.index || '-1');
+              const itemParent = fileItem.parentNode;
+              
+              if (itemParent && itemIndex >= 0) {
+                // Get the item's current position
+                const itemPosition = {
+                  top: fileItem.style.top,
+                  left: fileItem.style.left,
+                  width: fileItem.style.width
+                };
+                
+                // Remove the old item
+                fileItem.remove();
+                
+                // Create a new item with the updated thumbnail
+                const newItem = createModelItem(model, currentGridView);
+                newItem.dataset.index = itemIndex;
+                newItem.style.position = 'absolute';
+                newItem.style.top = itemPosition.top;
+                newItem.style.left = itemPosition.left;
+                newItem.style.width = itemPosition.width;
+                newItem.style.pointerEvents = 'auto';
+                
+                // Add the new item to the DOM
+                itemParent.appendChild(newItem);
+              }
             }
           } catch (e) {
-            console.error('Error updating visible thumbnail:', e);
+            console.error('Error refreshing item after thumbnail generation:', e);
           }
         },
         reject: (error) => {
