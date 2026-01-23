@@ -1,5 +1,40 @@
 // Add this at the very top of the file
 const DEBUG = true; // Enable debugging temporarily
+console.log('[Renderer] script loaded');
+window.addEventListener('DOMContentLoaded', () => {
+  console.log('[Renderer] DOMContentLoaded fired');
+});
+
+// If DOM is already loaded before this script executes (common in server-mode HTTP load),
+// force-dispatch DOMContentLoaded once so all late-registered listeners run.
+console.log('[Renderer] document.readyState at load:', document.readyState);
+if (document.readyState !== 'loading' && !window.__forcedDomContentLoaded) {
+  window.__forcedDomContentLoaded = true;
+  setTimeout(() => {
+    console.log('[Renderer] Forcing DOMContentLoaded (doc already loaded)');
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+  }, 0);
+} else {
+  document.addEventListener('DOMContentLoaded', () => {
+    window.__forcedDomContentLoaded = true;
+  });
+}
+
+// Safety: force a single DOMContentLoaded after a short delay if it never fired
+setTimeout(() => {
+  if (!window.__forcedDomContentLoaded) {
+    window.__forcedDomContentLoaded = true;
+    console.log('[Renderer] Forcing DOMContentLoaded after timeout');
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+  }
+}, 500);
+// Ensure window.electron exists before any usage to avoid early crashes in server mode
+if (typeof window !== 'undefined') {
+  window.electron = window.electron || {};
+  if (typeof window.electron.on !== 'function') {
+    window.electron.on = function() {};
+  }
+}
 
 // Add debug logging utility function
 function debugLog(...args) {
@@ -47,6 +82,21 @@ let autoStartedRendering = false;
 let thumbnailCache = new Map();
 let sharedRenderer = null;
 let renderContext = null;
+
+// Inverted filter state - tracks which filters are inverted (NOT equal instead of equal)
+let invertedFilters = window.invertedFilters || {
+  tag: false,
+  designer: false,
+  license: false,
+  parentModel: false,
+  search: false
+};
+// Ensure search flag exists if window.invertedFilters was created earlier without it
+if (invertedFilters.search === undefined) {
+  invertedFilters.search = false;
+}
+// Expose inverted filters globally so search.js can read the state (keep the same object reference)
+window.invertedFilters = invertedFilters;
 
 // Define loadModel function at top level so it's available immediately (before DOMContentLoaded)
 // Helper function to parse zip path format
@@ -1941,13 +1991,39 @@ async function loadDuplicateFiles(skipHashCheck = false) {
           const fileDiv = document.createElement('div');
           fileDiv.className = 'duplicate-file';
           
+          // Check if this is a ZIP entry
+          const isZipEntry = file.filePath.includes('::');
+          if (isZipEntry) {
+            fileDiv.classList.add('zip-entry');
+          }
+          
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
           checkbox.setAttribute('data-filepath', file.filePath);
           
+          // Disable checkbox for ZIP entries
+          if (isZipEntry) {
+            checkbox.disabled = true;
+            checkbox.title = 'Cannot delete files inside ZIP archives';
+          }
+          
           const filePath = document.createElement('span');
           filePath.className = 'duplicate-file-path';
-          filePath.textContent = file.filePath;
+          
+          // Add ZIP badge indicator if it's a ZIP entry
+          if (isZipEntry) {
+            const zipBadge = document.createElement('span');
+            zipBadge.className = 'zip-entry-badge';
+            zipBadge.textContent = 'ZIP';
+            zipBadge.title = 'Model in ZIP archive (cannot be deleted)';
+            filePath.appendChild(zipBadge);
+            
+            const pathText = document.createElement('span');
+            pathText.textContent = file.filePath;
+            filePath.appendChild(pathText);
+          } else {
+            filePath.textContent = file.filePath;
+          }
           
           const fileSize = document.createElement('span');
           fileSize.className = 'duplicate-file-size';
@@ -2156,7 +2232,8 @@ function createServerMenuBar() {
     { label: 'Scan Directory', action: () => document.getElementById('scan-directory-button')?.click() },
     { label: 'View Entire Library', action: () => document.getElementById('view-library-button')?.click() },
     { label: '---', action: null },
-    { label: 'De-Duplicate', action: () => {
+    { label: 'Print Roulette', action: () => window.electron.send('start-print-roulette') },
+    { label: 'De-Dup', action: () => {
       const dialog = document.getElementById('dedup-dialog');
       if (dialog) {
         dialog.showModal();
@@ -2170,6 +2247,7 @@ function createServerMenuBar() {
         window.electron.send('open-dedup');
       }
     }},
+    { label: '---', action: null },
     { label: 'Tag Manager', action: () => {
       const dialog = document.getElementById('tag-manager-dialog');
       if (dialog) {
@@ -2179,8 +2257,9 @@ function createServerMenuBar() {
         window.electron.send('open-tag-manager');
       }
     }},
-    { label: 'Print Roulette', action: () => window.electron.send('start-print-roulette') },
-    { label: '---', action: null },
+    { label: 'Metadata Manager', action: () => {
+      window.electron.send('open-metadata-editor');
+    }},
     { label: 'Backup/Restore', action: () => {
       const dialog = document.getElementById('backup-restore-dialog');
       if (dialog) {
@@ -2189,6 +2268,13 @@ function createServerMenuBar() {
         // Fallback: trigger the event which will open the dialog via the listener
         window.electron.send('open-backup-restore');
       }
+    }},
+    { label: '---', action: null },
+    { label: 'Regenerate Thumbnails', action: () => {
+      window.electron.send('regenerate-thumbnails');
+    }},
+    { label: 'Generate Missing Thumbnails', action: () => {
+      window.electron.send('generate-missing-thumbnails');
     }},
     { label: 'Purge Models', action: () => {
       const dialog = document.getElementById('purge-models-dialog');
@@ -2258,7 +2344,7 @@ function createServerMenuBar() {
         window.electron.send('open-ai-config');
       }
     }},
-    { label: 'File Type Settings', action: () => {
+    { label: 'File Type', action: () => {
       const dialog = document.getElementById('file-type-settings-dialog');
       if (dialog) {
         dialog.showModal();
@@ -2266,7 +2352,7 @@ function createServerMenuBar() {
         window.electron.send('open-file-type-settings');
       }
     }},
-    { label: 'Performance Settings', action: () => {
+    { label: 'Performance', action: () => {
       const dialog = document.getElementById('performance-settings-dialog');
       if (dialog) {
         dialog.showModal();
@@ -2274,7 +2360,7 @@ function createServerMenuBar() {
         window.electron.send('open-performance-settings');
       }
     }},
-    { label: 'Slicer Settings', action: () => {
+    { label: 'Slicer Path', action: () => {
       const dialog = document.getElementById('slicer-dialog');
       if (dialog) {
         dialog.showModal();
@@ -2285,20 +2371,23 @@ function createServerMenuBar() {
     { label: 'STL Home', action: async () => {
       await window.openSTLHomeDialog();
     }},
-    { label: 'Theme Settings', action: () => {
+    { label: 'Theme', action: () => {
       window.electron.send('open-theme-settings');
     }}
   ]);
   
   // Help menu
   const helpMenu = createMenuDropdown('Help', [
-    { label: 'User Guide', action: () => {
+    { label: 'Quick Start Guide', action: () => {
       const dialog = document.getElementById('guide-dialog');
       if (dialog) {
         dialog.showModal();
       } else {
         window.electron.send('open-guide');
       }
+    }},
+    { label: 'FAQ', action: () => {
+      window.electron.openExternal('https://printventory.com/faq.html');
     }},
     { label: 'About', action: async () => {
       const aboutDialog = document.getElementById('about-dialog');
@@ -2307,6 +2396,26 @@ function createServerMenuBar() {
         bindAboutCloseButton();
         await initializeAboutDialog();
       }
+    }},
+    { label: '---', action: null },
+    { label: 'Discord', action: () => {
+      window.electron.openExternal('https://discord.gg/JXcZHT77ua');
+    }},
+    { label: 'Patreon', action: () => {
+      window.electron.openExternal('https://patreon.com/Printventory');
+    }},
+    { label: 'Support Printventory', action: () => {
+      window.electron.openExternal('https://printventory.com/support.html');
+    }},
+    { label: 'GitHub', action: () => {
+      window.electron.openExternal('https://github.com/TechJeeper/Printventory');
+    }},
+    { label: '---', action: null },
+    { label: 'Library Stats', action: () => {
+      window.electron.send('open-stats');
+    }},
+    { label: 'Server Mode Info', action: () => {
+      window.electron.openExternal('https://github.com/TechJeeper/Printventory?tab=readme-ov-file#server-mode');
     }}
   ]);
   
@@ -2322,6 +2431,9 @@ function createServerMenuBar() {
 
 // Update the DOMContentLoaded event listener
 document.addEventListener('DOMContentLoaded', async () => {
+  // In server mode, the loading overlay blocks UI. Hide it early.
+  const initialOverlay = document.getElementById('loading-overlay');
+  if (initialOverlay) initialOverlay.style.display = 'none';
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
 
@@ -2527,9 +2639,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load initial data
   const savedDirectoryPath = await window.electron.loadDirectory();
-  if (savedDirectoryPath) {
+  
+  // In server mode, skip waiting for a directory path and always try to load models
+  const shouldLoadModels = serverMode || savedDirectoryPath;
+  
+  if (shouldLoadModels) {
     try {
+      console.log('[DEBUG] Loading initial models from database...');
       const models = await window.electron.getAllModels('date-desc', 0);
+      console.log('[DEBUG] Retrieved', models ? models.length : 0, 'models');
+      
       if (models && models.length > 0) {
         fileGrid.classList.remove('hidden');
         await renderFiles(models);
@@ -2539,6 +2658,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           viewLibMsg.textContent = `Showing All ${models.length} Models`;
         }
       } else {
+        console.log('[DEBUG] No models found, showing welcome dialog');
         if (welcomeDialog) {
           welcomeDialog.showModal();
         }
@@ -2551,6 +2671,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error loading models:', error);
     }
   } else {
+    console.log('[DEBUG] No directory path set and not in server mode, showing welcome');
     if (welcomeDialog) {
       welcomeDialog.showModal();
     }
@@ -2609,6 +2730,51 @@ document.addEventListener('DOMContentLoaded', async () => {
       exitMultiEditMode(); 
     }
     updateSelectedCount();
+  });
+
+  // Invert Filter button click handler
+  document.getElementById('invert-filter-button')?.addEventListener('click', async () => {
+    const button = document.getElementById('invert-filter-button');
+    
+    // Detect which filter is active and invert it
+    const searchTerm = document.getElementById('search-filter-input')?.value?.trim();
+    const designer = document.getElementById('designer-select')?.value;
+    const license = document.getElementById('license-select')?.value;
+    const parentModel = document.getElementById('parent-select')?.value;
+    const tagFilter = document.getElementById('tag-filter')?.value;
+    
+    // Determine which filter to invert (prioritize in order: search, tag, designer, license, parentModel)
+    if (searchTerm) {
+      invertedFilters.search = !invertedFilters.search;
+      console.log('Inverted search filter:', invertedFilters.search);
+    } else if (tagFilter) {
+      invertedFilters.tag = !invertedFilters.tag;
+      console.log('Inverted tag filter:', invertedFilters.tag);
+    } else if (designer) {
+      invertedFilters.designer = !invertedFilters.designer;
+      console.log('Inverted designer filter:', invertedFilters.designer);
+    } else if (license) {
+      invertedFilters.license = !invertedFilters.license;
+      console.log('Inverted license filter:', invertedFilters.license);
+    } else if (parentModel) {
+      invertedFilters.parentModel = !invertedFilters.parentModel;
+      console.log('Inverted parentModel filter:', invertedFilters.parentModel);
+    } else {
+      console.warn('No active filter to invert');
+      return;
+    }
+    
+    // Update button appearance to show it's active
+    if (Object.values(invertedFilters).some(val => val === true)) {
+      button.classList.add('active');
+      button.title = 'Filter is inverted (NOT equal)';
+    } else {
+      button.classList.remove('active');
+      button.title = 'Invert the current filter (NOT equal instead of equal)';
+    }
+    
+    // Trigger filter change to apply the inverted filter
+    await handleFilterChange();
   });
 
   // Initialize tag dialog handlers
@@ -3437,9 +3603,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dialog = document.getElementById('about-dialog');
     if (dialog) {
       try {
-        await initializeAboutDialog(); // Make sure to await this
-        console.log('About dialog initialized'); // Debug log
         dialog.showModal();
+        // Bind close button after showing dialog to ensure it's in the DOM
+        bindAboutCloseButton();
+        // Initialize after showing the dialog to ensure elements are in the DOM
+        await initializeAboutDialog();
       } catch (error) {
         console.error('Error showing about dialog:', error);
       }
@@ -5792,12 +5960,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    if (closeXButton.dataset.bound === 'true') {
-      return;
-    }
-
-    closeXButton.dataset.bound = 'true';
-    closeXButton.addEventListener('click', (e) => {
+    // Remove any existing event listeners by cloning and replacing the button
+    // This ensures we don't have duplicate listeners
+    const newButton = closeXButton.cloneNode(true);
+    closeXButton.parentNode.replaceChild(newButton, closeXButton);
+    
+    // Add the click handler to the new button
+    newButton.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       dialog.close();
@@ -7729,6 +7898,97 @@ document.addEventListener('DOMContentLoaded', async () => {
     window._downloadHandlerRegistered = true;
     const activeDownloads = new Set(); // Track active downloads to prevent duplicates
     
+  // Handle add-image-request event (for server/Docker mode)
+  let activeImageInput = null; // Track active file input to prevent duplicates
+  window.electron.on('add-image-request', async (filePath) => {
+    // Prevent multiple file input dialogs from opening
+    if (activeImageInput) {
+      console.log('Image file input dialog already open, ignoring request');
+      return;
+    }
+    
+    try {
+      // Create a file input element
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = 'image/png,image/jpeg,image/jpg,image/gif,image/webp';
+      fileInput.style.display = 'none';
+      activeImageInput = fileInput;
+      
+      let fileSelected = false;
+      
+      // Handle file selection
+      fileInput.addEventListener('change', async (e) => {
+        // Prevent multiple change events
+        if (fileSelected) {
+          return;
+        }
+        fileSelected = true;
+        
+        const file = e.target.files[0];
+        
+        // Clean up immediately, even if no file was selected
+        if (activeImageInput === fileInput) {
+          activeImageInput = null;
+        }
+        if (fileInput.parentNode) {
+          fileInput.parentNode.removeChild(fileInput);
+        }
+        
+        if (!file) {
+          return; // User cancelled
+        }
+        
+        try {
+          // Read file as data URL
+          const reader = new FileReader();
+          reader.onload = async (event) => {
+            try {
+              const dataUrl = event.target.result;
+              
+              // Add thumbnail to model via IPC (server will set it as default and send refresh event)
+              await window.electron.addThumbnail(filePath, dataUrl);
+              
+              // The server-side handler will automatically:
+              // 1. Add the thumbnail
+              // 2. Set it as default
+              // 3. Send the thumbnail-added event to refresh the UI
+            } catch (error) {
+              console.error('Error adding image:', error);
+              alert('Error adding image: ' + error.message);
+            }
+          };
+          reader.onerror = (error) => {
+            console.error('Error reading file:', error);
+            alert('Error reading image file');
+          };
+          reader.readAsDataURL(file);
+        } catch (error) {
+          console.error('Error processing image file:', error);
+          alert('Error processing image: ' + error.message);
+        }
+      });
+      
+      // Clean up if user cancels (no file selected after a delay)
+      setTimeout(() => {
+        if (!fileSelected && activeImageInput === fileInput) {
+          activeImageInput = null;
+          if (fileInput.parentNode) {
+            fileInput.parentNode.removeChild(fileInput);
+          }
+        }
+      }, 1000);
+      
+      // Trigger file input dialog
+      document.body.appendChild(fileInput);
+      fileInput.click();
+    } catch (error) {
+      console.error('Error setting up image file input:', error);
+      alert('Error: Could not open file dialog');
+      activeImageInput = null;
+    }
+  });
+
     window.electron.on('download-model', async (filePath) => {
       // Prevent duplicate downloads of the same file
       if (activeDownloads.has(filePath)) {
@@ -9300,8 +9560,14 @@ async function handleFilterChange() {
     updateSelectedCount();
 
     // Get and display filtered models
+    console.log('handleFilterChange: About to get filtered models. invertedFilters:', invertedFilters);
     const models = await window.getCombinedFilteredModels();
+    console.log('handleFilterChange: Got', models.length, 'models. About to display them.');
     await displayModels(models);
+    if (window.updateFilterIndicator) {
+      window.updateFilterIndicator(models.length);
+    }
+    console.log('handleFilterChange: Models displayed.');
   } catch (error) {
     console.error("Error applying filters:", error);
   }
@@ -11222,13 +11488,39 @@ async function showDuplicateFiles(duplicates) {
       const fileDiv = document.createElement('div');
       fileDiv.className = 'duplicate-file';
       
+      // Check if this is a ZIP entry
+      const isZipEntry = file.filePath.includes('::');
+      if (isZipEntry) {
+        fileDiv.classList.add('zip-entry');
+      }
+      
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.setAttribute('data-filepath', file.filePath);
       
+      // Disable checkbox for ZIP entries
+      if (isZipEntry) {
+        checkbox.disabled = true;
+        checkbox.title = 'Cannot delete files inside ZIP archives';
+      }
+      
       const filePath = document.createElement('span');
       filePath.className = 'duplicate-file-path';
-      filePath.textContent = file.filePath;
+      
+      // Add ZIP badge indicator if it's a ZIP entry
+      if (isZipEntry) {
+        const zipBadge = document.createElement('span');
+        zipBadge.className = 'zip-entry-badge';
+        zipBadge.textContent = 'ZIP';
+        zipBadge.title = 'Model in ZIP archive (cannot be deleted)';
+        filePath.appendChild(zipBadge);
+        
+        const pathText = document.createElement('span');
+        pathText.textContent = file.filePath;
+        filePath.appendChild(pathText);
+      } else {
+        filePath.textContent = file.filePath;
+      }
       
       const fileSize = document.createElement('span');
       fileSize.className = 'duplicate-file-size';
@@ -11258,7 +11550,12 @@ async function handleDeleteSelected() {
 
   const selectedFiles = Array.from(
     document.querySelectorAll('.duplicate-file input[type="checkbox"]:checked')
-  ).map(checkbox => checkbox.getAttribute('data-filepath'));
+  )
+    .map(checkbox => checkbox.getAttribute('data-filepath'))
+    .filter(filePath => {
+      // Filter out ZIP entries as a safeguard (they should already be disabled)
+      return !filePath.includes('::');
+    });
 
   console.log('Selected files:', selectedFiles);
 
@@ -14329,6 +14626,8 @@ function renderVirtualGrid(models) {
   
   // Only clear if models actually changed
   if (modelsChanged) {
+    console.log('renderVirtualGrid: Models changed! Clearing container and re-rendering.');
+    console.log('Current model count:', currentModels.length, 'New model count:', models.length);
     container.innerHTML = ''; // clear existing content
     
     // Add header for list view
@@ -14336,6 +14635,8 @@ function renderVirtualGrid(models) {
       const header = createListViewHeader();
       container.appendChild(header);
     }
+  } else {
+    console.log('renderVirtualGrid: Models did not change, skipping re-render.');
   }
   container.currentModels = models;
   

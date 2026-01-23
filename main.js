@@ -361,6 +361,16 @@ let wsClients = null; // WebSocket clients Set
 const pendingContextMenus = new Map();
 let contextMenuRequestIdCounter = 0;
 
+// Handler registry for WebSocket IPC calls in server mode
+// This allows us to directly invoke handlers without going through the renderer
+const ipcHandlerRegistry = new Map();
+
+// Helper function to register IPC handlers and add them to the registry
+function registerIpcHandler(channel, handler) {
+  ipcMain.handle(channel, handler);
+  ipcHandlerRegistry.set(channel, handler);
+}
+
 // UNC Path Validation Functions
 function isUncPath(path) {
   if (!path || typeof path !== 'string') {
@@ -460,34 +470,83 @@ function startHttpServer() {
 
   // Serve static files from the application directory
   const appDir = __dirname;
+  // Ensure renderer.js, styles.css, images, and server-bridge.js are served
+  // Without this, the browser won't load app scripts and buttons won't work
   
+  // CRITICAL: Inject server-bridge.js route handler BEFORE express.static
+  // This ensures the route handler runs and injects the bridge code
   // Inject server-bridge.js into HTML for server mode
   expressApp.get('/', (req, res) => {
     const htmlPath = path.join(appDir, 'index.html');
-    fs.readFile(htmlPath, 'utf8', (err, data) => {
+    const bridgePath = path.join(appDir, 'server-bridge.js');
+    
+    // Read both files
+    fs.readFile(htmlPath, 'utf8', (err, htmlData) => {
       if (err) {
         res.status(500).send('Error loading index.html');
         return;
       }
-      // Inject server-bridge.js BEFORE renderer.js loads
-      // This is critical - bridge must initialize window.electron.on before renderer.js uses it
-      const bridgeScript = '<script src="/server-bridge.js"></script>';
-      let modifiedHtml = data;
       
-      // Try to inject before the first <script> tag (which should be renderer.js or search.js)
-      if (data.includes('<script')) {
-        // Insert before first script tag
-        modifiedHtml = data.replace(/(<script[^>]*>)/i, `${bridgeScript}\n$1`);
-      } else if (data.includes('</head>')) {
-        // Insert before closing head tag
-        modifiedHtml = data.replace('</head>', `${bridgeScript}\n</head>`);
-      } else {
-        // Fallback: insert before closing body tag
-        modifiedHtml = data.replace('</body>', `${bridgeScript}\n</body>`);
-      }
-      res.send(modifiedHtml);
+      fs.readFile(bridgePath, 'utf8', (err, bridgeCode) => {
+        if (err) {
+          console.error('Error loading server-bridge.js, falling back to script tag:', err);
+          // Fallback to script tag if file can't be read
+          const bridgeScript = '<script src="/server-bridge.js"></script>';
+          let modifiedHtml = htmlData;
+          const appScriptRegex = /(<script(?:\s+type=["']module["'])?\s+src=["'](?:search|renderer|slicer|preview|guide)\.js["'][^>]*>)/i;
+          if (appScriptRegex.test(htmlData)) {
+            modifiedHtml = htmlData.replace(appScriptRegex, `${bridgeScript}\n$1`);
+          } else if (htmlData.includes('</body>')) {
+            modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
+          }
+          res.send(modifiedHtml);
+          return;
+        }
+        
+        // Inject server-bridge.js code INLINE before application scripts
+        // This ensures it executes synchronously and immediately
+        // Wrap in try-catch to ensure it doesn't break if there's an error
+        const bridgeScript = `<script>
+// Server bridge initialization
+try {
+${bridgeCode}
+} catch (error) {
+  console.error('[Bridge] Error initializing server bridge:', error);
+  // Ensure window.electron exists even if bridge fails
+  if (typeof window !== 'undefined' && !window.electron) {
+    window.electron = {};
+    window.electron.on = function() {};
+    window.electron.send = function() {};
+    console.warn('[Bridge] Created fallback window.electron object');
+  }
+}
+</script>`;
+        let modifiedHtml = htmlData;
+        
+        // Find the first application script (search.js, renderer.js, slicer.js, preview.js, or guide.js)
+        // and inject server-bridge.js right before it
+        const appScriptRegex = /(<script(?:\s+type=["']module["'])?\s+src=["'](?:search|renderer|slicer|preview|guide)\.js["'][^>]*>)/i;
+        if (appScriptRegex.test(htmlData)) {
+          // Insert before first application script
+          modifiedHtml = htmlData.replace(appScriptRegex, `${bridgeScript}\n$1`);
+        } else if (htmlData.includes('<script type="module" src="search.js"></script>')) {
+          // Specific pattern for search.js module
+          modifiedHtml = htmlData.replace('<script type="module" src="search.js"></script>', `${bridgeScript}\n<script type="module" src="search.js"></script>`);
+        } else if (htmlData.includes('<script src="renderer.js"></script>')) {
+          // Fallback: before renderer.js
+          modifiedHtml = htmlData.replace('<script src="renderer.js"></script>', `${bridgeScript}\n<script src="renderer.js"></script>`);
+        } else if (htmlData.includes('</body>')) {
+          // Last resort: insert before closing body tag
+          modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
+        }
+        res.send(modifiedHtml);
+      });
     });
   });
+  
+  // Now register static file serving AFTER the route handler
+  // This ensures the route handler takes precedence for the root path
+  expressApp.use(express.static(appDir));
 
   // Serve files via HTTP for server mode (UNC paths or Docker-mounted paths)
   expressApp.get('/api/file/*', (req, res) => {
@@ -696,15 +755,28 @@ function startHttpServer() {
     }
     
     const htmlPath = path.join(appDir, 'index.html');
-    fs.readFile(htmlPath, 'utf8', (err, data) => {
+    const bridgePath = path.join(appDir, 'server-bridge.js');
+    
+    fs.readFile(htmlPath, 'utf8', (err, htmlData) => {
       if (err) {
         res.status(500).send('Error loading index.html');
         return;
       }
-      // Inject server-bridge.js script before closing body tag
-      const bridgeScript = '<script src="/server-bridge.js"></script>';
-      const modifiedHtml = data.replace('</body>', `${bridgeScript}\n</body>`);
-      res.send(modifiedHtml);
+      
+      fs.readFile(bridgePath, 'utf8', (err, bridgeCode) => {
+        if (err) {
+          // Fallback to script tag
+          const bridgeScript = '<script src="/server-bridge.js"></script>';
+          const modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
+          res.send(modifiedHtml);
+          return;
+        }
+        
+        // Inject server-bridge.js code INLINE before closing body tag
+        const bridgeScript = `<script>\n${bridgeCode}\n</script>`;
+        const modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
+        res.send(modifiedHtml);
+      });
     });
   });
 
@@ -804,11 +876,48 @@ function startHttpServer() {
             }
           };
           
-          // Check if handler exists
-          const handler = ipcMain.listeners('handle-' + channel)?.[0];
-          if (!handler) {
-            // Try to find the handler in the registered handlers
-            // IPC handlers are registered with ipcMain.handle, so we need to trigger them
+          // Check if handler exists in registry (for direct invocation)
+          const handler = ipcHandlerRegistry.get(channel);
+          if (handler) {
+            // Call the handler directly - much faster and more reliable
+            try {
+              const result = await handler(mockEvent, ...(args || []));
+              
+              // Convert ArrayBuffer to base64 for WebSocket transmission
+              let serializedResult = result;
+              if (result instanceof ArrayBuffer) {
+                const buffer = Buffer.from(result);
+                serializedResult = {
+                  __arrayBuffer: true,
+                  data: buffer.toString('base64'),
+                  byteLength: result.byteLength
+                };
+              } else if (result && result.buffer instanceof ArrayBuffer) {
+                // Handle TypedArray (Uint8Array, etc.)
+                const buffer = Buffer.from(result.buffer, result.byteOffset, result.byteLength);
+                serializedResult = {
+                  __arrayBuffer: true,
+                  data: buffer.toString('base64'),
+                  byteLength: result.byteLength
+                };
+              }
+              
+              ws.send(JSON.stringify({
+                id,
+                type: 'result',
+                result: serializedResult
+              }));
+            } catch (error) {
+              console.error(`Error in handler for '${channel}':`, error);
+              ws.send(JSON.stringify({
+                id,
+                type: 'error',
+                error: error.message || String(error)
+              }));
+            }
+          } else {
+            // Fallback: Try to find handler using Electron's internal mechanism
+            // This is for handlers that weren't registered in our registry
             // Use the hidden window as fallback if direct call doesn't work
             if (mainWindow && !mainWindow.isDestroyed()) {
               // Wait if window is still loading
@@ -861,22 +970,33 @@ function startHttpServer() {
                   }
                 })()
               `);
+              // Convert ArrayBuffer to base64 for WebSocket transmission
+              let serializedResult = result;
+              if (result instanceof ArrayBuffer) {
+                const buffer = Buffer.from(result);
+                serializedResult = {
+                  __arrayBuffer: true,
+                  data: buffer.toString('base64'),
+                  byteLength: result.byteLength
+                };
+              } else if (result && result.buffer instanceof ArrayBuffer) {
+                // Handle TypedArray (Uint8Array, etc.)
+                const buffer = Buffer.from(result.buffer, result.byteOffset, result.byteLength);
+                serializedResult = {
+                  __arrayBuffer: true,
+                  data: buffer.toString('base64'),
+                  byteLength: result.byteLength
+                };
+              }
+              
               ws.send(JSON.stringify({
                 id,
                 type: 'result',
-                result
+                result: serializedResult
               }));
             } else {
               throw new Error(`IPC handler '${channel}' not found`);
             }
-          } else {
-            // Call the handler directly
-            const result = await handler(mockEvent, ...(args || []));
-            ws.send(JSON.stringify({
-              id,
-              type: 'result',
-              result
-            }));
           }
         } catch (error) {
           console.error('Error executing IPC call:', error);
@@ -2260,32 +2380,46 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
       
       // Check if we're in an asar archive (worker threads can't load from asar)
       if (__dirname.includes('.asar')) {
-        // Try to get from app.asar.unpacked directory first
+        // scan-worker.js should be unpacked to app.asar.unpacked
         const unpackedPath = __dirname.replace('.asar', '.asar.unpacked');
         const unpackedWorkerPath = path.join(unpackedPath, 'scan-worker.js');
         if (fs.existsSync(unpackedWorkerPath)) {
           workerPath = unpackedWorkerPath;
+          console.log(`[Main] Using unpacked worker from: ${unpackedWorkerPath}`);
         } else {
-          // Copy to temp directory as fallback
-          const tempDir = path.join(os.tmpdir(), 'printventory-worker');
-          if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-          }
-          const tempWorkerPath = path.join(tempDir, 'scan-worker.js');
-          // Only copy if it doesn't exist
-          if (!fs.existsSync(tempWorkerPath)) {
-            try {
-              // Read from asar using fs.readFileSync (this works even from asar)
-              const asarWorkerPath = path.join(__dirname, 'scan-worker.js');
-              const workerContent = fs.readFileSync(asarWorkerPath);
-              fs.writeFileSync(tempWorkerPath, workerContent);
-            } catch (error) {
-              console.error('Error copying scan-worker.js from asar:', error);
-              reject(new Error(`Failed to load scan-worker.js: ${error.message}`));
-              return;
+          // Fallback: try using process.resourcesPath (for built apps)
+          if (process.resourcesPath) {
+            const resourcesWorkerPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'scan-worker.js');
+            if (fs.existsSync(resourcesWorkerPath)) {
+              workerPath = resourcesWorkerPath;
+              console.log(`[Main] Using worker from resourcesPath: ${resourcesWorkerPath}`);
+            } else {
+              // Last resort: copy to temp directory (shouldn't be needed if unpacked correctly)
+              console.warn(`[Main] WARNING: scan-worker.js not found in app.asar.unpacked, copying to temp as fallback`);
+              const tempDir = path.join(os.tmpdir(), 'printventory-worker');
+              if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+              }
+              const tempWorkerPath = path.join(tempDir, 'scan-worker.js');
+              // Only copy if it doesn't exist
+              if (!fs.existsSync(tempWorkerPath)) {
+                try {
+                  // Read from asar using fs.readFileSync (this works even from asar)
+                  const asarWorkerPath = path.join(__dirname, 'scan-worker.js');
+                  const workerContent = fs.readFileSync(asarWorkerPath);
+                  fs.writeFileSync(tempWorkerPath, workerContent);
+                } catch (error) {
+                  console.error('Error copying scan-worker.js from asar:', error);
+                  reject(new Error(`Failed to load scan-worker.js: ${error.message}`));
+                  return;
+                }
+              }
+              workerPath = tempWorkerPath;
             }
+          } else {
+            reject(new Error(`scan-worker.js not found in app.asar.unpacked and process.resourcesPath is not available`));
+            return;
           }
-          workerPath = tempWorkerPath;
         }
       }
       
@@ -2400,8 +2534,77 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         }
       });
 
-      // Start the worker
-      worker.postMessage({ directoryPath, maxFileSize, enableZipArchives });
+      // Start the worker - pass node_modules path so worker can find dependencies
+      // When in asar, node_modules is typically in app.asar.unpacked/node_modules
+      // When not in asar, node_modules is in the app directory
+      let nodeModulesPath;
+      
+      // Use process.resourcesPath if available (Electron provides this in built apps)
+      // It points to the Resources directory where app.asar.unpacked is located
+      if (process.resourcesPath) {
+        // In built Electron app, resourcesPath points to Resources directory
+        // app.asar.unpacked is at Resources/app.asar.unpacked
+        const unpackedNodeModules = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules');
+        if (fs.existsSync(unpackedNodeModules)) {
+          nodeModulesPath = unpackedNodeModules;
+        } else {
+          // Fallback: try Resources/app/node_modules
+          const appNodeModules = path.join(process.resourcesPath, 'app', 'node_modules');
+          if (fs.existsSync(appNodeModules)) {
+            nodeModulesPath = appNodeModules;
+          }
+        }
+      }
+      
+      // If resourcesPath didn't work, try based on __dirname
+      if (!nodeModulesPath || !fs.existsSync(nodeModulesPath)) {
+        if (__dirname.includes('.asar')) {
+          // In asar archive, node_modules should be in app.asar.unpacked
+          const unpackedPath = __dirname.replace('.asar', '.asar.unpacked');
+          nodeModulesPath = path.join(unpackedPath, 'node_modules');
+          // If that doesn't exist, try app/node_modules (for macOS)
+          if (!fs.existsSync(nodeModulesPath)) {
+            const appPath = path.dirname(__dirname.replace('.asar', ''));
+            nodeModulesPath = path.join(appPath, 'node_modules');
+          }
+          // Also try Resources/app/node_modules (macOS app bundle structure)
+          if (!fs.existsSync(nodeModulesPath)) {
+            const resourcesPath = path.join(path.dirname(__dirname.replace('.asar', '')), '..', 'Resources');
+            const macNodeModules = path.join(resourcesPath, 'app', 'node_modules');
+            if (fs.existsSync(macNodeModules)) {
+              nodeModulesPath = macNodeModules;
+            }
+          }
+        } else {
+          // Not in asar, node_modules is in the app directory
+          nodeModulesPath = path.join(__dirname, 'node_modules');
+        }
+      }
+      
+      console.log(`[Main] Sending node_modules path to worker: ${nodeModulesPath}`);
+      console.log(`[Main] node_modules exists: ${fs.existsSync(nodeModulesPath)}`);
+      if (nodeModulesPath && fs.existsSync(path.join(nodeModulesPath, 'node-stream-zip'))) {
+        console.log(`[Main] node-stream-zip found in node_modules`);
+      } else {
+        console.warn(`[Main] WARNING: node-stream-zip not found in ${nodeModulesPath}`);
+        // Try to find it in common locations for debugging
+        const debugPaths = [
+          path.join(process.resourcesPath || '', 'app.asar.unpacked', 'node_modules', 'node-stream-zip'),
+          path.join(__dirname.replace('.asar', '.asar.unpacked'), 'node_modules', 'node-stream-zip'),
+        ];
+        for (const debugPath of debugPaths) {
+          if (fs.existsSync(debugPath)) {
+            console.log(`[Main] Found node-stream-zip at: ${debugPath}`);
+          }
+        }
+      }
+      
+      worker.postMessage({ 
+        directoryPath, 
+        maxFileSize, 
+        enableZipArchives,
+        nodeModulesPath: nodeModulesPath
+      });
     });
 
   } catch (error) {
@@ -2549,6 +2752,7 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
 ipcMain.handle('get-models-filtered', async (event, filters) => {
   try {
     console.log('getModelsFiltered called with filters:', filters);
+    console.log('Designer inverted flag:', filters.designerInverted);
     
     // Build WHERE clause conditions
     const conditions = [];
@@ -2556,31 +2760,64 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     
     // Designer filter
     if (filters.designer) {
-      if (filters.designer === '__none__') {
-        conditions.push("(designer IS NULL OR designer = '')");
+      if (filters.designerInverted) {
+        // Inverted: show models where designer is NOT equal (include NULL/empty as non-matching)
+        if (filters.designer === '__none__') {
+          conditions.push("(designer IS NOT NULL AND designer != '')");
+        } else {
+          conditions.push("(designer IS NULL OR designer = '' OR LOWER(TRIM(designer)) != LOWER(TRIM(?)))");
+          params.push(filters.designer);
+        }
       } else {
-        conditions.push("LOWER(TRIM(designer)) = LOWER(TRIM(?))");
-        params.push(filters.designer);
+        // Normal: show models where designer IS equal
+        if (filters.designer === '__none__') {
+          conditions.push("(designer IS NULL OR designer = '')");
+        } else {
+          conditions.push("LOWER(TRIM(designer)) = LOWER(TRIM(?))");
+          params.push(filters.designer);
+        }
       }
     }
     
     // License filter
     if (filters.license) {
-      if (filters.license === '__none__') {
-        conditions.push("(license IS NULL OR license = '')");
+      if (filters.licenseInverted) {
+        // Inverted: show models where license is NOT equal (include NULL/empty as non-matching)
+        if (filters.license === '__none__') {
+          conditions.push("(license IS NOT NULL AND license != '')");
+        } else {
+          conditions.push("(license IS NULL OR license = '' OR license != ?)");
+          params.push(filters.license);
+        }
       } else {
-        conditions.push("license = ?");
-        params.push(filters.license);
+        // Normal: show models where license IS equal
+        if (filters.license === '__none__') {
+          conditions.push("(license IS NULL OR license = '')");
+        } else {
+          conditions.push("license = ?");
+          params.push(filters.license);
+        }
       }
     }
     
     // Parent model filter
     if (filters.parentModel) {
-      if (filters.parentModel === '__none__') {
-        conditions.push("(parentModel IS NULL OR parentModel = '')");
+      if (filters.parentModelInverted) {
+        // Inverted: show models where parentModel is NOT equal (include NULL/empty as non-matching)
+        if (filters.parentModel === '__none__') {
+          conditions.push("(parentModel IS NOT NULL AND parentModel != '')");
+        } else {
+          conditions.push("(parentModel IS NULL OR parentModel = '' OR parentModel != ?)");
+          params.push(filters.parentModel);
+        }
       } else {
-        conditions.push("parentModel = ?");
-        params.push(filters.parentModel);
+        // Normal: show models where parentModel IS equal
+        if (filters.parentModel === '__none__') {
+          conditions.push("(parentModel IS NULL OR parentModel = '')");
+        } else {
+          conditions.push("parentModel = ?");
+          params.push(filters.parentModel);
+        }
       }
     }
     
@@ -2629,13 +2866,25 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     // Search term filter (searches in fileName, designer, parentModel, notes, filePath)
     if (filters.search) {
       const searchTerm = `%${filters.search.toLowerCase()}%`;
-      conditions.push(`(
-        LOWER(fileName) LIKE ? OR 
-        LOWER(designer) LIKE ? OR 
-        LOWER(parentModel) LIKE ? OR 
-        LOWER(notes) LIKE ? OR
-        LOWER(filePath) LIKE ?
-      )`);
+      if (filters.searchInverted) {
+        // Inverted: none of the fields should contain the term (NULL/empty count as non-matching)
+        conditions.push(`(
+          LOWER(COALESCE(fileName, '')) NOT LIKE ? AND 
+          LOWER(COALESCE(designer, '')) NOT LIKE ? AND 
+          LOWER(COALESCE(parentModel, '')) NOT LIKE ? AND 
+          LOWER(COALESCE(notes, '')) NOT LIKE ? AND
+          LOWER(COALESCE(filePath, '')) NOT LIKE ?
+        )`);
+      } else {
+        // Normal: any of the fields may contain the term
+        conditions.push(`(
+          LOWER(fileName) LIKE ? OR 
+          LOWER(designer) LIKE ? OR 
+          LOWER(parentModel) LIKE ? OR 
+          LOWER(notes) LIKE ? OR
+          LOWER(filePath) LIKE ?
+        )`);
+      }
       params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
@@ -2647,6 +2896,9 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     
     // Build WHERE clause
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    
+    console.log('WHERE clause built:', whereClause);
+    console.log('Conditions:', conditions);
     
     // Determine ORDER BY clause based on sortOption
     let orderClause = "";
@@ -2691,6 +2943,8 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     // Tag filter (needs to be done after query since it requires joining with model_tags)
     if (filters.tag) {
       const tagFilteredModels = [];
+      const isInverted = filters.tagInverted || false;
+      
       for (const model of models) {
         const modelTags = db.prepare(`
           SELECT t.name 
@@ -2699,7 +2953,11 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
           WHERE mt.model_id = ?
         `).all(model.id);
         
-        if (modelTags.some(tag => tag.name === filters.tag)) {
+        const hasTag = modelTags.some(tag => tag.name === filters.tag);
+        
+        // If not inverted, include models that have the tag
+        // If inverted, include models that don't have the tag
+        if (isInverted ? !hasTag : hasTag) {
           tagFilteredModels.push(model);
         }
       }
@@ -4050,12 +4308,21 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     menuItems.push({ type: 'separator' });
   }
   
-  menuItems.push(
-    {
-      label: 'Open File',
-      enabled: filePaths.length === 1,
-      click: async () => {
-        try {
+  // Add "Open File" option
+  menuItems.push({
+    label: 'Open File',
+    enabled: filePaths.length === 1,
+    click: async () => {
+      try {
+        if (isServerMode || isDockerContainer()) {
+          // In server/Docker mode: trigger download so user can open locally
+          if (isServerMode && global.broadcastEvent) {
+            global.broadcastEvent('download-model', filePaths[0]);
+          } else {
+            event.sender.send('download-model', filePaths[0]);
+          }
+        } else {
+          // Normal mode: open with system default application
           if (isZipEntry && pathInfo) {
             // Extract to temp file first
             const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
@@ -4064,9 +4331,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           } else {
             await shell.openPath(filePaths[0]);
           }
-        } catch (error) {
-          console.error('Error opening file:', error);
-          dialog.showMessageBox({
+        }
+      } catch (error) {
+        console.error('Error opening file:', error);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        if (win) {
+          dialog.showMessageBox(win, {
             type: 'error',
             title: 'Error',
             message: 'Could not open file',
@@ -4074,8 +4344,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           });
         }
       }
-    },
-    {
+    }
+  });
+  
+  // Add "Open Directory" only if NOT in server/Docker mode
+  if (!isServerMode && !isDockerContainer()) {
+    menuItems.push({
       label: 'Open Directory',
       enabled: filePaths.length === 1,
       click: async () => {
@@ -4096,11 +4370,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           });
         }
       }
-    }
-  );
+    });
+  }
   
-  // Add extract options for zip entries
-  if (isZipEntry && pathInfo && filePaths.length === 1) {
+  // Add extract options for zip entries (disabled in server/Docker mode)
+  if (isZipEntry && pathInfo && filePaths.length === 1 && !isServerMode && !isDockerContainer()) {
     menuItems.push(
       { type: 'separator' },
       {
@@ -4646,64 +4920,77 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       label: 'Add Image',
       click: async () => {
         try {
-          const win = BrowserWindow.fromWebContents(event.sender);
-          const result = await dialog.showOpenDialog(win, {
-            title: 'Select Image File',
-            properties: ['openFile'],
-            filters: [
-              { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
-              { name: 'All Files', extensions: ['*'] }
-            ]
-          });
-          
-          if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
-            const imagePath = result.filePaths[0];
-            
-            // Read the image file and convert to data URL
-            const imageData = await fs.promises.readFile(imagePath);
-            const ext = path.extname(imagePath).toLowerCase().slice(1);
-            let mimeType = 'image/png';
-            if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
-            else if (ext === 'gif') mimeType = 'image/gif';
-            else if (ext === 'webp') mimeType = 'image/webp';
-            
-            const base64Data = imageData.toString('base64');
-            const dataUrl = `data:${mimeType};base64,${base64Data}`;
-            
-            // Add thumbnail to model
-            const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
-            const currentThumbnail = model?.thumbnail || null;
-            const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, dataUrl);
-            
-            // Parse thumbnails to get count
-            const thumbnails = parseThumbnails(thumbnailsWithNew);
-            const newImageIndex = thumbnails.length - 1; // The new image is at the end
-            
-            // Make the new image the default (move it to the front)
-            const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
-            await saveThumbnail(filePaths[0], updatedThumbnail);
-            
-            // Verify the save was successful
-            const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
-            const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
-            
-            // Send message to renderer to refresh the grid with updated thumbnail
-            // The renderer will handle the refresh with a delay to ensure database write completes
-            event.sender.send('thumbnail-added', {
-              filePath: filePaths[0],
-              thumbnailCount: finalThumbnails.length,
-              hasMultiple: finalThumbnails.length > 1,
-              newImageIsDefault: true
+          if (isServerMode || isDockerContainer()) {
+            // In server/Docker mode: send event to renderer to show file input dialog
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('add-image-request', filePaths[0]);
+            } else {
+              event.sender.send('add-image-request', filePaths[0]);
+            }
+          } else {
+            // Normal mode: use native file dialog
+            const win = BrowserWindow.fromWebContents(event.sender);
+            const result = await dialog.showOpenDialog(win, {
+              title: 'Select Image File',
+              properties: ['openFile'],
+              filters: [
+                { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
+                { name: 'All Files', extensions: ['*'] }
+              ]
             });
+            
+            if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+              const imagePath = result.filePaths[0];
+              
+              // Read the image file and convert to data URL
+              const imageData = await fs.promises.readFile(imagePath);
+              const ext = path.extname(imagePath).toLowerCase().slice(1);
+              let mimeType = 'image/png';
+              if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+              else if (ext === 'gif') mimeType = 'image/gif';
+              else if (ext === 'webp') mimeType = 'image/webp';
+              
+              const base64Data = imageData.toString('base64');
+              const dataUrl = `data:${mimeType};base64,${base64Data}`;
+              
+              // Add thumbnail to model
+              const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
+              const currentThumbnail = model?.thumbnail || null;
+              const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, dataUrl);
+              
+              // Parse thumbnails to get count
+              const thumbnails = parseThumbnails(thumbnailsWithNew);
+              const newImageIndex = thumbnails.length - 1; // The new image is at the end
+              
+              // Make the new image the default (move it to the front)
+              const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
+              await saveThumbnail(filePaths[0], updatedThumbnail);
+              
+              // Verify the save was successful
+              const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
+              const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
+              
+              // Send message to renderer to refresh the grid with updated thumbnail
+              // The renderer will handle the refresh with a delay to ensure database write completes
+              event.sender.send('thumbnail-added', {
+                filePath: filePaths[0],
+                thumbnailCount: finalThumbnails.length,
+                hasMultiple: finalThumbnails.length > 1,
+                newImageIsDefault: true
+              });
+            }
           }
         } catch (error) {
           console.error('Error adding image:', error);
-          dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
-            type: 'error',
-            title: 'Error',
-            message: 'Could not add image',
-            detail: error.message
-          });
+          const win = BrowserWindow.fromWebContents(event.sender);
+          if (win) {
+            dialog.showMessageBox(win, {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not add image',
+              detail: error.message
+            });
+          }
         }
       }
     });
@@ -4713,8 +5000,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   menuItems.push({ type: 'separator' });
 
   // Add Move and new file operations
-  menuItems.push(
-    {
+  // Note: "Move" is excluded in server/Docker mode
+  const fileOperationItems = [];
+  
+  // Add "Move" only if NOT in server/Docker mode
+  if (!isServerMode && !isDockerContainer()) {
+    fileOperationItems.push({
       label: 'Move',
       click: async () => {
         const win = BrowserWindow.fromWebContents(event.sender);
@@ -4740,7 +5031,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           event.sender.send('refresh-grid');
         }
       }
-    },
+    });
+  }
+  
+  menuItems.push(
+    ...fileOperationItems,
     {
       label: 'Remove from Library',
       click: async () => {
@@ -4900,7 +5195,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
 });
 
 // IPC handler to execute context menu actions (for server mode browser access)
-ipcMain.handle('execute-context-menu-action', async (event, requestId, itemIndex, subIndex) => {
+const executeContextMenuActionHandler = async (event, requestId, itemIndex, subIndex) => {
   const menuData = pendingContextMenus.get(requestId);
   if (!menuData) {
     throw new Error('Context menu request not found or expired');
@@ -4941,7 +5236,11 @@ ipcMain.handle('execute-context-menu-action', async (event, requestId, itemIndex
   pendingContextMenus.delete(requestId);
   
   return { success: true };
-});
+};
+
+ipcMain.handle('execute-context-menu-action', executeContextMenuActionHandler);
+// Register in handler registry for direct WebSocket invocation
+ipcHandlerRegistry.set('execute-context-menu-action', executeContextMenuActionHandler);
 
 // Update the deleteFile function
 async function deleteFile(filePath) {
@@ -5596,7 +5895,7 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
 });
 
 // Read model file for preview (STL parsing in renderer)
-ipcMain.handle('read-model-file', async (event, filePath) => {
+const readModelFileHandler = async (event, filePath) => {
   try {
     // Handle zip entries
     if (filePath.includes('::')) {
@@ -5612,7 +5911,10 @@ ipcMain.handle('read-model-file', async (event, filePath) => {
     console.error(`Error reading model file ${filePath}:`, error);
     throw error;
   }
-});
+};
+ipcMain.handle('read-model-file', readModelFileHandler);
+// Register in handler registry for direct WebSocket invocation
+ipcHandlerRegistry.set('read-model-file', readModelFileHandler);
 
 ipcMain.handle('parse-3mf-preview', async (event, filePath, requestId) => {
   const pathInfo = parseZipPath(filePath);
@@ -6175,8 +6477,38 @@ ipcMain.handle('add-thumbnail', async (event, filePath, imageDataUrl) => {
   try {
     const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
     const currentThumbnail = model?.thumbnail || null;
-    const updatedThumbnail = addThumbnailToModel(currentThumbnail, imageDataUrl);
+    const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, imageDataUrl);
+    
+    // Parse thumbnails to get count and new index
+    const thumbnails = parseThumbnails(thumbnailsWithNew);
+    const newImageIndex = thumbnails.length - 1; // The new image is at the end
+    
+    // Make the new image the default (move it to the front)
+    const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
     await saveThumbnail(filePath, updatedThumbnail);
+    
+    // Verify the save was successful
+    const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
+    
+    // Send message to renderer to refresh the grid with updated thumbnail
+    if (event && event.sender) {
+      event.sender.send('thumbnail-added', {
+        filePath: filePath,
+        thumbnailCount: finalThumbnails.length,
+        hasMultiple: finalThumbnails.length > 1,
+        newImageIsDefault: true
+      });
+    } else if (isServerMode && global.broadcastEvent) {
+      // In server mode, broadcast the event to all clients
+      global.broadcastEvent('thumbnail-added', {
+        filePath: filePath,
+        thumbnailCount: finalThumbnails.length,
+        hasMultiple: finalThumbnails.length > 1,
+        newImageIsDefault: true
+      });
+    }
+    
     return true;
   } catch (error) {
     console.error('Error adding thumbnail:', error);

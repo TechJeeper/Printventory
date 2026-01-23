@@ -40,13 +40,18 @@ export async function getCombinedFilteredModels() {
   const filters = {
     sortOption,
     designer,
+    designerInverted: window.invertedFilters?.designer || false,  // Add inverted filter flag
     dateAdded: window.dateAddedFilter || null,
     license,
+    licenseInverted: window.invertedFilters?.license || false,  // Add inverted filter flag
     parentModel,
+    parentModelInverted: window.invertedFilters?.parentModel || false,  // Add inverted filter flag
     printed: printStatus === "all" ? undefined : printStatus,
     tag: tagFilter,
+    tagInverted: window.invertedFilters?.tag || false,  // Add inverted filter flag
     fileType,
     search: currentSearchTerm,
+    searchInverted: window.invertedFilters?.search || false,
     directory: window.currentDirectoryFilter
   };
 
@@ -133,6 +138,7 @@ export function updateFilterIndicator(count) {
   const tagFilter = document.getElementById("tag-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
   const searchTerm = document.getElementById("search-filter-input")?.value.trim() || "";
+  const inverted = window.invertedFilters || {};
   
   // Check if any filters are active
   const hasActiveFilters = designer || license || parentModel || printStatus !== "all" || tagFilter || fileType || searchTerm || window.currentDirectoryFilter;
@@ -152,8 +158,9 @@ export function updateFilterIndicator(count) {
       // Add designer filter pill if active
       if (designer) {
         const displayText = designer === "__none__" ? "No designer" : `Designer: ${designer}`;
-        message += `<div class="filter-pill" data-filter-type="designer">
-          ${displayText}
+        const invertLabel = inverted.designer ? '<span class="pill-invert">NOT</span>' : '';
+        message += `<div class="filter-pill ${inverted.designer ? 'inverted' : ''}" data-filter-type="designer">
+          ${displayText} ${invertLabel}
           <span class="filter-remove" data-filter-type="designer">×</span>
         </div>`;
       }
@@ -161,8 +168,9 @@ export function updateFilterIndicator(count) {
       // Add license filter pill if active
       if (license) {
         const displayText = license === "__none__" ? "No license" : `License: ${license}`;
-        message += `<div class="filter-pill" data-filter-type="license">
-          ${displayText}
+        const invertLabel = inverted.license ? '<span class="pill-invert">NOT</span>' : '';
+        message += `<div class="filter-pill ${inverted.license ? 'inverted' : ''}" data-filter-type="license">
+          ${displayText} ${invertLabel}
           <span class="filter-remove" data-filter-type="license">×</span>
         </div>`;
       }
@@ -170,8 +178,9 @@ export function updateFilterIndicator(count) {
       // Add parent model filter pill if active
       if (parentModel) {
         const displayText = parentModel === "__none__" ? "No parent model" : `Parent: ${parentModel}`;
-        message += `<div class="filter-pill" data-filter-type="parentModel">
-          ${displayText}
+        const invertLabel = inverted.parentModel ? '<span class="pill-invert">NOT</span>' : '';
+        message += `<div class="filter-pill ${inverted.parentModel ? 'inverted' : ''}" data-filter-type="parentModel">
+          ${displayText} ${invertLabel}
           <span class="filter-remove" data-filter-type="parentModel">×</span>
         </div>`;
       }
@@ -187,8 +196,9 @@ export function updateFilterIndicator(count) {
       
       // Add tag filter pill if active
       if (tagFilter) {
-        message += `<div class="filter-pill" data-filter-type="tagFilter">
-          Tag: ${tagFilter}
+        const invertLabel = inverted.tag ? '<span class="pill-invert">NOT</span>' : '';
+        message += `<div class="filter-pill ${inverted.tag ? 'inverted' : ''}" data-filter-type="tagFilter">
+          Tag: ${tagFilter} ${invertLabel}
           <span class="filter-remove" data-filter-type="tagFilter">×</span>
         </div>`;
       }
@@ -203,8 +213,9 @@ export function updateFilterIndicator(count) {
       
       // Add search term pill if active
       if (searchTerm) {
-        message += `<div class="filter-pill" data-filter-type="searchTerm">
-          Search: "${searchTerm}"
+        const invertLabel = inverted.search ? '<span class="pill-invert">NOT</span>' : '';
+        message += `<div class="filter-pill ${inverted.search ? 'inverted' : ''}" data-filter-type="searchTerm">
+          Search: "${searchTerm}" ${invertLabel}
           <span class="filter-remove" data-filter-type="searchTerm">×</span>
         </div>`;
       }
@@ -265,6 +276,15 @@ export function updateFilterIndicator(count) {
       // Reset the filter indicator
       filterIndicator.innerHTML = "";
       filterIndicator.classList.remove('visible');
+
+      // Clear inverted flags
+      if (window.invertedFilters) {
+        window.invertedFilters.tag = false;
+        window.invertedFilters.designer = false;
+        window.invertedFilters.license = false;
+        window.invertedFilters.parentModel = false;
+        window.invertedFilters.search = false;
+      }
       
       // Perform search with cleared filters
       await performCombinedSearch();
@@ -281,18 +301,22 @@ export function updateFilterIndicator(count) {
       switch (filterType) {
         case 'designer':
           document.getElementById("designer-select").value = "";
+          if (window.invertedFilters) window.invertedFilters.designer = false;
           break;
         case 'license':
           document.getElementById("license-select").value = "";
+          if (window.invertedFilters) window.invertedFilters.license = false;
           break;
         case 'parentModel':
           document.getElementById("parent-select").value = "";
+          if (window.invertedFilters) window.invertedFilters.parentModel = false;
           break;
         case 'printStatus':
           document.getElementById("printed-select").value = "all";
           break;
         case 'tagFilter':
           document.getElementById("tag-filter").value = "";
+          if (window.invertedFilters) window.invertedFilters.tag = false;
           break;
         case 'fileType':
           document.getElementById("filetype-select").value = "";
@@ -306,6 +330,7 @@ export function updateFilterIndicator(count) {
               clearSearchButton.style.display = "none";
             }
           }
+          if (window.invertedFilters) window.invertedFilters.search = false;
           break;
         case 'directory':
           window.currentDirectoryFilter = "";

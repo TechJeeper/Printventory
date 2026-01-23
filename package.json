@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -41,12 +41,20 @@
       ],
       "asar": true,
       "asarUnpack": [
-        "**/*.node"
+        "**/*.node",
+        "**/node_modules/node-stream-zip/**/*",
+        "scan-worker.js"
       ]
     },
     "win": {
       "target": "nsis",
-      "icon": "logo.ico"
+      "icon": "logo.ico",
+      "asar": true,
+      "asarUnpack": [
+        "**/*.node",
+        "**/node_modules/node-stream-zip/**/*",
+        "scan-worker.js"
+      ]
     },
     "linux": {
       "target": [
@@ -58,7 +66,13 @@
         }
       ],
       "icon": "logo.png",
-      "category": "Utility"
+      "category": "Utility",
+      "asar": true,
+      "asarUnpack": [
+        "**/*.node",
+        "**/node_modules/node-stream-zip/**/*",
+        "scan-worker.js"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -105,7 +119,8 @@
       "search.js",
       "scan-worker.js",
       "server-bridge.js",
-      "installer.nsh"
+      "installer.nsh",
+      "node_modules/node-stream-zip/**/*"
     ],
     "directories": {
       "buildResources": ".",

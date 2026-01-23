@@ -2,7 +2,152 @@ const { parentPort } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const StreamZip = require('node-stream-zip');
+const Module = require('module');
+
+// We'll load StreamZip after receiving the node_modules path from the main process
+let StreamZip = null;
+let nodeModulesPath = null;
+
+// Function to load StreamZip from the correct location
+function loadStreamZip() {
+  if (StreamZip) return StreamZip;
+  
+  try {
+    // First try normal require (works when worker is in app directory)
+    StreamZip = require('node-stream-zip');
+    return StreamZip;
+  } catch (error) {
+    // If that fails, try to find it from the app's node_modules
+    const possiblePaths = [];
+    
+    // Add the passed node_modules path if available (make it absolute)
+    if (nodeModulesPath) {
+      const absoluteNodeModules = path.isAbsolute(nodeModulesPath) 
+        ? nodeModulesPath 
+        : path.resolve(nodeModulesPath);
+      possiblePaths.push(path.join(absoluteNodeModules, 'node-stream-zip'));
+    }
+    
+    // Add common locations - use process.resourcesPath for built Electron apps
+    const resourcesPath = process.resourcesPath || path.dirname(__dirname);
+    possiblePaths.push(
+      path.resolve(__dirname, '..', 'node_modules', 'node-stream-zip'),
+      path.resolve(__dirname, '..', '..', 'node_modules', 'node-stream-zip'),
+      path.resolve(resourcesPath, 'app.asar.unpacked', 'node_modules', 'node-stream-zip'),
+      path.resolve(resourcesPath, 'app.asar', 'node_modules', 'node-stream-zip'),
+      path.resolve(resourcesPath, 'app', 'node_modules', 'node-stream-zip'),
+      // Windows-specific paths
+      path.resolve(path.dirname(resourcesPath), 'app.asar.unpacked', 'node_modules', 'node-stream-zip'),
+      path.resolve(path.dirname(resourcesPath), 'Resources', 'app.asar.unpacked', 'node_modules', 'node-stream-zip')
+    );
+    
+    // Try each path (normalize to absolute paths)
+    for (let modulePath of possiblePaths) {
+      // Normalize to absolute path
+      if (!path.isAbsolute(modulePath)) {
+        modulePath = path.resolve(modulePath);
+      }
+      
+      if (fs.existsSync(modulePath)) {
+        try {
+          // Try requiring the directory (Node will resolve to index.js or main from package.json)
+          // Use path.resolve to ensure we have an absolute path
+          const resolvedPath = path.resolve(modulePath);
+          StreamZip = require(resolvedPath);
+          console.log(`[Worker] Loaded node-stream-zip from: ${resolvedPath}`);
+          return StreamZip;
+        } catch (requireError) {
+          console.log(`[Worker] Failed to require ${modulePath}:`, requireError.message);
+          // If directory require fails, try requiring the main file directly
+          try {
+            const packageJsonPath = path.join(modulePath, 'package.json');
+            if (fs.existsSync(packageJsonPath)) {
+              const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+              const mainFile = packageJson.main || 'index.js';
+              const mainPath = path.resolve(modulePath, mainFile);
+              if (fs.existsSync(mainPath)) {
+                StreamZip = require(mainPath);
+                console.log(`[Worker] Loaded node-stream-zip from main file: ${mainPath}`);
+                return StreamZip;
+              }
+            }
+          } catch (mainFileError) {
+            console.log(`[Worker] Failed to load from main file:`, mainFileError.message);
+            // Continue to next path
+            continue;
+          }
+          // Continue to next path
+          continue;
+        }
+      }
+    }
+    
+    // Last resort: modify Module._nodeModulePaths to include the node_modules path
+    if (nodeModulesPath && fs.existsSync(nodeModulesPath)) {
+      const originalNodeModulePaths = Module._nodeModulePaths;
+      const originalResolveFilename = Module._resolveFilename;
+      
+      // Modify both _nodeModulePaths and _resolveFilename for better compatibility
+      Module._nodeModulePaths = function(from) {
+        const paths = originalNodeModulePaths.call(this, from);
+        if (!paths.includes(nodeModulesPath)) {
+          paths.unshift(nodeModulesPath);
+        }
+        return paths;
+      };
+      
+      // Also modify _resolveFilename as a fallback
+      Module._resolveFilename = function(request, parent, isMain, options) {
+        if (request === 'node-stream-zip') {
+          const streamZipPath = path.join(nodeModulesPath, 'node-stream-zip');
+          if (fs.existsSync(streamZipPath)) {
+            try {
+              const packageJsonPath = path.join(streamZipPath, 'package.json');
+              if (fs.existsSync(packageJsonPath)) {
+                const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+                const mainFile = packageJson.main || 'index.js';
+                const mainPath = path.join(streamZipPath, mainFile);
+                if (fs.existsSync(mainPath)) {
+                  return mainPath;
+                }
+              }
+              return streamZipPath;
+            } catch (e) {
+              // Fall through to original resolver
+            }
+          }
+        }
+        return originalResolveFilename.call(this, request, parent, isMain, options);
+      };
+      
+      try {
+        StreamZip = require('node-stream-zip');
+        Module._nodeModulePaths = originalNodeModulePaths;
+        Module._resolveFilename = originalResolveFilename;
+        console.log(`[Worker] Loaded node-stream-zip using modified Module paths from: ${nodeModulesPath}`);
+        return StreamZip;
+      } catch (requireError) {
+        Module._nodeModulePaths = originalNodeModulePaths;
+        Module._resolveFilename = originalResolveFilename;
+        console.error(`[Worker] Failed to load node-stream-zip from ${nodeModulesPath}:`, requireError.message);
+        console.error(`[Worker] Require error stack:`, requireError.stack);
+        // Continue to throw error below
+      }
+    }
+    
+    // Log all attempted paths for debugging
+    console.error(`[Worker] Cannot find node-stream-zip module. Worker location: ${__dirname}`);
+    console.error(`[Worker] process.resourcesPath: ${process.resourcesPath || 'undefined'}`);
+    console.error(`[Worker] nodeModulesPath: ${nodeModulesPath || 'undefined'}`);
+    console.error(`[Worker] Tried paths:`);
+    possiblePaths.forEach(p => {
+      const exists = fs.existsSync(p);
+      console.error(`[Worker]   ${p} - ${exists ? 'EXISTS' : 'NOT FOUND'}`);
+    });
+    
+    throw new Error(`Cannot find node-stream-zip module. Worker location: ${__dirname}, resourcesPath: ${process.resourcesPath || 'undefined'}, nodeModulesPath: ${nodeModulesPath || 'undefined'}`);
+  }
+}
 
 // Concurrency limit for file processing
 const MAX_CONCURRENT_OPS = 50;
@@ -152,10 +297,12 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   return donePromise;
 }
 
-async function scanZipFile(zipPath, maxFileSize) {
-  const files = [];
-  try {
-    const zip = new StreamZip.async({ file: zipPath });
+  async function scanZipFile(zipPath, maxFileSize) {
+    const files = [];
+    try {
+      // Ensure StreamZip is loaded
+      const StreamZipClass = loadStreamZip();
+      const zip = new StreamZipClass.async({ file: zipPath });
     const entries = await zip.entries();
     
     for (const entry of Object.values(entries)) {
@@ -190,7 +337,25 @@ async function scanZipFile(zipPath, maxFileSize) {
   return files;
 }
 
-parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives }) => {
+parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives, nodeModulesPath: passedNodeModulesPath }) => {
+  // Set the node_modules path if provided
+  if (passedNodeModulesPath) {
+    nodeModulesPath = passedNodeModulesPath;
+    console.log(`[Worker] Received node_modules path: ${nodeModulesPath}`);
+  }
+  
+  // Load StreamZip now that we have the path
+  try {
+    loadStreamZip();
+    if (!StreamZip) {
+      throw new Error('loadStreamZip() returned without setting StreamZip');
+    }
+  } catch (error) {
+    console.error(`[Worker] Error loading node-stream-zip:`, error);
+    console.error(`[Worker] Error stack:`, error.stack);
+    parentPort.postMessage({ type: 'error', error: `Failed to load node-stream-zip: ${error.message}` });
+    return;
+  }
   try {
     const result = await scanDirectory(directoryPath, maxFileSize, enableZipArchives);
     parentPort.postMessage({ type: 'done', result });

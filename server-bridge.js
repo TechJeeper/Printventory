@@ -2,12 +2,20 @@
 (function() {
   'use strict';
   
-  if (typeof window === 'undefined') return;
+  console.log('[Bridge] Server bridge script starting...');
+  
+  if (typeof window === 'undefined') {
+    console.error('[Bridge] window is undefined, cannot initialize');
+    return;
+  }
   
   // CRITICAL: Initialize window.electron immediately, before anything else
   // This prevents "Cannot read properties of undefined" errors
   if (!window.electron) {
     window.electron = {};
+    console.log('[Bridge] Created window.electron object');
+  } else {
+    console.log('[Bridge] window.electron already exists, will extend it');
   }
   window._electronEventListeners = window._electronEventListeners || {};
   
@@ -18,12 +26,7 @@
     }
     window._electronEventListeners[channel].push(callback);
   };
-  
-  // Define send() method IMMEDIATELY
-  window.electron.send = function(channel, ...args) {
-    // Will be enhanced when WebSocket connects
-    console.warn('window.electron.send called before WebSocket connected:', channel);
-  };
+  console.log('[Bridge] window.electron.on method defined');
   
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${wsProtocol}//${window.location.host}`;
@@ -32,6 +35,13 @@
   const maxReconnectAttempts = 5;
   const pendingRequests = new Map();
   let requestIdCounter = 0;
+  
+  // Define send() method - will be enhanced when WebSocket connects
+  let sendFunction = function(channel, ...args) {
+    // Will be enhanced when WebSocket connects
+    console.warn('window.electron.send called before WebSocket connected:', channel);
+  };
+  window.electron.send = sendFunction;
 
   function showBrowserMessage(title, message, buttons = ['OK']) {
     return new Promise((resolve) => {
@@ -107,26 +117,44 @@
   
   function connect() {
     try {
+      console.log('[Bridge] Attempting WebSocket connection to:', wsUrl);
       ws = new WebSocket(wsUrl);
       
       ws.onopen = () => {
         console.log('WebSocket connected to Printventory server');
+        console.log('[Bridge] WebSocket readyState after open:', ws.readyState);
         reconnectAttempts = 0;
       };
       
       ws.onmessage = (event) => {
+        console.log('[Bridge] Received WebSocket message:', event.data.substring(0, 200));
         try {
           const data = JSON.parse(event.data);
           
           if (data.type === 'result') {
             const pending = pendingRequests.get(data.id);
             if (pending) {
-              pending.resolve(data.result);
+              console.log('[Bridge] Resolving pending request:', data.id);
+              
+              // Convert base64 ArrayBuffer back to ArrayBuffer if needed
+              let result = data.result;
+              if (result && result.__arrayBuffer === true) {
+                // Convert base64 string back to ArrayBuffer
+                const binaryString = atob(result.data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                result = bytes.buffer;
+              }
+              
+              pending.resolve(result);
               pendingRequests.delete(data.id);
             }
           } else if (data.type === 'error') {
             const pending = pendingRequests.get(data.id);
             if (pending) {
+              console.log('[Bridge] Rejecting pending request:', data.id, data.error);
               pending.reject(new Error(data.error));
               pendingRequests.delete(data.id);
             }
@@ -148,13 +176,14 @@
       };
       
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        console.error('[Bridge] WebSocket error:', error);
       };
       
-      ws.onclose = () => {
-        console.log('WebSocket disconnected');
+      ws.onclose = (event) => {
+        console.log('[Bridge] WebSocket disconnected. Code:', event.code, 'Reason:', event.reason, 'Clean:', event.wasClean);
         if (reconnectAttempts < maxReconnectAttempts) {
           reconnectAttempts++;
+          console.log('[Bridge] Reconnect attempt', reconnectAttempts, 'in', 1000 * reconnectAttempts, 'ms');
           setTimeout(connect, 1000 * reconnectAttempts);
         }
       };
@@ -165,8 +194,11 @@
   
   // Helper function to make IPC calls via WebSocket
   function makeIpcCall(channel, ...args) {
+    console.log('[Bridge] makeIpcCall:', channel, 'args:', args?.length);
+    
     // If WebSocket is not connected, try to connect
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.log('[Bridge] WebSocket not open, state:', ws?.readyState, 'reconnectAttempts:', reconnectAttempts);
       if (reconnectAttempts < maxReconnectAttempts) {
         connect();
         // Wait a bit for connection
@@ -185,6 +217,7 @@
     }
     
     const id = `req_${++requestIdCounter}_${Date.now()}`;
+    console.log('[Bridge] Sending WebSocket message:', { id, channel, argsLength: args?.length });
     
     return new Promise((resolve, reject) => {
       pendingRequests.set(id, { resolve, reject });
@@ -199,6 +232,7 @@
       setTimeout(() => {
         if (pendingRequests.has(id)) {
           pendingRequests.delete(id);
+          console.error('[Bridge] IPC call timeout:', channel, 'id:', id);
           reject(new Error(`IPC call timeout: ${channel}`));
         }
       }, 30000);
@@ -207,41 +241,7 @@
   
   // Store original electron if it exists (for fallback)
   const originalElectron = window.electron || {};
-  
-  // Create window.electron bridge with all methods from preload.js
-  // Initialize immediately to prevent undefined errors
-  if (!window.electron) {
-    window.electron = {};
-  }
-  window._electronEventListeners = window._electronEventListeners || {};
-  
-  // Generic on method for events - define FIRST so it's always available
-  // This must be defined before any code tries to use it
-  // Don't call original to avoid infinite recursion - we're replacing it entirely for server mode
-  window.electron.on = function(channel, callback) {
-    if (!window._electronEventListeners[channel]) {
-      window._electronEventListeners[channel] = [];
-    }
-    window._electronEventListeners[channel].push(callback);
-    // Don't call originalElectron.on - it would cause infinite recursion
-  };
-  
-  // Also ensure send is available early
-  window.electron.send = function(channel, ...args) {
-    // Send events (fire and forget)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        id: `send_${++requestIdCounter}_${Date.now()}`,
-        channel,
-        args,
-        type: 'send'
-      }));
-    }
-    // Also call original if it exists
-    if (originalElectron.send) {
-      originalElectron.send.call(originalElectron, channel, ...args);
-    }
-  };
+  console.log('[Bridge] Stored originalElectron, now creating methods...');
   
   // Map of method names to IPC channels (from preload.js)
   const methodToChannel = {
@@ -325,71 +325,31 @@
     'openExternal': 'open-external',
     'quitApp': 'quitApp',
     'showContextMenu': 'show-context-menu',
-    'executeContextMenuAction': 'execute-context-menu-action'
+    'executeContextMenuAction': 'execute-context-menu-action',
+    'pull3MFMetadata': 'pull-3mf-metadata',
+    'readModelFile': 'read-model-file',
+    'parse3MFPreview': 'parse-3mf-preview',
+    'cancel3MFPreview': 'cancel-3mf-preview'
   };
   
-  // Create proxy methods for all IPC calls
+  // Create proxy methods for all IPC calls IMMEDIATELY and SYNCHRONOUSLY
+  // This ensures all methods exist before any other script tries to use them
+  console.log('[Bridge] Creating', Object.keys(methodToChannel).length, 'methods from methodToChannel...');
   Object.keys(methodToChannel).forEach(method => {
     // Store original method if it exists (before we overwrite it)
     const originalMethod = originalElectron[method];
     
+    // Create the method immediately - don't wait for WebSocket connection
     window.electron[method] = function(...args) {
       // In server mode, always use WebSocket (don't fall back to original)
       // The original methods from preload.js won't work in a browser anyway
       return makeIpcCall(methodToChannel[method], ...args);
     };
   });
-
-  window.electron.showMessage = function(title, message, buttons = ['OK']) {
-    return showBrowserMessage(title, message, buttons).then(result => result.label);
-  };
-
-  window.electron.showMessageBox = function(options = {}) {
-    const title = options.title || 'Message';
-    const messageParts = [options.message, options.detail].filter(Boolean);
-    const message = messageParts.join('\n\n');
-    const buttons = options.buttons || ['OK'];
-    return showBrowserMessage(title, message, buttons).then(result => ({
-      response: result.index,
-      checkboxChecked: false
-    }));
-  };
-
-  window.electron.openExternal = function(url) {
-    try {
-      window.open(url, '_blank', 'noopener');
-    } catch (error) {
-      console.error('Error opening external URL:', error);
-    }
-    return Promise.resolve(true);
-  };
+  console.log('[Bridge] Created all methods from methodToChannel');
   
-  // Special methods that don't map directly to IPC channels
-  window.electron.isServerMode = function() {
-    return Promise.resolve(true);
-  };
-  
-  window.electron.getAppVersion = function() {
-    return Promise.resolve('1.22.5');
-  };
-  
-  window.electron.invoke = function(channel, ...args) {
-    return makeIpcCall(channel, ...args);
-  };
-  
-  window.electron.send = function(channel, ...args) {
-    // Send events (fire and forget)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        id: `send_${++requestIdCounter}_${Date.now()}`,
-        channel,
-        args,
-        type: 'send'
-      }));
-    }
-  };
-  
-  // Event listener methods (onOpenTagManager, onOpenSettings, etc.)
+  // Ensure all event listener methods are available immediately
+  console.log('[Bridge] Creating event listener methods...');
   window.electron.onOpenTagManager = function(callback) {
     window.electron.on('open-tag-manager', callback);
   };
@@ -445,7 +405,12 @@
   };
   
   window.electron.onThumbnailAdded = function(callback) {
-    window.electron.on('thumbnail-added', (event, data) => callback(data));
+    window.electron.on('thumbnail-added', (data) => {
+      // In server mode via WebSocket, data comes directly as the first argument
+      // The WebSocket handler calls: listener(...(data.args || []))
+      // So if data.args = [{filePath: ...}], listener is called with that object
+      callback(data);
+    });
   };
   
   window.electron.onOpenThemeSettings = function(callback) {
@@ -488,9 +453,76 @@
     window.electron.on('db-cleanup', callback);
   };
   
+  window.electron.on3MFPreviewStatus = function(callback) {
+    window.electron.on('3mf-preview-status', (event, requestId, message) => callback(requestId, message));
+  };
+  
+  window.electron.receive = function(channel, callback) {
+    const validChannels = ['preview-model', 'download-model'];
+    if (validChannels.includes(channel)) {
+      window.electron.on(channel, callback);
+    }
+  };
+  
   window.electron.pong = function() {
     window.electron.send('pong');
   };
+  
+  // Special methods that don't map directly to IPC channels
+  window.electron.isServerMode = function() {
+    return Promise.resolve(true);
+  };
+  
+  window.electron.getAppVersion = function() {
+    return Promise.resolve('1.22.5');
+  };
+  
+  window.electron.invoke = function(channel, ...args) {
+    return makeIpcCall(channel, ...args);
+  };
+
+  // Override showMessage and showMessageBox with browser implementations
+  // (These are in methodToChannel but we want custom browser dialogs)
+  window.electron.showMessage = function(title, message, buttons = ['OK']) {
+    return showBrowserMessage(title, message, buttons).then(result => result.label);
+  };
+
+  window.electron.showMessageBox = function(options = {}) {
+    const title = options.title || 'Message';
+    const messageParts = [options.message, options.detail].filter(Boolean);
+    const message = messageParts.join('\n\n');
+    const buttons = options.buttons || ['OK'];
+    return showBrowserMessage(title, message, buttons).then(result => ({
+      response: result.index,
+      checkboxChecked: false
+    }));
+  };
+
+  window.electron.openExternal = function(url) {
+    try {
+      window.open(url, '_blank', 'noopener');
+    } catch (error) {
+      console.error('Error opening external URL:', error);
+    }
+    return Promise.resolve(true);
+  };
+  
+  // Update send method to use WebSocket when available
+  sendFunction = function(channel, ...args) {
+    // Send events (fire and forget)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        id: `send_${++requestIdCounter}_${Date.now()}`,
+        channel,
+        args,
+        type: 'send'
+      }));
+    } else {
+      // WebSocket not ready yet - will be queued or logged
+      console.warn('window.electron.send called before WebSocket connected:', channel);
+    }
+  };
+  window.electron.send = sendFunction;
   
   // Copy over any other methods from original that we haven't overridden
   Object.keys(originalElectron).forEach(key => {
@@ -498,6 +530,28 @@
       window.electron[key] = originalElectron[key];
     }
   });
+  
+  // Verify critical methods exist (debug check)
+  console.log('[Bridge] Verifying critical methods...');
+  if (typeof window.electron.getSetting !== 'function') {
+    console.error('[Bridge] ERROR: getSetting method not created! Available methods:', Object.keys(window.electron));
+  } else {
+    console.log('[Bridge] ✓ getSetting method exists');
+  }
+  if (typeof window.electron.receive !== 'function') {
+    console.error('[Bridge] ERROR: receive method not created!');
+  } else {
+    console.log('[Bridge] ✓ receive method exists');
+  }
+  if (typeof window.electron.onOpenSlicerSettings !== 'function') {
+    console.error('[Bridge] ERROR: onOpenSlicerSettings method not created!');
+  } else {
+    console.log('[Bridge] ✓ onOpenSlicerSettings method exists');
+  }
+  
+  // Signal that bridge is ready
+  window._electronBridgeReady = true;
+  console.log('[Bridge] Server bridge initialized, all methods available. Total methods:', Object.keys(window.electron).length);
   
   // Connect when script loads
   connect();

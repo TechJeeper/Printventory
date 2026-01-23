@@ -2272,6 +2272,32 @@ header {
   box-shadow: 0 6px 20px rgba(34, 197, 94, 0.4);
 }
 
+#invert-filter-button {
+  width: 265px;
+  padding: 8px 18px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #f97316 0%, #fb923c 100%);
+  box-shadow: 0 4px 12px rgba(249, 115, 22, 0.3);
+}
+
+/* Disable global before shimmer on this button so it stays centered/aligned */
+#invert-filter-button::before {
+  content: none !important;
+  display: none !important;
+}
+
+
+
+#invert-filter-button.active {
+  background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
+}
+
+#invert-filter-button.active:hover {
+  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
+  box-shadow: 0 6px 20px rgba(220, 38, 38, 0.4);
+}
+
 /* Apply the same styles to multi-edit panel */
 #multi-edit-panel .designer-input-container {
   display: flex;
@@ -2559,6 +2585,28 @@ header {
 .duplicate-file-size {
   margin-left: auto;
   color: #777;
+}
+
+.duplicate-file.zip-entry {
+  opacity: 0.7;
+  background: #1f1f1f;
+}
+
+.duplicate-file.zip-entry input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.zip-entry-badge {
+  display: inline-block;
+  background: #4a90e2;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: bold;
+  margin-right: 6px;
+  vertical-align: middle;
 }
 
 .no-duplicates {
@@ -4146,6 +4194,28 @@ header {
   color: #888;
 }
 
+.duplicate-file.zip-entry {
+  opacity: 0.7;
+  background: #1f1f1f;
+}
+
+.duplicate-file.zip-entry input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.zip-entry-badge {
+  display: inline-block;
+  background: #4a90e2;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: bold;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
 .dedup-dialog {
   min-width: 800px;
   max-width: 90vw;
@@ -5169,6 +5239,26 @@ header {
   font-weight: 500;
   color: #fff;
   transition: all 0.3s ease;
+}
+
+.filter-pill.inverted {
+  background: rgba(239, 68, 68, 0.20);
+  border-color: rgba(239, 68, 68, 0.6);
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
+}
+
+.pill-invert {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  margin-left: 6px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.35);
+  color: #ffeaea;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.3px;
 }
 
 .filter-pill:hover {
