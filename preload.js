@@ -1,12 +1,66 @@
 const { contextBridge, ipcRenderer, shell } = require('electron');
 const { version } = require('./package.json');
 
+// Track registered channels to prevent duplicates in hidden window
+const registeredChannels = new Set();
+
+// Check if we're in server mode (hidden window) - cache the result
+let isServerModeCached = null;
+let isServerModeCheckPending = false;
+
+async function checkIsServerMode() {
+  if (isServerModeCached !== null) {
+    return isServerModeCached;
+  }
+  if (isServerModeCheckPending) {
+    // Wait for pending check
+    while (isServerModeCheckPending) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return isServerModeCached;
+  }
+  isServerModeCheckPending = true;
+  try {
+    isServerModeCached = await ipcRenderer.invoke('is-server-mode');
+  } catch (error) {
+    console.error('[Preload] Error checking server mode:', error);
+    isServerModeCached = false; // Default to false (normal mode)
+  }
+  isServerModeCheckPending = false;
+  return isServerModeCached;
+}
+
+// Wrap ipcRenderer.on to prevent preview-model listeners ONLY in server mode hidden window
+// Only block if we're CERTAIN we're in server mode (cached = true)
+// If not cached yet, allow through (normal mode needs to work immediately)
+const originalOn = ipcRenderer.on.bind(ipcRenderer);
+const previewModelListenerCount = { count: 0 };
+ipcRenderer.on = function(channel, ...args) {
+  // Only block preview-model and download-model if we're CERTAIN we're in server mode
+  // In normal mode or if not cached yet, allow these listeners to register normally
+  if ((channel === 'preview-model' || channel === 'download-model') && isServerModeCached === true) {
+    previewModelListenerCount.count++;
+    console.warn(`[Preload] BLOCKED ipcRenderer.on('${channel}') call #${previewModelListenerCount.count} in server mode hidden window - events go to WebSocket clients`);
+    return ipcRenderer; // Return ipcRenderer to allow chaining
+  }
+  // If not cached yet, check asynchronously but don't block (normal mode needs to work immediately)
+  // The receive() and on() methods will handle the blocking properly for their specific cases
+  if ((channel === 'preview-model' || channel === 'download-model') && isServerModeCached === null) {
+    checkIsServerMode().then(isServer => {
+      if (isServer) {
+        console.warn(`[Preload] Note: '${channel}' listener registered via direct ipcRenderer.on() in server mode - consider using receive() method`);
+      }
+    });
+  }
+  return originalOn(channel, ...args);
+};
+
 contextBridge.exposeInMainWorld('electron', {
   isServerMode: () => ipcRenderer.invoke('is-server-mode'),
   loadDirectory: () => ipcRenderer.invoke('load-directory'),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   saveDirectory: (directoryPath) => ipcRenderer.invoke('save-directory', directoryPath),
-  scanDirectory: (directoryPath) => ipcRenderer.invoke('scan-directory', directoryPath),
+  scanDirectory: (directoryPath, options) => ipcRenderer.invoke('scan-directory', directoryPath, options || {}),
   getModel: (filePath) => ipcRenderer.invoke('get-model', filePath),
   getModelsFiltered: (filters) => ipcRenderer.invoke('get-models-filtered', filters),
   saveModel: (modelData) => ipcRenderer.invoke('save-model', modelData),
@@ -18,6 +72,7 @@ contextBridge.exposeInMainWorld('electron', {
   getModelsByDesigner: (designer) => ipcRenderer.invoke('get-models-by-designer', designer),
   showItemInFolder: (filePath) => ipcRenderer.invoke('show-item-in-folder', filePath),
   openPath: (path) => ipcRenderer.invoke('open-path', path),
+  executeClientCommand: (commandData) => ipcRenderer.invoke('execute-client-command', commandData),
   getAllModels: (sortOption, limit) => ipcRenderer.invoke('get-all-models', sortOption, limit),
   getTotalModelCount: () => ipcRenderer.invoke('getTotalModelCount'),
   getParentModels: () => ipcRenderer.invoke('get-parent-models'),
@@ -33,8 +88,12 @@ contextBridge.exposeInMainWorld('electron', {
   onOpenMetadataEditor: (callback) => ipcRenderer.on('open-metadata-editor', callback),
   getModelTags: (modelId) => ipcRenderer.invoke('get-model-tags', modelId),
   saveModelTags: (modelId, tagIds) => ipcRenderer.invoke('save-model-tags', modelId, tagIds),
+  getAdditionalFileTypesCatalog: () => ipcRenderer.invoke('get-additional-file-types-catalog'),
   getSetting: (key) => ipcRenderer.invoke('get-setting', key),
   saveSetting: (key, value) => ipcRenderer.invoke('save-setting', key, value),
+  startExtensionServer: (port) => ipcRenderer.invoke('start-extension-server', port),
+  stopExtensionServer: () => ipcRenderer.invoke('stop-extension-server'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   checkCollectUsage: () => ipcRenderer.invoke('check-collect-usage'),
   purgeThumbnails: () => ipcRenderer.invoke('purge-thumbnails'),
   onOpenSettings: (callback) => ipcRenderer.on('open-settings', callback),
@@ -45,6 +104,7 @@ contextBridge.exposeInMainWorld('electron', {
       await callback();
     });
   },
+  onOpenKeyboardShortcuts: (callback) => ipcRenderer.on('open-keyboard-shortcuts', callback),
   onOpenServerModeInfo: (callback) => {
     ipcRenderer.on('open-server-mode-info', async () => {
       await callback();
@@ -52,6 +112,11 @@ contextBridge.exposeInMainWorld('electron', {
   },
   onOpenStats: (callback) => {
     ipcRenderer.on('open-stats', async () => {
+      await callback();
+    });
+  },
+  onOpenSystemReport: (callback) => {
+    ipcRenderer.on('open-system-report', async () => {
       await callback();
     });
   },
@@ -108,11 +173,15 @@ contextBridge.exposeInMainWorld('electron', {
   onHashGenerationProgress: (callback) => {
     ipcRenderer.on('hash-generation-progress', (_, progress) => callback(progress));
   },
+  onHashGenerationComplete: (callback) => {
+    ipcRenderer.on('hash-generation-complete', (_, result) => callback(result || {}));
+  },
   getThumbnail: (filePath) => ipcRenderer.invoke('getThumbnail', filePath),
   getAllThumbnails: (filePath) => ipcRenderer.invoke('get-all-thumbnails', filePath),
   addThumbnail: (filePath, imageDataUrl) => ipcRenderer.invoke('add-thumbnail', filePath, imageDataUrl),
   addMultipleThumbnails: (filePath, imageDataUrls) => ipcRenderer.invoke('add-multiple-thumbnails', filePath, imageDataUrls),
   setDefaultThumbnail: (filePath, index) => ipcRenderer.invoke('set-default-thumbnail', filePath, index),
+  deleteThumbnail: (filePath, index) => ipcRenderer.invoke('delete-thumbnail', filePath, index),
   onStartPrintRoulette: (callback) => {
     ipcRenderer.on('start-print-roulette', callback);
   },
@@ -133,29 +202,62 @@ contextBridge.exposeInMainWorld('electron', {
     }
   },
   on: (channel, callback) => {
+    // Prevent preview-model and download-model registration ONLY in server mode hidden window
+    // In normal mode, allow these to work normally
+    if (channel === 'preview-model' || channel === 'download-model') {
+      // Check server mode - if true, block; if false/null, allow (normal mode)
+      if (isServerModeCached === true) {
+        console.warn(`[Preload] Blocking '${channel}' listener registration in server mode hidden window - use receive() method or events go to WebSocket clients`);
+        return;
+      }
+      // If not cached yet, check asynchronously but don't block (normal mode needs to work)
+      if (isServerModeCached === null) {
+        checkIsServerMode();
+      }
+    }
+    
     const validChannels = [
-      'ping', 
-      'open-ai-config', 
+      'ping',
+      'open-about',
+      'open-ai-config',
       'open-file-type-settings',
-      'tags-generated', 
+      'open-browser-extension-settings',
+      'open-settings',
+      'open-guide',
+      'open-keyboard-shortcuts',
+      'open-server-mode-info',
+      'open-stats',
+      'open-system-report',
+      'open-backup-restore',
+      'open-dedup',
+      'open-tag-manager',
+      'open-purge-models',
+      'open-metadata-editor',
+      'open-theme-settings',
+      'open-performance-settings',
+      'open-slicer-settings',
+      'open-manage-thumbnails',
+      'tags-generated',
       'show-progress-dialog',
       'update-progress',
       'close-progress-dialog',
       'start-single-tag-generation',
       'start-batch-tag-generation',
       'batch-tag-generation-complete',
+      'hash-generation-progress',
       'hash-generation-complete',
       'show-input-dialog',
       'puter-ai-chat-request',
       'regenerate-thumbnails',
       'generate-missing-thumbnails',
-      /* other valid channels */
+      'thumbnail-deleted',
+      'manage-thumbnails-request',
+      'execute-client-command',
+      'download-model',
+      'start-print-roulette',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.on(channel, (event, ...args) => callback(...args));
-    }
-    if (channel === 'open-guide') {
-      ipcRenderer.on(channel, (event) => callback());
     }
   },
   invoke: (channel, data) => {
@@ -194,10 +296,41 @@ contextBridge.exposeInMainWorld('electron', {
   parse3MFPreview: (filePath, requestId) => ipcRenderer.invoke('parse-3mf-preview', filePath, requestId),
   cancel3MFPreview: (requestId) => ipcRenderer.invoke('cancel-3mf-preview', requestId),
   on3MFPreviewStatus: (callback) => ipcRenderer.on('3mf-preview-status', (event, requestId, message) => callback(requestId, message)),
+  getGpuInfo: () => ipcRenderer.invoke('get-gpu-info'),
+  benchmarkFilesystem: () => ipcRenderer.invoke('benchmark-filesystem'),
+  benchmarkDatabase: () => ipcRenderer.invoke('benchmark-database'),
   receive: (channel, callback) => {
     const validChannels = ['preview-model', 'download-model'];
     if (validChannels.includes(channel)) {
-      ipcRenderer.on(channel, (event, ...args) => callback(...args));
+      // Prevent duplicate registrations regardless of mode - check FIRST
+      if (registeredChannels.has(channel)) {
+        console.warn(`[Preload] Duplicate receive() call for '${channel}' - ignoring (already registered)`);
+        return;
+      }
+      
+      // Mark as handled immediately to prevent race conditions
+      registeredChannels.add(channel);
+      
+      // Check if we're in server mode (hidden window) - only block in server mode
+      // Use async check but handle it properly
+      checkIsServerMode().then(isServer => {
+        if (isServer) {
+          // This is the hidden window in server mode - don't register IPC listeners
+          // Events go to browser clients via WebSocket, not to the hidden window
+          const location = typeof window !== 'undefined' ? window.location : null;
+          console.warn(`[Preload] Skipping IPC listener for '${channel}' in server mode hidden window (protocol: ${location?.protocol}, hostname: ${location?.hostname}) - events go to WebSocket clients`);
+          return;
+        }
+        
+        // Normal mode: register the listener
+        const location = typeof window !== 'undefined' ? window.location : null;
+        console.log(`[Preload] Registering IPC listener for '${channel}' in normal mode (protocol: ${location?.protocol}, hostname: ${location?.hostname})`);
+        ipcRenderer.on(channel, (event, ...args) => callback(...args));
+      }).catch(error => {
+        // If check fails, assume normal mode and register (fail open for normal mode)
+        console.warn(`[Preload] Error checking server mode, assuming normal mode:`, error);
+        ipcRenderer.on(channel, (event, ...args) => callback(...args));
+      });
     }
   }
 });

@@ -11,7 +11,7 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
-  <script src="https://js.puter.com/v2/"></script>
+  <!-- Puter.js is loaded dynamically only when needed to avoid unnecessary socket.io connections -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
 
@@ -37,6 +37,7 @@
       </button>
     </div>
     <button id="scan-directory-button">Scan Directory</button>
+    <button id="scan-stl-home-button" class="secondary-button" style="display: none;">Scan STL Home</button>
     <button id="view-library-button">View Entire Library</button>
     <div id="view-library-message" style="display: none; text-align: center; font-size: 14px; color: #000; margin-top: 5px; background-color: #FFD700; padding: 5px; border-radius: 4px; font-weight: bold;">
       <!-- Updated text will appear here -->
@@ -74,6 +75,14 @@
           <option value="date-desc" selected>Modified (Newest First)</option>
           <option value="dateadded-asc">Date Added (Oldest First)</option>
           <option value="dateadded-desc">Date Added (Newest First)</option>
+          <option value="directory-asc">Parent Directory (A-Z)</option>
+          <option value="directory-desc">Parent Directory (Z-A)</option>
+          <option value="designer-asc">Designer (A-Z)</option>
+          <option value="designer-desc">Designer (Z-A)</option>
+          <option value="parentmodel-asc">Parent Model (A-Z)</option>
+          <option value="parentmodel-desc">Parent Model (Z-A)</option>
+          <option value="printed-asc">Printed (Not Printed First)</option>
+          <option value="printed-desc">Printed (Printed First)</option>
         </select>
       </div>
       <div class="form-group">
@@ -118,7 +127,7 @@
           <option value="">All Types</option>
           <option value="stl">STL</option>
           <option value="3mf">3MF</option>
-          <option value="zip">Zip</option>
+          <!-- Zip and additional types are added by populateFileTypeFilter() from settings -->
         </select>
       </div>
       <div class="form-group">
@@ -224,7 +233,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="add-designer-button">Add</button>
-          <button type="button" id="cancel-designer-button">Cancel</button>
+          <button type="button" id="cancel-designer-button" onclick="document.getElementById('new-designer-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -237,7 +246,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="add-parent-button">Add</button>
-          <button type="button" id="cancel-parent-button">Cancel</button>
+          <button type="button" id="cancel-parent-button" onclick="document.getElementById('new-parent-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -254,7 +263,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="add-tag-submit">Add</button>
-          <button type="button" id="cancel-tag-button">Cancel</button>
+          <button type="button" id="cancel-tag-button" onclick="document.getElementById('new-tag-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -268,7 +277,7 @@
           <ul id="searchable-list-items" class="searchable-list"></ul>
         </div>
         <div class="dialog-buttons">
-          <button type="button" id="searchable-list-cancel">Cancel</button>
+          <button type="button" id="searchable-list-cancel" onclick="document.getElementById('searchable-list-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -309,7 +318,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="bulk-save-button">Save Changes</button>
-          <button type="button" id="bulk-cancel-button">Cancel</button>
+          <button type="button" id="bulk-cancel-button" onclick="document.getElementById('bulk-edit-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -393,7 +402,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="add-license-button">Add</button>
-          <button type="button" id="cancel-license-button">Cancel</button>
+          <button type="button" id="cancel-license-button" onclick="document.getElementById('new-license-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -405,7 +414,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="save-notes-button">Save</button>
-          <button type="button" id="cancel-notes-button">Cancel</button>
+          <button type="button" id="cancel-notes-button" onclick="document.getElementById('notes-modal-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -423,8 +432,11 @@
             </label>
           </div>
           <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+            <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group (keeps archived/ZIP copy when present)">Easy</button>
+            <button type="button" id="dedup-clear-button" class="modal-fullscreen-toggle" title="Clear all selections">Clear</button>
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
-            <button type="submit" id="close-dedup">Close</button>
+            <button type="button" id="dedup-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleDedupFullscreen==='function')window.toggleDedupFullscreen()">Full Screen</button>
+            <button type="button" id="close-dedup" onclick="document.getElementById('dedup-dialog')?.close()">Close</button>
           </div>
         </div>
         <div class="duplicate-groups" style="max-height: 300px; overflow-y: auto; margin-top: 0.5rem;">
@@ -437,8 +449,8 @@
         <h3>Purge Models</h3>
         <p class="setting-description">This will remove all model data from the database. This action cannot be undone.</p>
         <div class="dialog-buttons">
-          <button type="button" id="confirm-purge-button" class="danger-button">Purge All Models</button>
-          <button type="submit">Cancel</button>
+          <button type="button" id="confirm-purge-button" class="danger-button" onclick="if(typeof window.confirmPurgeModelsFromDialog==='function')window.confirmPurgeModelsFromDialog()">Purge All Models</button>
+          <button type="button" onclick="document.getElementById('purge-models-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -499,8 +511,8 @@
         </div>
 
         <div class="dialog-buttons">
-          <button type="button" id="save-performance-settings">Save</button>
-          <button type="button" id="cancel-performance-settings">Cancel</button>
+          <button type="button" id="save-performance-settings" onclick="if(typeof window.savePerformanceSettingsFromDialog==='function')window.savePerformanceSettingsFromDialog()">Save</button>
+          <button type="button" id="cancel-performance-settings" onclick="document.getElementById('performance-settings-dialog')?.close()">Cancel</button>
         </div>
       </div>
     </dialog>
@@ -508,23 +520,53 @@
       <form method="dialog">
         <h3>STL Home</h3>
         <p class="warning-text">
-          Warning: Scanning large directories may impact performance.<p>
-            Setting an STL Home will cause the app to scan the selected directory on startup.
-          </p>
+          Warning: Scanning large directories may impact performance.
         </p>
-        <div class="form-group" style="display: flex; gap: 0.5rem; align-items: center;">
+        <p class="setting-description">Setting an STL Home will cause the app to scan the selected directory on startup.</p>
+        <div class="form-group stl-home-dir-row">
           <input type="text" id="stl-home-directory" placeholder="No directory selected" readonly>
-          <button type="button" id="choose-stl-home-button" class="primary-button">Choose Directory</button>
-          <button type="button" id="clear-stl-home-button" class="secondary-button">Clear Directory</button>
+          <div class="stl-home-dir-buttons">
+            <button type="button" id="choose-stl-home-button" class="primary-button">Choose Directory</button>
+            <button type="button" id="clear-stl-home-button" class="secondary-button">Clear Directory</button>
+          </div>
         </div>
         <div class="form-group" id="stl-home-update-frequency-group" style="display: none;">
           <label for="stl-home-update-frequency">Update Frequency (minutes):</label>
           <input type="number" id="stl-home-update-frequency" min="1" max="1440" value="60">
           <p class="setting-description">How frequently the STL Home directory will be scanned for new files.</p>
         </div>
+        <div class="form-group" id="stl-home-path-metadata-group">
+          <div class="form-group checkbox-container stl-home-path-metadata-checkbox-row">
+            <input type="checkbox" id="stl-home-path-metadata-enabled" value="1" onclick="setTimeout(function(){ if(window.updateStlHomePathMetadataGrayed) window.updateStlHomePathMetadataGrayed(); }, 0)">
+            <label for="stl-home-path-metadata-enabled">Enable: use folder path to set Designer and Parent model</label>
+          </div>
+          <div id="stl-home-path-metadata-options" class="stl-home-path-metadata-options">
+          <p class="setting-description" style="margin-top: 0.25rem; margin-bottom: 0.5rem;">When you run “Scan STL Home”, folder names are read from the file upward. Values are only applied when the field is empty.</p>
+          <p class="setting-description" style="margin-bottom: 0.25rem; font-size: 0.9em;">Folder level: 0 = parent of file, 1 = grandparent, 2 = great-grandparent, etc.</p>
+          <p class="setting-description" style="margin-bottom: 0.5rem; font-size: 0.85em;"><span class="path-example">Example: D:\MODELS\DESIGNER\PARENT\MODEL.3MF</span> — level 0 = PARENT, level 1 = DESIGNER.</p>
+          <div class="path-metadata-indices">
+            <div class="form-group path-metadata-col">
+              <div class="form-group checkbox-container stl-home-path-metadata-checkbox-row" style="margin-bottom: 0.5rem;">
+                <input type="checkbox" id="stl-home-use-designer" value="1" checked>
+                <label for="stl-home-use-designer">Use folder path for Designer</label>
+              </div>
+              <label for="stl-home-designer-index">Folder level:</label>
+              <input type="number" id="stl-home-designer-index" min="0" value="1">
+            </div>
+            <div class="form-group path-metadata-col">
+              <div class="form-group checkbox-container stl-home-path-metadata-checkbox-row" style="margin-bottom: 0.5rem;">
+                <input type="checkbox" id="stl-home-use-parent-model" value="1" checked>
+                <label for="stl-home-use-parent-model">Use folder path for Parent model</label>
+              </div>
+              <label for="stl-home-parent-model-index">Folder level:</label>
+              <input type="number" id="stl-home-parent-model-index" min="0" value="0">
+            </div>
+          </div>
+          </div>
+        </div>
         <div class="dialog-buttons">
-          <button type="submit" id="save-stl-home-button">Save</button>
-          <button type="button" id="cancel-stl-home-button">Cancel</button>
+          <button type="button" id="save-stl-home-button" onclick="if(window.saveSTLHomeFromDialog) window.saveSTLHomeFromDialog()">Save</button>
+          <button type="button" id="cancel-stl-home-button" onclick="document.getElementById('stl-home-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -537,7 +579,7 @@
         <button type="button" id="add-slicer-button" class="full-width-button">Add New Slicer</button>
         <div class="dialog-buttons">
           <button type="button" id="save-slicer-settings">Save</button>
-          <button type="button" id="cancel-slicer-settings">Cancel</button>
+          <button type="button" id="cancel-slicer-settings" onclick="document.getElementById('slicer-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -552,6 +594,28 @@
             <label for="enable-zip-archives">Enable ZIP Archive Support:</label>
           </div>
           <p class="setting-description">When enabled, Printventory will scan inside ZIP files for 3D models (STL and 3MF files). Each model found within a ZIP file will be indexed separately.</p>
+        </div>
+        <div class="settings-group">
+          <h4>Additional file types to discover during scan</h4>
+          <p class="setting-description">These types will be discovered when scanning folders. Most do not support 3D preview; a placeholder with the file type (e.g. OBJ, STEP) will be shown and you can add your own images.</p>
+          <div id="scan-additional-types-container" class="scan-file-types-grid">
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-3ds"><span>3DS (.3ds)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-amf"><span>AMF (.amf)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-blender"><span>Blender (.blender)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-dae"><span>DAE (.dae)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-dxf"><span>DXF (.dxf)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-dwg"><span>DWG (.dwg)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-fbx"><span>FBX (.fbx)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-f3d"><span>F3D (.f3d)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-f3z"><span>F3Z (.f3z)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-gcode"><span>G-code (.gcode)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-igs"><span>IGES (.igs/.iges)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-obj"><span>OBJ (.obj)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-ply"><span>PLY (.ply)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-step"><span>STEP (.step/.stp)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-svg"><span>SVG (.svg)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-x3d"><span>X3D (.x3d)</span></label>
+          </div>
         </div>
         <div class="settings-group">
           <h4>3MF Metadata</h4>
@@ -574,8 +638,30 @@
           </div>
         </div>
         <div class="dialog-buttons">
-          <button type="button" id="save-file-type-settings">Save</button>
-          <button type="button" id="cancel-file-type-settings">Cancel</button>
+          <button type="button" id="save-file-type-settings" onclick="if(typeof window.saveFileTypeSettingsFromDialog==='function')window.saveFileTypeSettingsFromDialog()">Save</button>
+          <button type="button" id="cancel-file-type-settings" onclick="document.getElementById('file-type-settings-dialog')?.close()">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="browser-extension-settings-dialog" class="modal">
+      <form method="dialog">
+        <h3>Browser Extension</h3>
+        <p class="setting-description">When enabled, a local web server runs so the Printventory Chrome extension can connect to this app. Disabled by default.</p>
+        <p class="setting-description"><a id="browser-extension-store-link" href="https://chromewebstore.google.com/detail/pigngedngcegmemgfbkaiihjnbplaedj?utm_source=item-share-cb">Download the Printventory Watcher on Chrome Web Store</a></p>
+        <div class="settings-group">
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="enable-browser-extension">
+            <label for="enable-browser-extension">Enable Browser Extension</label>
+          </div>
+          <div class="form-group">
+            <label for="browser-extension-port">Port:</label>
+            <input type="number" id="browser-extension-port" min="1024" max="65535" value="5000">
+            <p class="setting-description">Port for the local server (default 5000). The Chrome extension must use the same port in its options.</p>
+          </div>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="save-browser-extension-settings">Save</button>
+          <button type="button" id="cancel-browser-extension-settings" onclick="document.getElementById('browser-extension-settings-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -651,9 +737,9 @@
           <small>Number of tag generation requests to process simultaneously (1-10)</small>
         </div>
         <div class="dialog-buttons">
-          <button type="button" id="test-ai-config">Test</button>
-          <button type="button" id="save-ai-config">Save</button>
-          <button type="button" id="cancel-ai-config">Cancel</button>
+          <button type="button" id="test-ai-config" onclick="event.preventDefault(); event.stopPropagation(); if(typeof window.testAIConfigFromDialog==='function'){ window.testAIConfigFromDialog(); }">Test</button>
+          <button type="button" id="save-ai-config" onclick="if(typeof window.saveAIConfigFromDialog==='function')window.saveAIConfigFromDialog()">Save</button>
+          <button type="button" id="cancel-ai-config" onclick="document.getElementById('ai-config-dialog')?.close()">Cancel</button>
         </div>
         <div id="ai-config-result" class="result-message"></div>
       </form>
@@ -676,7 +762,7 @@
         </div>
         <div class="dialog-buttons">
           <button type="button" id="tag-preview-apply">Apply Selected Tags</button>
-          <button type="button" id="tag-preview-cancel">Cancel</button>
+          <button type="button" id="tag-preview-cancel" onclick="document.getElementById('tag-preview-dialog')?.close()">Cancel</button>
         </div>
       </form>
     </dialog>
@@ -849,7 +935,7 @@
           </div>
           <div class="dialog-buttons">
             <button type="submit" id="save-settings">Save</button>
-            <button type="button" id="cancel-settings">Cancel</button>
+            <button type="button" id="cancel-settings" onclick="document.getElementById('settings-dialog')?.close()">Cancel</button>
           </div>
         </form>
       </dialog>
@@ -890,33 +976,20 @@
           </ul>
 
           <div class="dialog-buttons">
-            <button type="submit">Close</button>
+            <button type="button" onclick="document.getElementById('guide-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
       <dialog id="about-dialog" class="modal">
         <form method="dialog">
           <div class="about-header">
-            <button type="button" class="about-close-x" aria-label="Close">×</button>
+            <button type="button" class="about-close-x" aria-label="Close" onclick="document.getElementById('about-dialog')?.close()">×</button>
             <img src="logo.png" alt="Printventory Logo" class="about-logo">
             <h2>Printventory</h2>
             <p class="about-version-text" id="about-version">Version: Loading...</p>
           </div>
           <div class="about-content">
             <div class="about-main-column">
-              <div class="about-section">
-                <button type="button" id="check-updates-button" class="about-primary-button">
-                  <span class="button-icon">🔄</span>
-                  Check for Updates
-                </button>
-                <div class="about-options-row">
-                  <div class="about-option-item">
-                    <input type="checkbox" id="beta-opt-in">
-                    <label for="beta-opt-in">Beta Updates</label>
-                  </div>
-                </div>
-              </div>
-
               <div class="about-section">
                 <div class="about-link-item">
                   <span class="link-icon">🌐</span>
@@ -961,6 +1034,25 @@
               </div>
             </div>
           </div>
+        </form>
+      </dialog>
+      <dialog id="keyboard-shortcuts-dialog" class="modal" aria-labelledby="keyboard-shortcuts-title">
+        <form method="dialog">
+          <h2 id="keyboard-shortcuts-title">Keyboard Shortcuts</h2>
+          <p class="keyboard-shortcuts-intro">Power-user and accessibility shortcuts. Use <kbd>Ctrl</kbd> on Windows/Linux and <kbd>⌘</kbd> on Mac unless noted.</p>
+          <div class="keyboard-shortcuts-list">
+            <div class="shortcut-row"><span class="shortcut-action">Focus search</span><kbd>Ctrl</kbd>+<kbd>/</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Scan directory</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Clear all filters</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Print Roulette</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Toggle Multi-Edit mode</span><kbd>Ctrl</kbd>+<kbd>E</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Select all (filtered) models</span><kbd>Ctrl</kbd>+<kbd>A</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Next model (detail view)</span><kbd>↓</kbd> or <kbd>J</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Previous model (detail view)</span><kbd>↑</kbd> or <kbd>K</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Exit Multi-Edit mode</span><kbd>Escape</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Show this shortcuts dialog</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>?</kbd></div>
+          </div>
+          <button type="button" onclick="document.getElementById('keyboard-shortcuts-dialog')?.close()">Close</button>
         </form>
       </dialog>
       <dialog id="server-mode-info-dialog" class="modal">
@@ -1042,7 +1134,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             </div>
           </div>
           <div class="dialog-buttons">
-            <button type="submit">Close</button>
+            <button type="button" onclick="document.getElementById('server-mode-info-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
@@ -1071,6 +1163,10 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                 <div class="stats-row-compact">
                   <span class="stats-label-small">STL:</span>
                   <span class="stats-value-small" id="stats-type-stl">0</span>
+                </div>
+                <div class="stats-row-compact">
+                  <span class="stats-label-small">Other:</span>
+                  <span class="stats-value-small" id="stats-type-other">0</span>
                 </div>
                 <div class="chart-container-small">
                   <canvas id="file-type-chart"></canvas>
@@ -1116,7 +1212,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             </div>
           </div>
           <div class="dialog-buttons">
-            <button type="submit">Close</button>
+            <button type="button" onclick="document.getElementById('stats-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
@@ -1134,7 +1230,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
               <div class="form-group">
                 <label>Database Restore</label>
                 <p class="setting-description">Restore your database from a previous backup. This will replace all current data.</p>
-                <button type="button" id="restore-button" class="full-width-button">Restore from Backup</button>
+                <button type="button" id="restore-button" class="full-width-button" onclick="if(typeof window.restoreBackupFromDialog==='function')window.restoreBackupFromDialog()">Restore from Backup</button>
               </div>
             </div>
             <div style="flex: 1;">
@@ -1142,17 +1238,17 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
               <div class="form-group">
                 <label>Library Export</label>
                 <p class="setting-description">Export your library (models and tags) as a JSON file for backup or sharing.</p>
-                <button type="button" id="export-library-button" class="full-width-button">Export Library</button>
+                <button type="button" id="export-library-button" class="full-width-button" onclick="if(typeof window.exportLibraryFromDialog==='function')window.exportLibraryFromDialog()">Export Library</button>
               </div>
               <div class="form-group">
                 <label>Library Import</label>
                 <p class="setting-description">Import a library JSON file to merge models and tags into your current library.</p>
-                <button type="button" id="import-library-button" class="full-width-button">Import Library</button>
+                <button type="button" id="import-library-button" class="full-width-button" onclick="if(typeof window.importLibraryFromDialog==='function')window.importLibraryFromDialog()">Import Library</button>
               </div>
             </div>
           </div>
           <div class="dialog-buttons">
-            <button type="submit" id="save-backup-restore">Close</button>
+            <button type="button" id="save-backup-restore" onclick="document.getElementById('backup-restore-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
@@ -1178,7 +1274,8 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             </div>
           </div>
           <div class="dialog-buttons">
-            <button type="submit">Close</button>
+            <button type="button" id="tag-manager-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleTagManagerFullscreen==='function')window.toggleTagManagerFullscreen()">Full Screen</button>
+            <button type="button" onclick="document.getElementById('tag-manager-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
@@ -1202,7 +1299,64 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             </div>
           </div>
           <div class="dialog-buttons">
-            <button type="submit">Close</button>
+            <button type="button" onclick="document.getElementById('metadata-editor-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="system-report-dialog" class="modal">
+        <form method="dialog">
+          <h2>System Report</h2>
+          <div class="system-report-content" style="max-height: 70vh; overflow-y: auto; padding: 1rem;">
+            <div id="system-report-loading" style="text-align: center; padding: 2rem;">
+              <p>Loading system information...</p>
+            </div>
+            <div id="system-report-content" style="display: none;">
+              <div class="system-report-section" style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
+                <h3 style="margin-top: 0; margin-bottom: 0.75rem; font-size: 1.1rem;">GPU Detection (WebGL)</h3>
+                <div id="gpu-status" style="margin-bottom: 0.5rem;">
+                  <span style="font-weight: bold;">Status: </span>
+                  <span id="gpu-detected">Checking...</span>
+                </div>
+                <div id="gpu-details" style="font-size: 0.9rem; color: #aaa; margin-top: 0.5rem;"></div>
+              </div>
+
+              <div class="system-report-section" style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
+                <h3 style="margin-top: 0; margin-bottom: 0.75rem; font-size: 1.1rem;">File System Benchmark</h3>
+                <div id="filesystem-status" style="margin-bottom: 0.5rem;">
+                  <span style="font-weight: bold;">Status: </span>
+                  <span id="filesystem-result">Running benchmark...</span>
+                </div>
+                <div id="filesystem-details" style="font-size: 0.9rem; color: #aaa; margin-top: 0.5rem;"></div>
+              </div>
+
+              <div class="system-report-section" style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
+                <h3 style="margin-top: 0; margin-bottom: 0.75rem; font-size: 1.1rem;">Database Performance</h3>
+                <div id="database-status" style="margin-bottom: 0.5rem;">
+                  <span style="font-weight: bold;">Status: </span>
+                  <span id="database-result">Running benchmark...</span>
+                </div>
+                <div id="database-details" style="font-size: 0.9rem; color: #aaa; margin-top: 0.5rem;"></div>
+              </div>
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('system-report-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="manage-thumbnails-dialog" class="modal">
+        <form method="dialog">
+          <h3>Manage Thumbnails</h3>
+          <div class="form-group">
+            <p style="margin: 0 0 16px 0; color: #aaa; font-size: 0.9rem;">Select a thumbnail to set it as active, or delete thumbnails (the active thumbnail cannot be deleted).</p>
+            <div id="thumbnails-grid" class="thumbnails-grid">
+              <!-- Thumbnails will be added here dynamically -->
+            </div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('manage-thumbnails-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
@@ -1257,7 +1411,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       }, 5000);
     });
   </script>
-  <script type="module" src="search.js"></script>
+  <script src="search.js"></script>
   <script src="renderer.js"></script>
   <script type="module" src="slicer.js"></script>
   <script src="guide.js"></script>
@@ -1269,7 +1423,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       <div class="form-group">
         <input type="text" class="slicer-name" placeholder="Slicer Name" required>
         <div class="input-with-icon">
-          <input type="text" class="slicer-path" placeholder="Select slicer path..." readonly>
+          <input type="text" class="slicer-path" placeholder="Select slicer path...">
           <button type="button" class="browse-slicer-button icon-button">
             <img src="file-icon.png" alt="Browse">
           </button>

@@ -150,7 +150,16 @@ function loadStreamZip() {
 }
 
 // Concurrency limit for file processing
-const MAX_CONCURRENT_OPS = 50;
+// Higher concurrency in Docker/Server mode to compensate for slower file system operations
+// Docker file system operations (especially on network shares) can be 10-100ms per operation
+// vs <1ms for local file systems, so we need more parallel operations to maintain throughput
+function isDockerContainer() {
+  return require('fs').existsSync('/.dockerenv') || 
+         (require('fs').existsSync('/proc/self/cgroup') && 
+          require('fs').readFileSync('/proc/self/cgroup', 'utf8').includes('docker'));
+}
+
+const MAX_CONCURRENT_OPS = isDockerContainer() ? 100 : 50; // Higher concurrency in Docker
 
 async function calculateFileHash(filePath) {
   return new Promise((resolve, reject) => {
@@ -183,9 +192,10 @@ async function calculateFileHash(filePath) {
   });
 }
 
-async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false) {
+async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = ['.stl', '.3mf']) {
   const files = [];
   let processedFiles = 0;
+  const extSet = new Set(scanExtensions.map(e => e.toLowerCase().startsWith('.') ? e.toLowerCase() : '.' + e.toLowerCase()));
 
   // Use a simple queue system
   const queue = [{ type: 'dir', path: directoryPath }];
@@ -254,7 +264,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
       // Check extension FIRST to avoid unnecessary stat() calls
       const ext = path.extname(fileName).toLowerCase();
 
-      if (ext === '.stl' || ext === '.3mf') {
+      if (extSet.has(ext)) {
         // Only call stat() for valid 3D model files
         const stats = await fs.promises.stat(filePath);
         if (stats.size <= maxFileSize) {
@@ -269,10 +279,11 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
           });
         }
       } else if (enableZipArchives && ext === '.zip') {
+          // Scan inside ZIP using same scanExtensions
         // ZIP files still need stat for size check
         const stats = await fs.promises.stat(filePath);
         if (stats.size <= maxFileSize) {
-          const zipFiles = await scanZipFile(filePath, maxFileSize);
+          const zipFiles = await scanZipFile(filePath, maxFileSize, extSet);
           files.push(...zipFiles);
         }
       }
@@ -281,8 +292,10 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
       console.error(`Error processing file ${filePath}:`, error);
     } finally {
       processedFiles++;
-      // Report progress every 15 files instead of 100 for better responsiveness
-      if (processedFiles % 15 === 0) {
+      // Report progress more frequently in Docker (every 25 files) since operations are slower
+      // Less frequently in normal mode (every 15 files) to reduce overhead
+      const progressInterval = isDockerContainer() ? 25 : 15;
+      if (processedFiles % progressInterval === 0) {
         parentPort.postMessage({
           type: 'progress',
           processed: processedFiles
@@ -297,7 +310,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   return donePromise;
 }
 
-  async function scanZipFile(zipPath, maxFileSize) {
+  async function scanZipFile(zipPath, maxFileSize, extSet = new Set(['.stl', '.3mf'])) {
     const files = [];
     try {
       // Ensure StreamZip is loaded
@@ -308,7 +321,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
     for (const entry of Object.values(entries)) {
       if (!entry.isDirectory) {
         const ext = path.extname(entry.name).toLowerCase();
-        if (ext === '.stl' || ext === '.3mf') {
+        if (extSet.has(ext)) {
           if (entry.size <= maxFileSize) {
             // Use double colon format: zipPath::entryPath
             const filePath = `${zipPath}::${entry.name}`;
@@ -337,12 +350,14 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   return files;
 }
 
-parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives, nodeModulesPath: passedNodeModulesPath }) => {
+parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives, scanExtensions, nodeModulesPath: passedNodeModulesPath }) => {
   // Set the node_modules path if provided
   if (passedNodeModulesPath) {
     nodeModulesPath = passedNodeModulesPath;
     console.log(`[Worker] Received node_modules path: ${nodeModulesPath}`);
   }
+  
+  const extList = Array.isArray(scanExtensions) && scanExtensions.length > 0 ? scanExtensions : ['.stl', '.3mf'];
   
   // Load StreamZip now that we have the path
   try {
@@ -357,7 +372,7 @@ parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives,
     return;
   }
   try {
-    const result = await scanDirectory(directoryPath, maxFileSize, enableZipArchives);
+    const result = await scanDirectory(directoryPath, maxFileSize, enableZipArchives, extList);
     parentPort.postMessage({ type: 'done', result });
   } catch (error) {
     parentPort.postMessage({ type: 'error', error: error.message });

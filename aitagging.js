@@ -18,13 +18,34 @@ const DEFAULT_OPTIONS = {
 
 // Initialize OpenAI client with service type
 function initializeOpenAI(apiKey, baseURL, service = 'openai', puterIPCHandler = null) {
-  currentService = service;
+  // Normalize service to lowercase for comparison
+  const normalizedService = service ? String(service).toLowerCase().trim() : 'openai';
+  currentService = normalizedService;
   puterIPC = puterIPCHandler;
   
-  // For puter service, no OpenAI client needed
-  if (service === 'puter') {
+  // For puter service, no OpenAI client needed - return immediately
+  // Check for 'puter' (case-insensitive) to handle variations
+  if (normalizedService === 'puter') {
     openaiClient = null;
+    console.log('[AITagging] Skipping OpenAI client initialization for Puter.com service');
     return;
+  }
+  
+  // Validate API key for non-Puter services
+  if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
+    throw new Error('API key is required for ' + normalizedService + ' service');
+  }
+  
+  // Safety check: Never create OpenAI client for Puter.com (double-check after normalization)
+  if (normalizedService === 'puter') {
+    console.error('[AITagging] ERROR: Attempted to create OpenAI client for Puter.com - this should not happen!');
+    throw new Error('Cannot create OpenAI client for Puter.com service');
+  }
+  
+  // Final safety check: Never create OpenAI client for Puter.com (after normalization)
+  if (normalizedService === 'puter') {
+    console.error('[AITagging] CRITICAL ERROR: Attempted to create OpenAI client for Puter.com after normalization - this should never happen!');
+    throw new Error('Cannot create OpenAI client for Puter.com service');
   }
   
   // Configure client based on service type
@@ -36,7 +57,7 @@ function initializeOpenAI(apiKey, baseURL, service = 'openai', puterIPCHandler =
   // Add baseURL if provided or use default based on service
   if (baseURL) {
     config.baseURL = baseURL;
-  } else if (service === 'gemini') {
+  } else if (normalizedService === 'gemini') {
     config.baseURL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
   } else {
     config.baseURL = 'https://api.openai.com/v1';
@@ -513,48 +534,126 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
 
 // Test AI configuration
 async function testAIConfig(apiKey, baseURL, model, service = 'openai', puterIPCHandler = null) {
-  initializeOpenAI(apiKey, baseURL, service, puterIPCHandler);
+  // Normalize service to lowercase for comparison
+  let normalizedService = service ? String(service).toLowerCase().trim() : 'openai';
   
-  try {
-    if (service === 'puter') {
-      // Test puter service
-      if (!puterIPCHandler) {
-        return { success: false, error: 'Puter IPC handler is not available' };
-      }
-      
-      console.log('Testing Puter AI configuration with text-only request');
+  // If service is not 'puter' but endpoint contains 'puter.com', treat it as Puter
+  if (normalizedService !== 'puter' && baseURL && (baseURL.includes('puter.com') || baseURL.includes('js.puter.com'))) {
+    console.log('[AITagging] Endpoint contains puter.com, forcing service to puter');
+    normalizedService = 'puter';
+  }
+  
+  console.log('[AITagging] testAIConfig called with:', { 
+    service, 
+    normalizedService,
+    baseURL,
+    hasPuterHandler: !!puterIPCHandler, 
+    apiKeyLength: apiKey ? apiKey.length : 0 
+  });
+  
+  // For Puter.com, skip API key validation and OpenAI client initialization
+  // Check for 'puter' (case-insensitive) to handle variations
+  // Also check baseURL as a fallback
+  const isPuterService = normalizedService === 'puter' || 
+    (baseURL && (baseURL.includes('puter.com') || baseURL.includes('js.puter.com')));
+  
+  if (isPuterService) {
+    console.log('[AITagging] Detected Puter.com service, skipping OpenAI client initialization');
+    console.log('[AITagging] Service check:', { 
+      service, 
+      normalizedService, 
+      baseURL, 
+      isPuterService,
+      hasHandler: !!puterIPCHandler, 
+      handlerType: typeof puterIPCHandler,
+      isFunction: typeof puterIPCHandler === 'function'
+    });
+    
+    if (!puterIPCHandler) {
+      console.error('[AITagging] Puter IPC handler is not available - this should not happen for Puter service!');
+      console.error('[AITagging] Service:', service, 'Normalized:', normalizedService, 'BaseURL:', baseURL);
+      return { success: false, error: 'Puter IPC handler is not available. Please ensure Puter.com service is properly configured.' };
+    }
+    
+    try {
+      console.log('[AITagging] Testing Puter AI configuration with text-only request');
       const response = await puterIPCHandler('test', null, model || 'gpt-5-nano');
       
+      console.log('[AITagging] Puter AI test successful');
       return { 
         success: true, 
         tags: ["Puter AI connection successful"],
         response: response
       };
-    } else {
-      // Test OpenAI-compatible services
-      if (!openaiClient) {
-        return { success: false, error: 'OpenAI client is not initialized' };
-      }
-      
-      // Instead of using an image, just send a simple text message
-      console.log('Testing AI configuration with text-only request');
-      
-      const completion = await openaiClient.chat.completions.create({
-        messages: [{
-          role: "user",
-          content: "test"
-        }],
-        model: model || "gpt-4o-mini",
-        max_tokens: 50,
-      });
-      
-      // Return a tags array to maintain compatibility with the renderer
+    } catch (error) {
+      console.error('[AITagging] Error testing Puter AI config:', error);
+      return { success: false, error: error.message || 'Failed to connect to Puter.com' };
+    }
+  }
+  
+  // CRITICAL SAFETY CHECK: Never initialize OpenAI for Puter service
+  // This is a double-check in case the earlier check somehow failed
+  if (normalizedService === 'puter' || (baseURL && (baseURL.includes('puter.com') || baseURL.includes('js.puter.com')))) {
+    console.error('[AITagging] CRITICAL: Attempted to initialize OpenAI for Puter service - this should never happen!');
+    console.error('[AITagging] Service:', service, 'Normalized:', normalizedService, 'BaseURL:', baseURL);
+    return { 
+      success: false, 
+      error: 'Configuration error: Puter.com service detected but handler not available. Please check your AI configuration.' 
+    };
+  }
+  
+  // For other services, validate API key is provided before initializing
+  if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
+    console.error('[AITagging] API key is required for non-Puter services');
+    return { success: false, error: 'API key is required for ' + normalizedService + ' service' };
+  }
+  
+  // For other services, initialize OpenAI client (which will validate API key)
+  console.log('[AITagging] Non-Puter service detected, initializing OpenAI client');
+  try {
+    initializeOpenAI(apiKey, baseURL, normalizedService, puterIPCHandler);
+  } catch (error) {
+    console.error('[AITagging] Error initializing OpenAI:', error);
+    return { success: false, error: error.message };
+  }
+  
+  try {
+    // FINAL SAFETY CHECK: Never call OpenAI API for Puter service
+    // This is a triple-check to prevent any possibility of calling OpenAI for Puter
+    const finalServiceCheck = normalizedService === 'puter' || 
+      (baseURL && (baseURL.includes('puter.com') || baseURL.includes('js.puter.com')));
+    if (finalServiceCheck) {
+      console.error('[AITagging] CRITICAL: Attempted to call OpenAI API for Puter service - blocking!');
+      console.error('[AITagging] Service:', service, 'Normalized:', normalizedService, 'BaseURL:', baseURL);
       return { 
-        success: true, 
-        tags: ["API connection successful"],
-        response: completion.choices[0].message.content
+        success: false, 
+        error: 'Configuration error: Puter.com service detected. OpenAI API should not be called for Puter service.' 
       };
     }
+    
+    // Test OpenAI-compatible services
+    if (!openaiClient) {
+      return { success: false, error: 'OpenAI client is not initialized' };
+    }
+    
+    // Instead of using an image, just send a simple text message
+    console.log('[AITagging] Testing AI configuration with text-only request for service:', normalizedService);
+    
+    const completion = await openaiClient.chat.completions.create({
+      messages: [{
+        role: "user",
+        content: "test"
+      }],
+      model: model || "gpt-4o-mini",
+      max_tokens: 50,
+    });
+    
+    // Return a tags array to maintain compatibility with the renderer
+    return { 
+      success: true, 
+      tags: ["API connection successful"],
+      response: completion.choices[0].message.content
+    };
   } catch (error) {
     console.error('Error testing AI config:', error);
     return { success: false, error: error.message };

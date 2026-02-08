@@ -26,8 +26,19 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
   nameInput.dataset.originalValue = slicer.name || '';
   pathInput.dataset.originalValue = slicer.path || '';
   
+  // Always make both fields editable (never readonly) - users should be able to type manually
+  nameInput.removeAttribute('readonly');
+  nameInput.disabled = false;
+  pathInput.removeAttribute('readonly');
+  pathInput.disabled = false;
+  
   // Check if we're in server mode
   const serverMode = await window.electron.isServerMode().catch(() => false);
+  
+  // Update placeholder for path field in server mode
+  if (serverMode) {
+    pathInput.placeholder = 'Enter slicer path on your workstation';
+  }
   
   // Add browse button handler
   const browseButton = entry.querySelector('.browse-slicer-button');
@@ -36,7 +47,47 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
     e.stopPropagation();
     
     if (serverMode) {
-      // In server mode: use HTML5 file input to open local file picker on user's workstation
+      // In server mode: try to use Electron's native dialog first (works if accessed via Electron)
+      // This provides full paths, unlike HTML file input which only provides filenames
+      try {
+        // Check if Electron IPC is available
+        if (window.electron && typeof window.electron.openSlicerDialog === 'function') {
+          // Store current values before dialog
+          const currentValues = Array.from(document.querySelectorAll('.slicer-entry')).map(entry => ({
+            name: entry.querySelector('.slicer-name').value,
+            path: entry.querySelector('.slicer-path').value
+          }));
+          
+          // Add timeout to IPC call - if it takes too long, fall back to HTML input
+          const dialogPromise = window.electron.openSlicerDialog('Select Slicer');
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('IPC timeout')), 2000)
+          );
+          
+          const result = await Promise.race([dialogPromise, timeoutPromise]);
+          
+          // Restore all values after dialog
+          document.querySelectorAll('.slicer-entry').forEach((entry, index) => {
+            if (currentValues[index]) {
+              entry.querySelector('.slicer-name').value = currentValues[index].name;
+              entry.querySelector('.slicer-path').value = currentValues[index].path;
+            }
+          });
+          
+          // Update only this entry's path
+          if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+            const thisEntry = e.target.closest('.slicer-entry');
+            const thisPathInput = thisEntry.querySelector('.slicer-path');
+            thisPathInput.value = result.filePaths[0];
+          }
+          return; // Successfully used Electron dialog
+        }
+      } catch (error) {
+        console.log('Electron dialog not available, falling back to HTML file input:', error);
+      }
+      
+      // Fallback: use HTML5 file input (only provides filename, user must complete path manually)
+      // IMPORTANT: Must be triggered directly from user click, not in setTimeout, to satisfy browser security
       const fileInput = document.createElement('input');
       fileInput.type = 'file';
       fileInput.style.display = 'none';
@@ -87,20 +138,35 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
         }, 100);
       });
       
-      // Add to DOM and trigger click
+      // Add to DOM immediately
       document.body.appendChild(fileInput);
       
-      // Use a small delay to ensure the input is in the DOM
-      setTimeout(() => {
+      // Trigger click immediately (must be synchronous with user click for browser security)
+      // Try direct click first, then fallback to requestAnimationFrame if needed
+      try {
+        // Direct click - this must happen synchronously in the user event handler
         fileInput.click();
-        
-        // Clean up if no file is selected after a reasonable time (user cancelled)
-        setTimeout(() => {
-          if (!fileSelected && fileInput.parentNode) {
-            fileInput.parentNode.removeChild(fileInput);
+      } catch (error) {
+        console.error('Error triggering file input directly:', error);
+        // Fallback: try with requestAnimationFrame (may not work due to browser security)
+        requestAnimationFrame(() => {
+          try {
+            fileInput.click();
+          } catch (error2) {
+            console.error('Error triggering file input:', error2);
+            // If click fails, show message to user
+            alert('Unable to open file dialog. Please manually enter the slicer path in the input field.\n\n' +
+              'Example: C:\\Program Files\\PrusaSlicer\\prusa-slicer.exe');
           }
-        }, 500);
-      }, 10);
+        });
+      }
+      
+      // Clean up if no file is selected after a reasonable time (user cancelled)
+      setTimeout(() => {
+        if (!fileSelected && fileInput.parentNode) {
+          fileInput.parentNode.removeChild(fileInput);
+        }
+      }, 500);
     } else {
       // Normal mode: use file dialog
       // Store current values before dialog
@@ -128,11 +194,12 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
     }
   });
   
-  // In server mode, make the path input editable and update placeholder
-  if (serverMode) {
-    pathInput.removeAttribute('readonly');
-    pathInput.placeholder = 'Enter slicer path on your workstation';
-  }
+  // Both fields are already made editable above, but ensure they remain editable
+  // (This is a safety check in case something else tries to disable them)
+  nameInput.removeAttribute('readonly');
+  nameInput.disabled = false;
+  pathInput.removeAttribute('readonly');
+  pathInput.disabled = false;
   
   // Add remove button handler
   const removeButton = entry.querySelector('.remove-slicer-button');

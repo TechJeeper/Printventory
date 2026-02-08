@@ -1,5 +1,7 @@
 // Preview modal for 3D models
+console.log('[Preview] preview.js script loaded');
 (function() {
+  console.log('[Preview] preview.js IIFE executing');
   let previewScene = null;
   let previewCamera = null;
   let previewRenderer = null;
@@ -11,9 +13,56 @@
   let previewLoadToken = 0;
   let preview3mfRequestId = null;
 
+  // Register preview-model listener
+  // In server mode: server-bridge.js registers the listener and calls window.openPreview
+  // In normal mode: preview.js registers the listener directly
+  const previewCallback = (filePath) => {
+    console.log('[Preview] Received preview-model event for file:', filePath);
+    try {
+      openPreview(filePath);
+    } catch (error) {
+      console.error('[Preview] Error opening preview:', error);
+    }
+  };
+  
+  // Register listener - works in both normal mode and server mode
+  // In server mode, server-bridge.js will also register, but that's OK - it calls window.openPreview
+  // In normal mode, this is the only registration
+  if (window.electron && typeof window.electron.receive === 'function') {
+    console.log('[Preview] Registering preview-model listener via receive()');
+    window.electron.receive('preview-model', previewCallback);
+  } else if (window.electron && typeof window.electron.on === 'function') {
+    console.log('[Preview] Registering preview-model listener via on()');
+    window.electron.on('preview-model', previewCallback);
+  } else {
+    console.warn('[Preview] window.electron not available yet, will retry');
+    // Retry when electron is available
+    const maxAttempts = 50;
+    let attempts = 0;
+    const retryInterval = setInterval(() => {
+      attempts++;
+      if (window.electron && typeof window.electron.receive === 'function') {
+        console.log('[Preview] Registering preview-model listener via receive() (retry)');
+        window.electron.receive('preview-model', previewCallback);
+        clearInterval(retryInterval);
+      } else if (window.electron && typeof window.electron.on === 'function') {
+        console.log('[Preview] Registering preview-model listener via on() (retry)');
+        window.electron.on('preview-model', previewCallback);
+        clearInterval(retryInterval);
+      } else if (attempts >= maxAttempts) {
+        console.error('[Preview] Failed to register preview-model listener after', attempts, 'attempts');
+        clearInterval(retryInterval);
+      }
+    }, 100);
+  }
+
   // Initialize preview modal
   function initPreviewModal() {
     const dialog = document.getElementById('preview-dialog');
+    if (!dialog) {
+      console.error('[Preview] preview-dialog element not found!');
+      return;
+    }
     const closeBtn = document.getElementById('close-preview');
     const resetBtn = document.getElementById('preview-reset-view');
     const wireframeBtn = document.getElementById('preview-toggle-wireframe');
@@ -54,11 +103,6 @@
       }
     });
 
-    // Listen for preview events from main process
-    window.electron.receive('preview-model', (filePath) => {
-      openPreview(filePath);
-    });
-
     // Listen for 3MF preview status updates
     window.electron.on3MFPreviewStatus((requestId, message) => {
       if (requestId !== preview3mfRequestId) return;
@@ -71,10 +115,15 @@
 
   // Open preview modal
   async function openPreview(filePath) {
-    console.log('Opening preview for:', filePath);
+    console.log('[Preview] openPreview called with:', filePath);
     currentFilePath = filePath;
     const loadToken = ++previewLoadToken;
     const dialog = document.getElementById('preview-dialog');
+    
+    if (!dialog) {
+      console.error('[Preview] preview-dialog element not found!');
+      return;
+    }
     const modelName = document.getElementById('preview-model-name');
     const loading = document.getElementById('preview-loading');
     const fileType = document.getElementById('preview-file-type');
@@ -124,6 +173,11 @@
       `;
     }
   }
+  
+  // CRITICAL: Expose openPreview globally immediately after function definition
+  // This allows the bridge to find and call it in server/Docker mode
+  window.openPreview = openPreview;
+  console.log('[Preview] Exposed window.openPreview globally');
 
   // Initialize Three.js scene
   function initPreviewScene() {
@@ -381,11 +435,18 @@
         reject(new Error('Preview cancelled'));
         return;
       }
-      const ext = filePath.split('.').pop().toLowerCase();
+      const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
+      const ext = pathForExt.split('.').pop().toLowerCase();
       const fileType = document.getElementById('preview-file-type');
       
       fileType.textContent = `Type: ${ext.toUpperCase()}`;
       console.log('Loading model type:', ext);
+
+      // Only STL and 3MF support 3D preview; show message for other types
+      if (ext !== 'stl' && ext !== '3mf') {
+        reject(new Error('Preview not available for this file type. Only STL and 3MF models can be previewed in 3D.'));
+        return;
+      }
 
       try {
         if (ext === 'stl') {
@@ -700,7 +761,9 @@
 
   // Initialize when DOM is ready
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initPreviewModal);
+    document.addEventListener('DOMContentLoaded', () => {
+      initPreviewModal();
+    });
   } else {
     initPreviewModal();
   }

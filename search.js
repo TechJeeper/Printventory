@@ -3,12 +3,17 @@
 // It returns a set of filtered models and offers an initializer to add
 // event listeners to the new search bar in the filter menu.
 
+console.log('[search.js] Script loading...');
+
 // Global variable to store the last non-empty search term
 let lastSearchTerm = "";
 // Flag to track if a filtering operation is in progress
 let isFilteringInProgress = false;
+// Generation counter so a filter change during progressive load wins over stale "rest" response
+let searchGeneration = 0;
 
-export async function getCombinedFilteredModels() {
+// Optional overrides: { limit, offset } for progressive load when clearing filters (Server/Docker)
+async function getCombinedFilteredModels(overrides = {}) {
   // Get all models using the current sort option.
   const sortSelect = document.getElementById("sort-select");
   const sortOption = sortSelect ? sortSelect.value : "date-desc";
@@ -26,39 +31,39 @@ export async function getCombinedFilteredModels() {
   const currentSearchTerm = searchInput ? searchInput.value.trim() : "";
 
   // Check if any filters are active - if so, we should reset viewingEntireLibrary flag
-  const hasActiveFilters = designer || license || parentModel || printStatus !== "all" || 
+  const hasActiveFilters = designer || license || parentModel || printStatus !== "all" ||
                           tagFilter || fileType || currentSearchTerm || window.currentDirectoryFilter || window.dateAddedFilter;
-  
+
   if (hasActiveFilters && window.viewingEntireLibrary) {
     // Reset the flag since filters are now being applied
     window.viewingEntireLibrary = false;
     console.log("Reset viewingEntireLibrary flag due to active filters");
   }
 
-  // Construct filters object
-  // dateAddedFilter works as an additional filter (AND condition) with other filters
+  // Construct filters object; allow limit/offset overrides for progressive load
   const filters = {
     sortOption,
     designer,
-    designerInverted: window.invertedFilters?.designer || false,  // Add inverted filter flag
+    designerInverted: window.invertedFilters?.designer || false,
     dateAdded: window.dateAddedFilter || null,
     license,
-    licenseInverted: window.invertedFilters?.license || false,  // Add inverted filter flag
+    licenseInverted: window.invertedFilters?.license || false,
     parentModel,
-    parentModelInverted: window.invertedFilters?.parentModel || false,  // Add inverted filter flag
+    parentModelInverted: window.invertedFilters?.parentModel || false,
     printed: printStatus === "all" ? undefined : printStatus,
     tag: tagFilter,
-    tagInverted: window.invertedFilters?.tag || false,  // Add inverted filter flag
+    tagInverted: window.invertedFilters?.tag || false,
     fileType,
     search: currentSearchTerm,
     searchInverted: window.invertedFilters?.search || false,
     directory: window.currentDirectoryFilter
   };
+  if (overrides.limit != null) filters.limit = overrides.limit;
+  if (overrides.offset != null) filters.offset = overrides.offset;
 
   console.log("Requesting filtered models from backend:", filters);
 
   try {
-    // Use the new optimized IPC handler to get filtered results directly from DB
     const models = await window.electron.getModelsFiltered(filters);
     console.log(`Received ${models.length} models from backend`);
     return models;
@@ -68,7 +73,7 @@ export async function getCombinedFilteredModels() {
   }
 }
 
-export async function performCombinedSearch() {
+async function performCombinedSearch() {
   try {
     // Log the call stack to see what's calling this
     console.log("performCombinedSearch called from:", new Error().stack);
@@ -78,16 +83,29 @@ export async function performCombinedSearch() {
       console.log("Filtering operation already in progress, ignoring new request");
       return;
     }
+
+    const myGeneration = ++searchGeneration;
+
+    // Detect if we're loading full library (no filters) - e.g. after "Clear All Filters"
+    const designer = document.getElementById("designer-select")?.value || "";
+    const license = document.getElementById("license-select")?.value || "";
+    const parentModel = document.getElementById("parent-select")?.value || "";
+    const printStatus = document.getElementById("printed-select")?.value || "all";
+    const tagFilter = document.getElementById("tag-filter")?.value || "";
+    const fileType = document.getElementById("filetype-select")?.value || "";
+    const searchTerm = (document.getElementById("search-filter-input")?.value || "").trim();
+    const noFiltersActive = !designer && !license && !parentModel && printStatus === "all" &&
+      !tagFilter && !fileType && !searchTerm && !window.currentDirectoryFilter && !window.dateAddedFilter;
     
     // Set the filtering flag to prevent concurrent operations
     isFilteringInProgress = true;
     
-    // Show loading spinner
-    const spinner = document.getElementById('spinner');
-    if (spinner) spinner.classList.remove('hidden');
-    
-    // Disable all filter controls to prevent user interaction during loading
-    toggleFilterControls(false);
+    // When clearing filters (full library load), skip spinner so UI feels responsive
+    if (!noFiltersActive) {
+      const spinner = document.getElementById('spinner');
+      if (spinner) spinner.classList.remove('hidden');
+      toggleFilterControls(false);
+    }
     
     console.log("Performing combined search...", window.dateAddedFilter ? `dateAddedFilter: ${window.dateAddedFilter}` : 'no dateAddedFilter');
     
@@ -100,14 +118,33 @@ export async function performCombinedSearch() {
     
     const viewLibMsg = document.getElementById("view-library-message");
     if (viewLibMsg) { viewLibMsg.style.display = "none"; }
-    
-    // Get the filtered models (this will preserve dateAddedFilter if set)
-    const filteredModels = await getCombinedFilteredModels();
+
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    const PROGRESSIVE_INITIAL = 400;
+
+    let filteredModels;
+    if (noFiltersActive && serverMode) {
+      // Progressive load: show first batch quickly to reduce perceived lag when clearing filters (Server/Docker)
+      filteredModels = await getCombinedFilteredModels({ limit: PROGRESSIVE_INITIAL });
+      if (searchGeneration !== myGeneration) return;
+      updateFilterIndicator(filteredModels.length);
+      await window.renderFiles(filteredModels);
+      // Allow filter changes while rest loads; only apply rest if this search is still current
+      isFilteringInProgress = false;
+      getCombinedFilteredModels({ offset: PROGRESSIVE_INITIAL })
+        .then((rest) => {
+          if (searchGeneration !== myGeneration) return;
+          const full = filteredModels.concat(rest);
+          updateFilterIndicator(full.length);
+          return window.renderFiles(full);
+        })
+        .catch((err) => console.error("Progressive load rest failed:", err));
+      return; // exit so finally runs; rest runs in background
+    }
+
+    filteredModels = await getCombinedFilteredModels();
     console.log(`Got ${filteredModels.length} filtered models, rendering...`, window.dateAddedFilter ? `(filtered by dateAdded)` : '');
-    
-    // Update filter indicator with active filters
     updateFilterIndicator(filteredModels.length);
-    
     await window.renderFiles(filteredModels);
  
   } catch (error) {
@@ -126,7 +163,7 @@ export async function performCombinedSearch() {
 }
 
 // Function to update the filter indicator with active filters
-export function updateFilterIndicator(count) {
+function updateFilterIndicator(count) {
   const filterIndicator = document.getElementById("current-filter");
   if (!filterIndicator) return;
   
@@ -270,10 +307,14 @@ export function updateFilterIndicator(count) {
       // Clear the directory filter if it exists
       window.currentDirectoryFilter = "";
       
+      // Clear date-added filter so "Clear All Filters" really clears everything
+      window.dateAddedFilter = null;
+      window._lastDateAddedFilter = null;
+      
       // Clear the last search term
       lastSearchTerm = "";
       
-      // Reset the filter indicator
+      // Reset the filter indicator immediately so UI feels responsive
       filterIndicator.innerHTML = "";
       filterIndicator.classList.remove('visible');
 
@@ -286,7 +327,8 @@ export function updateFilterIndicator(count) {
         window.invertedFilters.search = false;
       }
       
-      // Perform search with cleared filters
+      // Let the cleared UI paint first, then run the search (reduces perceived delay)
+      await new Promise(r => requestAnimationFrame(r));
       await performCombinedSearch();
     });
   }
@@ -343,7 +385,7 @@ export function updateFilterIndicator(count) {
   });
 }
 
-export async function initializeCombinedSearch() {
+async function initializeCombinedSearch() {
   const searchInput = document.getElementById("search-filter-input");
   const searchButton = document.getElementById("filter-search-button");
   const clearButton = document.getElementById("clear-filter-search-button");
@@ -388,7 +430,7 @@ export async function initializeCombinedSearch() {
     const savedSortOption = await window.electron.getSetting('sortOption');
     if (savedSortOption) {
       // Validate that the saved option is a valid sort option
-      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc'];
+      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc', 'directory-asc', 'directory-desc', 'designer-asc', 'designer-desc', 'parentmodel-asc', 'parentmodel-desc', 'printed-asc', 'printed-desc'];
       if (validOptions.includes(savedSortOption)) {
         newSortSelect.value = savedSortOption;
       } else {
@@ -404,6 +446,12 @@ export async function initializeCombinedSearch() {
     newSortSelect.addEventListener('change', async (e) => {
       const sortValue = e.target.value;
       console.log(`Sort changed: ${sortValue}`);
+      
+      // Update sort indicators in list view header
+      const listHeader = document.querySelector('.list-view-header');
+      if (listHeader && listHeader.updateSortIndicators) {
+        listHeader.updateSortIndicators();
+      }
       
       // Save the sort preference to the database
       try {
@@ -495,6 +543,19 @@ export async function initializeCombinedSearch() {
   });
 }
 
+// Attach functions to the global window object IMMEDIATELY
+// This ensures they're available before renderer.js tries to use them
+window.getCombinedFilteredModels = getCombinedFilteredModels;
+window.updateFilterIndicator = updateFilterIndicator;
+window.performCombinedSearch = performCombinedSearch;
+window.initializeCombinedSearch = initializeCombinedSearch;
+window.isFilteringInProgress = isFilteringInProgress;
+window.checkFilterStatus = function() {
+  return isFilteringInProgress;
+};
+
+console.log('[search.js] Functions attached to window object');
+
 // Make sure renderFiles is accessible
 document.addEventListener("DOMContentLoaded", async () => {
   console.log("Initializing combined search from search.js");
@@ -505,16 +566,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     window.renderFiles = renderFiles;
   }
 });
-
-// Attach functions to the global window object
-window.getCombinedFilteredModels = getCombinedFilteredModels;
-window.updateFilterIndicator = updateFilterIndicator;
-window.performCombinedSearch = performCombinedSearch;
-window.initializeCombinedSearch = initializeCombinedSearch;
-window.isFilteringInProgress = isFilteringInProgress;
-window.checkFilterStatus = function() {
-  return isFilteringInProgress;
-};
 
 // Helper function to toggle the enabled state of all filter controls
 function toggleFilterControls(enabled) {

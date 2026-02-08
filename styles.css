@@ -1,3 +1,7 @@
+html {
+  overflow-x: hidden;
+}
+
 body {
   font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 50%, #1a1a2e 100%);
@@ -8,6 +12,8 @@ body {
   min-height: 100vh;
   margin: 0;
   padding: 0;
+  padding-left: 0 !important;
+  margin-left: 0 !important;
   letter-spacing: 0.01em;
   overflow-x: hidden;
 }
@@ -94,7 +100,9 @@ select option:not(:checked):not([selected]):not(:hover) {
   height: 100vh;
   position: fixed;
   top: 0;
-  left: 0;
+  left: 0 !important;
+  margin-left: 0 !important;
+  transform: none !important;
   background: rgba(30, 30, 46, 0.7);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
@@ -104,8 +112,26 @@ select option:not(:checked):not([selected]):not(:hover) {
   align-items: center;
   padding-top: 20px;
   box-shadow: 4px 0 20px rgba(0, 0, 0, 0.3), inset -1px 0 0 rgba(255, 255, 255, 0.05);
+  overflow-x: hidden;
   overflow-y: auto;
   z-index: 100;
+}
+
+/* Docker/Server mode: same layout fix + menu bar offset */
+body.server-mode {
+  overflow-x: hidden;
+  padding-left: 0 !important;
+  margin-left: 0 !important;
+}
+html.server-mode {
+  overflow-x: hidden;
+}
+body.server-mode .sidebar {
+  left: 0 !important;
+  top: 30px !important;
+  height: calc(100vh - 30px) !important;
+  transform: none !important;
+  margin-left: 0 !important;
 }
 
 #logo {
@@ -598,6 +624,165 @@ button:disabled {
   margin-bottom: 0;
 }
 
+/* STL Home: checkbox row – only checkbox + label in one row; native checkbox look, themed size */
+.stl-home-path-metadata-checkbox-row {
+  margin-bottom: 0.5rem;
+}
+#stl-home-dialog #stl-home-path-metadata-enabled,
+#stl-home-dialog #stl-home-use-designer,
+#stl-home-dialog #stl-home-use-parent-model {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  -webkit-appearance: checkbox;
+  -moz-appearance: checkbox;
+  appearance: checkbox;
+  accent-color: var(--primary-accent, #00d4ff);
+  cursor: pointer;
+  pointer-events: auto;
+}
+#stl-home-dialog .stl-home-path-metadata-checkbox-row label {
+  cursor: pointer;
+  pointer-events: auto;
+}
+/* Ensure main Enable row is always clickable (Docker/server mode) */
+#stl-home-dialog #stl-home-path-metadata-group > .checkbox-container:first-of-type {
+  pointer-events: auto;
+}
+
+/* STL Home: directory row – input + smaller Choose/Clear buttons side by side */
+.stl-home-dir-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.stl-home-dir-row #stl-home-directory {
+  flex: 1;
+  min-width: 0;
+}
+.stl-home-dir-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.stl-home-dir-buttons .primary-button,
+.stl-home-dir-buttons .secondary-button {
+  padding: 6px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* STL Home: Designer and Parent model in columns side by side */
+.path-metadata-indices {
+  display: flex;
+  flex-direction: row;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.path-metadata-indices .path-metadata-col {
+  flex: 1;
+  min-width: 140px;
+  margin-bottom: 0;
+}
+.path-metadata-indices .path-metadata-col input[type="number"] {
+  width: 4rem;
+}
+
+/* STL Home: gray out options when "Enable" is unchecked */
+.stl-home-path-metadata-options.grayed {
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Example path in STL Home dialog */
+#stl-home-dialog .path-example {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.95em;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.stl-home-path-metadata-options.grayed .path-example {
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* STL Home dialog: ensure Cancel/Save buttons are clickable in Docker/server (browser) mode */
+#stl-home-dialog .dialog-buttons {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+}
+
+/* File Type Settings dialog: ensure Save/Cancel buttons are clickable in Docker/server mode */
+#file-type-settings-dialog .dialog-buttons {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+}
+
+/* Purge Models dialog: ensure Purge/Cancel buttons are clickable in Docker/server mode */
+#purge-models-dialog .dialog-buttons {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+}
+
+/* Docker/Server mode: ensure ALL modal dialog buttons and fullscreen toggles are clickable */
+.modal .dialog-buttons,
+.modal .modal-fullscreen-toggle,
+.modal .dialog-buttons button {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+}
+
+/* Additional file types grid in File Type Settings */
+.scan-file-types-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px 24px;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 8px;
+  margin-bottom: 0;
+  padding: 0;
+}
+
+.scan-file-type-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 6px 0;
+  cursor: pointer;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.scan-file-type-option input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--primary-accent, #00d4ff);
+}
+
+.scan-file-type-option span {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 main {
   position: relative;
 }
@@ -793,7 +978,8 @@ main {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 20px;
+  gap: 12px;
+  overflow: visible;
 }
 
 .file-item-list .file-name {
@@ -819,11 +1005,18 @@ main {
 }
 
 .file-item-list .directory-info-column,
-.file-item-list .designer-info-column,
-.file-item-list .tags-info-column {
+.file-item-list .designer-info-column {
   display: flex;
   align-items: center;
   overflow: hidden;
+}
+
+.file-item-list .tags-info-column {
+  display: flex;
+  align-items: center;
+  overflow: visible;
+  flex-shrink: 1;
+  min-width: 160px;
 }
 
 .file-item-list .directory-info-column svg,
@@ -864,6 +1057,34 @@ main {
 
 .list-view-header svg {
   opacity: 0.6;
+}
+
+/* Sortable header styles */
+.list-view-header .sortable-header {
+  transition: color 0.2s ease, background-color 0.2s ease;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.list-view-header .sortable-header:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.list-view-header .sortable-header.sort-active {
+  color: #fff !important;
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+.list-view-header .sort-indicator {
+  font-size: 14px;
+  font-weight: bold;
+  color: #4a9eff;
+  line-height: 1;
+  margin-left: 4px;
+}
+
+.list-view-header .sortable-header.sort-active .sort-indicator {
+  color: #6bb3ff;
 }
 
 /* Preview view (formerly Small thumbnail) - Optimized */
@@ -1720,6 +1941,40 @@ header {
   -webkit-backdrop-filter: blur(8px);
 }
 
+/* Keyboard shortcuts dialog */
+.keyboard-shortcuts-intro {
+  margin: 0 0 1rem 0;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+.keyboard-shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+.keyboard-shortcuts-list .shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.keyboard-shortcuts-list .shortcut-action {
+  flex: 1;
+}
+.keyboard-shortcuts-list kbd {
+  display: inline-block;
+  padding: 0.2em 0.5em;
+  font-size: 0.85em;
+  font-family: inherit;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
 .dialog-buttons {
   display: flex;
   gap: 10px;
@@ -1745,6 +2000,21 @@ header {
 }
 
 .dialog-buttons button[type="submit"]:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(91, 159, 255, 0.4);
+}
+
+/* STL Home Save button is type="button" for Docker/server save reliability; keep primary style */
+#stl-home-dialog #save-stl-home-button {
+  background: linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  padding: 10px 20px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(91, 159, 255, 0.3);
+}
+#stl-home-dialog #save-stl-home-button:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(91, 159, 255, 0.4);
 }
@@ -2524,6 +2794,57 @@ header {
 .dedup-dialog .duplicate-groups {
   max-height: calc(80vh - 120px);
   overflow-y: auto;
+}
+
+/* Fullscreen toggle button for DeDup and Tag Manager modals */
+.modal-fullscreen-toggle {
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s ease;
+}
+.modal-fullscreen-toggle:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Modal fullscreen state */
+.modal.modal-fullscreen {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  margin: 0;
+  border-radius: 0;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.modal.modal-fullscreen form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.dedup-dialog.modal-fullscreen .duplicate-groups {
+  flex: 1;
+  min-height: 0;
+  max-height: none !important;
+  margin-top: 0.5rem;
+}
+#tag-manager-dialog.modal-fullscreen form .form-group:nth-child(3) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#tag-manager-dialog.modal-fullscreen #tag-manager-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .duplicate-group {
@@ -4117,6 +4438,14 @@ header {
   margin: 5px 0 10px 0;
 }
 
+#browser-extension-settings-dialog .setting-description a {
+  color: #7eb8f7;
+  text-decoration: underline;
+}
+#browser-extension-settings-dialog .setting-description a:hover {
+  color: #a8d4ff;
+}
+
 .full-width-button {
   width: 100%;
   max-width: 240px; /* Match filter section width */
@@ -4307,6 +4636,22 @@ header {
 
 .danger-button:hover {
   background-color: #c82333;
+}
+
+.easy-button {
+  background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.easy-button:hover {
+  background: linear-gradient(135deg, #218838 0%, #1aa179 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
 }
 
 .warning-text {
@@ -5690,4 +6035,125 @@ header {
     font-size: 13px;
     padding: 8px 16px;
   }
+}
+
+/* Manage Thumbnails Modal Styles */
+.thumbnails-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 16px;
+  max-height: 500px;
+  overflow-y: auto;
+  padding: 8px;
+  margin-top: 16px;
+}
+
+.thumbnail-item {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 2px solid transparent;
+  background: var(--model-background-color);
+}
+
+.thumbnail-item:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.thumbnail-item.active {
+  border-color: #00d4ff;
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.3);
+}
+
+.thumbnail-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumbnail-item-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.thumbnail-item:hover .thumbnail-item-overlay {
+  opacity: 1;
+}
+
+.thumbnail-item-label {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  z-index: 2;
+}
+
+.thumbnail-item.active .thumbnail-item-label {
+  background: rgba(0, 212, 255, 0.9);
+  color: #000;
+}
+
+.thumbnail-item-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  margin: 4px;
+}
+
+.thumbnail-item-button.set-active {
+  background: linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%);
+  color: white;
+}
+
+.thumbnail-item-button.set-active:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(91, 159, 255, 0.4);
+}
+
+.thumbnail-item-button.delete {
+  background: rgba(255, 59, 48, 0.9);
+  color: white;
+}
+
+.thumbnail-item-button.delete:hover {
+  background: rgba(255, 59, 48, 1);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(255, 59, 48, 0.4);
+}
+
+.thumbnail-item-button.delete:disabled {
+  background: rgba(128, 128, 128, 0.5);
+  color: rgba(255, 255, 255, 0.5);
+  cursor: not-allowed;
+  transform: none;
+}
+
+.thumbnail-item-button.delete:disabled:hover {
+  transform: none;
+  box-shadow: none;
 }

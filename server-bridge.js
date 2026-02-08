@@ -9,6 +9,16 @@
     return;
   }
   
+  // Don't initialize bridge in Electron windows (hidden window in server mode)
+  // Only initialize in browser contexts (where window.electron doesn't exist from preload)
+  // Check if window.electron already exists with methods from preload.js (not from bridge)
+  if (window.electron && typeof window.electron.invoke === 'function' && !window._electronBridgeReady) {
+    // This is likely the hidden Electron window with preload.js, not a browser
+    // The hidden window uses preload.js for IPC, not server-bridge.js for WebSocket
+    console.log('[Bridge] Detected Electron window context (preload.js), skipping bridge initialization');
+    return;
+  }
+  
   // CRITICAL: Initialize window.electron immediately, before anything else
   // This prevents "Cannot read properties of undefined" errors
   if (!window.electron) {
@@ -17,14 +27,25 @@
   } else {
     console.log('[Bridge] window.electron already exists, will extend it');
   }
-  window._electronEventListeners = window._electronEventListeners || {};
+  
+  // CRITICAL: Initialize _electronEventListeners immediately
+  if (!window._electronEventListeners) {
+    window._electronEventListeners = {};
+    console.log('[Bridge] Created window._electronEventListeners object');
+  } else {
+    console.log('[Bridge] window._electronEventListeners already exists');
+  }
   
   // Define on() method IMMEDIATELY so it's always available
   window.electron.on = function(channel, callback) {
+    if (!window._electronEventListeners) {
+      window._electronEventListeners = {};
+    }
     if (!window._electronEventListeners[channel]) {
       window._electronEventListeners[channel] = [];
     }
     window._electronEventListeners[channel].push(callback);
+    console.log('[Bridge] Registered listener for channel:', channel, 'Total listeners:', window._electronEventListeners[channel].length);
   };
   console.log('[Bridge] window.electron.on method defined');
   
@@ -35,7 +56,16 @@
   const maxReconnectAttempts = 5;
   const pendingRequests = new Map();
   let requestIdCounter = 0;
-  
+
+  // Promise that resolves when WebSocket connects (so first load doesn't run before bridge is ready)
+  let connectionReadyResolve;
+  const connectionReady = new Promise(function(resolve) {
+    connectionReadyResolve = resolve;
+  });
+  window.electron.whenConnected = function() {
+    return connectionReady;
+  };
+
   // Define send() method - will be enhanced when WebSocket connects
   let sendFunction = function(channel, ...args) {
     // Will be enhanced when WebSocket connects
@@ -124,6 +154,10 @@
         console.log('WebSocket connected to Printventory server');
         console.log('[Bridge] WebSocket readyState after open:', ws.readyState);
         reconnectAttempts = 0;
+        if (connectionReadyResolve) {
+          connectionReadyResolve();
+          connectionReadyResolve = null;
+        }
       };
       
       ws.onmessage = (event) => {
@@ -160,13 +194,40 @@
             }
           } else if (data.type === 'event') {
             // Handle events (like 'refresh-grid', 'scan-progress', etc.)
+            console.log('[Bridge] Received event:', data.channel, 'with args:', data.args);
             const eventListeners = window._electronEventListeners || {};
             const listeners = eventListeners[data.channel] || [];
-            listeners.forEach(listener => {
+            console.log('[Bridge] Found', listeners.length, 'listener(s) for channel:', data.channel);
+            if (listeners.length === 0) {
+              console.warn('[Bridge] No listeners registered for event channel:', data.channel);
+              // Debug: Show all registered channels
+              const allChannels = Object.keys(eventListeners);
+              console.log('[Bridge] All registered channels:', allChannels);
+              // Debug: Check if onHashGenerationProgress exists
+              if (data.channel === 'hash-generation-progress') {
+                console.log('[Bridge] window.electron.onHashGenerationProgress exists:', typeof window.electron?.onHashGenerationProgress);
+                console.log('[Bridge] window.electron.on exists:', typeof window.electron?.on);
+                console.log('[Bridge] _electronEventListeners type:', typeof window._electronEventListeners);
+                console.log('[Bridge] _electronEventListeners keys:', Object.keys(window._electronEventListeners || {}));
+              }
+              // Debug for tag generation events
+              if (data.channel === 'start-single-tag-generation' || data.channel === 'start-batch-tag-generation') {
+                console.log('[Bridge] Tag generation event received but no listeners!');
+                console.log('[Bridge] window.electron.on exists:', typeof window.electron?.on);
+                console.log('[Bridge] _electronEventListeners keys:', Object.keys(window._electronEventListeners || {}));
+                console.log('[Bridge] Attempting to register listener now...');
+                // Try to register listener if window.electron.on exists
+                if (typeof window.electron.on === 'function') {
+                  console.log('[Bridge] window.electron.on is a function, listeners should be registerable');
+                }
+              }
+            }
+            listeners.forEach((listener, index) => {
               try {
+                console.log('[Bridge] Calling listener', index, 'for channel:', data.channel, 'with args:', data.args);
                 listener(...(data.args || []));
               } catch (error) {
-                console.error('Error in event listener:', error);
+                console.error('[Bridge] Error in event listener:', error);
               }
             });
           }
@@ -228,14 +289,15 @@
         args
       }));
       
-      // Timeout after 30 seconds
-      setTimeout(() => {
+      // test-ai-config can take longer when using Puter (captcha, network)
+      var timeoutMs = (channel === 'test-ai-config') ? 60000 : 30000;
+      setTimeout(function() {
         if (pendingRequests.has(id)) {
           pendingRequests.delete(id);
           console.error('[Bridge] IPC call timeout:', channel, 'id:', id);
-          reject(new Error(`IPC call timeout: ${channel}`));
+          reject(new Error('IPC call timeout: ' + channel));
         }
-      }, 30000);
+      }, timeoutMs);
     });
   }
   
@@ -275,6 +337,7 @@
     'saveModelTags': 'save-model-tags',
     'getSetting': 'get-setting',
     'saveSetting': 'save-setting',
+    'getAppVersion': 'get-app-version',
     'checkCollectUsage': 'check-collect-usage',
     'purgeThumbnails': 'purge-thumbnails',
     'trackEvent': 'track-event',
@@ -303,6 +366,7 @@
     'addThumbnail': 'add-thumbnail',
     'addMultipleThumbnails': 'add-multiple-thumbnails',
     'setDefaultThumbnail': 'set-default-thumbnail',
+    'deleteThumbnail': 'delete-thumbnail',
     'checkForUpdates': 'check-for-updates',
     'openUpdatePage': 'open-update-page',
     'testAIConfig': 'test-ai-config',
@@ -329,7 +393,11 @@
     'pull3MFMetadata': 'pull-3mf-metadata',
     'readModelFile': 'read-model-file',
     'parse3MFPreview': 'parse-3mf-preview',
-    'cancel3MFPreview': 'cancel-3mf-preview'
+    'cancel3MFPreview': 'cancel-3mf-preview',
+    'executeClientCommand': 'execute-client-command',
+    'getGpuInfo': 'get-gpu-info',
+    'benchmarkFilesystem': 'benchmark-filesystem',
+    'benchmarkDatabase': 'benchmark-database'
   };
   
   // Create proxy methods for all IPC calls IMMEDIATELY and SYNCHRONOUSLY
@@ -384,6 +452,12 @@
     });
   };
   
+  window.electron.onOpenSystemReport = function(callback) {
+    window.electron.on('open-system-report', async () => {
+      await callback();
+    });
+  };
+  
   window.electron.onOpenBackupRestore = function(callback) {
     window.electron.on('open-backup-restore', callback);
   };
@@ -433,12 +507,127 @@
     window.electron.on('open-slicer-settings', callback);
   };
   
+  // Handle client-side command execution (for server mode)
+  window.electron.on('execute-client-command', async (commandData) => {
+    try {
+      if (!commandData || !commandData.type) {
+        console.error('[Bridge] Invalid command data:', commandData);
+        return;
+      }
+
+      const { type, filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath } = commandData;
+
+      if (type === 'open-file') {
+        // For browser clients, try to download and open, or show message
+        console.log('[Bridge] Open file requested:', filePath);
+        // Trigger download which browser can then open
+        window.electron.on('download-model', async (path) => {
+          // This will trigger the download handler
+        });
+        // Trigger download
+        const encodedPath = encodeURIComponent(filePath);
+        const downloadUrl = `/api/download/${encodedPath}`;
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = '';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => link.remove(), 100);
+      } else if (type === 'open-in-slicer') {
+        // For browser clients, show instructions (can't execute local commands)
+        console.log('[Bridge] Open in slicer requested:', filePath, slicerName);
+        let message = `To open this file in ${slicerName}:\n\n`;
+        
+        if (isZipEntry && zipPath && entryPath) {
+          message += `1. Download the ZIP file: ${zipPath}\n`;
+          message += `2. Extract ${entryPath} from the ZIP\n`;
+          message += `3. Open ${entryPath} in ${slicerName}\n\n`;
+        } else {
+          message += `1. Download the file (use the Download option)\n`;
+          message += `2. Open ${slicerName} on your workstation\n`;
+          message += `3. Open the downloaded file in ${slicerName}\n\n`;
+          message += `File: ${filePath}\n`;
+        }
+        
+        message += `Slicer Path: ${slicerPath}`;
+        
+        alert(message);
+      }
+    } catch (error) {
+      console.error('[Bridge] Error handling client command:', error);
+    }
+  });
+  
   window.electron.onOpenPurgeModels = function(callback) {
     window.electron.on('open-purge-models', callback);
   };
   
   window.electron.onHashGenerationProgress = function(callback) {
-    window.electron.on('hash-generation-progress', (event, progress) => callback(progress));
+    console.log('[Bridge] ===== onHashGenerationProgress CALLED =====');
+    console.log('[Bridge] Callback type:', typeof callback);
+    console.log('[Bridge] Stack trace:', new Error().stack);
+    // Ensure _electronEventListeners exists
+    if (!window._electronEventListeners) {
+      window._electronEventListeners = {};
+      console.log('[Bridge] Created _electronEventListeners in onHashGenerationProgress');
+    } else {
+      console.log('[Bridge] _electronEventListeners already exists with keys:', Object.keys(window._electronEventListeners));
+    }
+    // In server mode via WebSocket, the progress object comes as the first (and only) argument
+    // In normal mode via IPC, it comes as the second argument (event, progress)
+    const listener = (progress) => {
+      console.log('[Bridge] hash-generation-progress listener invoked with:', progress);
+      // If progress is actually the event object and we got a second argument, use that
+      // Otherwise, progress is the actual progress object
+      try {
+        callback(progress);
+      } catch (error) {
+        console.error('[Bridge] Error in hash-generation-progress callback:', error);
+      }
+    };
+    // Use the bridge's on method directly to ensure it's registered
+    if (typeof window.electron.on === 'function') {
+      window.electron.on('hash-generation-progress', listener);
+      console.log('[Bridge] Listener registered via window.electron.on');
+    } else {
+      // Fallback: register directly
+      if (!window._electronEventListeners['hash-generation-progress']) {
+        window._electronEventListeners['hash-generation-progress'] = [];
+      }
+      window._electronEventListeners['hash-generation-progress'].push(listener);
+      console.log('[Bridge] Listener registered directly');
+    }
+    console.log('[Bridge] onHashGenerationProgress completed, listeners for hash-generation-progress:', window._electronEventListeners?.['hash-generation-progress']?.length || 0);
+    console.log('[Bridge] All registered channels:', Object.keys(window._electronEventListeners || {}));
+  };
+  
+  window.electron.onHashGenerationComplete = function(callback) {
+    console.log('[Bridge] ===== onHashGenerationComplete CALLED =====');
+    // Ensure _electronEventListeners exists
+    if (!window._electronEventListeners) {
+      window._electronEventListeners = {};
+    }
+    const listener = (result) => {
+      console.log('[Bridge] hash-generation-complete listener invoked with:', result);
+      try {
+        callback(result || {});
+      } catch (error) {
+        console.error('[Bridge] Error in hash-generation-complete callback:', error);
+      }
+    };
+    // Use the bridge's on method directly to ensure it's registered
+    if (typeof window.electron.on === 'function') {
+      window.electron.on('hash-generation-complete', listener);
+      console.log('[Bridge] Completion listener registered via window.electron.on');
+    } else {
+      // Fallback: register directly
+      if (!window._electronEventListeners['hash-generation-complete']) {
+        window._electronEventListeners['hash-generation-complete'] = [];
+      }
+      window._electronEventListeners['hash-generation-complete'].push(listener);
+      console.log('[Bridge] Completion listener registered directly');
+    }
   };
   
   window.electron.onScanProgress = function(callback) {
@@ -460,7 +649,12 @@
   window.electron.receive = function(channel, callback) {
     const validChannels = ['preview-model', 'download-model'];
     if (validChannels.includes(channel)) {
+      console.log('[Bridge] Registering receive listener for channel:', channel);
       window.electron.on(channel, callback);
+      const count = (window._electronEventListeners[channel] || []).length;
+      console.log('[Bridge] Listener registered. Total listeners for', channel, ':', count);
+    } else {
+      console.warn('[Bridge] Attempted to register receive listener for invalid channel:', channel);
     }
   };
   
@@ -511,6 +705,9 @@
   sendFunction = function(channel, ...args) {
     // Send events (fire and forget)
     if (ws && ws.readyState === WebSocket.OPEN) {
+      if (channel === 'puter-ai-chat-response') {
+        console.log('[Bridge] Sending puter-ai-chat-response via WebSocket, requestId:', args[0], 'has result:', !!args[1]);
+      }
       ws.send(JSON.stringify({
         id: `send_${++requestIdCounter}_${Date.now()}`,
         channel,
@@ -552,6 +749,46 @@
   // Signal that bridge is ready
   window._electronBridgeReady = true;
   console.log('[Bridge] Server bridge initialized, all methods available. Total methods:', Object.keys(window.electron).length);
+  console.log('[Bridge] onHashGenerationProgress defined:', typeof window.electron.onHashGenerationProgress);
+  console.log('[Bridge] on method defined:', typeof window.electron.on);
+  console.log('[Bridge] _electronEventListeners initialized:', !!window._electronEventListeners);
+  
+  // CRITICAL: Register preview-model listener directly in bridge
+  // This ensures it works even if preview.js has issues
+  console.log('[Bridge] Registering preview-model listener directly in bridge');
+  window.electron.on('preview-model', (filePath) => {
+    console.log('[Bridge] preview-model event received:', filePath);
+    // Try to call window.openPreview if it exists (from preview.js)
+    if (typeof window.openPreview === 'function') {
+      console.log('[Bridge] Calling window.openPreview');
+      try {
+        window.openPreview(filePath);
+      } catch (error) {
+        console.error('[Bridge] Error calling window.openPreview:', error);
+      }
+    } else {
+      console.warn('[Bridge] window.openPreview not available yet, will retry when preview.js loads');
+      // Retry mechanism: check for openPreview periodically
+      let attempts = 0;
+      const maxAttempts = 50; // 5 seconds
+      const retryInterval = setInterval(() => {
+        attempts++;
+        if (typeof window.openPreview === 'function') {
+          console.log('[Bridge] window.openPreview now available, calling it');
+          clearInterval(retryInterval);
+          try {
+            window.openPreview(filePath);
+          } catch (error) {
+            console.error('[Bridge] Error calling window.openPreview:', error);
+          }
+        } else if (attempts >= maxAttempts) {
+          console.error('[Bridge] window.openPreview never became available');
+          clearInterval(retryInterval);
+        }
+      }, 100);
+    }
+  });
+  console.log('[Bridge] preview-model listener registered. Count:', (window._electronEventListeners['preview-model'] || []).length);
   
   // Connect when script loads
   connect();

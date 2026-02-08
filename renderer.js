@@ -28,6 +28,46 @@ setTimeout(() => {
     document.dispatchEvent(new Event('DOMContentLoaded'));
   }
 }, 500);
+
+// Scan STL Home + AI Config Test: delegated click handlers (Server/Docker - main block may run late)
+function _attachEarlyButtonHandlers() {
+  if (!document.body || document.body._earlyButtonHandlersAttached) return;
+  document.body._earlyButtonHandlersAttached = true;
+  document.body.addEventListener('click', function _earlyDelegated(e) {
+    if (!e.target || !e.target.closest) return;
+    if (e.target.closest('#scan-stl-home-button')) {
+      var btn = document.getElementById('scan-stl-home-button');
+      if (btn && btn.style.display === 'none') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof window.runScanSTLHome === 'function') window.runScanSTLHome();
+      else window._pendingScanStlHome = true;
+      return;
+    }
+    if (e.target.closest('#test-ai-config')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof window.testAIConfigFromDialog === 'function') window.testAIConfigFromDialog();
+      return;
+    }
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _attachEarlyButtonHandlers);
+} else {
+  _attachEarlyButtonHandlers();
+}
+
+// Stub so "Scan STL Home" click always has something to call; replaced by real impl when main block runs
+window.runScanSTLHome = function() {
+  if (typeof window._runScanSTLHomeImpl === 'function') {
+    window._runScanSTLHomeImpl();
+    return;
+  }
+  window._pendingScanStlHome = true;
+  console.log('[Scan STL Home] runScanSTLHome not ready yet, queued');
+};
+
 // Ensure window.electron exists before any usage to avoid early crashes in server mode
 if (typeof window !== 'undefined') {
   window.electron = window.electron || {};
@@ -35,6 +75,465 @@ if (typeof window !== 'undefined') {
     window.electron.on = function() {};
   }
 }
+
+// Early event listener pattern for Docker/Server: register listeners before DOMContentLoaded
+// so events broadcast from server (e.g. menu clicks) are never "No listeners registered"
+window._electronRealEventHandlers = {};
+window._electronPendingEvents = {};
+const earlyEventChannels = [
+  'open-theme-settings', 'regenerate-thumbnails', 'generate-missing-thumbnails',
+  'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-stats',
+  'open-backup-restore', 'open-ai-config', 'open-performance-settings',
+  'open-slicer-settings', 'open-browser-extension-settings', 'open-purge-models',
+  'open-metadata-editor', 'open-system-report', 'open-manage-thumbnails',
+  'open-settings', 'open-guide', 'open-about', 'open-keyboard-shortcuts',
+  'open-server-mode-info',
+  'puter-ai-chat-request',
+  'tags-generated', 'start-single-tag-generation', 'start-batch-tag-generation', 'batch-tag-generation-complete'
+];
+earlyEventChannels.forEach(function(channel) {
+  window.electron.on(channel, function() {
+    const args = Array.prototype.slice.call(arguments);
+    if (window._electronRealEventHandlers[channel]) {
+      try {
+        window._electronRealEventHandlers[channel].apply(null, args);
+      } catch (err) {
+        console.error('[Bridge] Early handler error for', channel, err);
+      }
+    } else {
+      if (!window._electronPendingEvents[channel]) {
+        window._electronPendingEvents[channel] = [];
+      }
+      window._electronPendingEvents[channel].push(args);
+      console.log('[Bridge] Event', channel, 'queued (real handler not ready yet).');
+    }
+  });
+});
+
+// File Type Settings: expose save early so Save button onclick works in Docker/server (before DOMContentLoaded block runs)
+window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromDialog() {
+  const dialogEl = document.getElementById('file-type-settings-dialog');
+  if (!dialogEl || !window.electron?.saveSetting) return;
+  try {
+    const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
+    const enableZipArchives = checkbox?.checked ? '1' : '0';
+    await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+
+    // Read additional file type checkboxes from the dialog so state is correct in Docker/server
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    const selectedScanTypes = [];
+    for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
+      const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
+      if (el && el.checked) selectedScanTypes.push(id);
+    }
+    const scanTypesValue = JSON.stringify(selectedScanTypes);
+    await window.electron.saveSetting('scanAdditionalFileTypes', scanTypesValue);
+
+    const designerCheckbox = dialogEl.querySelector('#enable-3mf-designer') || document.getElementById('enable-3mf-designer');
+    const parentModelCheckbox = dialogEl.querySelector('#enable-3mf-parent-model') || document.getElementById('enable-3mf-parent-model');
+    const licenseCheckbox = dialogEl.querySelector('#enable-3mf-license') || document.getElementById('enable-3mf-license');
+    const notesCheckbox = dialogEl.querySelector('#enable-3mf-notes') || document.getElementById('enable-3mf-notes');
+    await window.electron.saveSetting('enable3MFDesigner', designerCheckbox?.checked ? '1' : '0');
+    await window.electron.saveSetting('enable3MFParentModel', parentModelCheckbox?.checked ? '1' : '0');
+    await window.electron.saveSetting('enable3MFLicense', licenseCheckbox?.checked ? '1' : '0');
+    await window.electron.saveSetting('enable3MFNotes', notesCheckbox?.checked ? '1' : '0');
+
+    if (typeof dialogEl.close === 'function') dialogEl.close();
+    if (typeof window.populateFileTypeFilter === 'function') await window.populateFileTypeFilter();
+  } catch (err) {
+    console.error('File type settings save failed:', err);
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to save file type settings: ' + (err.message || String(err)));
+  }
+};
+
+// Tag Manager & DeDup: fullscreen toggle (expose early so Full Screen button works in Docker/server mode)
+window.toggleTagManagerFullscreen = function toggleTagManagerFullscreen() {
+  const dialog = document.getElementById('tag-manager-dialog');
+  const btn = document.getElementById('tag-manager-fullscreen-toggle');
+  if (!dialog || !btn) return;
+  dialog.classList.toggle('modal-fullscreen');
+  btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
+};
+window.toggleDedupFullscreen = function toggleDedupFullscreen() {
+  const dialog = document.getElementById('dedup-dialog');
+  const btn = document.getElementById('dedup-fullscreen-toggle');
+  if (!dialog || !btn) return;
+  dialog.classList.toggle('modal-fullscreen');
+  btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
+};
+
+// Purge Models: expose confirm action early so Purge button onclick works in Docker/server mode
+window.confirmPurgeModelsFromDialog = async function confirmPurgeModelsFromDialog() {
+  if (!window.electron?.purgeModels) return;
+  try {
+    const success = await window.electron.purgeModels();
+    if (success) {
+      const container = document.querySelector('.file-grid');
+      if (container) container.innerHTML = '';
+      if (typeof window.updateModelCounts === 'function') await window.updateModelCounts(0);
+      const dialog = document.getElementById('purge-models-dialog');
+      if (dialog && typeof dialog.close === 'function') dialog.close();
+      if (window.electron?.showMessage) await window.electron.showMessage('Success', 'All models have been purged from the database.');
+      const designerSelect = document.getElementById('designer-select');
+      const parentSelect = document.getElementById('parent-select');
+      const printedSelect = document.getElementById('printed-select');
+      const tagFilter = document.getElementById('tag-filter');
+      if (designerSelect) designerSelect.value = '';
+      if (parentSelect) parentSelect.value = '';
+      if (printedSelect) printedSelect.value = 'all';
+      if (tagFilter) tagFilter.value = '';
+    }
+  } catch (err) {
+    console.error('Error purging models:', err);
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to purge models from the database.');
+  }
+};
+
+// DeDup Easy: select all but one per group; keep archived (ZIP) when present (early for Docker/server)
+window.dedupEasyFromDialog = function dedupEasyFromDialog() {
+  const dialog = document.getElementById('dedup-dialog');
+  if (!dialog) return;
+  const groups = dialog.querySelectorAll('.duplicate-group');
+  groups.forEach(function(group) {
+    const fileRows = group.querySelectorAll('.duplicate-file');
+    if (fileRows.length === 0) return;
+    const zipRow = Array.from(fileRows).find(function(row) { return row.classList.contains('zip-entry'); });
+    const keeperRow = zipRow || fileRows[0];
+    fileRows.forEach(function(row) {
+      const checkbox = row.querySelector('input[type="checkbox"]');
+      if (!checkbox || checkbox.disabled) return;
+      checkbox.checked = row !== keeperRow;
+    });
+  });
+};
+
+// DeDup Clear: uncheck all (early for Docker/server)
+window.dedupClearFromDialog = function dedupClearFromDialog() {
+  const dialog = document.getElementById('dedup-dialog');
+  if (!dialog) return;
+  dialog.querySelectorAll('.duplicate-file input[type="checkbox"]:not(:disabled)').forEach(function(cb) {
+    cb.checked = false;
+  });
+};
+
+// Backup/Restore/Export/Import: early-exposed for Docker/server button clicks
+window.createBackupFromDialog = async function createBackupFromDialog() {
+  if (!window.electron?.backupDatabase) return;
+  try {
+    const serverMode = await window.electron.isServerMode().catch(function() { return false; });
+    if (serverMode) {
+      const result = await window.electron.backupDatabase();
+      if (result && result.success && result.filePath) {
+        const downloadUrl = '/api/download/' + encodeURIComponent(result.filePath);
+        window.location.href = downloadUrl;
+        if (window.electron.showMessage) await window.electron.showMessage('Success', 'Database backup created successfully. Download should start shortly.');
+      } else {
+        if (window.electron.showMessage) await window.electron.showMessage('Error', result && result.message ? result.message : 'Failed to create database backup');
+      }
+      return;
+    }
+    const success = await window.electron.backupDatabase();
+    if (success && window.electron.showMessage) await window.electron.showMessage('Success', 'Database backup created successfully');
+  } catch (err) {
+    console.error('Backup error:', err);
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to create database backup');
+  }
+};
+
+window.restoreBackupFromDialog = async function restoreBackupFromDialog() {
+  if (typeof window._restoreBackupFromDialogImpl === 'function') {
+    await window._restoreBackupFromDialogImpl();
+  }
+};
+
+window.exportLibraryFromDialog = async function exportLibraryFromDialog() {
+  if (!window.electron?.exportLibrary) return;
+  try {
+    const serverMode = await window.electron.isServerMode().catch(function() { return false; });
+    if (serverMode) {
+      const result = await window.electron.exportLibrary();
+      if (result && result.success && result.filePath) {
+        window.location.href = '/api/download/' + encodeURIComponent(result.filePath);
+        if (window.electron.showMessage) await window.electron.showMessage('Success', 'Library exported successfully. Download should start shortly.');
+      } else {
+        if (window.electron.showMessage) await window.electron.showMessage('Error', result && result.message ? result.message : 'Failed to export library');
+      }
+      return;
+    }
+    const success = await window.electron.exportLibrary();
+    if (success && window.electron.showMessage) await window.electron.showMessage('Success', 'Library exported successfully');
+  } catch (err) {
+    console.error('Export library error:', err);
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to export library');
+  }
+};
+
+window.importLibraryFromDialog = async function importLibraryFromDialog() {
+  if (typeof window._importLibraryFromDialogImpl === 'function') {
+    await window._importLibraryFromDialogImpl();
+  }
+};
+
+// AI Config: Test and Save (early for Docker/server)
+window.testAIConfigFromDialog = async function testAIConfigFromDialog() {
+  const resultDiv = document.getElementById('ai-config-result');
+  if (resultDiv) resultDiv.textContent = 'Testing...';
+  if (!window.electron || typeof window.electron.testAIConfig !== 'function') {
+    if (resultDiv) resultDiv.textContent = 'Error: AI config not available (not connected?).';
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', 'AI config test is not available.');
+    return;
+  }
+  const apiKeyEl = document.getElementById('ai-api-key');
+  const endpointEl = document.getElementById('ai-endpoint');
+  const modelEl = document.getElementById('ai-model');
+  const serviceEl = document.getElementById('ai-service-select');
+  if (!apiKeyEl || !endpointEl || !modelEl || !serviceEl) {
+    if (resultDiv) resultDiv.textContent = 'Error: Form fields not found.';
+    return;
+  }
+  const selectedOption = serviceEl.options && serviceEl.options[serviceEl.selectedIndex];
+  let service = selectedOption ? selectedOption.value : (serviceEl.value || 'puter');
+  const endpoint = (endpointEl.value || '').trim();
+  if (endpoint.indexOf('puter.com') !== -1 || endpoint.indexOf('js.puter.com') !== -1) {
+    service = 'puter';
+  }
+  const apiKey = (apiKeyEl.value || '').trim();
+  const model = (modelEl.value || '').trim() || (service === 'puter' ? 'gpt-5-nano' : '');
+  try {
+    const result = await window.electron.testAIConfig(apiKey, endpoint, model, service);
+    if (resultDiv) {
+      resultDiv.textContent = result.success ? 'Test successful! Tags: ' + (result.tags ? result.tags.join(', ') : '') : 'Test failed: ' + (result.error || '');
+    }
+  } catch (err) {
+    console.error('AI Config test error:', err);
+    if (resultDiv) resultDiv.textContent = 'Test failed: ' + (err.message || String(err));
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Test failed');
+  }
+};
+
+window.saveAIConfigFromDialog = async function saveAIConfigFromDialog() {
+  if (!window.electron?.saveSetting) return;
+  const service = (document.getElementById('ai-service-select') && document.getElementById('ai-service-select').value) || 'puter';
+  const apiKey = service === 'puter' ? '' : ((document.getElementById('ai-api-key') && document.getElementById('ai-api-key').value) || '');
+  const endpoint = (document.getElementById('ai-endpoint') && document.getElementById('ai-endpoint').value) || (service === 'puter' ? 'https://js.puter.com/v2/' : 'https://api.openai.com/v1');
+  const model = (document.getElementById('ai-model') && document.getElementById('ai-model').value) || (service === 'puter' ? 'gpt-5-nano' : 'gpt-4o-mini');
+  const maxTags = (document.getElementById('ai-tag-max-tags') && document.getElementById('ai-tag-max-tags').value) || '10';
+  const mergeStrategy = (document.getElementById('ai-tag-merge-strategy') && document.getElementById('ai-tag-merge-strategy').value) || 'merge';
+  const useCategories = document.getElementById('ai-tag-use-categories') && document.getElementById('ai-tag-use-categories').checked ? '1' : '0';
+  const allowRetagging = document.getElementById('ai-tag-allow-retagging') && document.getElementById('ai-tag-allow-retagging').checked ? '1' : '0';
+  const concurrency = (document.getElementById('ai-tag-concurrency') && document.getElementById('ai-tag-concurrency').value) || '3';
+  const detailLevel = (document.getElementById('ai-tag-detail-level') && document.getElementById('ai-tag-detail-level').value) || 'medium';
+  try {
+    await window.electron.saveSetting('apiKey', apiKey);
+    await window.electron.saveSetting('apiEndpoint', endpoint);
+    await window.electron.saveSetting('aiModel', model);
+    await window.electron.saveSetting('aiService', service);
+    await window.electron.saveSetting('aiTagMaxTags', maxTags);
+    await window.electron.saveSetting('aiTagMergeStrategy', mergeStrategy);
+    await window.electron.saveSetting('aiTagUseCategories', useCategories);
+    await window.electron.saveSetting('aiTagAllowRetagging', allowRetagging);
+    await window.electron.saveSetting('aiTagConcurrency', concurrency);
+    await window.electron.saveSetting('aiTagDetailLevel', detailLevel);
+    const dialog = document.getElementById('ai-config-dialog');
+    if (dialog && typeof dialog.close === 'function') dialog.close();
+  } catch (err) {
+    console.error('Save AI config error:', err);
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to save');
+  }
+};
+
+// Performance Save: full dialog fields (early for Docker/server)
+window.savePerformanceSettingsFromDialog = async function savePerformanceSettingsFromDialog() {
+  if (!window.electron?.saveSetting) return;
+  const batchSizeEl = document.getElementById('batch-size');
+  const concurrentEl = document.getElementById('concurrent-renders');
+  const maxFileSizeEl = document.getElementById('max-file-size');
+  const thumbnailBatchEl = document.getElementById('thumbnail-batch-size');
+  const renderDelayEl = document.getElementById('render-delay');
+  const newBatchSize = batchSizeEl ? parseInt(batchSizeEl.value, 10) : NaN;
+  const newConcurrentRenders = concurrentEl ? parseInt(concurrentEl.value, 10) : NaN;
+  const newMaxFileSize = maxFileSizeEl ? parseInt(maxFileSizeEl.value, 10) : NaN;
+  const newThumbnailBatchSize = thumbnailBatchEl ? parseInt(thumbnailBatchEl.value, 10) : NaN;
+  const newRenderDelay = renderDelayEl ? parseInt(renderDelayEl.value, 10) : NaN;
+  try {
+    if (!isNaN(newBatchSize) && newBatchSize >= 1 && newBatchSize <= 100) {
+      await window.electron.saveSetting('batchSize', String(newBatchSize));
+    }
+    if (!isNaN(newConcurrentRenders) && newConcurrentRenders >= 1 && newConcurrentRenders <= 10) {
+      await window.electron.saveSetting('maxConcurrentRenders', String(newConcurrentRenders));
+    }
+    if (!isNaN(newMaxFileSize) && newMaxFileSize >= 1 && newMaxFileSize <= 1000) {
+      await window.electron.saveSetting('maxFileSizeMB', String(newMaxFileSize));
+    }
+    if (!isNaN(newThumbnailBatchSize) && newThumbnailBatchSize >= 5 && newThumbnailBatchSize <= 20) {
+      await window.electron.saveSetting('thumbnailBatchSize', String(newThumbnailBatchSize));
+    }
+    if (!isNaN(newRenderDelay) && newRenderDelay >= 0 && newRenderDelay <= 100) {
+      await window.electron.saveSetting('renderDelay', String(newRenderDelay));
+    }
+    const dialog = document.getElementById('performance-settings-dialog');
+    if (dialog && typeof dialog.close === 'function') dialog.close();
+    if (window.electron.showMessage) await window.electron.showMessage('Success', 'Performance settings saved successfully');
+  } catch (err) {
+    console.error('Performance save error:', err);
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to save');
+  }
+};
+
+// STL Home Clear Directory (early for Docker/server)
+window.clearSTLHomeDirectory = async function clearSTLHomeDirectory() {
+  const input = document.getElementById('stl-home-directory');
+  if (input) input.value = '';
+  if (window.electron?.saveSetting) await window.electron.saveSetting('stlHome', '');
+  if (typeof window.updateScanStlHomeButtonVisibility === 'function') window.updateScanStlHomeButtonVisibility();
+  if (typeof window.stopPeriodicSTLHomeScan === 'function') window.stopPeriodicSTLHomeScan();
+  const dialog = document.getElementById('stl-home-dialog');
+  if (dialog && typeof dialog.close === 'function') dialog.close();
+};
+
+// Lazy load Puter.js only when needed to avoid unnecessary socket.io connections
+let puterLoadingPromise = null;
+async function loadPuterJS() {
+  // If already loaded, return immediately
+  if (typeof puter !== 'undefined' && puter && puter.ai) {
+    console.log('[Puter] Puter.js already loaded');
+    return Promise.resolve();
+  }
+  
+  // If already loading, return the existing promise
+  if (puterLoadingPromise) {
+    console.log('[Puter] Puter.js already loading, waiting...');
+    return puterLoadingPromise;
+  }
+  
+  // Check if script tag already exists
+  const existingScript = document.querySelector('script[src="https://js.puter.com/v2/"]');
+  if (existingScript) {
+    console.log('[Puter] Puter.js script tag already exists, waiting for load...');
+    puterLoadingPromise = new Promise((resolve, reject) => {
+      let retries = 0;
+      const maxRetries = 50; // 5 seconds
+      const checkInterval = setInterval(() => {
+        retries++;
+        if (typeof puter !== 'undefined' && puter && puter.ai) {
+          clearInterval(checkInterval);
+          puterLoadingPromise = null;
+          console.log('[Puter] Puter.js loaded successfully');
+          resolve();
+        } else if (retries >= maxRetries) {
+          clearInterval(checkInterval);
+          puterLoadingPromise = null;
+          reject(new Error('Puter.js failed to load within timeout'));
+        }
+      }, 100);
+    });
+    return puterLoadingPromise;
+  }
+  
+  // Load Puter.js dynamically
+  console.log('[Puter] Loading Puter.js dynamically...');
+  puterLoadingPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://js.puter.com/v2/';
+    script.async = true;
+    script.onload = () => {
+      // Wait for puter object to be available
+      let retries = 0;
+      const maxRetries = 50; // 5 seconds
+      const checkInterval = setInterval(() => {
+        retries++;
+        if (typeof puter !== 'undefined' && puter && puter.ai) {
+          clearInterval(checkInterval);
+          puterLoadingPromise = null;
+          console.log('[Puter] Puter.js loaded and initialized successfully');
+          resolve();
+        } else if (retries >= maxRetries) {
+          clearInterval(checkInterval);
+          puterLoadingPromise = null;
+          reject(new Error('Puter.js loaded but puter object not available'));
+        }
+      }, 100);
+    };
+    script.onerror = () => {
+      puterLoadingPromise = null;
+      console.error('[Puter] Failed to load Puter.js');
+      reject(new Error('Failed to load Puter.js script'));
+    };
+    document.head.appendChild(script);
+  });
+  
+  return puterLoadingPromise;
+}
+
+// Assign puter-ai-chat-request handler early so Test (Puter) works in Docker/server before DOMContentLoaded
+window._electronRealEventHandlers['puter-ai-chat-request'] = async function(requestId, prompt, imageUrl, model) {
+  console.log('[Puter AI] Received request, Puter.js captcha may appear in this window');
+  try {
+    await loadPuterJS();
+    var retries = 0;
+    var maxRetries = 10;
+    while ((typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) && retries < maxRetries) {
+      await new Promise(function(r) { setTimeout(r, 100); });
+      retries++;
+    }
+    if (typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) {
+      throw new Error('Puter.js is not loaded. Please refresh the application.');
+    }
+    var response;
+    try {
+      var timeoutPromise = new Promise(function(_, reject) {
+        setTimeout(function() { reject(new Error('Network timeout: Unable to reach Puter.com API. Please check your internet connection.')); }, 55000);
+      });
+      response = await Promise.race([
+        puter.ai.chat(prompt, imageUrl, { model: model || 'gpt-5-nano' }),
+        timeoutPromise
+      ]);
+    } catch (apiError) {
+      if (apiError.message && (apiError.message.indexOf('timeout') !== -1 || apiError.message.indexOf('Network') !== -1 || apiError.message.indexOf('Failed to fetch') !== -1)) {
+        throw new Error('Network error: Unable to connect to Puter.com API. Please check your internet connection. If running in Docker, ensure the container or browser has internet access.');
+      }
+      if (apiError.message && apiError.message.indexOf('403') !== -1) {
+        throw new Error('Puter.com API access denied (403). This may be due to CORS restrictions or API limitations. Please try using a different AI service or check puter.com documentation.');
+      }
+      if (apiError.message && apiError.message.indexOf('Forbidden') !== -1) {
+        throw new Error('Puter.com API access forbidden. This service may require additional setup or have usage restrictions.');
+      }
+      throw apiError;
+    }
+    var responseText;
+    if (typeof response === 'string') {
+      responseText = response;
+    } else if (response && typeof response === 'object') {
+      responseText = response.text || response.content || response.message || JSON.stringify(response);
+    } else {
+      responseText = String(response || '');
+    }
+    console.log('[Puter AI] Sending response back, requestId:', requestId, 'response length:', responseText ? responseText.length : 0);
+    window.electron.send('puter-ai-chat-response', requestId, { response: responseText });
+  } catch (error) {
+    console.error('[Puter AI] Error calling puter.ai.chat:', error);
+    var errorMessage = error.message || 'Unknown error';
+    window.electron.send('puter-ai-chat-response', requestId, { error: errorMessage });
+  }
+};
+
+// Minimal handlers for tag-preview so dialog opens when events arrive before late block (Docker/Server)
+window._electronRealEventHandlers['start-single-tag-generation'] = function(filePath, modelData) {
+  var dialog = document.getElementById('tag-preview-dialog');
+  if (dialog && !dialog.open) {
+    dialog.showModal();
+    var container = document.getElementById('tag-preview-container');
+    if (container) container.innerHTML = '<div style="padding: 20px; color: #fff;">Generating tags...</div>';
+  }
+};
+window._electronRealEventHandlers['start-batch-tag-generation'] = function(count, filePaths) {
+  var dialog = document.getElementById('tag-preview-dialog');
+  if (dialog && !dialog.open) {
+    dialog.showModal();
+    var container = document.getElementById('tag-preview-container');
+    if (container) container.innerHTML = '<div style="padding: 20px; color: #fff;">Generating tags for ' + (count || 0) + ' model(s)...</div>';
+  }
+};
 
 // Add debug logging utility function
 function debugLog(...args) {
@@ -46,13 +545,66 @@ function debugLog(...args) {
 let BATCH_SIZE = 50; // Default batch size for database operations
 let MAX_FILE_SIZE_MB = 50; // Default max file size in MB
 const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
-const MAX_CONCURRENT_RENDERS = 5; // Reduce from 5 to 1 to prevent context loss
+// Higher concurrency in Server/Docker mode to compensate for slower file system operations
+// Docker file system operations (especially on network shares) can be 10-100ms per operation
+// vs <1ms for local file systems, so we need more parallel operations to maintain throughput
+let MAX_CONCURRENT_RENDERS = 5; // Default value, will be adjusted based on mode
 
 const MAX_MODELS_IN_MEMORY = 500;
 const PAGE_SIZE = 100; // Number of models to keep in memory
 let allFilteredModels = []; // Store all filtered models (references only)
 let visibleModels = []; // Store currently visible models (full data)
 let currentGridView = 'detailed'; // Current grid view mode: 'list', 'preview', 'detailed'
+
+// Per-folder view preference (when "View Entire Library" is off): remember list/preview/detailed per scanned root
+async function getPerFolderViewPrefs() {
+  try {
+    const raw = await window.electron.getSetting('perFolderView');
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function getViewForFolder(folderPath) {
+  if (!folderPath) return null;
+  const prefs = await getPerFolderViewPrefs();
+  if (prefs[folderPath] && ['list', 'preview', 'detailed'].includes(prefs[folderPath])) {
+    return prefs[folderPath];
+  }
+  const lastUsed = await window.electron.getSetting('lastUsedView');
+  if (lastUsed && ['list', 'preview', 'detailed'].includes(lastUsed)) return lastUsed;
+  const globalView = await window.electron.getSetting('gridView');
+  if (globalView && ['list', 'preview', 'detailed'].includes(globalView)) return globalView === 'small' ? 'preview' : globalView;
+  return 'detailed';
+}
+
+async function savePerFolderView(folderPath, view) {
+  if (!folderPath || !['list', 'preview', 'detailed'].includes(view)) return;
+  const prefs = await getPerFolderViewPrefs();
+  prefs[folderPath] = view;
+  await window.electron.saveSetting('perFolderView', JSON.stringify(prefs));
+  await window.electron.saveSetting('lastUsedView', view);
+}
+
+async function applyViewForCurrentFolder() {
+  const folder = window.currentDirectoryFilter;
+  if (!folder) return;
+  const view = await getViewForFolder(folder);
+  if (!view || view === currentGridView) return;
+  currentGridView = view;
+  const viewButtons = document.querySelectorAll('.view-button');
+  viewButtons.forEach(btn => btn.classList.remove('active'));
+  viewButtons.forEach(button => {
+    if (button.dataset.view === currentGridView) button.classList.add('active');
+  });
+}
+
+window.savePerFolderView = savePerFolderView;
+window.applyViewForCurrentFolder = applyViewForCurrentFolder;
+
 let currentPage = 0;
 let isVirtualScrolling = false; // Flag to track if virtual scrolling is active
 
@@ -64,6 +616,84 @@ let isRendering = false;
 let selectedModels = new Set();
 let isMultiSelectMode = false;
 let isScanning = false;
+
+// Scan STL Home: define at top level so it's ready before DOMContentLoaded handler runs (avoids "not ready yet, queued" in Docker/server)
+function runScanSTLHomeImpl() {
+  console.log('[Scan STL Home] runScanSTLHome entered');
+  if (isScanning) {
+    console.log('[Scan STL Home] skipped - already scanning');
+    return;
+  }
+  (async () => {
+    const stlHome = await window.electron.getSetting('stlHome');
+    if (!stlHome || stlHome.trim() === '') {
+      console.log('[Scan STL Home] no path set');
+      if (window.electron && typeof window.electron.showMessage === 'function') {
+        await window.electron.showMessage('STL Home', 'Set STL Home path in Settings first (Settings → STL Home).');
+      }
+      return;
+    }
+    console.log('[Scan STL Home] starting scan:', stlHome);
+    await window.electron.saveDirectory(stlHome.trim());
+    const clearFilterButton = document.querySelector('.clear-filter-button');
+    if (clearFilterButton) {
+      clearFilterButton.click();
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const scanButton = document.getElementById('scan-directory-button');
+    const stlHomeButton = document.getElementById('scan-stl-home-button');
+    if (scanButton) { scanButton.disabled = true; scanButton.style.opacity = '0.5'; scanButton.style.cursor = 'not-allowed'; }
+    if (stlHomeButton) { stlHomeButton.disabled = true; stlHomeButton.style.opacity = '0.5'; stlHomeButton.style.cursor = 'not-allowed'; }
+    isScanning = true;
+    showProgressBars();
+    let lastScanProcessed = 0;
+    window.electron.onScanProgress((progress) => {
+      const processedRaw = typeof progress?.processed === 'number' ? progress.processed : 0;
+      lastScanProcessed = Math.max(lastScanProcessed, processedRaw);
+      const percent = progress.total ? (lastScanProcessed / progress.total) * 100 : 0;
+      const progressBar = document.getElementById('progress-bar');
+      const progressText = document.getElementById('progress-text');
+      if (progressBar) progressBar.style.width = `${percent}%`;
+      if (progressText) progressText.textContent = `Checking files: ${lastScanProcessed}`;
+    });
+    window.electron.onDbProgress((progress) => {
+      const percent = progress.total ? (progress.processed / progress.total) * 100 : 0;
+      const renderProgressBar = document.getElementById('render-progress-bar');
+      const renderProgressText = document.getElementById('render-progress-text');
+      if (renderProgressBar) renderProgressBar.style.width = `${percent}%`;
+      if (renderProgressText) renderProgressText.textContent = progress.processed + ' / ' + (progress.total || 0);
+    });
+    try {
+      await scanAndRenderDirectory(stlHome.trim(), false, true);
+      await populateDesignerDropdown();
+      await populateParentModelFilter();
+      await populateTagFilter();
+      await populateLicenseFilter();
+      console.log('[Scan STL Home] scan complete');
+    } catch (err) {
+      console.error('[Scan STL Home] scan error:', err);
+      if (window.electron && typeof window.electron.showMessage === 'function') {
+        await window.electron.showMessage('Scan STL Home Error', err.message || String(err));
+      }
+    } finally {
+      isScanning = false;
+      if (scanButton) { scanButton.disabled = false; scanButton.style.opacity = ''; scanButton.style.cursor = ''; }
+      if (stlHomeButton) { stlHomeButton.disabled = false; stlHomeButton.style.opacity = ''; stlHomeButton.style.cursor = ''; }
+      const progressSection = document.getElementById('progress-section');
+      if (progressSection) progressSection.classList.add('hidden');
+      // Force grid to refetch and re-render so models show without reload (Docker/server)
+      window.disableGridRefresh = false;
+      const gridEl = document.querySelector('.file-grid');
+      if (gridEl) gridEl.currentModels = null;
+      if (typeof window.forceGridRefresh === 'function') {
+        window.forceGridRefresh().catch(err => console.error('[Scan STL Home] post-scan refresh:', err));
+      } else if (typeof window.performCombinedSearch === 'function') {
+        window.performCombinedSearch().catch(err => console.error('[Scan STL Home] post-scan refresh:', err));
+      }
+    }
+  })();
+}
+window._runScanSTLHomeImpl = runScanSTLHomeImpl;
 
 // Add these queue-related variables
 let renderQueue = [];
@@ -121,7 +751,44 @@ function getModelColor() {
   }
 }
 
+// Extensions that are valid for library (scan/add). Used for isValidFile.
+const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.obj', '.ply', '.step', '.stp', '.svg', '.x3d']);
+
+// Map file extension (with or without dot) to label for typed placeholder
+const EXTENSION_TO_PLACEHOLDER_LABEL = {
+  '3ds': '3DS', 'amf': 'AMF', 'blender': 'Blender', 'dae': 'DAE', 'dxf': 'DXF', 'dwg': 'DWG',
+  'fbx': 'FBX', 'f3d': 'F3D', 'f3z': 'F3Z', 'gcode': 'G-code', 'igs': 'IGES', 'iges': 'IGES',
+  'obj': 'OBJ', 'ply': 'PLY', 'step': 'STEP', 'stp': 'STEP', 'svg': 'SVG', 'x3d': 'X3D'
+};
+
+function generateTypedPlaceholder(extension) {
+  const ext = (extension || '').toLowerCase().replace(/^\./, '');
+  const label = EXTENSION_TO_PLACEHOLDER_LABEL[ext] || (ext ? ext.toUpperCase() : '?');
+  const size = 250;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '3d.png';
+  // Dark background similar to 3d.png style
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.font = 'bold 24px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, size / 2, size / 2);
+  try {
+    return canvas.toDataURL('image/png');
+  } catch (e) {
+    return '3d.png';
+  }
+}
+
 async function loadModel(filePath, options = {}) {
+  if (filePath && filePath.startsWith('url::')) {
+    return null;
+  }
   const startTime = Date.now();
   console.log(`[DEBUG] loadModel: Start loading ${filePath}`);
   try {
@@ -146,6 +813,17 @@ async function loadModel(filePath, options = {}) {
     }
     
     const fileExtension = actualFilePath.split('.').pop().toLowerCase();
+
+    // Standalone .zip (container only): no 3D model to load — treat like scan zip
+    if (fileExtension === 'zip') {
+      console.log(`[DEBUG] loadModel: Standalone .zip file, skipping 3D load`);
+      return null;
+    }
+    
+    // Only STL and 3MF are loadable for 3D preview; other types use typed placeholder
+    if (fileExtension !== 'stl' && fileExtension !== '3mf') {
+      return null;
+    }
     
     // For 3MF files, check for embedded images BEFORE 3D loading
     // NOTE: This is a safety check - renderModelToPNG should have already checked
@@ -174,12 +852,25 @@ async function loadModel(filePath, options = {}) {
     
     let encodedFilePath;
     
-    if (serverMode) {
-      // In server mode, use HTTP endpoint for UNC paths
+    // Check if this is a UNC path (works in both server and non-server mode)
+    const isUncPath = actualFilePath.startsWith('\\\\') && !/^[A-Za-z]:/.test(actualFilePath);
+    
+    if (serverMode || isUncPath) {
+      // In server mode, or for UNC paths in any mode, use HTTP endpoint
       // Encode the path for URL
       const encodedPath = encodeURIComponent(actualFilePath);
-      encodedFilePath = `/api/file/${encodedPath}`;
-      console.log('loadModel: Using HTTP endpoint for server mode:', encodedFilePath);
+      // Use full URL for HTTP endpoint (Three.js loaders need absolute URLs)
+      // In server mode (browser access), use current window origin
+      // In non-server mode (Electron) with UNC paths, HTTP server runs on localhost:5000
+      const serverPort = 5000; // Should match the port in main.js startHttpServer()
+      if (serverMode && window.location.origin && window.location.origin !== 'null' && window.location.origin !== 'file://') {
+        // Server mode with browser access - use current origin
+        encodedFilePath = `${window.location.origin}/api/file/${encodedPath}`;
+      } else {
+        // Electron mode with UNC paths - HTTP server runs on localhost:5000
+        encodedFilePath = `http://localhost:${serverPort}/api/file/${encodedPath}`;
+      }
+      console.log(`loadModel: Using HTTP endpoint ${serverMode ? 'for server mode' : 'for UNC path'}:`, encodedFilePath);
     } else if (/^[A-Za-z]:/.test(actualFilePath)) {
       // Check if we're running on Windows (starts with drive letter)
       // For Windows paths: 
@@ -499,7 +1190,7 @@ async function updateModelElement(filePath) {
       }
     }
     
-    // Check search term filter
+    // Check search term filter (name, directory, metadata, tags, notes)
     if (shouldBeVisible && searchTerm) {
       const searchLower = searchTerm.toLowerCase();
       const fileName = (model.fileName || '').toLowerCase();
@@ -508,13 +1199,18 @@ async function updateModelElement(filePath) {
       const modelSource = (model.source || '').toLowerCase();
       const modelLicense = (model.license || '').toLowerCase();
       const modelParent = (model.parentModel || '').toLowerCase();
+      const modelNotes = (model.notes || '').toLowerCase();
+      const tagNames = Array.isArray(model.tags) ? model.tags.map(t => (t && t.name) ? t.name.toLowerCase() : '').filter(Boolean) : [];
+      const tagsMatch = tagNames.some(name => name.includes(searchLower));
       
       shouldBeVisible = fileName.includes(searchLower) ||
                        filePath.includes(searchLower) ||
                        modelDesigner.includes(searchLower) ||
                        modelSource.includes(searchLower) ||
                        modelLicense.includes(searchLower) ||
-                       modelParent.includes(searchLower);
+                       modelParent.includes(searchLower) ||
+                       modelNotes.includes(searchLower) ||
+                       tagsMatch;
     }
 
     // Find existing element by iterating through all file items
@@ -1075,6 +1771,15 @@ let currentModelDetailsAbort = false;
 // Parse file path into hierarchical structure
 function parsePath(filePath) {
   if (!filePath) return null;
+  if (filePath.startsWith('url::')) {
+    return {
+      isZipEntry: false,
+      zipPath: null,
+      entryPath: null,
+      pathSegments: ['Online model'],
+      fullPath: filePath
+    };
+  }
   
   const isZipEntry = filePath.includes('::');
   let zipPath = null;
@@ -1721,18 +2426,18 @@ let isCheckingForHashes = false;
 
 // Flag to prevent multiple thumbnail generation dialogs from showing
 let isThumbnailDialogShowing = false;
+// Flag to prevent multiple regenerate thumbnails dialogs from showing
+let isRegeneratingThumbnails = false;
+// Flag to prevent multiple DeDup delete confirmations from showing
+let isDeletingDuplicates = false;
 
 // Add or update the loadDuplicateFiles function
-async function loadDuplicateFiles(skipHashCheck = false) {
+// refreshOnly: when true, only refresh duplicate-groups content and do not call showModal() (dialog stays open)
+async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
   try {
     const serverMode = await window.electron.isServerMode().catch(() => false);
     // First check for models without file hash (unless we're skipping the check)
     if (!skipHashCheck) {
-      if (serverMode) {
-        // In server/docker mode hashes are generated in the background.
-        isHashDialogShowing = false;
-        isCheckingForHashes = false;
-      } else {
       // Check if a hash dialog is already showing or if we're currently checking
       if (isHashDialogShowing || isCheckingForHashes) {
         return; // Exit early if dialog is already showing or check is in progress
@@ -1740,19 +2445,95 @@ async function loadDuplicateFiles(skipHashCheck = false) {
       
       isCheckingForHashes = true; // Set flag before checking
       const modelsWithoutHashCount = await window.electron.getModelsWithoutHash();
+      const isAlreadyGenerating = await window.electron.isGeneratingHashes();
       isCheckingForHashes = false; // Reset flag after checking
       
-      // If there are models without hash, ask the user if they want to generate hashes
+      // If there are models without hash, handle based on mode
       if (modelsWithoutHashCount > 0) {
+        // Check if hash generation is already running
+        if (isAlreadyGenerating) {
+          // Hash generation is already in progress - show progress dialog and attach to existing process
+          console.log('Hash generation already in progress, showing progress dialog');
+          isHashDialogShowing = true;
+          
+          // Show progress dialog (works in both normal and server mode)
+          const progressDialog = document.createElement('dialog');
+          progressDialog.className = 'progress-dialog';
+          progressDialog.innerHTML = `
+            <h3>Generating File Hashes</h3>
+            <div class="progress-container">
+              <progress id="hash-progress" value="0" max="100"></progress>
+              <div id="hash-progress-text">0/${modelsWithoutHashCount}</div>
+            </div>
+            <p style="margin-top: 15px; color: #666;">
+              Hash generation is already running in the background. Progress will be shown here.
+            </p>
+          `;
+          document.body.appendChild(progressDialog);
+          progressDialog.showModal();
+          
+          // Set up progress listener to attach to existing process
+          let isCompleting = false;
+          const progressListener = (progress) => {
+            const progressBar = document.getElementById('hash-progress');
+            const progressText = document.getElementById('hash-progress-text');
+            
+            if (progressBar && progressText) {
+              const percentage = (progress.processed / progress.total) * 100;
+              progressBar.value = percentage;
+              
+              if (progress.success !== undefined && progress.failed !== undefined) {
+                progressText.textContent = `${progress.processed}/${progress.total} (${progress.success} succeeded, ${progress.failed} failed)`;
+              } else {
+                progressText.textContent = `${progress.processed}/${progress.total}`;
+              }
+              
+              if (progress.processed >= progress.total && !isCompleting) {
+                isCompleting = true;
+                setTimeout(() => {
+                  progressDialog.close();
+                  progressDialog.remove();
+                  isHashDialogShowing = false;
+                  loadDuplicateFiles(true);
+                }, 500);
+              }
+            }
+          };
+          
+          const completionListener = (result) => {
+            if (result && result.failed > 0) {
+              const failedMsg = result.failed === result.total 
+                ? 'All file hashes failed to generate. This may be due to network issues or file access problems.'
+                : `${result.failed} out of ${result.total} file hashes failed to generate. Some duplicates may not be detected.`;
+              
+              if (result.failed === result.total) {
+                setTimeout(async () => {
+                  await window.electron.showMessage('Warning', failedMsg);
+                }, 600);
+              } else {
+                console.warn(failedMsg);
+              }
+            }
+          };
+          
+          window.electron.onHashGenerationProgress(progressListener);
+          window.electron.onHashGenerationComplete(completionListener);
+          
+          // Don't start a new process, just wait for the existing one
+          return;
+        }
+        
+        // In both server mode and normal mode, ask the user if they want to generate hashes
+        // and show the progress bar
         isHashDialogShowing = true; // Set flag before showing dialog
         const response = await window.electron.showMessage(
           'Generate File Hashes',
           `${modelsWithoutHashCount} models don't have file hashes which are needed for de-duplication. Would you like to generate the hashes now?`,
           ['Yes', 'No']
         );
-        
+      
         if (response === 'Yes') {
-          // Show progress dialog
+          // Show progress dialog (works in both normal and server mode)
           const progressDialog = document.createElement('dialog');
           progressDialog.className = 'progress-dialog';
           progressDialog.innerHTML = `
@@ -1768,7 +2549,7 @@ async function loadDuplicateFiles(skipHashCheck = false) {
           document.body.appendChild(progressDialog);
           progressDialog.showModal();
           
-          // Set up progress listener
+          // Set up progress listener (works in both normal and server mode via WebSocket)
           let isCompleting = false; // Flag to prevent multiple completion calls
           const progressListener = (progress) => {
             const progressBar = document.getElementById('hash-progress');
@@ -1777,7 +2558,13 @@ async function loadDuplicateFiles(skipHashCheck = false) {
             if (progressBar && progressText) {
               const percentage = (progress.processed / progress.total) * 100;
               progressBar.value = percentage;
-              progressText.textContent = `${progress.processed}/${progress.total}`;
+              
+              // Show success/failure counts if available
+              if (progress.success !== undefined && progress.failed !== undefined) {
+                progressText.textContent = `${progress.processed}/${progress.total} (${progress.success} succeeded, ${progress.failed} failed)`;
+              } else {
+                progressText.textContent = `${progress.processed}/${progress.total}`;
+              }
               
               // Close dialog when complete (only once)
               if (progress.processed >= progress.total && !isCompleting) {
@@ -1797,12 +2584,70 @@ async function loadDuplicateFiles(skipHashCheck = false) {
             }
           };
           
-          // Set up the listener
+          // Set up completion listener to handle success/failure counts
+          const completionListener = (result) => {
+            if (result && result.failed > 0) {
+              // Some hashes failed - show informative message but don't treat as error
+              const failedMsg = result.failed === result.total 
+                ? 'All file hashes failed to generate. This may be due to network issues or file access problems.'
+                : `${result.failed} out of ${result.total} file hashes failed to generate. Some duplicates may not be detected.`;
+              
+              // Only show error dialog if ALL hashes failed
+              if (result.failed === result.total) {
+                setTimeout(async () => {
+                  await window.electron.showMessage('Warning', failedMsg);
+                }, 600);
+              } else {
+                // Show non-blocking notification for partial failures
+                console.warn(failedMsg);
+              }
+            }
+          };
+          
+          // Listen for completion event
+          window.electron.onHashGenerationComplete(completionListener);
+          
+          // Set up the listener (works in both normal and server mode)
           window.electron.onHashGenerationProgress(progressListener);
+          
+          // Check if hash generation is already running before starting
+          const isAlreadyRunning = await window.electron.isGeneratingHashes();
+          if (isAlreadyRunning) {
+            console.log('Hash generation already in progress, attaching to existing process');
+            // Don't start a new process, just attach to the existing one
+            // The progress listener is already set up above, so it will receive updates
+            // Update the dialog message to indicate we're joining an existing process
+            const dialogContent = progressDialog.querySelector('p');
+            if (dialogContent) {
+              dialogContent.textContent = 'Hash generation is already running in the background. Progress will be shown here.';
+            }
+            // Don't call generateMissingHashes() - just wait for progress updates
+            return; // Exit early, progress listener will handle completion
+          }
           
           // Start hash generation
           try {
-            await window.electron.generateMissingHashes();
+            const result = await window.electron.generateMissingHashes();
+            
+            // Check if it's already running (shouldn't happen after the check above, but handle it)
+            if (result && result.alreadyRunning) {
+              console.log('Hash generation was already running, attached to existing process');
+              // Progress listener is already set up, just wait for updates
+              return;
+            }
+            
+            // Check if all hashes failed
+            if (result && result.failed === result.total && result.total > 0) {
+              // All hashes failed - error dialog will be shown by completion listener
+              // Reset flags
+              isHashDialogShowing = false;
+              isCheckingForHashes = false;
+              // Close progress dialog
+              progressDialog.close();
+              progressDialog.remove();
+              return;
+            }
+            // If some or all succeeded, the completion listener will handle the dialog closing
           } catch (error) {
             console.error('Error generating hashes:', error);
             // Reset flags on error
@@ -1811,7 +2656,8 @@ async function loadDuplicateFiles(skipHashCheck = false) {
             // Close progress dialog
             progressDialog.close();
             progressDialog.remove();
-            await window.electron.showMessage('Error', 'Failed to generate file hashes');
+            // Only show error if it's a critical error, not just some failed hashes
+            await window.electron.showMessage('Error', 'Failed to generate file hashes. Please check file permissions and network connectivity.');
             return;
           }
           return; // Exit early - we'll reload when hash generation is complete
@@ -1823,12 +2669,18 @@ async function loadDuplicateFiles(skipHashCheck = false) {
         // No models without hash, ensure flag is reset
         isHashDialogShowing = false;
       }
-      }
     }
     
     const dialog = document.getElementById('dedup-dialog');
     const duplicateGroups = dialog.querySelector('.duplicate-groups');
-    duplicateGroups.innerHTML = '';
+    
+    // Show loading indicator immediately
+    duplicateGroups.innerHTML = `
+      <div style="text-align: center; padding: 40px; color: #888;">
+        <div style="display: inline-block; width: 40px; height: 40px; border: 4px solid #333; border-top-color: #4a9eff; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px;"></div>
+        <div style="margin-top: 15px;">Loading duplicate files...</div>
+      </div>
+    `;
     
     // Check if ZIP is enabled and show/hide the checkbox
     const enableZipArchives = await window.electron.getSetting('enableZipArchives');
@@ -1863,6 +2715,14 @@ async function loadDuplicateFiles(skipHashCheck = false) {
     // Get the current checkbox state (default to false)
     const includeZip = includeZipCheckbox?.checked || false;
     
+    // Update loading message
+    duplicateGroups.innerHTML = `
+      <div style="text-align: center; padding: 40px; color: #888;">
+        <div style="display: inline-block; width: 40px; height: 40px; border: 4px solid #333; border-top-color: #4a9eff; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px;"></div>
+        <div style="margin-top: 15px;">Analyzing duplicates...</div>
+      </div>
+    `;
+    
     // Load duplicates with the includeZip parameter
     const duplicates = await window.electron.getDuplicates(includeZip);
     const isGeneratingHashes = await window.electron.isGeneratingHashes();
@@ -1870,49 +2730,8 @@ async function loadDuplicateFiles(skipHashCheck = false) {
     console.log('Is generating hashes:', isGeneratingHashes);
     console.log('Include zip:', includeZip);
     
-    // Check for missing thumbnails in duplicate groups and generate them if needed
-    if (duplicates && Object.keys(duplicates).length > 0) {
-      const modelsNeedingThumbnails = [];
-      
-      // Check each duplicate group for missing thumbnails
-      for (const [hash, files] of Object.entries(duplicates)) {
-        // Check the first file's thumbnail (since we use it for the preview)
-        const firstFile = files[0];
-        try {
-          const thumbnail = await window.electron.getThumbnail(firstFile.filePath);
-          // If thumbnail is null, empty, or the default placeholder, we need to generate it
-          if (!thumbnail || thumbnail === '3d.png' || thumbnail.trim() === '') {
-            console.log(`Missing thumbnail for duplicate: ${firstFile.filePath}`);
-            modelsNeedingThumbnails.push(firstFile.filePath);
-          }
-        } catch (error) {
-          console.error(`Error checking thumbnail for ${firstFile.filePath}:`, error);
-          // If we can't check, assume we need to generate
-          modelsNeedingThumbnails.push(firstFile.filePath);
-        }
-      }
-      
-      // Generate thumbnails if any are missing
-      if (modelsNeedingThumbnails.length > 0) {
-        console.log(`Generating ${modelsNeedingThumbnails.length} missing thumbnails for duplicate preview...`);
-        try {
-          // Generate thumbnails one at a time
-          for (const filePath of modelsNeedingThumbnails) {
-            try {
-              await generateThumbnail(filePath);
-              console.log(`Generated thumbnail for: ${filePath}`);
-            } catch (error) {
-              console.error(`Failed to generate thumbnail for ${filePath}:`, error);
-              // Continue with next file even if one fails
-            }
-          }
-          console.log('Thumbnail generation complete for duplicates');
-        } catch (error) {
-          console.error('Error generating thumbnails for duplicates:', error);
-          // Continue anyway to show the duplicates, even without thumbnails
-        }
-      }
-    }
+    // Clear loading message; previews are rendered on demand by showDuplicateFiles via renderModelToPNG
+    duplicateGroups.innerHTML = '';
     
     // Show warning if hashes are being generated
     if (isGeneratingHashes) {
@@ -1944,11 +2763,12 @@ async function loadDuplicateFiles(skipHashCheck = false) {
       const deleteButton = dialog.querySelector('#delete-selected');
       if (deleteButton) {
         deleteButton.style.display = '';
-        // Remove any existing click listeners
+        // Remove any existing click listeners by cloning
         deleteButton.replaceWith(deleteButton.cloneNode(true));
         // Get the new button reference
         const newDeleteButton = dialog.querySelector('#delete-selected');
-        // Add click handler
+        // Add click handler - showDuplicateFiles will also set this, but that's okay
+        // The flag in handleDeleteSelected will prevent multiple confirmations
         newDeleteButton.addEventListener('click', handleDeleteSelected);
       }
       
@@ -1961,19 +2781,40 @@ async function loadDuplicateFiles(skipHashCheck = false) {
         const preview = document.createElement('div');
         preview.className = 'duplicate-preview';
         
-        // Try to get thumbnail
+        // Try stored thumbnail first, then fall back to on-the-fly render (covers models with no thumbnail yet)
         try {
           const thumbnail = await window.electron.getThumbnail(files[0].filePath);
-          if (thumbnail) {
+          if (thumbnail && thumbnail !== '3d.png' && thumbnail.trim() !== '') {
             const img = document.createElement('img');
             img.src = thumbnail;
             preview.appendChild(img);
           } else {
+            const rendered = await renderModelToPNG(files[0].filePath, preview);
+            if (rendered) {
+              const img = document.createElement('img');
+              img.src = rendered;
+              preview.innerHTML = '';
+              preview.appendChild(img);
+            } else {
+              preview.innerHTML = '<div class="error-message">No preview available</div>';
+            }
+          }
+        } catch (error) {
+          console.error('Error getting thumbnail:', error);
+          try {
+            const rendered = await renderModelToPNG(files[0].filePath, preview);
+            if (rendered) {
+              const img = document.createElement('img');
+              img.src = rendered;
+              preview.innerHTML = '';
+              preview.appendChild(img);
+            } else {
+              preview.innerHTML = '<div class="error-message">No preview available</div>';
+            }
+          } catch (renderErr) {
+            console.error('Error rendering preview:', renderErr);
             preview.innerHTML = '<div class="error-message">No preview available</div>';
           }
-  } catch (error) {
-          console.error('Error getting thumbnail:', error);
-          preview.innerHTML = '<div class="error-message">No preview available</div>';
         }
         
         // Add files list
@@ -2040,19 +2881,184 @@ async function loadDuplicateFiles(skipHashCheck = false) {
         duplicateGroups.appendChild(group);
       }
     }
-    
-    // Show the dialog
-    dialog.showModal();
+
+    // Show the dialog only if not refresh-only (e.g. after delete we stay in dialog and just refreshed list)
+    if (!refreshOnly) {
+      dialog.showModal();
+    }
     
   } catch (error) {
     console.error('Error loading duplicates:', error);
     // Reset flags in case of error
     isHashDialogShowing = false;
     isCheckingForHashes = false;
-    await window.electron.showMessage('Error', 'Failed to load duplicate files');
+    // In refreshOnly mode (e.g. after delete), don't show error dialog so user stays in de-dupe list
+    if (!refreshOnly) {
+      await window.electron.showMessage('Error', 'Failed to load duplicate files');
+    }
   }
 }
 
+// Function to show manage thumbnails modal
+async function showManageThumbnailsModal(filePath) {
+  const dialog = document.getElementById('manage-thumbnails-dialog');
+  const grid = document.getElementById('thumbnails-grid');
+  
+  if (!dialog || !grid) {
+    throw new Error('Manage thumbnails dialog elements not found');
+  }
+  
+  try {
+    // Get all thumbnails for the model
+    const allThumbnails = await window.electron.getAllThumbnails(filePath);
+    
+    // Filter out invalid thumbnails (3d.png and non-data URLs)
+    const validThumbnails = allThumbnails.filter(t => 
+      t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')
+    );
+    
+    if (validThumbnails.length === 0) {
+      alert('This model has no thumbnails to manage.');
+      return;
+    }
+    
+    // Clear the grid
+    grid.innerHTML = '';
+    
+    // Create thumbnail items
+    validThumbnails.forEach((thumbnail, index) => {
+      const item = document.createElement('div');
+      item.className = 'thumbnail-item';
+      if (index === 0) {
+        item.classList.add('active');
+      }
+      item.dataset.index = index;
+      
+      const img = document.createElement('img');
+      img.src = thumbnail;
+      img.alt = `Thumbnail ${index + 1}`;
+      
+      const label = document.createElement('div');
+      label.className = 'thumbnail-item-label';
+      label.textContent = index === 0 ? 'Active' : `Image ${index + 1}`;
+      
+      const overlay = document.createElement('div');
+      overlay.className = 'thumbnail-item-overlay';
+      
+      const setActiveButton = document.createElement('button');
+      setActiveButton.type = 'button';
+      setActiveButton.className = 'thumbnail-item-button set-active';
+      setActiveButton.textContent = index === 0 ? 'Active' : 'Set as Active';
+      setActiveButton.disabled = index === 0;
+      
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'thumbnail-item-button delete';
+      deleteButton.textContent = 'Delete';
+      // Disable delete for active thumbnail (index 0) or if only one thumbnail remains
+      deleteButton.disabled = index === 0 || validThumbnails.length <= 1;
+      
+      // Set active button handler
+      setActiveButton.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          await window.electron.setDefaultThumbnail(filePath, index);
+          
+          // Refresh the modal to show updated state
+          await showManageThumbnailsModal(filePath);
+          
+          // Refresh the grid to show updated thumbnail
+          if (window.refreshGrid) {
+            window.refreshGrid();
+          }
+        } catch (error) {
+          console.error('Error setting active thumbnail:', error);
+          alert('Error setting active thumbnail: ' + error.message);
+        }
+      });
+      
+      // Delete button handler
+      deleteButton.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        
+        // Confirm deletion
+        if (!confirm(`Are you sure you want to delete this thumbnail?`)) {
+          return;
+        }
+        
+        try {
+          await window.electron.deleteThumbnail(filePath, index);
+          
+          // Refresh the modal to show updated thumbnails
+          await showManageThumbnailsModal(filePath);
+          
+          // Refresh the grid to show updated thumbnail
+          if (window.refreshGrid) {
+            window.refreshGrid();
+          }
+        } catch (error) {
+          console.error('Error deleting thumbnail:', error);
+          alert('Error deleting thumbnail: ' + error.message);
+        }
+      });
+      
+      // Click on item to set as active (if not already active)
+      item.addEventListener('click', async (e) => {
+        // Don't trigger if clicking on buttons
+        if (e.target.closest('.thumbnail-item-button')) {
+          return;
+        }
+        
+        if (index !== 0) {
+          try {
+            await window.electron.setDefaultThumbnail(filePath, index);
+            await showManageThumbnailsModal(filePath);
+            if (window.refreshGrid) {
+              window.refreshGrid();
+            }
+          } catch (error) {
+            console.error('Error setting active thumbnail:', error);
+            alert('Error setting active thumbnail: ' + error.message);
+          }
+        }
+      });
+      
+      overlay.appendChild(setActiveButton);
+      if (!deleteButton.disabled) {
+        overlay.appendChild(deleteButton);
+      }
+      
+      item.appendChild(img);
+      item.appendChild(label);
+      item.appendChild(overlay);
+      grid.appendChild(item);
+    });
+    
+    // Show the dialog
+    dialog.showModal();
+    
+    // Handle dialog close
+    const form = dialog.querySelector('form');
+    if (form) {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        dialog.close();
+      });
+    }
+    
+    // Also handle close button
+    const closeButton = dialog.querySelector('button[type="submit"]');
+    if (closeButton) {
+      closeButton.addEventListener('click', () => {
+        dialog.close();
+      });
+    }
+    
+  } catch (error) {
+    console.error('Error loading thumbnails:', error);
+    throw error;
+  }
+}
 
 // Update the checkTermsOfService function to return a promise
 async function checkTermsOfService() {
@@ -2174,6 +3180,14 @@ function createMenuDropdown(label, items) {
   return menuContainer;
 }
 
+// Gray out path-metadata options when "Enable" is unchecked (used by STL Home dialog)
+function updateStlHomePathMetadataGrayed() {
+  const enableEl = document.getElementById('stl-home-path-metadata-enabled');
+  const optionsEl = document.getElementById('stl-home-path-metadata-options');
+  if (optionsEl) optionsEl.classList.toggle('grayed', !enableEl?.checked);
+}
+window.updateStlHomePathMetadataGrayed = updateStlHomePathMetadataGrayed;
+
 // Shared function to initialize and open STL Home dialog
 window.openSTLHomeDialog = async function() {
   const stlHomeDialog = document.getElementById('stl-home-dialog');
@@ -2194,6 +3208,26 @@ window.openSTLHomeDialog = async function() {
   const updateFrequencyInput = document.getElementById('stl-home-update-frequency');
   const updateFrequencyGroup = document.getElementById('stl-home-update-frequency-group');
   const chooseButton = document.getElementById('choose-stl-home-button');
+
+  // Load path metadata from folder (STL Home only): enabled + use Designer/Parent checkboxes + segment indices
+  const pathMetaEnabled = await window.electron.getSetting('pathMetadataStlHomeEnabled');
+  const pathMetaUseDesigner = await window.electron.getSetting('pathMetadataUseDesigner');
+  const pathMetaUseParentModel = await window.electron.getSetting('pathMetadataUseParentModel');
+  const pathMetaDesignerIndex = await window.electron.getSetting('pathMetadataDesignerIndex');
+  const pathMetaParentModelIndex = await window.electron.getSetting('pathMetadataParentModelIndex');
+  const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
+  const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
+  const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
+  const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
+  const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
+  if (pathMetaEnabledEl) pathMetaEnabledEl.checked = pathMetaEnabled === '1';
+  if (pathMetaUseDesignerEl) pathMetaUseDesignerEl.checked = pathMetaUseDesigner !== '0';
+  if (pathMetaUseParentModelEl) pathMetaUseParentModelEl.checked = pathMetaUseParentModel !== '0';
+  if (pathMetaDesignerIndexEl) pathMetaDesignerIndexEl.value = (pathMetaDesignerIndex !== null && pathMetaDesignerIndex !== '') ? String(pathMetaDesignerIndex) : '1';
+  if (pathMetaParentModelIndexEl) pathMetaParentModelIndexEl.value = (pathMetaParentModelIndex !== null && pathMetaParentModelIndex !== '') ? String(pathMetaParentModelIndex) : '0';
+  updateStlHomePathMetadataGrayed();
+  // Re-apply grayed state after paint (fixes Docker/server mode where checkbox state wasn't reflected)
+  requestAnimationFrame(() => updateStlHomePathMetadataGrayed());
   
   if (serverMode) {
     // In server mode: hide Choose Directory button, show Update Frequency, make input editable
@@ -2217,12 +3251,540 @@ window.openSTLHomeDialog = async function() {
       directoryInput.placeholder = 'No directory selected';
     }
   }
-  
+
+  // Bind Save button when dialog opens - run save logic directly so it always works (Docker/server load order)
+  const saveBtn = document.getElementById('save-stl-home-button');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async function onSaveClick(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log('[STL Home] Save button clicked');
+      const stlDirEl = document.getElementById('stl-home-directory');
+      const stlDir = stlDirEl ? stlDirEl.value.trim() : '';
+      const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
+      const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
+      const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
+      const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
+      const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
+      try {
+        console.log('[STL Home] Saving stlHome:', stlDir);
+        await window.electron.saveSetting('stlHome', stlDir);
+        await window.electron.saveSetting('pathMetadataStlHomeEnabled', pathMetaEnabledEl?.checked ? '1' : '0');
+        await window.electron.saveSetting('pathMetadataUseDesigner', pathMetaUseDesignerEl?.checked ? '1' : '0');
+        await window.electron.saveSetting('pathMetadataUseParentModel', pathMetaUseParentModelEl?.checked ? '1' : '0');
+        await window.electron.saveSetting('pathMetadataDesignerIndex', pathMetaDesignerIndexEl?.value ?? '1');
+        await window.electron.saveSetting('pathMetadataParentModelIndex', pathMetaParentModelIndexEl?.value ?? '0');
+        // Show "Scan STL Home" in sidebar from value we just saved (Docker/server: getSetting can lag)
+        const scanStlHomeBtn = document.getElementById('scan-stl-home-button');
+        if (scanStlHomeBtn) scanStlHomeBtn.style.display = (stlDir && stlDir.trim() !== '') ? '' : 'none';
+        if (typeof window.updateScanStlHomeButtonVisibility === 'function') await window.updateScanStlHomeButtonVisibility();
+        const serverMode = await window.electron.isServerMode().catch(() => false);
+        if (serverMode) {
+          const updateFrequencyEl = document.getElementById('stl-home-update-frequency');
+          const updateFrequency = updateFrequencyEl ? updateFrequencyEl.value : '60';
+          await window.electron.saveSetting('stlHomeUpdateFrequency', updateFrequency);
+          if (stlDir && stlDir.trim() !== '') {
+            if (typeof window.performSTLHomeScan === 'function') window.performSTLHomeScan(stlDir).catch(err => console.error('STL Home scan on save:', err));
+            if (typeof window.startPeriodicSTLHomeScan === 'function') window.startPeriodicSTLHomeScan();
+          } else {
+            if (typeof window.stopPeriodicSTLHomeScan === 'function') window.stopPeriodicSTLHomeScan();
+          }
+        }
+        console.log('[STL Home] Save complete, closing dialog');
+        if (typeof stlHomeDialog.close === 'function') stlHomeDialog.close();
+      } catch (err) {
+        console.error('[STL Home] Save failed:', err);
+        if (window.electron && typeof window.electron.showMessage === 'function') {
+          await window.electron.showMessage('Error', 'Failed to save STL Home: ' + (err.message || String(err)));
+        }
+      }
+    }, { once: true });
+  }
+
   stlHomeDialog.showModal();
 };
 
-// Function to create server mode menu bar
-function createServerMenuBar() {
+// About dialog functions - defined at top level for accessibility
+function bindAboutCloseButton() {
+  const dialog = document.getElementById('about-dialog');
+  const closeXButton = dialog?.querySelector('.about-close-x');
+  if (!dialog || !closeXButton) {
+    return;
+  }
+
+  // Remove any existing event listeners by cloning and replacing the button
+  // This ensures we don't have duplicate listeners
+  const newButton = closeXButton.cloneNode(true);
+  closeXButton.parentNode.replaceChild(newButton, closeXButton);
+  
+  // Add the click handler to the new button
+  newButton.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dialog.close();
+  });
+}
+
+// Define the collect usage change handler as a named function so we can remove it
+async function collectUsageChangeHandler(e) {
+  const newValue = e.target.checked ? '1' : '0';
+  console.log('About dialog - Saving CollectUsage value:', newValue);
+  
+  // Save the setting
+  await window.electron.saveSetting('CollectUsage', newValue);
+  
+  // Verify the setting was saved correctly
+  const verifiedValue = await window.electron.checkCollectUsage();
+  console.log('Verified CollectUsage value from database:', verifiedValue);
+  
+  // Update the checkbox state to match the database value
+  e.target.checked = verifiedValue === '1';
+  
+  // Toggle analytics based on the verified value
+  toggleAnalytics(verifiedValue === '1');
+}
+
+async function initializeAboutDialog() {
+  const versionElement = document.getElementById('about-version');
+  const dialog = document.getElementById('about-dialog');
+  if (!dialog) return;
+
+  // Version: load defensively so dialog always shows something
+  try {
+    let currentVersion = null;
+    if (typeof window.electron?.getSetting === 'function') {
+      currentVersion = await window.electron.getSetting('currentVersion').catch(() => null);
+    }
+    if (!currentVersion && typeof window.electron?.getAppVersion === 'function') {
+      currentVersion = await window.electron.getAppVersion().catch(() => null);
+    }
+    if (versionElement) {
+      versionElement.textContent = `Version: ${currentVersion || 'Unknown'}`;
+    }
+  } catch (e) {
+    console.error('About dialog version:', e);
+    if (versionElement) versionElement.textContent = 'Version: Unknown';
+  }
+
+  // Analytics checkbox: optional, don't block dialog load
+  try {
+    const collectUsageCheckbox = document.getElementById('collect-usage');
+    if (collectUsageCheckbox && typeof window.electron?.getSetting === 'function') {
+      const collectUsage = await window.electron.getSetting('CollectUsage').catch(() => null);
+      collectUsageCheckbox.checked = collectUsage === '1';
+      collectUsageCheckbox.removeEventListener('change', collectUsageChangeHandler);
+      collectUsageCheckbox.addEventListener('change', collectUsageChangeHandler);
+    }
+  } catch (e) {
+    console.error('About dialog CollectUsage:', e);
+  }
+
+  // Close X is handled by inline onclick in HTML; bind for any extra behavior
+  bindAboutCloseButton();
+
+  // License link
+  try {
+    const licenseLink = document.getElementById('license-link');
+    if (licenseLink && typeof window.electron?.openExternal === 'function') {
+      licenseLink.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await window.electron.openExternal('https://github.com/TechJeeper/Printventory/blob/main/LICENSE.txt');
+      });
+    }
+  } catch (e) {
+    console.error('About dialog license link:', e);
+  }
+}
+
+async function initializeSystemReport() {
+  try {
+    const loadingEl = document.getElementById('system-report-loading');
+    const contentEl = document.getElementById('system-report-content');
+    const gpuDetectedEl = document.getElementById('gpu-detected');
+    const gpuDetailsEl = document.getElementById('gpu-details');
+    const filesystemResultEl = document.getElementById('filesystem-result');
+    const filesystemDetailsEl = document.getElementById('filesystem-details');
+    const databaseResultEl = document.getElementById('database-result');
+    const databaseDetailsEl = document.getElementById('database-details');
+    
+    // Show loading, hide content
+    if (loadingEl) loadingEl.style.display = 'block';
+    if (contentEl) contentEl.style.display = 'none';
+    
+    // Check GPU/WebGL support (client-side)
+    let gpuDetected = false;
+    let gpuInfo = '';
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      
+      if (gl) {
+        gpuDetected = true;
+        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+        if (debugInfo) {
+          const vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
+          const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+          gpuInfo = `Vendor: ${vendor}<br>Renderer: ${renderer}`;
+        } else {
+          gpuInfo = 'WebGL is available but detailed GPU information is not accessible.';
+        }
+      } else {
+        gpuDetected = false;
+        gpuInfo = 'WebGL is not available. 3D rendering may be limited or unavailable.';
+      }
+    } catch (error) {
+      gpuDetected = false;
+      gpuInfo = `Error detecting GPU: ${error.message}`;
+    }
+    
+    // Update GPU status
+    if (gpuDetectedEl) {
+      gpuDetectedEl.textContent = gpuDetected ? '✓ Detected' : '✗ Not Detected';
+      gpuDetectedEl.style.color = gpuDetected ? '#4caf50' : '#f44336';
+    }
+    if (gpuDetailsEl) {
+      gpuDetailsEl.innerHTML = gpuInfo || 'No additional information available.';
+    }
+    
+    // Run file system benchmark
+    let filesystemInfo = '';
+    try {
+      const fsResult = await window.electron.benchmarkFilesystem();
+      if (fsResult && fsResult.success) {
+        filesystemInfo = `Write: ${fsResult.write.speedMBps} MB/s (${fsResult.write.time}ms for ${fsResult.iterations} operations)<br>Read: ${fsResult.read.speedMBps} MB/s (${fsResult.read.time}ms for ${fsResult.iterations} operations)`;
+        if (filesystemResultEl) {
+          filesystemResultEl.textContent = '✓ Completed';
+          filesystemResultEl.style.color = '#4caf50';
+        }
+      } else {
+        filesystemInfo = `Error: ${fsResult?.error || 'Unknown error'}`;
+        if (filesystemResultEl) {
+          filesystemResultEl.textContent = '✗ Failed';
+          filesystemResultEl.style.color = '#f44336';
+        }
+      }
+    } catch (error) {
+      filesystemInfo = `Error: ${error.message}`;
+      if (filesystemResultEl) {
+        filesystemResultEl.textContent = '✗ Error';
+        filesystemResultEl.style.color = '#f44336';
+      }
+    }
+    if (filesystemDetailsEl) {
+      filesystemDetailsEl.innerHTML = filesystemInfo || 'Benchmark not available.';
+    }
+    
+    // Run database benchmark
+    let databaseInfo = '';
+    try {
+      const dbResult = await window.electron.benchmarkDatabase();
+      if (dbResult && dbResult.success) {
+        databaseInfo = `Write: ${dbResult.write.opsPerSec} ops/sec (${dbResult.write.time}ms for ${dbResult.write.operations} operations)<br>Read: ${dbResult.read.opsPerSec} ops/sec (${dbResult.read.time}ms for ${dbResult.read.operations} operations)`;
+        if (databaseResultEl) {
+          databaseResultEl.textContent = '✓ Completed';
+          databaseResultEl.style.color = '#4caf50';
+        }
+      } else {
+        databaseInfo = `Error: ${dbResult?.error || 'Unknown error'}`;
+        if (databaseResultEl) {
+          databaseResultEl.textContent = '✗ Failed';
+          databaseResultEl.style.color = '#f44336';
+        }
+      }
+    } catch (error) {
+      databaseInfo = `Error: ${error.message}`;
+      if (databaseResultEl) {
+        databaseResultEl.textContent = '✗ Error';
+        databaseResultEl.style.color = '#f44336';
+      }
+    }
+    if (databaseDetailsEl) {
+      databaseDetailsEl.innerHTML = databaseInfo || 'Benchmark not available.';
+    }
+    
+    // Hide loading, show content
+    if (loadingEl) loadingEl.style.display = 'none';
+    if (contentEl) contentEl.style.display = 'block';
+    
+  } catch (error) {
+    console.error('Error initializing system report:', error);
+    const loadingEl = document.getElementById('system-report-loading');
+    const contentEl = document.getElementById('system-report-content');
+    if (loadingEl) {
+      loadingEl.innerHTML = `<p style="color: #f44336;">Error loading system report: ${error.message}</p>`;
+    }
+    if (contentEl) contentEl.style.display = 'none';
+  }
+}
+
+// Shared function to load AI config settings and show dialog (must be top-level for server menu access)
+async function loadAndShowAIConfig() {
+  const dialog = document.getElementById('ai-config-dialog');
+  if (!dialog) {
+    console.error('ai-config-dialog element not found.');
+    return;
+  }
+  
+  // Load all settings first, then show dialog with populated values
+  const apiKeyValue = await window.electron.getSetting('apiKey').catch(() => null);
+  const serviceValue = await window.electron.getSetting('aiService').catch(() => null);
+  const endpointValue = await window.electron.getSetting('apiEndpoint').catch(() => null);
+  const modelValue = await window.electron.getSetting('aiModel').catch(() => null);
+  
+  // Ensure dialog is in DOM before getting elements
+  if (!dialog.isConnected) {
+    document.body.appendChild(dialog);
+  }
+  
+  // Get all form elements
+  const keyEl = document.getElementById('ai-api-key');
+  const serviceEl = document.getElementById('ai-service-select');
+  const endpointEl = document.getElementById('ai-endpoint');
+  const modelEl = document.getElementById('ai-model');
+  const apiKeyGroup = keyEl?.closest('.form-group');
+  
+  if (!serviceEl) {
+    console.error('ai-service-select element not found.');
+    return;
+  }
+  
+  console.log('[AI Config] Found elements:', {
+    serviceEl: !!serviceEl,
+    endpointEl: !!endpointEl,
+    modelEl: !!modelEl,
+    keyEl: !!keyEl
+  });
+  
+    // Set service first - default to 'puter' if undefined
+    const selectedService = serviceValue || 'puter';
+    
+    // Force set the select value and verify it stuck
+    serviceEl.value = selectedService;
+    
+    // Double-check the value was set correctly
+    if (serviceEl.value !== selectedService) {
+      console.warn('[AI Config] Select value mismatch, forcing to:', selectedService);
+      // Try setting by selectedIndex
+      for (let i = 0; i < serviceEl.options.length; i++) {
+        if (serviceEl.options[i].value === selectedService) {
+          serviceEl.selectedIndex = i;
+          break;
+        }
+      }
+      // Verify again
+      if (serviceEl.value !== selectedService) {
+        console.error('[AI Config] Failed to set service select to:', selectedService, 'current value:', serviceEl.value);
+      }
+    }
+    
+    // Ensure service is saved if it was undefined
+    if (!serviceValue || serviceValue !== selectedService) {
+      await window.electron.saveSetting('aiService', selectedService).catch((err) => {
+        console.error('[AI Config] Error saving service:', err);
+      });
+      console.log('[AI Config] Saved service to database:', selectedService);
+    }
+    
+    console.log('[AI Config] Service set to:', selectedService, 'serviceEl.value:', serviceEl.value, 'selectedIndex:', serviceEl.selectedIndex);
+  
+  // Helper function to check if a value is empty/null/undefined
+  const isEmpty = (val) => val === null || val === undefined || val === '';
+  
+  // Set defaults based on service if values are empty
+  if (selectedService === 'puter') {
+    // Load Puter.js when Puter service is selected in the dialog
+    loadPuterJS().catch(err => {
+      console.warn('[AI Config] Failed to preload Puter.js:', err);
+      // Don't block dialog opening if Puter.js fails to load
+    });
+    
+    // For Puter.com, always use defaults (endpoint and model are required for Puter.com)
+    const puterEndpoint = 'https://js.puter.com/v2/';
+    const puterModel = 'gpt-5-nano';
+    
+    console.log('[AI Config] Setting Puter.com defaults:', { endpointEl: !!endpointEl, modelEl: !!modelEl, endpointValue, modelValue });
+    
+    if (endpointEl) {
+      // Always set the Puter.com endpoint
+      endpointEl.value = puterEndpoint;
+      endpointEl.required = false;
+      console.log('[AI Config] Set endpoint to:', endpointEl.value);
+      // Save it if it wasn't already saved or if it's different
+      if (isEmpty(endpointValue) || endpointValue !== puterEndpoint) {
+        await window.electron.saveSetting('apiEndpoint', puterEndpoint).catch((err) => {
+          console.error('[AI Config] Error saving endpoint:', err);
+        });
+      }
+    } else {
+      console.error('[AI Config] endpointEl not found!');
+    }
+    if (modelEl) {
+      // Always set the Puter.com model
+      modelEl.value = puterModel;
+      console.log('[AI Config] Set model to:', modelEl.value);
+      // Save it if it wasn't already saved or if it's different
+      if (isEmpty(modelValue) || modelValue !== puterModel) {
+        await window.electron.saveSetting('aiModel', puterModel).catch((err) => {
+          console.error('[AI Config] Error saving model:', err);
+        });
+      }
+    } else {
+      console.error('[AI Config] modelEl not found!');
+    }
+    if (keyEl) {
+      keyEl.value = '';
+      keyEl.required = false;
+      keyEl.disabled = true;
+    }
+    if (apiKeyGroup) apiKeyGroup.style.display = 'none';
+  } else if (selectedService === 'openai') {
+    if (endpointEl) {
+      endpointEl.value = endpointValue || 'https://api.openai.com/v1';
+      endpointEl.required = true;
+    }
+    if (modelEl) {
+      modelEl.value = modelValue || 'gpt-4o-mini';
+    }
+    if (keyEl) {
+      keyEl.value = apiKeyValue || '';
+      keyEl.required = true;
+      keyEl.disabled = false;
+    }
+    if (apiKeyGroup) apiKeyGroup.style.display = '';
+  } else if (selectedService === 'gemini') {
+    if (endpointEl) {
+      endpointEl.value = endpointValue || 'https://generativelanguage.googleapis.com/v1beta/openai/';
+      endpointEl.required = true;
+    }
+    if (modelEl) {
+      modelEl.value = modelValue || 'gemini-2.5-flash';
+    }
+    if (keyEl) {
+      keyEl.value = apiKeyValue || '';
+      keyEl.required = true;
+      keyEl.disabled = false;
+    }
+    if (apiKeyGroup) apiKeyGroup.style.display = '';
+  } else {
+    // Custom service
+    if (endpointEl) {
+      endpointEl.value = endpointValue || '';
+      endpointEl.required = true;
+    }
+    if (modelEl) {
+      modelEl.value = modelValue || '';
+    }
+    if (keyEl) {
+      keyEl.value = apiKeyValue || '';
+      keyEl.required = true;
+      keyEl.disabled = false;
+    }
+    if (apiKeyGroup) apiKeyGroup.style.display = '';
+  }
+  
+  // Add input event listeners for real-time persistence (only if not already added)
+  if (keyEl && !keyEl.dataset.listenerAdded) {
+    keyEl.addEventListener('input', async () => {
+      await window.electron.saveSetting('apiKey', keyEl.value).catch(() => {});
+    });
+    keyEl.dataset.listenerAdded = 'true';
+  }
+  if (endpointEl && !endpointEl.dataset.listenerAdded) {
+    endpointEl.addEventListener('input', async () => {
+      await window.electron.saveSetting('apiEndpoint', endpointEl.value).catch(() => {});
+    });
+    endpointEl.dataset.listenerAdded = 'true';
+  }
+  if (modelEl && !modelEl.dataset.listenerAdded) {
+    modelEl.addEventListener('input', async () => {
+      await window.electron.saveSetting('aiModel', modelEl.value).catch(() => {});
+    });
+    modelEl.dataset.listenerAdded = 'true';
+  }
+  
+  // Load AI tag settings
+  const maxTagsValue = await window.electron.getSetting('aiTagMaxTags').catch(() => null);
+  const mergeStrategyValue = await window.electron.getSetting('aiTagMergeStrategy').catch(() => null);
+  const useCategoriesValue = await window.electron.getSetting('aiTagUseCategories').catch(() => null);
+  const allowRetaggingValue = await window.electron.getSetting('aiTagAllowRetagging').catch(() => null);
+  const concurrencyValue = await window.electron.getSetting('aiTagConcurrency').catch(() => null);
+  const detailLevelValue = await window.electron.getSetting('aiTagDetailLevel').catch(() => null);
+  
+  const maxTagsEl = document.getElementById('ai-tag-max-tags');
+  if (maxTagsEl) {
+    maxTagsEl.value = maxTagsValue || '10';
+  }
+  
+  const mergeStrategyEl = document.getElementById('ai-tag-merge-strategy');
+  if (mergeStrategyEl) {
+    mergeStrategyEl.value = mergeStrategyValue || 'merge';
+  }
+  
+  const useCategoriesEl = document.getElementById('ai-tag-use-categories');
+  if (useCategoriesEl) {
+    useCategoriesEl.checked = useCategoriesValue === '1';
+  }
+  
+  const allowRetaggingEl = document.getElementById('ai-tag-allow-retagging');
+  if (allowRetaggingEl) {
+    allowRetaggingEl.checked = allowRetaggingValue === '1';
+  }
+  
+  const concurrencyEl = document.getElementById('ai-tag-concurrency');
+  if (concurrencyEl) {
+    concurrencyEl.value = concurrencyValue || '3';
+  }
+  
+  const detailLevelEl = document.getElementById('ai-tag-detail-level');
+  if (detailLevelEl) {
+    detailLevelEl.value = detailLevelValue || 'medium';
+  }
+  
+  // Double-check Puter.com defaults are set (in case elements weren't ready earlier)
+  if (selectedService === 'puter') {
+    const puterEndpoint = 'https://js.puter.com/v2/';
+    const puterModel = 'gpt-5-nano';
+    
+    // Re-get elements to ensure they're in the DOM
+    const finalEndpointEl = document.getElementById('ai-endpoint');
+    const finalModelEl = document.getElementById('ai-model');
+    
+    if (finalEndpointEl && (!finalEndpointEl.value || finalEndpointEl.value === '')) {
+      finalEndpointEl.value = puterEndpoint;
+      console.log('[AI Config] Re-set endpoint after dialog prep:', finalEndpointEl.value);
+    }
+    if (finalModelEl && (!finalModelEl.value || finalModelEl.value === '')) {
+      finalModelEl.value = puterModel;
+      console.log('[AI Config] Re-set model after dialog prep:', finalModelEl.value);
+    }
+  }
+  
+  // Now show the dialog with all values populated
+  dialog.showModal();
+  
+  // One more check after dialog is shown (for any edge cases)
+  if (selectedService === 'puter') {
+    setTimeout(() => {
+      const puterEndpoint = 'https://js.puter.com/v2/';
+      const puterModel = 'gpt-5-nano';
+      const finalEndpointEl = document.getElementById('ai-endpoint');
+      const finalModelEl = document.getElementById('ai-model');
+      
+      if (finalEndpointEl && (!finalEndpointEl.value || finalEndpointEl.value === '')) {
+        finalEndpointEl.value = puterEndpoint;
+        console.log('[AI Config] Final fallback - set endpoint:', finalEndpointEl.value);
+      }
+      if (finalModelEl && (!finalModelEl.value || finalModelEl.value === '')) {
+        finalModelEl.value = puterModel;
+        console.log('[AI Config] Final fallback - set model:', finalModelEl.value);
+      }
+    }, 100);
+  }
+}
+
+// Function to create server mode menu bar (async so we can hide Browser Extension in server mode)
+async function createServerMenuBar() {
+  const serverMode = await window.electron.isServerMode().catch(() => false);
   const menuBar = document.createElement('div');
   menuBar.id = 'server-menu-bar';
   menuBar.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; height: 30px; background-color: #2c2c2c; border-bottom: 1px solid #444; display: flex; align-items: center; padding: 0 10px; z-index: 10000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px;';
@@ -2236,6 +3798,9 @@ function createServerMenuBar() {
     { label: 'De-Dup', action: () => {
       const dialog = document.getElementById('dedup-dialog');
       if (dialog) {
+        dialog.classList.remove('modal-fullscreen');
+        const fullscreenBtn = document.getElementById('dedup-fullscreen-toggle');
+        if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
         dialog.showModal();
         const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
         if (includeZipCheckbox) {
@@ -2251,6 +3816,9 @@ function createServerMenuBar() {
     { label: 'Tag Manager', action: () => {
       const dialog = document.getElementById('tag-manager-dialog');
       if (dialog) {
+        dialog.classList.remove('modal-fullscreen');
+        const fullscreenBtn = document.getElementById('tag-manager-fullscreen-toggle');
+        if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
         dialog.showModal();
       } else {
         // Fallback: trigger the event which will open the dialog via the listener
@@ -2281,6 +3849,10 @@ function createServerMenuBar() {
       if (dialog) {
         dialog.showModal();
       }
+    }},
+    { label: '---', action: null },
+    { label: 'Browser Extension', action: () => {
+      window.open('https://chromewebstore.google.com/detail/pigngedngcegmemgfbkaiihjnbplaedj?utm_source=item-share-cb', '_blank', 'noopener,noreferrer');
     }},
     { label: '---', action: null },
     { label: 'Restart Server', action: async () => {
@@ -2334,15 +3906,10 @@ function createServerMenuBar() {
     }}
   ]);
   
-  // Settings menu
-  const settingsMenu = createMenuDropdown('Settings', [
-    { label: 'AI Config', action: () => {
-      const dialog = document.getElementById('ai-config-dialog');
-      if (dialog) {
-        dialog.showModal();
-      } else {
-        window.electron.send('open-ai-config');
-      }
+  // Settings menu (Browser Extension not needed in Docker/Server mode)
+  const settingsMenuItems = [
+    { label: 'AI Config', action: async () => {
+      await loadAndShowAIConfig();
     }},
     { label: 'File Type', action: () => {
       const dialog = document.getElementById('file-type-settings-dialog');
@@ -2360,41 +3927,58 @@ function createServerMenuBar() {
         window.electron.send('open-performance-settings');
       }
     }},
-    { label: 'Slicer Path', action: () => {
-      const dialog = document.getElementById('slicer-dialog');
-      if (dialog) {
-        dialog.showModal();
-      } else {
-        window.electron.send('open-slicer-settings');
-      }
-    }},
     { label: 'STL Home', action: async () => {
       await window.openSTLHomeDialog();
     }},
     { label: 'Theme', action: () => {
       window.electron.send('open-theme-settings');
     }}
-  ]);
+  ];
+  if (!serverMode) {
+    settingsMenuItems.push({ label: 'Browser Extension', action: async () => {
+      const dialog = document.getElementById('browser-extension-settings-dialog');
+      if (!dialog) {
+        window.electron.send('open-browser-extension-settings');
+        return;
+      }
+      const enabled = await window.electron.getSetting('enableBrowserExtension');
+      const port = await window.electron.getSetting('browserExtensionPort');
+      const check = document.getElementById('enable-browser-extension');
+      const portInput = document.getElementById('browser-extension-port');
+      if (check) check.checked = enabled === '1';
+      if (portInput) portInput.value = port || '5000';
+      dialog.showModal();
+    }});
+  }
+  const settingsMenu = createMenuDropdown('Settings', settingsMenuItems);
   
-  // Help menu
+  // Help menu - Quick Start Guide opens multi-page quickstart-guide, not guide-dialog
   const helpMenu = createMenuDropdown('Help', [
     { label: 'Quick Start Guide', action: () => {
-      const dialog = document.getElementById('guide-dialog');
-      if (dialog) {
-        dialog.showModal();
+      if (typeof showGuide === 'function') {
+        showGuide();
       } else {
         window.electron.send('open-guide');
       }
+    }},
+    { label: 'Keyboard Shortcuts', action: () => {
+      const dialog = document.getElementById('keyboard-shortcuts-dialog');
+      if (dialog) dialog.showModal();
     }},
     { label: 'FAQ', action: () => {
       window.electron.openExternal('https://printventory.com/faq.html');
     }},
     { label: 'About', action: async () => {
       const aboutDialog = document.getElementById('about-dialog');
-      if (aboutDialog) {
-        aboutDialog.showModal();
-        bindAboutCloseButton();
+      if (!aboutDialog) return;
+      aboutDialog.showModal();
+      bindAboutCloseButton();
+      try {
         await initializeAboutDialog();
+      } catch (e) {
+        console.error('Error initializing about dialog:', e);
+        const versionEl = document.getElementById('about-version');
+        if (versionEl) versionEl.textContent = 'Version: Unknown';
       }
     }},
     { label: '---', action: null },
@@ -2414,6 +3998,13 @@ function createServerMenuBar() {
     { label: 'Library Stats', action: () => {
       window.electron.send('open-stats');
     }},
+    { label: 'System Report', action: async () => {
+      const systemReportDialog = document.getElementById('system-report-dialog');
+      if (systemReportDialog) {
+        systemReportDialog.showModal();
+        await initializeSystemReport();
+      }
+    }},
     { label: 'Server Mode Info', action: () => {
       window.electron.openExternal('https://github.com/TechJeeper/Printventory?tab=readme-ov-file#server-mode');
     }}
@@ -2424,9 +4015,38 @@ function createServerMenuBar() {
   menuBar.appendChild(helpMenu);
   
   document.body.insertBefore(menuBar, document.body.firstChild);
-  
+  document.body.classList.add('server-mode');
+  if (document.documentElement) document.documentElement.classList.add('server-mode');
+
   // Adjust body padding to account for menu bar
   document.body.style.paddingTop = '30px';
+
+  // Prevent left-side shift in Docker/Server: reset horizontal scroll and re-apply after paint
+  const resetHorizontalScroll = () => {
+    if (document.documentElement) document.documentElement.scrollLeft = 0;
+    if (document.body) document.body.scrollLeft = 0;
+  };
+  resetHorizontalScroll();
+  requestAnimationFrame(resetHorizontalScroll);
+  window.addEventListener('resize', resetHorizontalScroll);
+}
+
+// Extract 3MF thumbnail function - must be at top level for generateThumbnail to access
+async function extract3MFThumbnail(filePath) {
+  try {
+    console.log(`[DEBUG] extract3MFThumbnail: Extracting images from ${filePath}`);
+    const images = await window.electron.get3MFImages(filePath);
+    if (images && images.length > 0) {
+      console.log(`[DEBUG] extract3MFThumbnail: Found ${images.length} image(s) in 3MF file`);
+      return images; // Return array of images
+    } else {
+      console.log(`[DEBUG] extract3MFThumbnail: No images found in 3MF file`);
+      return null;
+    }
+  } catch (error) {
+    console.error('extract3MFThumbnail error:', error);
+    return null; // Or return null to indicate failure
+  }
 }
 
 // Update the DOMContentLoaded event listener
@@ -2434,13 +4054,41 @@ document.addEventListener('DOMContentLoaded', async () => {
   // In server mode, the loading overlay blocks UI. Hide it early.
   const initialOverlay = document.getElementById('loading-overlay');
   if (initialOverlay) initialOverlay.style.display = 'none';
+
+  // Docker/Server first connect: wait for WebSocket before any IPC so data loads without refresh
+  const isServedOverHttp = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+  if (isServedOverHttp && window.electron && typeof window.electron.whenConnected === 'function') {
+    const connected = window.electron.whenConnected();
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Bridge connect timeout')), 15000));
+    try {
+      await Promise.race([connected, timeout]);
+    } catch (e) {
+      console.warn('[Renderer] Bridge whenConnected timeout or error, continuing:', e?.message || e);
+    }
+  }
+
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
 
-  // Check for server mode and add UI indicators
-  const serverMode = await window.electron.isServerMode().catch(() => false);
+  // Docker/Server: parallelize initial round-trips to reduce startup lag
+  const [serverMode, hasRunBeforeVal, savedView] = await Promise.all([
+    window.electron.isServerMode().catch(() => false),
+    window.electron.getSetting('hasRunBefore'),
+    window.electron.getSetting('gridView')
+  ]);
+
+  // After bridge is ready: show "Scan STL Home" when STL Home is set (Docker/server may set via env)
+  if (typeof window.updateScanStlHomeButtonVisibility === 'function') {
+    window.updateScanStlHomeButtonVisibility().catch(() => {});
+  }
+
+  // Adjust concurrency limits for server/Docker mode
   if (serverMode) {
-    // Add server mode indicator to the sidebar (only if it doesn't already exist)
+    MAX_CONCURRENT_RENDERS = 10;
+    console.log('Server mode detected: Increased MAX_CONCURRENT_RENDERS to', MAX_CONCURRENT_RENDERS);
+  }
+
+  if (serverMode) {
     const sidebar = document.querySelector('.sidebar');
     if (sidebar && !document.getElementById('server-mode-indicator')) {
       const serverIndicator = document.createElement('div');
@@ -2454,16 +4102,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       `;
       sidebar.insertBefore(serverIndicator, sidebar.firstChild);
     }
-    
-    // Add menu bar for server mode (only if it doesn't already exist)
     if (!document.getElementById('server-menu-bar')) {
-      createServerMenuBar();
+      await createServerMenuBar();
     }
   }
 
   // Show the welcome dialog if this is the first run
-  const hasRunBefore = await window.electron.getSetting('hasRunBefore');
-  if (!hasRunBefore) {
+  if (!hasRunBeforeVal) {
     const welcomeDialog = document.getElementById('welcome-message');
     if (welcomeDialog) {
       welcomeDialog.showModal();
@@ -2472,9 +4117,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Load saved grid view preference
-  const savedView = await window.electron.getSetting('gridView');
   if (savedView && ['list', 'preview', 'detailed'].includes(savedView)) {
-    // Map old 'small' to 'preview' for backward compatibility
     if (savedView === 'small') {
       currentGridView = 'preview';
     } else {
@@ -2493,62 +4136,56 @@ document.addEventListener('DOMContentLoaded', async () => {
       button.classList.add('active');
     }
     button.addEventListener('click', async () => {
-      // Before switching views, save current thumbnails as default for all items with navigation
+      const container = document.querySelector('.file-grid');
+      // Capture current models BEFORE clearing so we can re-render without a round-trip (Docker/Server)
+      const cachedModels = container?.currentModels ? [...container.currentModels] : null;
+
+      // Before switching views, save current thumbnails in background (do not block — avoids lag in Docker/Server)
       if (currentGridView === 'detailed' && view !== 'detailed') {
-        // Save current thumbnail index for all items with multiple thumbnails
         const allWrappers = document.querySelectorAll('.thumbnail-wrapper');
         for (const wrapper of allWrappers) {
-          // Clear any pending debounced saves and save immediately
           if (wrapper._saveTimeout) {
             clearTimeout(wrapper._saveTimeout);
             wrapper._saveTimeout = null;
           }
-          
           const currentIdx = parseInt(wrapper.dataset.currentIndex) || 0;
           const filePath = wrapper.dataset.filePath;
           const thumbs = JSON.parse(wrapper.dataset.thumbnails || '[]');
-          
           if (filePath && thumbs && thumbs.length > currentIdx && currentIdx >= 0) {
-            try {
-              await window.electron.setDefaultThumbnail(filePath, currentIdx);
-            } catch (e) {
+            window.electron.setDefaultThumbnail(filePath, currentIdx).catch((e) => {
               console.error('Error saving default thumbnail on view switch:', e);
-            }
+            });
           }
         }
       }
-      
+
       // Remove active class from all buttons
       viewButtons.forEach(btn => btn.classList.remove('active'));
-      // Add active class to clicked button
       button.classList.add('active');
-      // Update current view
       currentGridView = view;
-      // Save preference
       await window.electron.saveSetting('gridView', view);
-      // Force clear the grid to ensure new view is applied
-      const container = document.querySelector('.file-grid');
+      // When viewing a folder (not entire library), remember this view for this folder
+      if (!window.viewingEntireLibrary && window.currentDirectoryFilter) {
+        await window.savePerFolderView(window.currentDirectoryFilter, view);
+      }
+
+      // Clear grid so new view is applied
       if (container) {
         container.innerHTML = '';
         container.currentModels = null;
         container.isRendering = false;
       }
-      // Re-render grid with new view, preserving current filters
-      // Use performCombinedSearch to maintain filters when switching views
-      if (typeof window.performCombinedSearch === 'function') {
+
+      // Re-render from cached models when possible to avoid backend round-trip (Docker/Server)
+      if (cachedModels && cachedModels.length > 0) {
+        renderVirtualGrid(cachedModels);
+      } else if (typeof window.performCombinedSearch === 'function') {
         await window.performCombinedSearch();
       } else {
-        // Fallback if search.js hasn't loaded yet
-        const currentModels = container?.currentModels || [];
-        if (currentModels.length > 0) {
-          renderVirtualGrid(currentModels);
-        } else {
-          // If no models in memory, reload from database with current filters
-          const sortSelect = document.getElementById('sort-select');
-          const sortOption = sortSelect ? sortSelect.value : 'date-desc';
-          const models = await window.electron.getAllModels(sortOption, 0);
-          await renderFiles(models);
-        }
+        const sortSelect = document.getElementById('sort-select');
+        const sortOption = sortSelect ? sortSelect.value : 'date-desc';
+        const models = await window.electron.getAllModels(sortOption, 0);
+        await renderFiles(models);
       }
     });
   });
@@ -2637,55 +4274,57 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Load initial data
-  const savedDirectoryPath = await window.electron.loadDirectory();
-  
-  // In server mode, skip waiting for a directory path and always try to load models
-  const shouldLoadModels = serverMode || savedDirectoryPath;
-  
-  if (shouldLoadModels) {
-    try {
-      console.log('[DEBUG] Loading initial models from database...');
-      const models = await window.electron.getAllModels('date-desc', 0);
-      console.log('[DEBUG] Retrieved', models ? models.length : 0, 'models');
-      
-      if (models && models.length > 0) {
-        fileGrid.classList.remove('hidden');
-        await renderFiles(models);
-        const viewLibMsg = document.getElementById("view-library-message");
-        if (viewLibMsg) {
-          viewLibMsg.style.display = "block";
-          viewLibMsg.textContent = `Showing All ${models.length} Models`;
-        }
-      } else {
-        console.log('[DEBUG] No models found, showing welcome dialog');
-        if (welcomeDialog) {
-          welcomeDialog.showModal();
-        }
-        const viewLibMsg = document.getElementById("view-library-message");
-        if (viewLibMsg) { 
-          viewLibMsg.style.display = "none"; 
-        }
-      }
-    } catch (error) {
-      console.error('Error loading models:', error);
-    }
-  } else {
-    console.log('[DEBUG] No directory path set and not in server mode, showing welcome');
-    if (welcomeDialog) {
-      welcomeDialog.showModal();
-    }
-  }
-
-  // Once the initial models have been rendered, hide the loading overlay.
+  // Docker/Server: hide overlay so main window shell (sidebar, empty grid) paints immediately
   const loadingOverlay = document.getElementById('loading-overlay');
   if (loadingOverlay) loadingOverlay.style.display = 'none';
-  
-  // Initialize filters
-  await populateDesignerDropdown();
-  await populateLicenseFilter();
-  await populateParentModelFilter();
-  await populateTagFilter();
+
+  // Docker/Server: yield for first paint, then load data (reduces perceived startup lag)
+  requestAnimationFrame(async () => {
+    const savedDirectoryPath = await window.electron.loadDirectory();
+    const shouldLoadModels = serverMode || savedDirectoryPath;
+
+    if (shouldLoadModels) {
+      try {
+        console.log('[DEBUG] Loading initial models from database...');
+        const models = await window.electron.getAllModels('date-desc', 0);
+        console.log('[DEBUG] Retrieved', models ? models.length : 0, 'models');
+
+        if (models && models.length > 0) {
+          fileGrid.classList.remove('hidden');
+          await renderFiles(models);
+          const viewLibMsg = document.getElementById("view-library-message");
+          if (viewLibMsg) {
+            viewLibMsg.style.display = "block";
+            viewLibMsg.textContent = `Showing All ${models.length} Models`;
+          }
+        } else {
+          console.log('[DEBUG] No models found, showing welcome dialog');
+          if (welcomeDialog) {
+            welcomeDialog.showModal();
+          }
+          const viewLibMsg = document.getElementById("view-library-message");
+          if (viewLibMsg) {
+            viewLibMsg.style.display = "none";
+          }
+        }
+      } catch (error) {
+        console.error('Error loading models:', error);
+      }
+    } else {
+      console.log('[DEBUG] No directory path set and not in server mode, showing welcome');
+      if (welcomeDialog) {
+        welcomeDialog.showModal();
+      }
+    }
+
+    // Initialize filters in parallel (Docker/Server: one batch instead of four sequential round-trips)
+    await Promise.all([
+      populateDesignerDropdown(),
+      populateLicenseFilter(),
+      populateParentModelFilter(),
+      populateTagFilter()
+    ]);
+  });
 
   // Update the edit mode toggle button listener
   document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => { // Ensure async
@@ -3281,6 +4920,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Clear the input and close the dialog
         document.getElementById('new-parent-name').value = '';
         newParentDialog.close();
+        
+        // Refresh metadata editor list if dialog is open
+        const metadataDialog = document.getElementById('metadata-editor-dialog');
+        if (metadataDialog && metadataDialog.open && currentMetadataType === 'parentModel') {
+          allMetadata = []; // Clear cache to force refresh
+          await refreshMetadataList('parentModel');
+        }
       }
     });
   }
@@ -3576,12 +5222,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('printed-select').value = 'all';
       document.getElementById('tag-filter').value = '';
 
-      // Load and display models
-      const allModels = await window.electron.getAllModels();
-      await renderFiles(allModels);
-      
-      // Update counts
-      await updateModelCounts(allModels.length);
+      // Force grid to refetch and re-render so models show without reload (Docker/server - same as Scan STL Home / View Entire Library)
+      window.disableGridRefresh = false;
+      const gridEl = document.querySelector('.file-grid');
+      if (gridEl) gridEl.currentModels = null;
+      if (typeof window.forceGridRefresh === 'function') {
+        await window.forceGridRefresh();
+      } else {
+        const allModels = await window.electron.getAllModels();
+        await renderFiles(allModels);
+        await updateModelCounts(allModels.length);
+      }
 
     } catch (error) {
       console.error('Error scanning directory:', error);
@@ -3598,33 +5249,50 @@ document.addEventListener('DOMContentLoaded', async () => {
  
 
   // About dialog handler
-  window.electron.onOpenAbout(async () => {
-    console.log('Received open-about event'); // Debug log
-    const dialog = document.getElementById('about-dialog');
-    if (dialog) {
-      try {
-        dialog.showModal();
-        // Bind close button after showing dialog to ensure it's in the DOM
-        bindAboutCloseButton();
-        // Initialize after showing the dialog to ensure elements are in the DOM
-        await initializeAboutDialog();
-      } catch (error) {
-        console.error('Error showing about dialog:', error);
-      }
-    } else {
-      console.error('About dialog element not found');
-    }
-  });
+  window._electronRealEventHandlers['open-keyboard-shortcuts'] = function() {
+    const dialog = document.getElementById('keyboard-shortcuts-dialog');
+    if (dialog) dialog.showModal();
+  };
+  if (window._electronPendingEvents['open-keyboard-shortcuts']) {
+    window._electronPendingEvents['open-keyboard-shortcuts'].forEach((args) => {
+      window._electronRealEventHandlers['open-keyboard-shortcuts'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-keyboard-shortcuts'];
+  }
 
-  // Server Mode Info dialog handler
-  window.electron.onOpenServerModeInfo(async () => {
-    const dialog = document.getElementById('server-mode-info-dialog');
-    if (dialog) {
-      dialog.showModal();
-    } else {
-      console.error('Server Mode Info dialog element not found');
+  window._electronRealEventHandlers['open-about'] = async function() {
+    const dialog = document.getElementById('about-dialog');
+    if (!dialog) {
+      console.error('About dialog element not found');
+      return;
     }
-  });
+    dialog.showModal();
+    bindAboutCloseButton();
+    try {
+      await initializeAboutDialog();
+    } catch (error) {
+      console.error('Error initializing about dialog:', error);
+      const versionEl = document.getElementById('about-version');
+      if (versionEl) versionEl.textContent = 'Version: Unknown';
+    }
+  };
+  if (window._electronPendingEvents['open-about']) {
+    window._electronPendingEvents['open-about'].forEach((args) => {
+      window._electronRealEventHandlers['open-about'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-about'];
+  }
+
+  window._electronRealEventHandlers['open-server-mode-info'] = function() {
+    const dialog = document.getElementById('server-mode-info-dialog');
+    if (dialog) dialog.showModal();
+  };
+  if (window._electronPendingEvents['open-server-mode-info']) {
+    window._electronPendingEvents['open-server-mode-info'].forEach((args) => {
+      window._electronRealEventHandlers['open-server-mode-info'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-server-mode-info'];
+  }
 
   // Stats dialog handler
   const statsDialog = document.getElementById('stats-dialog');
@@ -3642,7 +5310,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
   
-  window.electron.onOpenStats(async () => {
+  window._electronRealEventHandlers['open-stats'] = async function() {
     const dialog = document.getElementById('stats-dialog');
     if (dialog) {
       try {
@@ -3651,10 +5319,32 @@ document.addEventListener('DOMContentLoaded', async () => {
       } catch (error) {
         console.error('Error showing stats dialog:', error);
       }
-    } else {
-      console.error('Stats dialog element not found');
     }
-  });
+  };
+  if (window._electronPendingEvents['open-stats']) {
+    window._electronPendingEvents['open-stats'].forEach((args) => {
+      window._electronRealEventHandlers['open-stats'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-stats'];
+  }
+
+  window._electronRealEventHandlers['open-system-report'] = async function() {
+    const dialog = document.getElementById('system-report-dialog');
+    if (dialog) {
+      try {
+        dialog.showModal();
+        await initializeSystemReport();
+      } catch (error) {
+        console.error('Error showing system report dialog:', error);
+      }
+    }
+  };
+  if (window._electronPendingEvents['open-system-report']) {
+    window._electronPendingEvents['open-system-report'].forEach((args) => {
+      window._electronRealEventHandlers['open-system-report'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-system-report'];
+  }
 
   // Chart instances storage
   let fileTypeChart = null;
@@ -3671,6 +5361,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Update file types
       document.getElementById('stats-type-3mf').textContent = stats.fileTypes.threeMf.toLocaleString();
       document.getElementById('stats-type-stl').textContent = stats.fileTypes.stl.toLocaleString();
+      const otherEl = document.getElementById('stats-type-other');
+      if (otherEl) otherEl.textContent = (stats.fileTypes.other != null ? stats.fileTypes.other : 0).toLocaleString();
       
       // Update archived models
       document.getElementById('stats-archived').textContent = stats.archivedModels.toLocaleString();
@@ -3704,20 +5396,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       const fileTypeCanvas = document.getElementById('file-type-chart');
       if (fileTypeCanvas && typeof Chart !== 'undefined') {
         const ctx = fileTypeCanvas.getContext('2d');
+        const otherCount = stats.fileTypes.other != null ? stats.fileTypes.other : 0;
         fileTypeChart = new Chart(ctx, {
           type: 'pie',
           data: {
-            labels: ['3MF', 'STL'],
+            labels: otherCount > 0 ? ['3MF', 'STL', 'Other'] : ['3MF', 'STL'],
             datasets: [{
-              data: [stats.fileTypes.threeMf, stats.fileTypes.stl],
-              backgroundColor: [
-                'rgba(74, 158, 255, 0.8)',
-                'rgba(0, 212, 255, 0.8)'
-              ],
-              borderColor: [
-                'rgba(74, 158, 255, 1)',
-                'rgba(0, 212, 255, 1)'
-              ],
+              data: otherCount > 0 ? [stats.fileTypes.threeMf, stats.fileTypes.stl, otherCount] : [stats.fileTypes.threeMf, stats.fileTypes.stl],
+              backgroundColor: otherCount > 0 ? ['rgba(74, 158, 255, 0.8)', 'rgba(0, 212, 255, 0.8)', 'rgba(128, 128, 128, 0.8)'] : ['rgba(74, 158, 255, 0.8)', 'rgba(0, 212, 255, 0.8)'],
+              borderColor: otherCount > 0 ? ['rgba(74, 158, 255, 1)', 'rgba(0, 212, 255, 1)', 'rgba(128, 128, 128, 1)'] : ['rgba(74, 158, 255, 1)', 'rgba(0, 212, 255, 1)'],
               borderWidth: 1
             }]
           },
@@ -3969,6 +5656,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             licenseSelect.value = newLicenseName;
           }
         }
+        
+        // Refresh metadata editor list if dialog is open
+        const metadataDialog = document.getElementById('metadata-editor-dialog');
+        if (metadataDialog && metadataDialog.open && currentMetadataType === 'license') {
+          allMetadata = []; // Clear cache to force refresh
+          await refreshMetadataList('license');
+        }
       }
     });
   }
@@ -3976,11 +5670,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize dialog handlers
   initializeDialogHandlers();
 
-  // Add inside your DOMContentLoaded event listener
-  window.electron.onOpenBackupRestore(() => {
+  window._electronRealEventHandlers['open-backup-restore'] = function() {
     const dialog = document.getElementById('backup-restore-dialog');
-    dialog.showModal();
-  });
+    if (dialog) dialog.showModal();
+  };
+  if (window._electronPendingEvents['open-backup-restore']) {
+    window._electronPendingEvents['open-backup-restore'].forEach((args) => {
+      window._electronRealEventHandlers['open-backup-restore'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-backup-restore'];
+  }
 
   async function readFileAsBase64(file) {
     return new Promise((resolve, reject) => {
@@ -4041,158 +5740,105 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  document.getElementById('backup-button')?.addEventListener('click', async () => {
-    try {
-      const serverMode = await window.electron.isServerMode().catch(() => false);
-      if (serverMode) {
-        const result = await window.electron.backupDatabase();
-        if (result && result.success && result.filePath) {
-          const downloadUrl = `/api/download/${encodeURIComponent(result.filePath)}`;
-          window.location.href = downloadUrl;
-          await window.electron.showMessage('Success', 'Database backup created successfully. Download should start shortly.');
-        } else {
-          await window.electron.showMessage('Error', result?.message || 'Failed to create database backup');
-        }
-        return;
-      }
-
-      const success = await window.electron.backupDatabase();
-      if (success) {
-        await window.electron.showMessage('Success', 'Database backup created successfully');
-      }
-    } catch (error) {
-      console.error('Backup error:', error);
-      await window.electron.showMessage('Error', 'Failed to create database backup');
-    }
-  });
-
-  document.getElementById('restore-button')?.addEventListener('click', async () => {
+  window._restoreBackupFromDialogImpl = async function() {
     try {
       const confirmResult = await window.electron.showMessage(
         'Confirm Restore',
         'Warning: Restoring from backup will replace all current data. This cannot be undone. Continue?',
         ['Yes', 'No']
       );
-      
-      if (confirmResult === 'Yes') {
-        const serverMode = await window.electron.isServerMode().catch(() => false);
-        if (serverMode) {
-          const file = await promptForBackupFile();
-          if (!file) {
-            return;
-          }
-
-          const base64 = await readFileAsBase64(file);
-          const result = await window.electron.restoreDatabase({ base64 });
-          if (result && result.success) {
-            await window.electron.showMessage('Success', 'Database restored successfully. The application will now reload.');
-            window.location.reload();
-          } else {
-            await window.electron.showMessage('Error', result?.message || 'Failed to restore database');
-          }
-          return;
-        }
-
-        const success = await window.electron.restoreDatabase();
-        if (success) {
+      if (confirmResult !== 'Yes') return;
+      const serverMode = await window.electron.isServerMode().catch(() => false);
+      if (serverMode) {
+        const file = await promptForBackupFile();
+        if (!file) return;
+        const base64 = await readFileAsBase64(file);
+        const result = await window.electron.restoreDatabase({ base64 });
+        if (result && result.success) {
           await window.electron.showMessage('Success', 'Database restored successfully. The application will now reload.');
           window.location.reload();
+        } else {
+          await window.electron.showMessage('Error', result?.message || 'Failed to restore database');
         }
+        return;
+      }
+      const success = await window.electron.restoreDatabase();
+      if (success) {
+        await window.electron.showMessage('Success', 'Database restored successfully. The application will now reload.');
+        window.location.reload();
       }
     } catch (error) {
       console.error('Restore error:', error);
       await window.electron.showMessage('Error', 'Failed to restore database');
     }
-  });
+  };
 
-  document.getElementById('export-library-button')?.addEventListener('click', async () => {
-    try {
-      const serverMode = await window.electron.isServerMode().catch(() => false);
-      if (serverMode) {
-        const result = await window.electron.exportLibrary();
-        if (result && result.success && result.filePath) {
-          const downloadUrl = `/api/download/${encodeURIComponent(result.filePath)}`;
-          window.location.href = downloadUrl;
-          await window.electron.showMessage('Success', 'Library exported successfully. Download should start shortly.');
-        } else {
-          await window.electron.showMessage('Error', result?.message || 'Failed to export library');
-        }
-        return;
-      }
-
-      const success = await window.electron.exportLibrary();
-      if (success) {
-        await window.electron.showMessage('Success', 'Library exported successfully');
-      }
-    } catch (error) {
-      console.error('Export library error:', error);
-      await window.electron.showMessage('Error', 'Failed to export library');
-    }
-  });
-
-  document.getElementById('import-library-button')?.addEventListener('click', async () => {
+  window._importLibraryFromDialogImpl = async function() {
     try {
       const result = await window.electron.showMessage(
         'Confirm Import',
         'This will merge the imported library with your current library. Existing models will be updated. Continue?',
         ['Yes', 'No']
       );
-      
-      if (result === 'Yes') {
-        const serverMode = await window.electron.isServerMode().catch(() => false);
-        if (serverMode) {
-          const file = await promptForLibraryImportFile();
-          if (!file) {
-            return;
-          }
-          const json = await readFileAsText(file);
-          const importResult = await window.electron.importLibrary({ json });
-          if (importResult && importResult.success) {
-            const message = `Library imported successfully. ${importResult.imported} new models added, ${importResult.updated} models updated.`;
-            await window.electron.showMessage('Success', message);
-            if (typeof refreshModelDisplay === 'function') {
-              await refreshModelDisplay();
-            }
-          } else {
-            await window.electron.showMessage('Error', importResult?.message || 'Failed to import library');
-          }
-          return;
-        }
-
-        const importResult = await window.electron.importLibrary();
+      if (result !== 'Yes') return;
+      const serverMode = await window.electron.isServerMode().catch(() => false);
+      if (serverMode) {
+        const file = await promptForLibraryImportFile();
+        if (!file) return;
+        const json = await readFileAsText(file);
+        const importResult = await window.electron.importLibrary({ json });
         if (importResult && importResult.success) {
           const message = `Library imported successfully. ${importResult.imported} new models added, ${importResult.updated} models updated.`;
           await window.electron.showMessage('Success', message);
-          // Refresh the grid to show imported models
-          if (typeof refreshModelDisplay === 'function') {
-            await refreshModelDisplay();
-          }
+          if (typeof refreshModelDisplay === 'function') await refreshModelDisplay();
+        } else {
+          await window.electron.showMessage('Error', importResult?.message || 'Failed to import library');
         }
+        return;
+      }
+      const importResult = await window.electron.importLibrary();
+      if (importResult && importResult.success) {
+        const message = `Library imported successfully. ${importResult.imported} new models added, ${importResult.updated} models updated.`;
+        await window.electron.showMessage('Success', message);
+        if (typeof refreshModelDisplay === 'function') await refreshModelDisplay();
       }
     } catch (error) {
       console.error('Import library error:', error);
       await window.electron.showMessage('Error', 'Failed to import library: ' + (error.message || 'Unknown error'));
     }
-  });
+  };
+
+  document.getElementById('backup-button')?.addEventListener('click', () => window.createBackupFromDialog());
+  document.getElementById('restore-button')?.addEventListener('click', () => window.restoreBackupFromDialog());
+  document.getElementById('export-library-button')?.addEventListener('click', () => window.exportLibraryFromDialog());
+  document.getElementById('import-library-button')?.addEventListener('click', () => window.importLibraryFromDialog());
 
   document.getElementById('save-backup-restore')?.addEventListener('click', () => {
     document.getElementById('backup-restore-dialog').close();
   });
 
-  // Add after your existing event listeners in DOMContentLoaded
-  window.electron.onOpenDeDup(() => {
+  // Assign real handler for open-dedup (early listener already registered; avoids "No listeners" in Docker/server)
+  window._electronRealEventHandlers['open-dedup'] = function() {
     const dialog = document.getElementById('dedup-dialog');
-    // Reset the checkbox to unchecked when dialog is first opened
+    if (!dialog) return;
+    dialog.classList.remove('modal-fullscreen');
+    const fullscreenBtn = document.getElementById('dedup-fullscreen-toggle');
+    if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
     const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
-    if (includeZipCheckbox) {
-      includeZipCheckbox.checked = false;
-    }
+    if (includeZipCheckbox) includeZipCheckbox.checked = false;
     loadDuplicateFiles();
-  });
+  };
+  if (window._electronPendingEvents['open-dedup']) {
+    window._electronPendingEvents['open-dedup'].forEach((args) => {
+      window._electronRealEventHandlers['open-dedup'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-dedup'];
+  }
 
   // Add this with other event listeners in the DOMContentLoaded section
   document.getElementById('view-library-button')?.addEventListener('click', async () => {
     try {
+      window.disableGridRefresh = false; // Ensure user-initiated view always shows models (e.g. after scan in docker mode)
       // Reset all filter dropdowns
       document.getElementById('designer-select').value = '';
       document.getElementById('license-select').value = '';
@@ -4222,7 +5868,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       
       // Use the combined search function to retrieve and display models with all filters applied correctly
-      await window.performCombinedSearch();
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      }
       
       console.log("Viewing entire library");
     } catch (error) {
@@ -4232,13 +5880,42 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Add Tag Manager functionality
-  window.electron.onOpenTagManager(() => {
+  window._electronRealEventHandlers['open-tag-manager'] = function() {
     const tagManagerDialog = document.getElementById('tag-manager-dialog');
+    if (!tagManagerDialog) return;
+    tagManagerDialog.classList.remove('modal-fullscreen');
+    const fullscreenBtn = document.getElementById('tag-manager-fullscreen-toggle');
+    if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
     refreshTagManagerList();
     tagManagerDialog.showModal();
-    
-    // Clear search when opening
-    document.getElementById('tag-manager-search').value = '';
+    const searchEl = document.getElementById('tag-manager-search');
+    if (searchEl) searchEl.value = '';
+  };
+  if (window._electronPendingEvents['open-tag-manager']) {
+    window._electronPendingEvents['open-tag-manager'].forEach((args) => {
+      window._electronRealEventHandlers['open-tag-manager'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-tag-manager'];
+  }
+
+  // Fullscreen toggle for DeDup and Tag Manager modals
+  document.getElementById('dedup-fullscreen-toggle')?.addEventListener('click', () => {
+    const dialog = document.getElementById('dedup-dialog');
+    const btn = document.getElementById('dedup-fullscreen-toggle');
+    if (!dialog || !btn) return;
+    dialog.classList.toggle('modal-fullscreen');
+    btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
+  });
+
+  document.getElementById('dedup-easy-button')?.addEventListener('click', () => window.dedupEasyFromDialog());
+  document.getElementById('dedup-clear-button')?.addEventListener('click', () => window.dedupClearFromDialog());
+
+  document.getElementById('tag-manager-fullscreen-toggle')?.addEventListener('click', () => {
+    const dialog = document.getElementById('tag-manager-dialog');
+    const btn = document.getElementById('tag-manager-fullscreen-toggle');
+    if (!dialog || !btn) return;
+    dialog.classList.toggle('modal-fullscreen');
+    btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
   });
 
   // Add close event handler to refresh UI when tag manager closes
@@ -4403,32 +6080,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add this event listener in your DOMContentLoaded section
-  window.electron.onOpenPurgeModels((_event) => {
+  window._electronRealEventHandlers['open-purge-models'] = function() {
     const dialog = document.getElementById('purge-models-dialog');
-    dialog.showModal();
-  });
+    if (dialog) dialog.showModal();
+  };
+  if (window._electronPendingEvents['open-purge-models']) {
+    window._electronPendingEvents['open-purge-models'].forEach((args) => {
+      window._electronRealEventHandlers['open-purge-models'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-purge-models'];
+  }
 
   // Metadata Editor functionality
   let allMetadata = []; // Store all metadata for filtering
   let currentMetadataType = 'designer'; // Track current active tab
   let metadataEditorChanged = false; // Track if any changes were made
 
-  window.electron.onOpenMetadataEditor(() => {
+  window._electronRealEventHandlers['open-metadata-editor'] = function() {
     const metadataDialog = document.getElementById('metadata-editor-dialog');
+    if (!metadataDialog) return;
     currentMetadataType = 'designer';
-    metadataEditorChanged = false; // Reset change flag when opening
+    metadataEditorChanged = false;
     updateMetadataTabs();
     refreshMetadataList('designer');
     metadataDialog.showModal();
-    
-    // Clear search when opening
     const searchInput = document.getElementById('metadata-editor-search');
-    if (searchInput) {
-      searchInput.value = '';
-    }
-
-    // Initialize tab button event listeners (in case they weren't set up yet)
+    if (searchInput) searchInput.value = '';
     initializeMetadataTabs();
     initializeMetadataSearch();
 
@@ -4455,10 +6132,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     };
     
-    // Remove any existing listener and add new one
     metadataDialog.removeEventListener('close', closeHandler);
     metadataDialog.addEventListener('close', closeHandler);
-  });
+  };
+  if (window._electronPendingEvents['open-metadata-editor']) {
+    window._electronPendingEvents['open-metadata-editor'].forEach((args) => {
+      window._electronRealEventHandlers['open-metadata-editor'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-metadata-editor'];
+  }
 
   // Tab switching functionality - initialize when dialog is available
   function initializeMetadataTabs() {
@@ -4517,6 +6199,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       // Filter metadata by type and search term
       let filteredMetadata = allMetadata.filter(item => item.type === type);
+      
+      // Deduplicate by name (case-insensitive) - keep the one with the highest model_count
+      const metadataMap = new Map();
+      filteredMetadata.forEach(item => {
+        const key = item.name.toLowerCase();
+        const existing = metadataMap.get(key);
+        if (!existing || (item.model_count || 0) > (existing.model_count || 0)) {
+          metadataMap.set(key, item);
+        }
+      });
+      filteredMetadata = Array.from(metadataMap.values());
       
       // Further filter by search term if provided
       if (searchTerm) {
@@ -4733,46 +6426,45 @@ document.addEventListener('DOMContentLoaded', async () => {
     initializeMetadataSearch();
   });
 
-  // Handle regenerate thumbnails from Tools menu
-  window.electron.on('regenerate-thumbnails', async () => {
+  window._electronRealEventHandlers['regenerate-thumbnails'] = async function() {
+    if (isRegeneratingThumbnails) return;
     try {
-      // Get all models
       const sortSelect = document.getElementById('sort-select');
       const allModels = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
-      
       if (allModels.length === 0) {
         await window.electron.showMessage('Information', 'No models found in the database.');
         return;
       }
-      
-      // Ask for user confirmation
+      isRegeneratingThumbnails = true;
       const userChoice = await window.electron.showMessage(
         'Regenerate Thumbnails',
         `This will regenerate thumbnails for all ${allModels.length} models. This may take a while. Continue?`,
         ['Yes', 'No']
       );
-      
       if (userChoice === 'Yes') {
-        // Purge existing thumbnails to force regeneration
         await window.electron.purgeThumbnails();
-        
-        // Regenerate thumbnails for all models
         await generateThumbnailsForModels(allModels);
-        
+        isRegeneratingThumbnails = false;
         await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
-        
-        // Refresh the grid to show the new thumbnails
         const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
         await renderFiles(models);
+      } else {
+        isRegeneratingThumbnails = false;
       }
     } catch (error) {
       console.error('Error regenerating thumbnails:', error);
+      isRegeneratingThumbnails = false;
       await window.electron.showMessage('Error', 'Failed to regenerate thumbnails: ' + error.message);
     }
-  });
+  };
+  if (window._electronPendingEvents['regenerate-thumbnails']) {
+    window._electronPendingEvents['regenerate-thumbnails'].forEach((args) => {
+      window._electronRealEventHandlers['regenerate-thumbnails'].apply(null, args);
+    });
+    delete window._electronPendingEvents['regenerate-thumbnails'];
+  }
 
-  // Handle generate missing thumbnails from Tools menu
-  window.electron.on('generate-missing-thumbnails', async () => {
+  window._electronRealEventHandlers['generate-missing-thumbnails'] = async function() {
     // Check if a thumbnail dialog is already showing
     if (isThumbnailDialogShowing) {
       return; // Exit early if dialog is already showing
@@ -4820,41 +6512,41 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } catch (error) {
       console.error('Error generating missing thumbnails:', error);
-      isThumbnailDialogShowing = false; // Reset flag on error
+      isThumbnailDialogShowing = false;
       await window.electron.showMessage('Error', 'Failed to generate missing thumbnails: ' + error.message);
     }
-  });
+  };
+  if (window._electronPendingEvents['generate-missing-thumbnails']) {
+    window._electronPendingEvents['generate-missing-thumbnails'].forEach((args) => {
+      window._electronRealEventHandlers['generate-missing-thumbnails'].apply(null, args);
+    });
+    delete window._electronPendingEvents['generate-missing-thumbnails'];
+  }
 
-  // Add purge confirmation handler
-  document.getElementById('confirm-purge-button')?.addEventListener('click', async () => {
+  // Purge Models: full implementation (overwrites early stub so updateModelCounts is available)
+  async function confirmPurgeModelsFromDialog() {
     try {
       const success = await window.electron.purgeModels();
       if (success) {
-        // Clear the grid
         const container = document.querySelector('.file-grid');
-        container.innerHTML = '';
-        
-        // Update model counts
+        if (container) container.innerHTML = '';
         await updateModelCounts(0);
-        
-        // Close the dialog
-        document.getElementById('purge-models-dialog').close();
-        
-        // Show success message
+        document.getElementById('purge-models-dialog')?.close();
         await window.electron.showMessage('Success', 'All models have been purged from the database.');
-        
-        // Reset all filters and dropdowns
         document.getElementById('designer-select').value = '';
         document.getElementById('parent-select').value = '';
         document.getElementById('printed-select').value = 'all';
         document.getElementById('tag-filter').value = '';
-        
- 
       }
     } catch (error) {
       console.error('Error purging models:', error);
       await window.electron.showMessage('Error', 'Failed to purge models from the database.');
     }
+  }
+  window.confirmPurgeModelsFromDialog = confirmPurgeModelsFromDialog;
+
+  document.getElementById('confirm-purge-button')?.addEventListener('click', async () => {
+    await confirmPurgeModelsFromDialog();
   });
 
   // Sort-select handler is now managed by search.js via initializeCombinedSearch()
@@ -5008,7 +6700,159 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Handle thumbnail deleted event - refresh grid to show updated thumbnail
+  window.electron.on('thumbnail-deleted', async (data) => {
+    if (data && data.filePath) {
+      // Use a small delay to ensure database write is complete
+      setTimeout(async () => {
+        try {
+          // Preserve dateAddedFilter if it's set (for new models view)
+          const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
+          
+          // If dateAddedFilter is active, we should only update the specific item, not refresh the whole grid
+          if (preservedDateAddedFilter) {
+            console.log('Thumbnail deleted while dateAddedFilter is active, updating item only');
+            
+            // First, verify the model was updated in the database
+            const updatedModel = await window.electron.getModel(data.filePath);
+            if (!updatedModel) {
+              return;
+            }
+            
+            // Check if this model matches the filter
+            if (updatedModel.dateAdded) {
+              const modelDateAdded = new Date(updatedModel.dateAdded);
+              const filterDate = new Date(preservedDateAddedFilter);
+              if (modelDateAdded < filterDate) {
+                // This model doesn't match the dateAdded filter, don't refresh
+                console.log('Thumbnail deleted for model outside dateAdded filter, skipping');
+                return;
+              }
+            }
+            
+            // Restore the filter
+            window.dateAddedFilter = preservedDateAddedFilter;
+            window._lastDateAddedFilter = preservedDateAddedFilter;
+            
+            // Try to find and update the specific DOM element only
+            const allFileItems = document.querySelectorAll('.file-item');
+            const normalizedPath = normalizePathForComparison(data.filePath);
+            
+            for (const fileItem of allFileItems) {
+              const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
+              const normalizedItemPath = normalizePathForComparison(itemPath);
+              if (normalizedItemPath === normalizedPath) {
+                // Update the model in currentModels array
+                const container = document.querySelector('.file-grid');
+                if (container && container.currentModels) {
+                  const modelIndex = container.currentModels.findIndex(m => 
+                    normalizePathForComparison(m.filePath) === normalizedPath
+                  );
+                  if (modelIndex >= 0) {
+                    // Update the model with fresh data from database
+                    container.currentModels[modelIndex] = { ...updatedModel };
+                  }
+                }
+                
+                // Remove the item so it gets recreated with updated thumbnail
+                fileItem.remove();
+                
+                // Trigger re-render of visible items only (preserves filter)
+                if (container && container.renderVisibleItemsFn) {
+                  container.renderVisibleItemsFn();
+                }
+                
+                return;
+              }
+            }
+            
+            return;
+          }
+          
+          // If dateAddedFilter is NOT active, proceed with normal refresh behavior
+          const updatedModel = await window.electron.getModel(data.filePath);
+          if (!updatedModel) {
+            return;
+          }
+          
+          // Try to find and update the specific DOM element first
+          const allFileItems = document.querySelectorAll('.file-item');
+          const normalizedPath = normalizePathForComparison(data.filePath);
+          let itemFound = false;
+          
+          for (const fileItem of allFileItems) {
+            const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
+            const normalizedItemPath = normalizePathForComparison(itemPath);
+            if (normalizedItemPath === normalizedPath) {
+              itemFound = true;
+              
+              // Update the model in currentModels array
+              const container = document.querySelector('.file-grid');
+              if (container && container.currentModels) {
+                const modelIndex = container.currentModels.findIndex(m => 
+                  normalizePathForComparison(m.filePath) === normalizedPath
+                );
+                if (modelIndex >= 0) {
+                  container.currentModels[modelIndex] = { ...updatedModel };
+                }
+              }
+              
+              // Remove the item so it gets recreated with updated thumbnail
+              fileItem.remove();
+              
+              // Trigger re-render of visible items
+              if (container && container.renderVisibleItemsFn) {
+                container.renderVisibleItemsFn();
+              }
+              
+              return;
+            }
+          }
+          
+          // If item wasn't found, do a full refresh
+          if (!itemFound) {
+            if (typeof window.performCombinedSearch === 'function') {
+              await window.performCombinedSearch();
+            } else {
+              const sortSelect = document.getElementById('sort-select');
+              const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+              await renderFiles(models);
+            }
+          }
+        } catch (updateError) {
+          console.error('Error refreshing grid after deleting thumbnail:', updateError);
+          // Fallback to full refresh on error
+          if (typeof window.performCombinedSearch === 'function') {
+            await window.performCombinedSearch();
+          }
+        }
+      }, 300); // Delay to ensure database write completes
+    }
+  });
+
+  // Force grid to refetch and re-render (Docker/server: performCombinedSearch alone often doesn't update the grid)
+  async function forceGridRefresh() {
+    window.disableGridRefresh = false;
+    const gridEl = document.querySelector('.file-grid');
+    if (gridEl) gridEl.currentModels = null; // force renderVirtualGrid to treat as changed and re-render
+    if (typeof populateFileTypeFilter === 'function') await populateFileTypeFilter();
+    const sortSelect = document.getElementById('sort-select');
+    const sortOption = sortSelect ? sortSelect.value : 'date-desc';
+    try {
+      const models = await window.electron.getAllModels(sortOption, 0);
+      if (typeof renderFiles === 'function') await renderFiles(models);
+    } catch (err) {
+      console.error('[forceGridRefresh]', err);
+    }
+  }
+  window.forceGridRefresh = forceGridRefresh;
+
   window.electron.onRefreshGrid(async () => {
+    // Always allow grid refresh when server/main signals (e.g. after scan in docker/server mode)
+    window.disableGridRefresh = false;
+    const gridEl = document.querySelector('.file-grid');
+    if (gridEl) gridEl.currentModels = null;
+    if (typeof populateFileTypeFilter === 'function') await populateFileTypeFilter();
     // Preserve dateAddedFilter if it's set
     const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
     if (preservedDateAddedFilter) {
@@ -5016,37 +6860,35 @@ document.addEventListener('DOMContentLoaded', async () => {
       window.dateAddedFilter = preservedDateAddedFilter;
       window._lastDateAddedFilter = preservedDateAddedFilter;
     }
-    
-    // Clear all selected models from memory.
     selectedModels.clear();
-    // Also clear any visual indication of selection.
     document.querySelectorAll('.file-item.selected').forEach(item => item.classList.remove('selected'));
-    
-    // Use performCombinedSearch to refresh the grid, which will preserve dateAddedFilter if set
-    if (typeof window.performCombinedSearch === 'function') {
-      await window.performCombinedSearch();
-    } else {
-      // Fallback: Get current sort option and refresh the grid.
-      const sortSelect = document.getElementById('sort-select');
-      // If dateAddedFilter is set, use filtered models
-      if (preservedDateAddedFilter) {
+    // Prefer direct refetch so grid actually updates in Docker/server
+    if (preservedDateAddedFilter) {
+      try {
         const filteredModels = await window.electron.getModelsFiltered({
+          sortOption: document.getElementById('sort-select')?.value || 'date-desc',
           dateAdded: preservedDateAddedFilter
         });
-        await renderFiles(filteredModels);
-      } else {
-        const models = await window.electron.getAllModels(sortSelect.value);
-        await renderFiles(models);
+        if (typeof renderFiles === 'function') await renderFiles(filteredModels);
+      } catch (e) {
+        if (typeof window.performCombinedSearch === 'function') await window.performCombinedSearch();
       }
+    } else {
+      await forceGridRefresh();
     }
   });
 
   // Add this near other dialog event listeners
-  window.electron.onOpenThemeSettings(() => {
-    // Rename the existing settings dialog to theme-dialog
+  window._electronRealEventHandlers['open-theme-settings'] = function() {
     const themeDialog = document.getElementById('settings-dialog');
-    themeDialog.showModal();
-  });
+    if (themeDialog) themeDialog.showModal();
+  };
+  if (window._electronPendingEvents['open-theme-settings']) {
+    window._electronPendingEvents['open-theme-settings'].forEach((args) => {
+      window._electronRealEventHandlers['open-theme-settings'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-theme-settings'];
+  }
 
 
   // Update the tag deletion handler
@@ -5331,19 +7173,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     await initializeSettings();
     
     // Add performance settings dialog handlers
-    window.electron.onOpenPerformanceSettings(() => {
+    window._electronRealEventHandlers['open-performance-settings'] = function() {
       const dialog = document.getElementById('performance-settings-dialog');
       if (dialog) {
         initializePerformanceSettings();
         dialog.showModal();
       }
-    });
+    };
+    if (window._electronPendingEvents['open-performance-settings']) {
+      window._electronPendingEvents['open-performance-settings'].forEach((args) => {
+        window._electronRealEventHandlers['open-performance-settings'].apply(null, args);
+      });
+      delete window._electronPendingEvents['open-performance-settings'];
+    }
 
     // Remove the form submit handler and only use the save button
     const saveButton = document.getElementById('save-performance-settings');
     if (saveButton) {
       saveButton.addEventListener('click', async () => {
-        await savePerformanceSettings();
+        if (typeof window.savePerformanceSettingsFromDialog === 'function') {
+          await window.savePerformanceSettingsFromDialog();
+        } else {
+          await savePerformanceSettings();
+        }
       });
     }
 
@@ -5359,12 +7211,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Add performance settings dialog handler
-  window.electron.onOpenPerformanceSettings(() => {
-    const dialog = document.getElementById('performance-settings-dialog');
-    initializePerformanceSettings();
-    dialog.showModal();
-  });
-
   document.getElementById('performance-settings-dialog').addEventListener('submit', async (event) => {
     event.preventDefault();
     
@@ -5420,9 +7266,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update the file scanning function to use MAX_FILE_SIZE_MB
   function isValidFile(filename, size) {
     const maxSize = MAX_FILE_SIZE_MB * 1024 * 1024;
-    const isValid = (filename.toLowerCase().endsWith('.stl') || 
-                    filename.toLowerCase().endsWith('.3mf')) && 
-                    size <= maxSize;
+    const lower = filename.toLowerCase();
+    const ext = lower.includes('.') ? '.' + lower.split('.').pop() : '';
+    const isValid = EXTENSIONS_VALID_FOR_LIBRARY.has(ext) && size <= maxSize;
     debugLog(`File validation: ${filename}, size: ${size}, max: ${maxSize}, valid: ${isValid}`);
     return isValid;
   }
@@ -5451,25 +7297,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   const savePerformanceButton = document.getElementById('save-performance-settings');
   if (savePerformanceButton) {
     savePerformanceButton.addEventListener('click', async () => {
+      if (typeof window.savePerformanceSettingsFromDialog === 'function') {
+        await window.savePerformanceSettingsFromDialog();
+        return;
+      }
       const input = document.getElementById('max-file-size');
       if (!input) {
         await window.electron.showMessage('Error', 'Could not find max file size input');
         return;
       }
-
-      const maxFileSize = parseInt(input.value);
+      const maxFileSize = parseInt(input.value, 10);
       if (isNaN(maxFileSize) || maxFileSize < 1 || maxFileSize > 1000) {
         await window.electron.showMessage('Error', 'Invalid max file size. Must be between 1 and 1000 MB.');
         return;
       }
-
       try {
         await window.electron.saveSetting('maxFileSizeMB', maxFileSize.toString());
         MAX_FILE_SIZE_MB = maxFileSize;
         const dialog = document.getElementById('performance-settings-dialog');
-        if (dialog) {
-          dialog.close();
-        }
+        if (dialog) dialog.close();
         await window.electron.showMessage('Success', 'Performance settings saved successfully');
       } catch (error) {
         console.error('Error saving performance settings:', error);
@@ -5487,18 +7333,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
-
-  window.electron.onOpenPerformanceSettings(() => {
-    const dialog = document.getElementById('performance-settings-dialog');
-    if (dialog) {
-      const maxFileSize = window.electron.getSetting('maxFileSizeMB') || '50';
-      const input = document.getElementById('max-file-size');
-      if (input) {
-        input.value = maxFileSize;
-      }
-      dialog.showModal();
-    }
-  });
 
   // ... rest of the existing code ...
 
@@ -5558,22 +7392,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     return sharedRenderer;
   }
 
-  async function extract3MFThumbnail(filePath) {
-    try {
-      console.log(`[DEBUG] extract3MFThumbnail: Extracting images from ${filePath}`);
-      const images = await window.electron.get3MFImages(filePath);
-      if (images && images.length > 0) {
-        console.log(`[DEBUG] extract3MFThumbnail: Found ${images.length} image(s) in 3MF file`);
-        return images; // Return array of images
-      } else {
-        console.log(`[DEBUG] extract3MFThumbnail: No images found in 3MF file`);
-        return null;
-      }
-    } catch (error) {
-      console.error('extract3MFThumbnail error:', error);
-      return null; // Or return null to indicate failure
-    }
-  }
+  // extract3MFThumbnail moved to top level for generateThumbnail access
   
   async function extract3MFSTL(filePath) {
     try {
@@ -5864,10 +7683,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     );
   }
 
-  // Add event listener for the menu item
-  window.electron.onStartPrintRoulette(() => {
+  window._electronRealEventHandlers['start-print-roulette'] = function() {
     startPrintRoulette();
-  });
+  };
+  if (window._electronPendingEvents['start-print-roulette']) {
+    window._electronPendingEvents['start-print-roulette'].forEach((args) => {
+      window._electronRealEventHandlers['start-print-roulette'].apply(null, args);
+    });
+    delete window._electronPendingEvents['start-print-roulette'];
+  }
 
   // Add these functions at an appropriate location
   async function checkForUpdates(silent = false) {
@@ -5952,125 +7776,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Update the about dialog initialization
-  function bindAboutCloseButton() {
-    const dialog = document.getElementById('about-dialog');
-    const closeXButton = dialog?.querySelector('.about-close-x');
-    if (!dialog || !closeXButton) {
-      return;
-    }
-
-    // Remove any existing event listeners by cloning and replacing the button
-    // This ensures we don't have duplicate listeners
-    const newButton = closeXButton.cloneNode(true);
-    closeXButton.parentNode.replaceChild(newButton, closeXButton);
-    
-    // Add the click handler to the new button
-    newButton.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dialog.close();
-    });
-  }
-
-  async function initializeAboutDialog() {
-    try {
-      // Get both versions
-      const currentVersion = await window.electron.getSetting('currentVersion');
-      const latestVersion = await window.electron.getSetting('latestVersion');
-      const isBeta = (await window.electron.getSetting('betaOptIn')) === 'true';
-      
-      console.log('Initializing about dialog:', {
-        currentVersion,
-        latestVersion,
-        isBeta
-      });
-      
-      // Update version display
-      const versionElement = document.getElementById('about-version');
-      if (versionElement) {
-        let versionText = `Version: ${currentVersion}${isBeta ? ' (Beta)' : ''}`;
-        if (latestVersion && latestVersion !== currentVersion) {
-          versionText += ` (${latestVersion} available)`;
-        }
-        versionElement.textContent = versionText;
-      }
-
-      // Set up beta opt-in
-      const betaOptIn = document.getElementById('beta-opt-in');
-      if (betaOptIn) {
-        betaOptIn.checked = isBeta;
-        betaOptIn.addEventListener('change', async (e) => {
-          console.log('Beta opt-in changed:', e.target.checked);
-          await window.electron.saveSetting('betaOptIn', e.target.checked.toString());
-        });
-      }
-
-      // Set up check updates button
-      const checkUpdatesButton = document.getElementById('check-updates-button');
-      if (checkUpdatesButton) {
-        checkUpdatesButton.addEventListener('click', () => {
-          console.log('Check updates button clicked');
-          checkForUpdates(false);
-        });
-      }
-      
-      // Initialize analytics checkbox
-      const collectUsageCheckbox = document.getElementById('collect-usage');
-      if (collectUsageCheckbox) {
-        // Get initial value
-        const collectUsage = await window.electron.getSetting('CollectUsage');
-        console.log('About dialog - Initial CollectUsage value:', collectUsage);
-        
-        // Set checkbox state based on the actual value
-        collectUsageCheckbox.checked = collectUsage === '1';
-        
-        // Remove any existing event listeners
-        collectUsageCheckbox.removeEventListener('change', collectUsageChangeHandler);
-        
-        // Add new event listener
-        collectUsageCheckbox.addEventListener('change', collectUsageChangeHandler);
-      }
-
-      // Set up close X button
-      bindAboutCloseButton();
-
-      // Set up license link
-      const licenseLink = document.getElementById('license-link');
-      if (licenseLink) {
-        licenseLink.addEventListener('click', async (e) => {
-          e.preventDefault();
-          await window.electron.openExternal('https://github.com/TechJeeper/Printventory/blob/main/LICENSE.txt');
-        });
-      }
-    } catch (error) {
-      console.error('Error initializing about dialog:', error);
-    }
-  }
-  
-  // Define the collect usage change handler as a named function so we can remove it
-  async function collectUsageChangeHandler(e) {
-    const newValue = e.target.checked ? '1' : '0';
-    console.log('About dialog - Saving CollectUsage value:', newValue);
-    
-    // Save the setting
-    await window.electron.saveSetting('CollectUsage', newValue);
-    
-    // Verify the setting was saved correctly
-    const verifiedValue = await window.electron.checkCollectUsage();
-    console.log('Verified CollectUsage value from database:', verifiedValue);
-    
-    // Update the checkbox state to match the database value
-    e.target.checked = verifiedValue === '1';
-    
-    // Toggle analytics based on the verified value
-    toggleAnalytics(verifiedValue === '1');
-  }
-
   // Remove any nested DOMContentLoaded listeners and consolidate into one
   document.addEventListener('DOMContentLoaded', async () => {
     try {
       bindAboutCloseButton();
+      // Scan STL Home: ensure delegated handler is attached (fallback if main block ran before body existed)
+      if (typeof window.attachScanStlHomeHandler === 'function') window.attachScanStlHomeHandler();
+      // If user clicked "Scan STL Home" before runScanSTLHome was ready, run the queued scan now
+      if (window._pendingScanStlHome && typeof window.runScanSTLHome === 'function') {
+        window._pendingScanStlHome = false;
+        console.log('[Scan STL Home] running queued scan (DOMContentLoaded)');
+        window.runScanSTLHome();
+      }
       // Initialize all settings first
       await initializeSettings();
       
@@ -6080,16 +7797,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Initialize performance settings handlers
       initializePerformanceSettings();
       
-      // Add about dialog handler
-      window.electron.onOpenAbout(async () => {
-        const dialog = document.getElementById('about-dialog');
-        if (dialog) {
-          dialog.showModal();
-          bindAboutCloseButton();
-          // Initialize after showing the dialog to ensure elements are in the DOM
-          await initializeAboutDialog();
-        }
-      });
+      // About dialog: handled by early listener (electron.on('open-about')) which calls
+      // _electronRealEventHandlers['open-about'] set in initializeDialogHandlers() above.
+      // Register onOpenAbout so preload has a listener; callback is a no-op here to avoid
+      // double-open (early handler already opens the dialog).
+      window.electron.onOpenAbout(() => {});
 
       // Add server mode info dialog handler
       window.electron.onOpenServerModeInfo(async () => {
@@ -6145,27 +7857,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Handler for Cancel button in the STL Home dialog
+  // Handler for Cancel button in the STL Home dialog (inline onclick also set in HTML for Docker/server mode)
   document.getElementById('cancel-stl-home-button')?.addEventListener('click', () => {
     document.getElementById('stl-home-dialog').close();
   });
 
-  // Handler for Clear Directory button in the STL Home dialog
-  document.getElementById('clear-stl-home-button')?.addEventListener('click', async () => {
-    // Clear the directory input field
-    document.getElementById('stl-home-directory').value = "";
-    // Save an empty string, effectively clearing the STL Home setting
-    await window.electron.saveSetting('stlHome', "");
-    
-    // Stop periodic scanning if in server mode
-    const serverMode = await window.electron.isServerMode().catch(() => false);
-    if (serverMode) {
-      stopPeriodicSTLHomeScan();
-    }
-    
-    // Close the dialog
-    document.getElementById('stl-home-dialog').close();
-  });
+  // Gray out path-metadata options when "Enable" is unchecked (change + click for Docker/server mode)
+  const stlHomePathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
+  if (stlHomePathMetaEnabledEl) {
+    stlHomePathMetaEnabledEl.addEventListener('change', updateStlHomePathMetadataGrayed);
+    stlHomePathMetaEnabledEl.addEventListener('click', updateStlHomePathMetadataGrayed);
+  }
+
+  // Show or hide "Scan STL Home" sidebar button based on whether STL Home path is set
+  async function updateScanStlHomeButtonVisibility() {
+    const stlHome = await window.electron.getSetting('stlHome');
+    const btn = document.getElementById('scan-stl-home-button');
+    if (btn) btn.style.display = (stlHome && stlHome.trim() !== '') ? '' : 'none';
+  }
+  window.updateScanStlHomeButtonVisibility = updateScanStlHomeButtonVisibility;
+
+  document.getElementById('clear-stl-home-button')?.addEventListener('click', () => window.clearSTLHomeDirectory());
 
   // Periodic STL Home scanning for server mode
   let stlHomeScanInterval = null;
@@ -6184,20 +7896,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     const frequencyMinutes = parseInt(updateFrequency) || 60;
     const frequencyMs = frequencyMinutes * 60 * 1000;
     
-    console.log(`Starting periodic STL Home scan. Frequency: ${frequencyMinutes} minutes`);
+    console.log(`Starting periodic STL Home scan. Frequency: ${frequencyMinutes} minutes (first run after interval)`);
     
-    // Perform initial scan
-    await performSTLHomeScan(stlHome);
-    
-    // Set up periodic scanning
-    stlHomeScanInterval = setInterval(async () => {
+    // In server mode: no scan on page load; first check after interval, then on interval
+    const runScan = async () => {
       const currentStlHome = await window.electron.getSetting('stlHome');
       if (currentStlHome && currentStlHome.trim() !== "") {
         await performSTLHomeScan(currentStlHome);
       } else {
         stopPeriodicSTLHomeScan();
       }
-    }, frequencyMs);
+    };
+    stlHomeScanInterval = setInterval(runScan, frequencyMs);
   }
 
   function stopPeriodicSTLHomeScan() {
@@ -6223,49 +7933,115 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error during periodic STL Home scan:', error);
     }
   }
+  window.performSTLHomeScan = performSTLHomeScan;
+  window.startPeriodicSTLHomeScan = startPeriodicSTLHomeScan;
+  window.stopPeriodicSTLHomeScan = stopPeriodicSTLHomeScan;
 
-  // Handler for saving the STL Home setting (via form submit)
-  document.getElementById('stl-home-dialog').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const stlDir = document.getElementById('stl-home-directory').value.trim();
-    // Save the STL Home directory to settings (blank by default if nothing selected)
-    await window.electron.saveSetting('stlHome', stlDir);
-    
-    // Save update frequency if in server mode
-    const serverMode = await window.electron.isServerMode().catch(() => false);
-    if (serverMode) {
-      const updateFrequency = document.getElementById('stl-home-update-frequency').value;
-      await window.electron.saveSetting('stlHomeUpdateFrequency', updateFrequency);
-      
-      // Restart periodic scanning if STL Home is set
-      if (stlDir && stlDir.trim() !== "") {
-        startPeriodicSTLHomeScan();
-      } else {
-        stopPeriodicSTLHomeScan();
+  // Shared save logic for STL Home (used by Save click, form submit, and inline onclick for Docker/server/Electron)
+  async function saveSTLHomeFromDialog() {
+    console.log('[STL Home] saveSTLHomeFromDialog started');
+    const stlDirEl = document.getElementById('stl-home-directory');
+    const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
+    const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
+    const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
+    const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
+    const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
+    const stlDir = stlDirEl ? stlDirEl.value.trim() : '';
+    try {
+      console.log('[STL Home] Saving stlHome:', stlDir);
+      await window.electron.saveSetting('stlHome', stlDir);
+      await window.electron.saveSetting('pathMetadataStlHomeEnabled', pathMetaEnabledEl?.checked ? '1' : '0');
+      await window.electron.saveSetting('pathMetadataUseDesigner', pathMetaUseDesignerEl?.checked ? '1' : '0');
+      await window.electron.saveSetting('pathMetadataUseParentModel', pathMetaUseParentModelEl?.checked ? '1' : '0');
+      await window.electron.saveSetting('pathMetadataDesignerIndex', pathMetaDesignerIndexEl?.value ?? '1');
+      await window.electron.saveSetting('pathMetadataParentModelIndex', pathMetaParentModelIndexEl?.value ?? '0');
+      if (typeof updateScanStlHomeButtonVisibility === 'function') updateScanStlHomeButtonVisibility();
+      const serverMode = await window.electron.isServerMode().catch(() => false);
+      if (serverMode) {
+        const updateFrequencyEl = document.getElementById('stl-home-update-frequency');
+        const updateFrequency = updateFrequencyEl ? updateFrequencyEl.value : '60';
+        await window.electron.saveSetting('stlHomeUpdateFrequency', updateFrequency);
+        if (stlDir && stlDir.trim() !== "") {
+          if (typeof performSTLHomeScan === 'function') performSTLHomeScan(stlDir).catch(err => console.error('STL Home scan on save:', err));
+          if (typeof startPeriodicSTLHomeScan === 'function') startPeriodicSTLHomeScan();
+        } else {
+          if (typeof stopPeriodicSTLHomeScan === 'function') stopPeriodicSTLHomeScan();
+        }
+      }
+      console.log('[STL Home] Save complete, closing dialog');
+      const dialog = document.getElementById('stl-home-dialog');
+      if (dialog && typeof dialog.close === 'function') dialog.close();
+    } catch (err) {
+      console.error('STL Home save failed:', err);
+      if (window.electron && typeof window.electron.showMessage === 'function') {
+        await window.electron.showMessage('Error', 'Failed to save STL Home: ' + (err.message || String(err)));
       }
     }
-    
-    document.getElementById('stl-home-dialog').close();
+  }
+  window.saveSTLHomeFromDialog = saveSTLHomeFromDialog;
+
+  // Save button uses inline onclick in HTML so it works in Docker/server/Electron; form submit for Enter key
+  // Form submit: prevent default and run same save (e.g. Enter key)
+  document.getElementById('stl-home-dialog').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await saveSTLHomeFromDialog();
   });
 
-  // On startup, if an STL Home directory is specified, automatically scan it.
+  // Show/hide "Scan STL Home" button based on STL Home setting
+  updateScanStlHomeButtonVisibility();
+
+  // Scan STL Home: implementation is at top level (_runScanSTLHomeImpl); run any queued click from before script ready
+  if (window._pendingScanStlHome) {
+    window._pendingScanStlHome = false;
+    console.log('[Scan STL Home] running queued scan');
+    window.runScanSTLHome();
+  }
+
+  // Attach Scan STL Home click handler (immediately if body exists, else on DOMContentLoaded - Server/Docker)
+  function attachScanStlHomeHandler() {
+    if (!document.body) return;
+    if (document.body._scanStlHomeHandlerAttached) return;
+    document.body._scanStlHomeHandlerAttached = true;
+    document.body.addEventListener('click', function scanStlHomeDelegated(e) {
+      if (!e.target || !e.target.closest) return;
+      if (!e.target.closest('#scan-stl-home-button')) return;
+      const btn = document.getElementById('scan-stl-home-button');
+      if (btn && btn.style.display === 'none') return;
+      e.preventDefault();
+      e.stopPropagation();
+      console.log('[Scan STL Home] button clicked');
+      if (typeof window.runScanSTLHome === 'function') window.runScanSTLHome();
+    });
+    console.log('[Scan STL Home] delegated handler attached to body');
+  }
+  window.attachScanStlHomeHandler = attachScanStlHomeHandler;
+  if (document.body) attachScanStlHomeHandler();
+  else document.addEventListener('DOMContentLoaded', attachScanStlHomeHandler);
+
+  // On startup, if an STL Home directory is specified:
+  // - In docker/server mode (stl_home set via startup/env): run one background check when the server loads, then on the interval.
+  // - When user saves STL Home via the UI in server mode: scan runs in the dialog submit handler when saved.
+  // - In normal mode: scan once on load and refresh filters.
   const stlHome = await window.electron.getSetting('stlHome');
   
   if (stlHome && stlHome.trim() !== "") {
-    console.log("STL Home is set. Scanning directory:", stlHome);
-    // You can use your existing scan/render function (e.g., scanAndRenderDirectory)
-    await scanAndRenderDirectory(stlHome);
-
-    // Refresh filters after scanning
-    await populateDesignerDropdown();
-    await populateParentModelFilter();
-    await populateTagFilter();
-    await populateLicenseFilter();
-    
-    // If in server mode, start periodic scanning (reuse serverMode from line 2121)
-    if (serverMode) {
+    const serverModeStlHome = await window.electron.isServerMode().catch(() => false);
+    if (serverModeStlHome) {
+      console.log("STL Home is set (server mode). Running initial background check, then on the configured interval.");
+      performSTLHomeScan(stlHome).catch(err => console.error('Background STL Home scan on server load:', err));
       startPeriodicSTLHomeScan();
+    } else {
+      console.log("STL Home is set. Scanning directory:", stlHome);
+      await scanAndRenderDirectory(stlHome);
+      await populateDesignerDropdown();
+      await populateParentModelFilter();
+      await populateTagFilter();
+      await populateLicenseFilter();
     }
+  }
+  // Ensure "Scan STL Home" button is visible when STL Home is set (Docker/server: may be set via env before UI ready)
+  if (typeof window.updateScanStlHomeButtonVisibility === 'function') {
+    await window.updateScanStlHomeButtonVisibility();
   }
 
   // Add event listener for "View Entire Library" button
@@ -6273,6 +8049,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (viewLibraryButton) {
     viewLibraryButton.addEventListener('click', async () => {
       try {
+        window.disableGridRefresh = false;
+        const gridEl = document.querySelector('.file-grid');
+        if (gridEl) gridEl.currentModels = null;
         // Reset all filter dropdowns
         document.getElementById('designer-select').value = '';
         document.getElementById('license-select').value = '';
@@ -6281,29 +8060,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('tag-filter').value = '';
         document.getElementById('filetype-select').value = '';
         document.getElementById('search-filter-input').value = '';
-        
-        // Explicitly clear the directory filter
         window.currentDirectoryFilter = "";
-        
-        // Hide the "Showing 100 Newest Models" message
+        window.dateAddedFilter = null;
+        window._lastDateAddedFilter = null;
         const viewLibMsg = document.getElementById("view-library-message");
-        if (viewLibMsg) {
-          viewLibMsg.style.display = "none";
-        }
-        
-        // Flag that we're viewing the entire library
+        if (viewLibMsg) viewLibMsg.style.display = "none";
         window.viewingEntireLibrary = true;
-        
-        // Clear the filter indicator
         const filterIndicator = document.getElementById('current-filter');
-        if (filterIndicator) {
-          filterIndicator.innerHTML = "";
-          filterIndicator.classList.remove('visible');
+        if (filterIndicator) { filterIndicator.innerHTML = ""; filterIndicator.classList.remove('visible'); }
+        // Force refetch and re-render so grid updates in Docker/server
+        if (typeof window.forceGridRefresh === 'function') {
+          await window.forceGridRefresh();
+        } else if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
         }
-        
-        // Use the combined search function to retrieve and display models with all filters applied correctly
-        await window.performCombinedSearch();
-        
         console.log("Viewing entire library");
       } catch (error) {
         console.error('Error loading library:', error);
@@ -6344,14 +8114,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Add this listener at the top of the file or within the DOMContentLoaded event
-  window.electron.on('open-guide', () => {
-    showGuide(); // Call the function to show the guide
-  });
+  window._electronRealEventHandlers['open-guide'] = function() {
+    if (typeof showGuide === 'function') showGuide();
+  };
+  if (window._electronPendingEvents['open-guide']) {
+    window._electronPendingEvents['open-guide'].forEach((args) => {
+      window._electronRealEventHandlers['open-guide'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-guide'];
+  }
 
   // Handler for puter.com AI requests from main process
-  window.electron.on('puter-ai-chat-request', async (requestId, prompt, imageUrl, model) => {
+  // In server mode, this is called via WebSocket from server-bridge.js
+  // In normal mode, this is called via IPC from main process
+  // The captcha will appear in this window (browser window in server mode, Electron window in normal mode)
+  window._electronRealEventHandlers['puter-ai-chat-request'] = async function(requestId, prompt, imageUrl, model) {
+    console.log('[Puter AI] Received request, Puter.js captcha may appear in this window');
     try {
-      // Wait for puter.js to be fully loaded
+      await loadPuterJS();
+      
+      // Wait for puter.js to be fully initialized
       let retries = 0;
       const maxRetries = 10;
       while ((typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) && retries < maxRetries) {
@@ -6367,8 +8149,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Call puter.ai.chat() with error handling
       let response;
       try {
-        response = await puter.ai.chat(prompt, imageUrl, { model: model || 'gpt-5-nano' });
+        // Add timeout wrapper to detect network issues
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Network timeout: Unable to reach Puter.com API. Please check your internet connection.')), 55000);
+        });
+        
+        response = await Promise.race([
+          puter.ai.chat(prompt, imageUrl, { model: model || 'gpt-5-nano' }),
+          timeoutPromise
+        ]);
       } catch (apiError) {
+        console.error('[Puter AI] API call error:', apiError);
+        // Handle network/timeout errors
+        if (apiError.message && (apiError.message.includes('timeout') || apiError.message.includes('Network') || apiError.message.includes('Failed to fetch'))) {
+          throw new Error('Network error: Unable to connect to Puter.com API. Please check your internet connection. If running in Docker, ensure the container or browser has internet access.');
+        }
         // Handle 403 or other API errors
         if (apiError.message && apiError.message.includes('403')) {
           throw new Error('Puter.com API access denied (403). This may be due to CORS restrictions or API limitations. Please try using a different AI service or check puter.com documentation.');
@@ -6391,143 +8186,38 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       
       // Send response back to main process with requestId (only send serializable string)
+      console.log('[Puter AI] Sending response back, requestId:', requestId, 'response length:', responseText?.length);
       window.electron.send('puter-ai-chat-response', requestId, { response: responseText });
     } catch (error) {
-      console.error('Error calling puter.ai.chat:', error);
+      console.error('[Puter AI] Error calling puter.ai.chat:', error);
       const errorMessage = error.message || 'Unknown error';
+      console.log('[Puter AI] Sending error response, requestId:', requestId, 'error:', errorMessage);
       window.electron.send('puter-ai-chat-response', requestId, { error: errorMessage });
     }
-  });
+  };
+  if (window._electronPendingEvents['puter-ai-chat-request']) {
+    window._electronPendingEvents['puter-ai-chat-request'].forEach((args) => {
+      window._electronRealEventHandlers['puter-ai-chat-request'].apply(null, args);
+    });
+    delete window._electronPendingEvents['puter-ai-chat-request'];
+  }
 
-  // NEW: Listen for the "open-ai-config" event from the main process
-  window.electron.on('open-ai-config', () => {
-    const dialog = document.getElementById('ai-config-dialog');
-    if (!dialog) {
-      console.error('ai-config-dialog element not found.');
-      return;
-    }
-    window.electron.getSetting('apiKey').then((value) => {
-      const keyEl = document.getElementById('ai-api-key');
-      if (keyEl) {
-        keyEl.value = value || '';
-        
-        // Add input event listener for real-time persistence
-        keyEl.addEventListener('input', async () => {
-          await window.electron.saveSetting('apiKey', keyEl.value);
-        });
-      } else {
-        console.error('ai-api-key element not found.');
-      }
+  window._electronRealEventHandlers['open-ai-config'] = async function() {
+    await loadAndShowAIConfig();
+  };
+  if (window._electronPendingEvents['open-ai-config']) {
+    window._electronPendingEvents['open-ai-config'].forEach((args) => {
+      window._electronRealEventHandlers['open-ai-config'].apply(null, args);
     });
-    window.electron.getSetting('apiEndpoint').then((value) => {
-      const endpointEl = document.getElementById('ai-endpoint');
-      if (endpointEl) {
-        endpointEl.value = value || 'https://js.puter.com/v2/';
-        
-        // Add input event listener for real-time persistence
-        endpointEl.addEventListener('input', async () => {
-          await window.electron.saveSetting('apiEndpoint', endpointEl.value);
-        });
-      } else {
-        console.error('ai-endpoint element not found.');
-      }
-    });
-    window.electron.getSetting('aiModel').then((value) => {
-      const modelEl = document.getElementById('ai-model');
-      if (modelEl) {
-        modelEl.value = value || 'gpt-5-nano';
-        
-        // Add input event listener for real-time persistence
-        modelEl.addEventListener('input', async () => {
-          await window.electron.saveSetting('aiModel', modelEl.value);
-        });
-      } else {
-        console.error('ai-model element not found.');
-      }
-    });
-    window.electron.getSetting('aiService').then((value) => {
-      const serviceEl = document.getElementById('ai-service-select');
-      if (serviceEl) {
-        serviceEl.value = value || 'puter';
-        
-        // Update UI based on current service
-        const apiKeyEl = document.getElementById('ai-api-key');
-        const apiKeyGroup = apiKeyEl?.closest('.form-group');
-        const endpointEl = document.getElementById('ai-endpoint');
-        if (serviceEl.value === 'puter') {
-          if (apiKeyEl) {
-            apiKeyEl.required = false;
-            apiKeyEl.disabled = true;
-          }
-          if (apiKeyGroup) apiKeyGroup.style.display = 'none';
-          if (endpointEl) endpointEl.required = false;
-        } else {
-          if (apiKeyEl) {
-            apiKeyEl.required = true;
-            apiKeyEl.disabled = false;
-          }
-          if (apiKeyGroup) apiKeyGroup.style.display = '';
-          if (endpointEl) endpointEl.required = true;
-        }
-        
-        // Add change event listener for real-time persistence
-        serviceEl.addEventListener('change', async () => {
-          await window.electron.saveSetting('aiService', serviceEl.value);
-        });
-      } else {
-        console.error('ai-service-select element not found.');
-      }
-    });
-    
-    // Load AI tag settings
-    window.electron.getSetting('aiTagMaxTags').then((value) => {
-      const maxTagsEl = document.getElementById('ai-tag-max-tags');
-      if (maxTagsEl) {
-        maxTagsEl.value = value || '10';
-      }
-    });
-    
-    window.electron.getSetting('aiTagMergeStrategy').then((value) => {
-      const mergeStrategyEl = document.getElementById('ai-tag-merge-strategy');
-      if (mergeStrategyEl) {
-        mergeStrategyEl.value = value || 'merge';
-      }
-    });
-    
-    window.electron.getSetting('aiTagUseCategories').then((value) => {
-      const useCategoriesEl = document.getElementById('ai-tag-use-categories');
-      if (useCategoriesEl) {
-        useCategoriesEl.checked = value === '1';
-      }
-    });
-    
-    window.electron.getSetting('aiTagAllowRetagging').then((value) => {
-      const allowRetaggingEl = document.getElementById('ai-tag-allow-retagging');
-      if (allowRetaggingEl) {
-        allowRetaggingEl.checked = value === '1';
-      }
-    });
-    
-    window.electron.getSetting('aiTagConcurrency').then((value) => {
-      const concurrencyEl = document.getElementById('ai-tag-concurrency');
-      if (concurrencyEl) {
-        concurrencyEl.value = value || '3';
-      }
-    });
-    
-    window.electron.getSetting('aiTagDetailLevel').then((value) => {
-      const detailLevelEl = document.getElementById('ai-tag-detail-level');
-      if (detailLevelEl) {
-        detailLevelEl.value = value || 'medium';
-      }
-    });
-    
-    dialog.showModal();
-  });
+    delete window._electronPendingEvents['open-ai-config'];
+  }
 
-  // AI Config dialog handlers
   document.getElementById('test-ai-config')?.addEventListener('click', async (event) => {
     event.preventDefault();
+    if (typeof window.testAIConfigFromDialog === 'function') {
+      await window.testAIConfigFromDialog();
+      return;
+    }
     const apiKeyEl = document.getElementById('ai-api-key');
     const endpointEl = document.getElementById('ai-endpoint');
     const modelEl = document.getElementById('ai-model');
@@ -6538,10 +8228,41 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     
-    const apiKey = apiKeyEl.value;
-    const endpoint = endpointEl.value;
-    const model = modelEl.value;
-    const service = serviceEl.value;
+    // Get values - ALWAYS read from the select element's selected option, not just .value
+    // This ensures we get the actual selected value, not a stale value
+    const selectedOption = serviceEl.options[serviceEl.selectedIndex];
+    let service = selectedOption ? selectedOption.value : (serviceEl.value || 'puter');
+    
+    // If service is still empty or doesn't match what we expect, check the endpoint
+    // If endpoint is Puter.com URL, force service to 'puter'
+    const endpoint = endpointEl.value || '';
+    if (endpoint.includes('puter.com') || endpoint.includes('js.puter.com')) {
+      if (service !== 'puter') {
+        console.warn('[AI Config Test] Endpoint is Puter.com but service is', service, '- forcing to puter');
+        service = 'puter';
+        serviceEl.value = 'puter';
+        // Update selectedIndex to match
+        for (let i = 0; i < serviceEl.options.length; i++) {
+          if (serviceEl.options[i].value === 'puter') {
+            serviceEl.selectedIndex = i;
+            break;
+          }
+        }
+      }
+    }
+    
+    const apiKey = apiKeyEl.value || '';
+    const model = modelEl.value || '';
+    
+    console.log('[AI Config Test] Calling testAIConfig with:', { 
+      service, 
+      endpoint, 
+      model, 
+      apiKeyLength: apiKey.length,
+      serviceElValue: serviceEl.value,
+      selectedIndex: serviceEl.selectedIndex,
+      selectedOptionValue: selectedOption ? selectedOption.value : 'none'
+    });
     
     const result = await window.electron.testAIConfig(apiKey, endpoint, model, service);
     const resultDiv = document.getElementById('ai-config-result');
@@ -6558,6 +8279,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('save-ai-config')?.addEventListener('click', async (event) => {
     event.preventDefault();
+    if (typeof window.saveAIConfigFromDialog === 'function') {
+      await window.saveAIConfigFromDialog();
+      return;
+    }
     const service = document.getElementById('ai-service-select')?.value || 'puter';
     const apiKey = service === 'puter' ? '' : (document.getElementById('ai-api-key')?.value || '');
     const endpoint = document.getElementById('ai-endpoint')?.value || (service === 'puter' ? 'https://js.puter.com/v2/' : 'https://api.openai.com/v1');
@@ -6589,6 +8314,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('ai-config-dialog').close();
   });
 
+  // Populate File Type filter dropdown with only enabled types (from Settings > File Type)
+  async function populateFileTypeFilter() {
+    const select = document.getElementById('filetype-select');
+    if (!select) return;
+    const currentValue = select.value;
+    try {
+      const enableZipArchives = await window.electron.getSetting('enableZipArchives');
+      const scanTypesRaw = await window.electron.getSetting('scanAdditionalFileTypes');
+      let scanTypes = [];
+      try {
+        if (scanTypesRaw && typeof scanTypesRaw === 'string') scanTypes = JSON.parse(scanTypesRaw);
+        if (!Array.isArray(scanTypes)) scanTypes = [];
+      } catch (e) { /* ignore */ }
+      const catalog = await (window.electron.getAdditionalFileTypesCatalog && window.electron.getAdditionalFileTypesCatalog()) || [];
+      const enabledIds = new Set(scanTypes);
+      const options = [
+        { value: '', label: 'All Types' },
+        { value: 'stl', label: 'STL' },
+        { value: '3mf', label: '3MF' }
+      ];
+      if (enableZipArchives === '1') options.push({ value: 'zip', label: 'Zip' });
+      catalog.forEach(entry => {
+        if (entry.id && enabledIds.has(entry.id)) options.push({ value: entry.id, label: entry.label || entry.id });
+      });
+      select.innerHTML = '';
+      options.forEach(opt => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        if (opt.value === currentValue) option.selected = true;
+        select.appendChild(option);
+      });
+      if (select.value !== currentValue && !options.some(o => o.value === currentValue)) select.value = '';
+    } catch (e) {
+      console.error('Error populating file type filter:', e);
+    }
+  }
+
+  // Populate file type filter once when sidebar is ready (only enabled types)
+  setTimeout(() => { if (typeof populateFileTypeFilter === 'function') populateFileTypeFilter(); }, 500);
+
   // File Type Settings dialog handlers
   window.electron.on('open-file-type-settings', async () => {
     const dialog = document.getElementById('file-type-settings-dialog');
@@ -6603,6 +8369,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (checkbox) {
       checkbox.checked = enableZipArchives === '1';
     }
+    
+    // Load additional file types to scan (JSON array of catalog ids)
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    try {
+      const scanTypesRaw = await window.electron.getSetting('scanAdditionalFileTypes');
+      const scanTypes = (scanTypesRaw && typeof scanTypesRaw === 'string') ? JSON.parse(scanTypesRaw) : [];
+      const scanSet = new Set(Array.isArray(scanTypes) ? scanTypes : []);
+      ADDITIONAL_SCAN_TYPE_IDS.forEach(id => {
+        const el = document.getElementById('scan-type-' + id);
+        if (el) el.checked = scanSet.has(id);
+      });
+    } catch (e) { /* ignore */ }
     
     // Load 3MF metadata settings (default to '1' if not set)
     const enable3MFDesigner = await window.electron.getSetting('enable3MFDesigner');
@@ -6631,29 +8409,97 @@ document.addEventListener('DOMContentLoaded', async () => {
     dialog.showModal();
   });
 
+  async function saveFileTypeSettingsFromDialog() {
+    const dialogEl = document.getElementById('file-type-settings-dialog');
+    if (!dialogEl) return;
+    try {
+      const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
+      const enableZipArchives = checkbox?.checked ? '1' : '0';
+      await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+      const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+      const selectedScanTypes = [];
+      for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
+        const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
+        if (el && el.checked) selectedScanTypes.push(id);
+      }
+      await window.electron.saveSetting('scanAdditionalFileTypes', JSON.stringify(selectedScanTypes));
+      const designerCheckbox = dialogEl.querySelector('#enable-3mf-designer') || document.getElementById('enable-3mf-designer');
+      const parentModelCheckbox = dialogEl.querySelector('#enable-3mf-parent-model') || document.getElementById('enable-3mf-parent-model');
+      const licenseCheckbox = dialogEl.querySelector('#enable-3mf-license') || document.getElementById('enable-3mf-license');
+      const notesCheckbox = dialogEl.querySelector('#enable-3mf-notes') || document.getElementById('enable-3mf-notes');
+      await window.electron.saveSetting('enable3MFDesigner', designerCheckbox?.checked ? '1' : '0');
+      await window.electron.saveSetting('enable3MFParentModel', parentModelCheckbox?.checked ? '1' : '0');
+      await window.electron.saveSetting('enable3MFLicense', licenseCheckbox?.checked ? '1' : '0');
+      await window.electron.saveSetting('enable3MFNotes', notesCheckbox?.checked ? '1' : '0');
+      if (typeof dialogEl.close === 'function') dialogEl.close();
+      if (typeof populateFileTypeFilter === 'function') await populateFileTypeFilter();
+    } catch (err) {
+      console.error('File type settings save failed:', err);
+      if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to save file type settings: ' + (err.message || String(err)));
+    }
+  }
+  window.saveFileTypeSettingsFromDialog = saveFileTypeSettingsFromDialog;
+
   document.getElementById('save-file-type-settings')?.addEventListener('click', async (event) => {
     event.preventDefault();
-    const checkbox = document.getElementById('enable-zip-archives');
-    const enableZipArchives = checkbox?.checked ? '1' : '0';
-    
-    await window.electron.saveSetting('enableZipArchives', enableZipArchives);
-    
-    // Save 3MF metadata settings
-    const designerCheckbox = document.getElementById('enable-3mf-designer');
-    const parentModelCheckbox = document.getElementById('enable-3mf-parent-model');
-    const licenseCheckbox = document.getElementById('enable-3mf-license');
-    const notesCheckbox = document.getElementById('enable-3mf-notes');
-    
-    await window.electron.saveSetting('enable3MFDesigner', designerCheckbox?.checked ? '1' : '0');
-    await window.electron.saveSetting('enable3MFParentModel', parentModelCheckbox?.checked ? '1' : '0');
-    await window.electron.saveSetting('enable3MFLicense', licenseCheckbox?.checked ? '1' : '0');
-    await window.electron.saveSetting('enable3MFNotes', notesCheckbox?.checked ? '1' : '0');
-    
-    document.getElementById('file-type-settings-dialog').close();
+    await saveFileTypeSettingsFromDialog();
   });
 
   document.getElementById('cancel-file-type-settings')?.addEventListener('click', () => {
-    document.getElementById('file-type-settings-dialog').close();
+    document.getElementById('file-type-settings-dialog')?.close();
+  });
+
+  // Browser Extension Settings: not shown in Docker/Server mode (menu item hidden there)
+  window._electronRealEventHandlers['open-browser-extension-settings'] = async function() {
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    if (serverMode) return;
+    const dialog = document.getElementById('browser-extension-settings-dialog');
+    if (!dialog) return;
+    const enabled = await window.electron.getSetting('enableBrowserExtension');
+    const port = await window.electron.getSetting('browserExtensionPort');
+    const check = document.getElementById('enable-browser-extension');
+    const portInput = document.getElementById('browser-extension-port');
+    if (check) check.checked = enabled === '1';
+    if (portInput) portInput.value = port || '5000';
+    dialog.showModal();
+  };
+  if (window._electronPendingEvents['open-browser-extension-settings']) {
+    window._electronPendingEvents['open-browser-extension-settings'].forEach((args) => {
+      window._electronRealEventHandlers['open-browser-extension-settings'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-browser-extension-settings'];
+  }
+
+  document.getElementById('save-browser-extension-settings')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const check = document.getElementById('enable-browser-extension');
+    const portInput = document.getElementById('browser-extension-port');
+    const enabled = check?.checked ? '1' : '0';
+    const port = Math.min(65535, Math.max(1024, parseInt(portInput?.value || '5000', 10) || 5000));
+    await window.electron.saveSetting('enableBrowserExtension', enabled);
+    await window.electron.saveSetting('browserExtensionPort', String(port));
+    if (enabled === '1') {
+      const result = await window.electron.startExtensionServer(port);
+      if (result && !result.success) {
+        await window.electron.showMessage('Browser Extension Server', result.message || 'Failed to start server. On macOS, check the main process console (run from Terminal) or ensure the app was built with com.apple.security.network.server entitlement.');
+        return;
+      }
+    } else {
+      await window.electron.stopExtensionServer();
+    }
+    document.getElementById('browser-extension-settings-dialog').close();
+  });
+
+  document.getElementById('cancel-browser-extension-settings')?.addEventListener('click', () => {
+    document.getElementById('browser-extension-settings-dialog').close();
+  });
+
+  document.getElementById('browser-extension-store-link')?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const url = e.currentTarget.getAttribute('href');
+    if (url && typeof window.electron?.openExternal === 'function') {
+      await window.electron.openExternal(url);
+    }
   });
 
   // Store pending tags for preview (can handle multiple models)
@@ -6675,13 +8521,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Helper function to deduplicate model data array
   function deduplicateModelData(modelsData) {
+    if (!Array.isArray(modelsData) || modelsData.length === 0) {
+      return [];
+    }
+    
     const deduplicated = new Map();
     
     for (const modelData of modelsData) {
+      if (!modelData) continue; // Skip null/undefined entries
+      
       const filePath = getFilePathFromModelData(modelData);
-      if (!filePath) continue;
+      if (!filePath) {
+        console.warn('[Deduplicate] Skipping modelData with no filePath:', modelData);
+        continue;
+      }
       
       const normalizedPath = normalizeFilePath(filePath);
+      if (!normalizedPath) {
+        console.warn('[Deduplicate] Skipping modelData with empty normalized path:', filePath);
+        continue;
+      }
+      
       const existing = deduplicated.get(normalizedPath);
       
       // Prefer entry with actual tags over "Generating..." entries or empty tags
@@ -6707,13 +8567,40 @@ document.addEventListener('DOMContentLoaded', async () => {
           // Existing is generating, new has result - replace
           deduplicated.set(normalizedPath, modelData);
         } else {
-          // Both in same state - keep existing (first one wins)
-          // (don't replace)
+          // Both in same state - prefer the one with more complete data (has model object)
+          // If both have model objects, keep existing (first one wins)
+          const existingHasModel = existing.model && typeof existing.model === 'object';
+          const newHasModel = modelData.model && typeof modelData.model === 'object';
+          
+          if (newHasModel && !existingHasModel) {
+            // New has model object, existing doesn't - replace
+            deduplicated.set(normalizedPath, modelData);
+          } else {
+            // Keep existing (first one wins or both have same completeness)
+            // (don't replace)
+          }
         }
       }
     }
     
-    return Array.from(deduplicated.values());
+    const result = Array.from(deduplicated.values());
+    
+    // Final validation: ensure no duplicates by path
+    const pathSet = new Set();
+    const finalResult = [];
+    for (const modelData of result) {
+      const filePath = getFilePathFromModelData(modelData);
+      if (!filePath) continue;
+      const normalizedPath = normalizeFilePath(filePath);
+      if (!pathSet.has(normalizedPath)) {
+        pathSet.add(normalizedPath);
+        finalResult.push(modelData);
+      } else {
+        console.warn(`[Deduplicate] Found duplicate after deduplication: ${filePath}`);
+      }
+    }
+    
+    return finalResult;
   }
 
   // Helper function to update or add model data to pendingTagData (ensures no duplicates)
@@ -6753,8 +8640,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     showTagPreviewDialog(pendingTagData);
   }
 
-  // Listen for the 'tags-generated' event from the main process
-  window.electron.on('tags-generated', async (filePath, tags, errorMessage) => {
+  window._electronRealEventHandlers['tags-generated'] = async function(filePath, tags, errorMessage) {
     try {
       // Check if there's a rate limit error
       if (errorMessage && errorMessage.includes('Rate limit')) {
@@ -6839,60 +8725,155 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (error) {
       console.error(`Error updating tags for model ${filePath}:`, error);
     }
-  });
-  
-  // Listen for single file tag generation start
-  window.electron.on('start-single-tag-generation', async (filePath, modelData) => {
-    console.log('Received start-single-tag-generation event', filePath);
-    batchTagGenerationInProgress = false;
-    expectedBatchCount = 1;
-    pendingTagData = [modelData];
-    reviewDialogOpen = false; // Reset dialog state
-    rateLimitDialogShown = false; // Reset rate limit dialog flag
-    // Deduplicate before showing (should be single item, but be safe)
-    const uniquePendingData = deduplicateModelData(pendingTagData);
-    showTagPreviewDialog(uniquePendingData);
-  });
+  };
+  if (window._electronPendingEvents['tags-generated']) {
+    window._electronPendingEvents['tags-generated'].forEach((args) => {
+      window._electronRealEventHandlers['tags-generated'].apply(null, args);
+    });
+    delete window._electronPendingEvents['tags-generated'];
+  }
 
-  // Listen for batch tag generation start
-  window.electron.on('start-batch-tag-generation', async (count, filePaths) => {
-    batchTagGenerationInProgress = true;
-    expectedBatchCount = count;
-    pendingTagData = [];
-    reviewDialogOpen = false;
-    rateLimitDialogShown = false; // Reset rate limit dialog flag for new batch
-    
-    // Pre-populate with all models so they appear immediately
-    if (filePaths && filePaths.length > 0) {
-      for (const filePath of filePaths) {
-        try {
-          const model = await window.electron.getModel(filePath);
-          if (model) {
-            pendingTagData.push({
-              filePath: filePath,
-              model: model,
-              generatedTags: undefined, // Not generated yet
-              existingTags: model.tags || []
-            });
+  window._electronRealEventHandlers['start-single-tag-generation'] = async function(filePath, modelData) {
+    try {
+      console.log('[Renderer] Received start-single-tag-generation event', filePath, modelData);
+      batchTagGenerationInProgress = false;
+      expectedBatchCount = 1;
+      pendingTagData = [modelData];
+      reviewDialogOpen = false; // Reset dialog state
+      rateLimitDialogShown = false; // Reset rate limit dialog flag
+      // Deduplicate before showing (should be single item, but be safe)
+      const uniquePendingData = deduplicateModelData(pendingTagData);
+      console.log('[Renderer] About to call showTagPreviewDialog with:', uniquePendingData);
+      console.log('[Renderer] showTagPreviewDialog exists:', typeof showTagPreviewDialog);
+      
+      // Ensure dialog opens even if showTagPreviewDialog has issues
+      const dialog = document.getElementById('tag-preview-dialog');
+      if (dialog && !dialog.open) {
+        console.log('[Renderer] Opening tag preview dialog directly');
+        dialog.showModal();
+        reviewDialogOpen = true;
+      }
+      
+      if (typeof showTagPreviewDialog === 'function') {
+        showTagPreviewDialog(uniquePendingData);
+      } else {
+        console.error('[Renderer] showTagPreviewDialog is not a function!');
+        // If function doesn't exist, at least show the dialog with basic content
+        if (dialog && dialog.open) {
+          const container = document.getElementById('tag-preview-container');
+          if (container) {
+            container.innerHTML = '<div style="padding: 20px; color: #fff;">Generating tags...</div>';
           }
-        } catch (error) {
-          console.error(`Error loading model ${filePath} for preview:`, error);
         }
       }
+    } catch (error) {
+      console.error('[Renderer] Error in start-single-tag-generation handler:', error);
+      // Try to open dialog anyway
+      try {
+        const dialog = document.getElementById('tag-preview-dialog');
+        if (dialog && !dialog.open) {
+          dialog.showModal();
+          reviewDialogOpen = true;
+        }
+      } catch (dialogError) {
+        console.error('[Renderer] Failed to open dialog:', dialogError);
+      }
     }
-    
-    // Show the review dialog immediately with all models (some may show "Generating...")
-    // Deduplicate before showing to prevent any duplicates
-    const uniquePendingData = deduplicateModelData(pendingTagData);
-    if (uniquePendingData.length > 0) {
-      showTagPreviewDialog(uniquePendingData);
-    } else {
-      showTagPreviewDialog([]);
+  };
+  if (window._electronPendingEvents['start-single-tag-generation']) {
+    window._electronPendingEvents['start-single-tag-generation'].forEach((args) => {
+      window._electronRealEventHandlers['start-single-tag-generation'].apply(null, args);
+    });
+    delete window._electronPendingEvents['start-single-tag-generation'];
+  }
+
+  window._electronRealEventHandlers['start-batch-tag-generation'] = async function(count, filePaths) {
+    try {
+      console.log('[Renderer] Received start-batch-tag-generation event', count, filePaths);
+      batchTagGenerationInProgress = true;
+      expectedBatchCount = count;
+      pendingTagData = [];
+      reviewDialogOpen = false;
+      rateLimitDialogShown = false; // Reset rate limit dialog flag for new batch
+      
+      // Ensure dialog opens immediately, even before loading models
+      const dialog = document.getElementById('tag-preview-dialog');
+      if (dialog && !dialog.open) {
+        console.log('[Renderer] Opening tag preview dialog directly for batch');
+        dialog.showModal();
+        reviewDialogOpen = true;
+      }
+      
+      // Pre-populate with all models so they appear immediately (deduplicate by normalized path to avoid duplicate entries)
+      if (filePaths && filePaths.length > 0) {
+        const seenPaths = new Set();
+        for (const filePath of filePaths) {
+          const norm = normalizeFilePath(filePath);
+          if (!norm || seenPaths.has(norm)) continue;
+          seenPaths.add(norm);
+          try {
+            const model = await window.electron.getModel(filePath);
+            if (model) {
+              pendingTagData.push({
+                filePath: filePath,
+                model: model,
+                generatedTags: undefined, // Not generated yet
+                existingTags: model.tags || []
+              });
+            }
+          } catch (error) {
+            console.error(`Error loading model ${filePath} for preview:`, error);
+          }
+        }
+      }
+      
+      // Show the review dialog immediately with all models (some may show "Generating...")
+      // Deduplicate before showing to prevent any duplicates
+      const uniquePendingData = deduplicateModelData(pendingTagData);
+      console.log('[Renderer] About to call showTagPreviewDialog with:', uniquePendingData.length, 'items');
+      console.log('[Renderer] showTagPreviewDialog exists:', typeof showTagPreviewDialog);
+      if (typeof showTagPreviewDialog === 'function') {
+        if (uniquePendingData.length > 0) {
+          showTagPreviewDialog(uniquePendingData);
+        } else {
+          showTagPreviewDialog([]);
+        }
+      } else {
+        console.error('[Renderer] showTagPreviewDialog is not a function!');
+        // If function doesn't exist, at least show the dialog with basic content
+        if (dialog && dialog.open) {
+          const container = document.getElementById('tag-preview-container');
+          if (container) {
+            container.innerHTML = `<div style="padding: 20px; color: #fff;">Generating tags for ${count} model(s)...</div>`;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[Renderer] Error in start-batch-tag-generation handler:', error);
+      // Try to open dialog anyway
+      try {
+        const dialog = document.getElementById('tag-preview-dialog');
+        if (dialog && !dialog.open) {
+          dialog.showModal();
+          reviewDialogOpen = true;
+          const container = document.getElementById('tag-preview-container');
+          if (container) {
+            container.innerHTML = '<div style="padding: 20px; color: #fff;">Error loading tag preview. Tags are still being generated...</div>';
+          }
+        }
+      } catch (dialogError) {
+        console.error('[Renderer] Failed to open dialog:', dialogError);
+      }
     }
-  });
-  
-  // Listen for batch tag generation complete
-  window.electron.on('batch-tag-generation-complete', async () => {
+  };
+  if (window._electronPendingEvents['start-batch-tag-generation']) {
+    window._electronPendingEvents['start-batch-tag-generation'].forEach((args) => {
+      window._electronRealEventHandlers['start-batch-tag-generation'].apply(null, args);
+    });
+    delete window._electronPendingEvents['start-batch-tag-generation'];
+  }
+
+  window._electronRealEventHandlers['batch-tag-generation-complete'] = async function() {
     batchTagGenerationInProgress = false;
     rateLimitDialogShown = false; // Reset rate limit dialog flag when batch completes
     
@@ -6929,7 +8910,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Don't auto-close - let the user review what happened (even if no tags)
     // They can see which models failed and which succeeded
-  });
+  };
+  if (window._electronPendingEvents['batch-tag-generation-complete']) {
+    window._electronPendingEvents['batch-tag-generation-complete'].forEach((args) => {
+      window._electronRealEventHandlers['batch-tag-generation-complete'].apply(null, args);
+    });
+    delete window._electronPendingEvents['batch-tag-generation-complete'];
+  }
 
   // Function to show tag preview dialog (now handles multiple models)
   function showTagPreviewDialog(modelsData) {
@@ -7031,20 +9018,54 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Clear container completely to prevent duplicates
     container.innerHTML = '';
 
+    // Open dialog immediately (before loading settings) so it appears in desktop mode
+    if (!dialog.open) {
+      dialog.showModal();
+      reviewDialogOpen = true;
+    }
+
     // Get merge strategy from settings
     window.electron.getSetting('aiTagMergeStrategy').then((strategy) => {
       const mergeStrategy = strategy || 'merge';
+
+      // Final deduplication check before rendering - use a Set to track rendered filePaths
+      const renderedPaths = new Set();
+      const finalUniqueModels = [];
+      
+      for (const modelData of uniqueModelsData) {
+        const filePath = getFilePathFromModelData(modelData);
+        if (!filePath) continue;
+        
+        const normalizedPath = normalizeFilePath(filePath);
+        if (!renderedPaths.has(normalizedPath)) {
+          renderedPaths.add(normalizedPath);
+          finalUniqueModels.push(modelData);
+        } else {
+          console.warn(`[Tag Preview] Skipping duplicate model: ${filePath}`);
+        }
+      }
+      
+      if (finalUniqueModels.length !== uniqueModelsData.length) {
+        console.log(`[Tag Preview] Final deduplication: ${uniqueModelsData.length} -> ${finalUniqueModels.length} models`);
+      }
 
       // Create a container for multiple models (scrolling handled by parent)
       const modelsContainer = document.createElement('div');
 
       // Process each model - use for...of to support async operations
-      for (const [index, modelData] of uniqueModelsData.entries()) {
+      for (const [index, modelData] of finalUniqueModels.entries()) {
         const { model, generatedTags, existingTags, errorMessage } = modelData;
         const fileName = model.fileName || model.filePath?.split(/[/\\]/).pop() || 'Unknown';
         const filePath = model.filePath || 'Unknown path';
 
-        // Create model section
+        // Create model section with unique ID to prevent duplicate rendering
+        const normalizedModelPath = normalizeFilePath(model.filePath);
+        const existingSection = modelsContainer.querySelector(`[data-normalized-path="${normalizedModelPath}"]`);
+        if (existingSection) {
+          console.warn(`[Tag Preview] Skipping duplicate model section for: ${model.filePath}`);
+          continue; // Skip if this model section already exists
+        }
+        
         const modelSection = document.createElement('div');
         modelSection.style.marginBottom = '25px';
         modelSection.style.padding = '15px';
@@ -7052,6 +9073,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         modelSection.style.border = '1px solid #444';
         modelSection.style.borderRadius = '8px';
         modelSection.dataset.filePath = model.filePath;
+        modelSection.dataset.normalizedPath = normalizedModelPath;
 
         // Model header with thumbnail
         const modelHeader = document.createElement('div');
@@ -7377,6 +9399,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
+      // Dialog is already opened earlier, just ensure it's still open
       if (!dialog.open) {
         dialog.showModal();
         reviewDialogOpen = true;
@@ -7830,6 +9853,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       if (apiKeyGroup) apiKeyGroup.style.display = '';
     } else if (selectedService === 'puter') {
+      // Load Puter.js when user selects Puter service
+      loadPuterJS().catch(err => {
+        console.warn('[AI Config] Failed to load Puter.js:', err);
+      });
+      
       endpointEl.value = 'https://js.puter.com/v2/';
       modelEl.value = 'gpt-5-nano';
       if (apiKeyEl) {
@@ -7854,9 +9882,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     
     // Save the new values to the database
-    await window.electron.saveSetting('apiEndpoint', endpointEl.value);
-    await window.electron.saveSetting('aiModel', modelEl.value);
-    await window.electron.saveSetting('aiService', selectedService);
+    await window.electron.saveSetting('apiEndpoint', endpointEl.value).catch(err => console.error('Error saving endpoint:', err));
+    await window.electron.saveSetting('aiModel', modelEl.value).catch(err => console.error('Error saving model:', err));
+    await window.electron.saveSetting('aiService', selectedService).catch(err => console.error('Error saving service:', err));
+    console.log('[AI Config] Service changed to:', selectedService, 'and saved to database');
   });
 
   // Add missing function renderThumbnail used in generateThumbnail().
@@ -7989,6 +10018,169 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Handle manage-thumbnails-request event
+  window.electron.on('manage-thumbnails-request', async (filePath) => {
+    try {
+      await showManageThumbnailsModal(filePath);
+    } catch (error) {
+      console.error('Error showing manage thumbnails modal:', error);
+      alert('Error opening thumbnail manager: ' + error.message);
+    }
+  });
+
+  // Handle client-side command execution (for server mode)
+  window.electron.on('execute-client-command', async (commandData) => {
+    try {
+      if (!commandData || !commandData.type) {
+        console.error('Invalid command data:', commandData);
+        return;
+      }
+
+      const { type, filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath } = commandData;
+
+      if (type === 'open-file') {
+        // Try to open file using Electron IPC handler first, then fallback to download
+        try {
+          // Try IPC handler (works for Electron clients)
+          if (window.electron && typeof window.electron.invoke === 'function') {
+            try {
+              const result = await window.electron.invoke('execute-client-command', commandData);
+              if (result && result.success) {
+                console.log('File opened successfully via IPC');
+                return;
+              }
+            } catch (ipcError) {
+              console.log('IPC handler not available, trying direct method:', ipcError);
+            }
+          }
+          
+          // Try direct openPath (works for Electron clients with preload)
+          if (window.electron && typeof window.electron.openPath === 'function') {
+            await window.electron.openPath(filePath);
+          } else {
+            // Browser context - trigger download so user can open it
+            const encodedPath = encodeURIComponent(filePath);
+            const downloadUrl = `/api/download/${encodedPath}`;
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = '';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            setTimeout(() => link.remove(), 100);
+          }
+        } catch (error) {
+          console.error('Error opening file:', error);
+          // Fallback: trigger download
+          const encodedPath = encodeURIComponent(filePath);
+          const downloadUrl = `/api/download/${encodedPath}`;
+          const link = document.createElement('a');
+          link.href = downloadUrl;
+          link.download = '';
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => link.remove(), 100);
+        }
+      } else if (type === 'open-in-slicer') {
+        // Try to execute slicer command on client machine
+        // For Electron clients, use IPC handler; for browser clients, show instructions
+        
+        try {
+          // Try IPC handler first (works for Electron clients accessing server)
+          if (window.electron && typeof window.electron.invoke === 'function') {
+            try {
+              const result = await window.electron.invoke('execute-client-command', commandData);
+              if (result && result.success) {
+                console.log('Slicer command executed successfully via IPC');
+                return;
+              } else if (result && result.error) {
+                alert(`Error opening file in ${slicerName}:\n${result.error}\n\n` +
+                  `File: ${filePath}\n` +
+                  `Slicer: ${slicerPath}`);
+                return;
+              }
+            } catch (ipcError) {
+              console.log('IPC handler failed, trying direct execution:', ipcError);
+            }
+          }
+          
+          // Fallback: Try direct Node.js execution (if available in Electron renderer)
+          const hasNodeAccess = typeof window !== 'undefined' && typeof require !== 'undefined';
+          
+          if (hasNodeAccess) {
+            try {
+              const { exec } = require('child_process');
+              let modelPath = filePath;
+              
+              // Handle zip entries - for now show instructions (would need extraction)
+              if (isZipEntry && zipPath && entryPath) {
+                alert(`To open a file from a ZIP archive in your slicer:\n\n` +
+                  `1. Download the ZIP file: ${zipPath}\n` +
+                  `2. Extract ${entryPath} from the ZIP\n` +
+                  `3. Open ${entryPath} in ${slicerName}\n\n` +
+                  `Slicer: ${slicerPath}`);
+                return;
+              }
+              
+              // Construct command based on platform
+              let command;
+              if (process.platform === 'darwin' && slicerPath.toLowerCase().endsWith('.app')) {
+                command = `open -a "${slicerPath}" --args "${modelPath}"`;
+              } else {
+                command = `"${slicerPath}" "${modelPath}"`;
+              }
+              
+              exec(command, (error, stdout, stderr) => {
+                if (error) {
+                  console.error('Error executing slicer on client:', error);
+                  alert(`Error opening file in ${slicerName}:\n${error.message}\n\n` +
+                    `File: ${modelPath}\n` +
+                    `Slicer: ${slicerPath}\n\n` +
+                    `Please try opening the file manually.`);
+                } else {
+                  console.log('Successfully executed slicer command on client');
+                }
+              });
+              return; // Successfully started execution
+            } catch (execError) {
+              console.error('Cannot execute command directly:', execError);
+              // Fall through to show instructions
+            }
+          }
+          
+          // Browser client or no Node.js access - show instructions
+          showSlicerInstructions(filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath);
+        } catch (error) {
+          console.error('Error executing slicer command:', error);
+          showSlicerInstructions(filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath);
+        }
+      }
+    } catch (error) {
+      console.error('Error handling client command:', error);
+    }
+  });
+
+  // Helper function to show slicer instructions
+  function showSlicerInstructions(filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath) {
+    let message = `To open this file in ${slicerName}:\n\n`;
+    
+    if (isZipEntry && zipPath && entryPath) {
+      message += `1. Download the ZIP file: ${zipPath}\n`;
+      message += `2. Extract ${entryPath} from the ZIP\n`;
+      message += `3. Open ${entryPath} in ${slicerName}\n\n`;
+    } else {
+      message += `1. Download the file (use the Download option)\n`;
+      message += `2. Open ${slicerName} on your workstation\n`;
+      message += `3. Open the downloaded file in ${slicerName}\n\n`;
+      message += `File: ${filePath}\n`;
+    }
+    
+    message += `Slicer Path: ${slicerPath}`;
+    
+    alert(message);
+  }
+
     window.electron.on('download-model', async (filePath) => {
       // Prevent duplicate downloads of the same file
       if (activeDownloads.has(filePath)) {
@@ -8083,20 +10275,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Add this line to listen for the slicer settings event
-  window.electron.onOpenSlicerSettings(() => {
+  window._electronRealEventHandlers['open-slicer-settings'] = function() {
     const dialog = document.getElementById('slicer-dialog');
     if (dialog) {
-      // Load current slicer path
       window.electron.getSetting('slicerPath')
-        .then(path => {
+        .then(function(path) {
           const input = document.getElementById('slicer-path');
           if (input) input.value = path || '';
           dialog.showModal();
         })
-        .catch(err => console.error('Error loading slicer path:', err));
+        .catch(function(err) { console.error('Error loading slicer path:', err); });
     }
-  });
+  };
+  if (window._electronPendingEvents['open-slicer-settings']) {
+    window._electronPendingEvents['open-slicer-settings'].forEach((args) => {
+      window._electronRealEventHandlers['open-slicer-settings'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-slicer-settings'];
+  }
 
   // Modify the prompt handler
   async function promptPendingThumbnails() {
@@ -8193,7 +10389,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add function for generating thumbnails for multiple models
   async function generateThumbnailsForModels(models) {
     console.log(`[DEBUG] generateThumbnailsForModels: Starting thumbnail generation for ${models.length} models.`);
-    const BATCH_SIZE = 1; // Process one at a time
+    
+    // Check if we're in server mode (Docker typically runs in server mode)
+    // Higher concurrency in server/Docker mode to compensate for slower file operations
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    const maxConcurrentThumbnails = serverMode ? 10 : 3; // Higher concurrency in server/Docker mode
     
     // New progress UI elements (Sidebar)
     const progressSection = document.getElementById('progress-section');
@@ -8241,21 +10441,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         activeProgressText.textContent = `Processing 0/${totalThumbnailsToGenerate} (0%)`;
       }
       
-      for (let i = 0; i < models.length; i++) {
-        if (isCancelled) break;
-
-        const model = models[i];
+      // Process models in parallel with concurrency control for better performance
+      const modelQueue = [...models];
+      const activePromises = new Set();
+      let processedCount = 0;
+      
+      const processModel = async (model) => {
         let thumbnail = null;
+        const pathForExt = model.filePath.includes('::') ? (model.filePath.split('::')[1] || '') : model.filePath;
+        const fileExt = pathForExt.split('.').pop().toLowerCase();
         
         try {
-          // Update progress before starting each model
-          generatedThumbnailsCount = i;
+          // 0. Non-previewable types: use typed placeholder (file type label)
+          if (fileExt !== 'stl' && fileExt !== '3mf' && fileExt !== 'svg') {
+            thumbnail = generateTypedPlaceholder(fileExt);
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+            if (!model.hash || model.hash === '') {
+              try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
+            }
+            return;
+          }
           
-          // Only update UI elements if they exist
-          if (hasProgressUI) {
-            const progress = Math.floor((i / totalThumbnailsToGenerate) * 100);
-            activeProgressBar.style.width = `${progress}%`;
-            activeProgressText.textContent = `Processing ${i + 1}/${totalThumbnailsToGenerate} (${progress}%)`;
+          // 0b. SVG: try to load as image data URL; on failure use typed placeholder
+          if (fileExt === 'svg') {
+            try {
+              const buf = await window.electron.readModelFile(model.filePath);
+              if (buf && (buf instanceof ArrayBuffer || buf.byteLength)) {
+                const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
+                const decoder = new TextDecoder();
+                const svgText = decoder.decode(bytes);
+                thumbnail = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+              }
+            } catch (e) { /* ignore */ }
+            if (!thumbnail || !thumbnail.startsWith('data:image')) {
+              thumbnail = generateTypedPlaceholder('svg');
+            }
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+            if (!model.hash || model.hash === '') {
+              try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
+            }
+            return;
           }
           
           // 1. Try to get embedded thumbnail for 3MF
@@ -8290,7 +10515,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           }
 
-          // 3. Validate and fallback to default if necessary
+          // 3. Validate and fallback to default if necessary (STL/3MF only reach here)
           if (!thumbnail || typeof thumbnail !== 'string' || !thumbnail.startsWith('data:image')) {
             thumbnail = '3d.png';
           }
@@ -8313,18 +10538,48 @@ document.addEventListener('DOMContentLoaded', async () => {
             deepCleanThreeResources();
           }
           
-          // Add delay between models
-          await new Promise(resolve => setTimeout(resolve, 50));
-          
         } catch (error) {
           console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
-          // Try to save a default thumbnail to prevent future attempts
+          // Try to save a typed placeholder or default to prevent future attempts
           try {
-            await window.electron.saveThumbnail(model.filePath, '3d.png');
+            const fallback = EXTENSIONS_VALID_FOR_LIBRARY.has('.' + fileExt) ? generateTypedPlaceholder(fileExt) : '3d.png';
+            await window.electron.saveThumbnail(model.filePath, fallback);
           } catch (saveError) {
             console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
           }
+        } finally {
+          processedCount++;
+          generatedThumbnailsCount = processedCount;
+          
+          // Update progress
+          if (hasProgressUI) {
+            const progress = Math.floor((processedCount / totalThumbnailsToGenerate) * 100);
+            activeProgressBar.style.width = `${progress}%`;
+            activeProgressText.textContent = `Processing ${processedCount}/${totalThumbnailsToGenerate} (${progress}%)`;
+          }
         }
+      };
+      
+      // Process models with concurrency control
+      while (modelQueue.length > 0 && !isCancelled) {
+        // Fill up to max concurrent thumbnails
+        while (activePromises.size < maxConcurrentThumbnails && modelQueue.length > 0) {
+          const model = modelQueue.shift();
+          const promise = processModel(model).finally(() => {
+            activePromises.delete(promise);
+          });
+          activePromises.add(promise);
+        }
+        
+        // Wait for at least one promise to complete before continuing
+        if (activePromises.size > 0) {
+          await Promise.race(Array.from(activePromises));
+        }
+      }
+      
+      // Wait for any remaining active promises to complete
+      if (activePromises.size > 0) {
+        await Promise.all(Array.from(activePromises));
       }
 
       // Update final progress
@@ -8355,11 +10610,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update the view-library-button click handler
   document.getElementById('view-library-button')?.addEventListener('click', async () => {
     try {
-      // Clear dateAddedFilter when viewing entire library
+      window.disableGridRefresh = false;
+      const gridEl = document.querySelector('.file-grid');
+      if (gridEl) gridEl.currentModels = null;
       window.dateAddedFilter = null;
       window._lastDateAddedFilter = null;
-      
-      // Reset all filter dropdowns
       document.getElementById('designer-select').value = '';
       document.getElementById('license-select').value = '';
       document.getElementById('parent-select').value = '';
@@ -8367,29 +10622,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('tag-filter').value = '';
       document.getElementById('filetype-select').value = '';
       document.getElementById('search-filter-input').value = '';
-      
-      // Explicitly clear the directory filter
       window.currentDirectoryFilter = "";
-      
-      // Hide the "Showing 100 Newest Models" message
       const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) {
-        viewLibMsg.style.display = "none";
-      }
-      
-      // Flag that we're viewing the entire library
+      if (viewLibMsg) viewLibMsg.style.display = "none";
       window.viewingEntireLibrary = true;
-      
-      // Clear the filter indicator
       const filterIndicator = document.getElementById('current-filter');
-      if (filterIndicator) {
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
+      if (filterIndicator) { filterIndicator.innerHTML = ""; filterIndicator.classList.remove('visible'); }
+      if (typeof window.forceGridRefresh === 'function') {
+        await window.forceGridRefresh();
+      } else if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
       }
-      
-      // Use the combined search function to retrieve and display models with all filters applied correctly
-      await window.performCombinedSearch();
-      
       console.log("Viewing entire library");
     } catch (error) {
       console.error('Error loading library:', error);
@@ -8626,12 +10869,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!modelTags || !modelTags.some(tag => tag.name === tagFilter)) return false;
     }
 
-    // Handle search term
+    // Handle search term (name, directory, metadata, tags, notes)
     if (searchTerm) {
-      const searchFields = [model.fileName, model.designer, model.parentModel, model.notes, model.filePath]
+      const searchLower = searchTerm.toLowerCase();
+      const searchFields = [model.fileName, model.designer, model.parentModel, model.notes, model.filePath, model.source, model.license]
         .filter(Boolean)
-        .map(field => field.toLowerCase());
-      if (!searchFields.some(field => field.includes(searchTerm.toLowerCase()))) return false;
+        .map(field => String(field).toLowerCase());
+      if (searchFields.some(field => field.includes(searchLower))) return true;
+      const modelTags = await window.electron.getModelTags(model.id);
+      const tagMatch = modelTags && modelTags.some(tag => tag.name && tag.name.toLowerCase().includes(searchLower));
+      if (tagMatch) return true;
+      return false;
     }
 
     return true;
@@ -8692,7 +10940,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     try {
       // Get all filtered model references (not just visible ones)
-      const filteredModels = await window.getCombinedFilteredModels(); // Use the function from search.js
+      // Wait for getCombinedFilteredModels to be available (handles module loading race condition)
+      const getFilteredModels = await waitForGetCombinedFilteredModels();
+      const filteredModels = await getFilteredModels(); // Use the function from search.js
       
       // Add all filtered models to selection (ensuring no duplicates by file path)
       const uniqueFilePaths = new Set();
@@ -8962,8 +11212,8 @@ function hideProgressBars() {
   progressSection.classList.add('hidden');
 }
 
-// Update function signature to include background parameter
-async function scanAndRenderDirectory(directoryPath, background = false) {
+// Update function signature to include background and isStlHomeScan parameters
+async function scanAndRenderDirectory(directoryPath, background = false, isStlHomeScan = false) {
   const progressSection = document.getElementById('progress-section');
   const progressContainer = document.getElementById('progress-container');
   const progressBar = document.getElementById('progress-bar');
@@ -9012,7 +11262,8 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     const scanStartTime = new Date().toISOString();
     
     // Update the scan directory call to use the new validation and cancellation
-    const scanResult = await window.electron.scanDirectory(directoryPath, isValidFile);
+    const scanOptions = isStlHomeScan ? { isStlHomeScan: true } : {};
+    const scanResult = await window.electron.scanDirectory(directoryPath, scanOptions);
     const { files, totalFiles, newFilesCount, cancelScan } = scanResult || { files: [], totalFiles: 0, newFilesCount: 0 };
     
     if (isCancelled) {
@@ -9080,7 +11331,11 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       progressBar.style.width = '100%';
     }
 
-    const filesNeedingThumbnails = files.filter(file => !existingThumbnails.has(file.filePath));
+    // Include files that have no thumbnail or only the default placeholder (new inserts have null)
+    const filesNeedingThumbnails = files.filter(file => {
+      const thumb = existingThumbnails.get(file.filePath);
+      return !thumb || thumb === '3d.png' || (typeof thumb === 'string' && thumb.trim() === '');
+    });
     if (!background) {
       if (filesNeedingThumbnails.length > 0) {
         progressText.textContent = `${filesNeedingThumbnails.length} models found`;
@@ -9103,7 +11358,9 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
       };
 
       // Improved thumbnail generation with concurrency control and cancellation
-      const maxConcurrentThumbnails = 5; // Increased from 1 for better performance
+      // Higher concurrency in Server/Docker mode to compensate for slower file system operations
+      const serverMode = await window.electron.isServerMode().catch(() => false);
+      const maxConcurrentThumbnails = serverMode ? 10 : 5; // Higher concurrency in server/Docker mode
       const thumbnailQueue = [...filesNeedingThumbnails];
       const activePromises = new Set();
       
@@ -9114,7 +11371,8 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
           
           const promise = (async () => {
             try {
-              if (existingThumbnails.has(file.filePath)) {
+              const existing = existingThumbnails.get(file.filePath);
+              if (existing && existing !== '3d.png' && (typeof existing !== 'string' || existing.trim() !== '')) {
                 console.log(`Thumbnail found for ${file.filePath} in database. Skipping render.`);
                 return;
               }
@@ -9212,10 +11470,8 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
             } catch (error) {
               console.error('Error caching thumbnail:', error);
             } finally {
-              if (!existingThumbnails.has(file.filePath)) {
-                completedThumbnails++;
-                thumbnailProgressUpdate(completedThumbnails);
-              }
+              completedThumbnails++;
+              thumbnailProgressUpdate(completedThumbnails);
               activePromises.delete(promise);
             }
           })();
@@ -9346,6 +11602,14 @@ async function scanAndRenderDirectory(directoryPath, background = false) {
     } else {
       window.disableGridRefresh = false;
       console.log('Background scan complete: grid refresh re-enabled');
+      // Refresh the grid so models show without requiring a page reload (docker/server mode)
+      if (typeof window.performCombinedSearch === 'function') {
+        window.performCombinedSearch().catch(err => console.error('Background scan post-refresh:', err));
+      } else {
+        window.electron.getAllModels().then((models) => {
+          if (typeof window.renderFiles === 'function') window.renderFiles(models);
+        }).catch(err => console.error('Background scan post-refresh:', err));
+      }
     }
   }
 }
@@ -9530,6 +11794,19 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
   }
 }
 
+// Helper function to wait for window.getCombinedFilteredModels to be available
+// This handles the case where search.js module hasn't finished loading yet
+async function waitForGetCombinedFilteredModels(maxWait = 5000) {
+  const startTime = Date.now();
+  while (!window.getCombinedFilteredModels && (Date.now() - startTime) < maxWait) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (!window.getCombinedFilteredModels) {
+    throw new Error('getCombinedFilteredModels function not available after waiting. search.js may not have loaded properly.');
+  }
+  return window.getCombinedFilteredModels;
+}
+
 async function handleFilterChange() {
   try {
     // Clear previous selections explicitly
@@ -9560,8 +11837,10 @@ async function handleFilterChange() {
     updateSelectedCount();
 
     // Get and display filtered models
+    // Wait for getCombinedFilteredModels to be available (handles module loading race condition)
     console.log('handleFilterChange: About to get filtered models. invertedFilters:', invertedFilters);
-    const models = await window.getCombinedFilteredModels();
+    const getFilteredModels = await waitForGetCombinedFilteredModels();
+    const models = await getFilteredModels();
     console.log('handleFilterChange: Got', models.length, 'models. About to display them.');
     await displayModels(models);
     if (window.updateFilterIndicator) {
@@ -9597,8 +11876,16 @@ async function renderFile(file, container, skipThumbnail = false) {
   const fileName = document.createElement('div');
   fileName.className = 'file-name';
   
-  // Check if this is a zip entry
-  const isZipEntry = file.filePath.includes('::');
+  const isUrlModel = file.filePath && file.filePath.startsWith('url::');
+  const isZipEntry = file.filePath.includes('::') && !isUrlModel;
+  if (isUrlModel) {
+    const urlBadge = document.createElement('span');
+    urlBadge.className = 'url-badge';
+    urlBadge.textContent = 'URL';
+    urlBadge.title = 'Online model - click directory to open in browser';
+    urlBadge.style.cssText = 'background: #2d7a2d; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; margin-right: 6px;';
+    fileName.appendChild(urlBadge);
+  }
   if (isZipEntry) {
     const zipBadge = document.createElement('span');
     zipBadge.className = 'zip-badge';
@@ -9613,9 +11900,11 @@ async function renderFile(file, container, skipThumbnail = false) {
   fileName.appendChild(fileNameText);
   fileInfo.appendChild(fileName);
 
-  // For zip entries, show both zip file and entry path
+  // For zip entries, show both zip file and entry path; for URL models show "Open in browser"
   let parentDir;
-  if (isZipEntry) {
+  if (isUrlModel) {
+    parentDir = 'Open in browser';
+  } else if (isZipEntry) {
     const [zipPath, entryPath] = file.filePath.split('::');
     const zipFileName = zipPath.split(/[/\\]/).pop();
     parentDir = `${zipFileName} → ${entryPath.split(/[/\\]/).slice(0, -1).join('/') || 'root'}`;
@@ -9627,7 +11916,7 @@ async function renderFile(file, container, skipThumbnail = false) {
   const parentDirElement = document.createElement('div');
   parentDirElement.className = 'parent-directory';
   parentDirElement.innerHTML = `
-      <span class="directory-label">Directory:</span> 
+      <span class="directory-label">${isUrlModel ? 'Source:' : 'Directory:'}</span> 
       <a href="#" class="directory-link">${parentDir}</a>
   `;
   
@@ -9638,6 +11927,14 @@ async function renderFile(file, container, skipThumbnail = false) {
       const viewLibMsg = document.getElementById("view-library-message");
       if (viewLibMsg) { viewLibMsg.style.display = "none"; }
       
+      if (isUrlModel) {
+        try {
+          await window.electron.openPath(file.filePath);
+        } catch (err) {
+          console.error('Error opening URL:', err);
+        }
+        return;
+      }
       // For zip entries, open the zip file's directory in the file explorer
       if (isZipEntry) {
         try {
@@ -9686,25 +11983,18 @@ async function renderFile(file, container, skipThumbnail = false) {
       
       // Set the global directory filter with the full path
       window.currentDirectoryFilter = directoryFilterPath;
-      
+      if (window.viewingEntireLibrary) {
+        window.viewingEntireLibrary = false;
+      }
+      // Restore this folder's view preference (list/preview/detailed) when switching folders
+      if (typeof window.applyViewForCurrentFolder === 'function') {
+        await window.applyViewForCurrentFolder();
+      }
       // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-      await performCombinedSearch();
-      
-      // Update the filter indicator to show the active parent directory filter.
-      const filterIndicator = document.getElementById('current-filter');
-      filterIndicator.innerHTML = `
-        Showing models in directory: ${parentDir}
-        <button class="clear-filter-button">Clear Filter</button>
-      `;
-      filterIndicator.classList.add('visible');
-      
-      // Attach a click handler to clear the directory filter.
-      filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-        window.currentDirectoryFilter = "";
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
-        await performCombinedSearch();
-      });
+      // The updateFilterIndicator function in search.js will handle displaying the filter correctly
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      }
     });
 
   fileInfo.appendChild(parentDirElement);
@@ -9840,6 +12130,17 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     return existingThumbnail;
   }
 
+  // URL-only models (from Chrome extension) have no file to render; show placeholder
+  if (filePath && filePath.startsWith('url::')) {
+    const img = document.createElement('img');
+    img.src = '3d.png';
+    img.style.width = '250px';
+    img.style.height = '250px';
+    container.innerHTML = '';
+    container.appendChild(img);
+    return '3d.png';
+  }
+
   // For 3MF files, check for embedded images BEFORE 3D rendering
   // Handle ZIP entries: get extension from entry path if it's a ZIP entry
   let fileExtension;
@@ -9944,6 +12245,46 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     }
   }
 
+  // Non-previewable types: show typed placeholder (file type label on image)
+  if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'svg') {
+    const dataUrl = generateTypedPlaceholder(fileExtension);
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.style.width = '250px';
+    img.style.height = '250px';
+    container.innerHTML = '';
+    container.appendChild(img);
+    return dataUrl;
+  }
+
+  // SVG: try to load file and show as image; on failure use typed placeholder
+  if (fileExtension === 'svg') {
+    try {
+      const buf = await window.electron.readModelFile(filePath);
+      if (buf && (buf instanceof ArrayBuffer || buf.byteLength)) {
+        const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
+        const decoder = new TextDecoder();
+        const svgText = decoder.decode(bytes);
+        const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+        const img = document.createElement('img');
+        img.style.width = '250px';
+        img.style.height = '250px';
+        container.innerHTML = '';
+        container.appendChild(img);
+        img.src = dataUrl;
+        return dataUrl;
+      }
+    } catch (e) { /* ignore */ }
+    const fallback = generateTypedPlaceholder('svg');
+    const img = document.createElement('img');
+    img.src = fallback;
+    img.style.width = '250px';
+    img.style.height = '250px';
+    container.innerHTML = '';
+    container.appendChild(img);
+    return fallback;
+  }
+
   let renderer, scene, camera, canvas;
   let model = null; // Declare model in outer scope
 
@@ -9996,8 +12337,14 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     }
     model = await loadModelFunc(filePath);
     if (!model) {
-      console.log(`[DEBUG] renderModelToPNG: loadModel returned null (likely embedded image found), skipping 3D render`);
-      throw new Error('Failed to load model - embedded image should be used instead');
+      console.log(`[DEBUG] renderModelToPNG: loadModel returned null (embedded image, zip container, or url), using placeholder`);
+      const img = document.createElement('img');
+      img.src = '3d.png';
+      img.style.width = '250px';
+      img.style.height = '250px';
+      container.innerHTML = '';
+      container.appendChild(img);
+      return '3d.png';
     }
     
     scene.add(model);
@@ -10222,8 +12569,53 @@ async function handleFileClick(event, filePath) {
   }
 }
 
+// Helper: true when focus is in a form control (don't trigger app shortcuts)
+function isFocusInFormControl() {
+  const el = document.activeElement;
+  return el && (
+    el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+    el.isContentEditable
+  );
+}
+
+// Navigate to next/previous model in detail view (called from keydown when details visible)
+function navigateDetailView(direction) {
+  const detailsPanel = document.getElementById('model-details');
+  if (!detailsPanel || detailsPanel.classList.contains('hidden')) return false;
+  const items = Array.from(document.querySelectorAll('.file-item'));
+  if (items.length === 0) return false;
+  const currentPath = getCurrentModelFilePath() || currentModelDetailsPath || '';
+  const normalizedCurrent = currentPath ? normalizePathForComparison(currentPath) : '';
+  let index = -1;
+  if (normalizedCurrent) {
+    index = items.findIndex(item => {
+      const p = item.getAttribute('data-filepath') || item.dataset.filepath || '';
+      return p && normalizePathForComparison(p) === normalizedCurrent;
+    });
+  }
+  if (index < 0) index = items.findIndex(item => item.classList.contains('selected'));
+  if (index < 0) index = 0;
+  const nextIndex = direction === 'next' ? index + 1 : index - 1;
+  if (nextIndex < 0 || nextIndex >= items.length) return false;
+  const target = items[nextIndex];
+  const filePath = target.getAttribute('data-filepath') || target.dataset.filepath;
+  if (!filePath) return false;
+  document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
+  target.classList.add('selected');
+  target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  showModelDetails(filePath);
+  return true;
+}
+
 // Handle keyboard shortcuts
 document.addEventListener('keydown', async (event) => {
+  const mod = event.ctrlKey || event.metaKey;
+  const inInput = isFocusInFormControl();
+  const detailsVisible = (() => {
+    const p = document.getElementById('model-details');
+    return p && !p.classList.contains('hidden');
+  })();
+
   // Handle Escape key to exit multi-edit mode
   if (event.key === 'Escape' || event.key === 'Esc') {
     if (isMultiSelectMode) {
@@ -10232,9 +12624,85 @@ document.addEventListener('keydown', async (event) => {
       return;
     }
   }
+
+  // Search focus: Ctrl+/ or Cmd+/ (always allow so user can jump to search from anywhere)
+  if (mod && event.key === '/') {
+    event.preventDefault();
+    const searchInput = document.getElementById('search-filter-input');
+    if (searchInput) {
+      searchInput.focus();
+      searchInput.select();
+    }
+    return;
+  }
+
+  // Show keyboard shortcuts dialog: Ctrl+Shift+/ (?) or Cmd+Shift+/
+  if (mod && event.shiftKey && event.key === '?') {
+    event.preventDefault();
+    const dialog = document.getElementById('keyboard-shortcuts-dialog');
+    if (dialog) dialog.showModal();
+    return;
+  }
+
+  // Next/Previous in detail view (only when details panel is open and not typing)
+  if (!inInput && detailsVisible && (event.key === 'ArrowDown' || event.key === 'j' || event.key === 'J')) {
+    if (navigateDetailView('next')) {
+      event.preventDefault();
+      return;
+    }
+  }
+  if (!inInput && detailsVisible && (event.key === 'ArrowUp' || event.key === 'k' || event.key === 'K')) {
+    if (navigateDetailView('previous')) {
+      event.preventDefault();
+      return;
+    }
+  }
+
+  // Other shortcuts only when not typing in an input
+  if (inInput) return;
+
+  // Scan directory: Ctrl+Shift+S / Cmd+Shift+S
+  if (mod && event.shiftKey && (event.key === 'S' || event.key === 's')) {
+    if (!isScanning) {
+      event.preventDefault();
+      document.getElementById('scan-directory-button')?.click();
+    }
+    return;
+  }
+
+  // Clear filters: Ctrl+Shift+C / Cmd+Shift+C
+  if (mod && event.shiftKey && (event.key === 'C' || event.key === 'c')) {
+    event.preventDefault();
+    const clearBtn = document.querySelector('.clear-filter-button');
+    if (clearBtn) clearBtn.click();
+    else {
+      const searchInput = document.getElementById('search-filter-input');
+      const viewLibraryBtn = document.getElementById('view-library-button');
+      if (searchInput) searchInput.value = '';
+      if (viewLibraryBtn) viewLibraryBtn.click();
+    }
+    return;
+  }
+
+  // Print Roulette: Ctrl+Shift+R / Cmd+Shift+R
+  if (mod && event.shiftKey && (event.key === 'R' || event.key === 'r')) {
+    event.preventDefault();
+    window.electron.send('start-print-roulette');
+    return;
+  }
+
+  // Toggle Multi-Edit: Ctrl+E / Cmd+E
+  if (mod && (event.key === 'e' || event.key === 'E')) {
+    event.preventDefault();
+    const toggleBtn = document.getElementById('edit-mode-toggle');
+    const enterMultiBtn = document.getElementById('enter-multi-edit-button');
+    if (enterMultiBtn && detailsVisible) enterMultiBtn.click();
+    else if (toggleBtn) toggleBtn.click();
+    return;
+  }
   
   // Check for Ctrl+A (Windows/Linux) or Cmd+A (Mac)
-  if ((event.ctrlKey || event.metaKey) && (event.key === 'a' || event.key === 'A')) {
+  if (mod && (event.key === 'a' || event.key === 'A')) {
     // Don't intercept if user is typing in an input field, textarea, or contenteditable
     const activeElement = document.activeElement;
     const isInputField = activeElement && (
@@ -10255,7 +12723,9 @@ document.addEventListener('keydown', async (event) => {
     
     try {
       // Get all filtered model references (not just visible ones) - same as select-all-button
-      const filteredModels = await window.getCombinedFilteredModels();
+      // Wait for getCombinedFilteredModels to be available (handles module loading race condition)
+      const getFilteredModels = await waitForGetCombinedFilteredModels();
+      const filteredModels = await getFilteredModels();
       
       // Add all filtered models to selection (ensuring no duplicates by file path)
       const uniqueFilePaths = new Set();
@@ -10438,6 +12908,13 @@ document.getElementById('new-designer-dialog').addEventListener('submit', async 
       if (designerSelect) {
         designerSelect.value = newDesignerName;
       }
+    }
+    
+    // Refresh metadata editor list if dialog is open
+    const metadataDialog = document.getElementById('metadata-editor-dialog');
+    if (metadataDialog && metadataDialog.open && currentMetadataType === 'designer') {
+      allMetadata = []; // Clear cache to force refresh
+      await refreshMetadataList('designer');
     }
   }
 });
@@ -11185,6 +13662,132 @@ function createSVGIcon(svgString, size = 16) {
 }
 
 // Function to create list view header
+// Helper function to create a sortable header
+function createSortableHeader(label, sortKey, width, options = {}) {
+  const header = document.createElement('div');
+  header.className = 'sortable-header';
+  header.dataset.sortKey = sortKey;
+  header.style.flexShrink = '0';
+  header.style.width = width;
+  header.style.fontSize = '12px';
+  header.style.fontWeight = '600';
+  header.style.color = '#aaa';
+  header.style.textTransform = 'uppercase';
+  header.style.letterSpacing = '0.5px';
+  header.style.cursor = 'pointer';
+  header.style.display = 'flex';
+  header.style.alignItems = 'center';
+  header.style.gap = '6px';
+  header.style.userSelect = 'none';
+  if (options.textAlign) {
+    header.style.justifyContent = options.textAlign === 'center' ? 'center' : 'flex-start';
+  }
+  
+  // Create label container
+  const labelSpan = document.createElement('span');
+  labelSpan.textContent = label;
+  header.appendChild(labelSpan);
+  
+  // Create sort indicator container
+  const sortIndicator = document.createElement('span');
+  sortIndicator.className = 'sort-indicator';
+  sortIndicator.style.display = 'inline-flex';
+  sortIndicator.style.alignItems = 'center';
+  sortIndicator.style.marginLeft = '4px';
+  sortIndicator.style.opacity = '0';
+  sortIndicator.style.transition = 'opacity 0.2s ease';
+  header.appendChild(sortIndicator);
+  
+  // Add click handler
+  header.addEventListener('click', async () => {
+    const sortSelect = document.getElementById('sort-select');
+    if (!sortSelect) return;
+    
+    const currentSort = sortSelect.value;
+    let newSort;
+    
+    // Determine new sort based on current state
+    if (currentSort === `${sortKey}-asc`) {
+      newSort = `${sortKey}-desc`;
+    } else if (currentSort === `${sortKey}-desc`) {
+      newSort = `${sortKey}-asc`;
+    } else {
+      // Default to ascending when clicking a new column
+      newSort = `${sortKey}-asc`;
+    }
+    
+    // Update sort select - check if option exists first
+    if (sortSelect.querySelector(`option[value="${newSort}"]`)) {
+      sortSelect.value = newSort;
+      
+      // Trigger change event to ensure other listeners are notified
+      sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      console.warn(`Sort option ${newSort} not found in dropdown, adding it dynamically`);
+      // Option doesn't exist, add it dynamically
+      const option = document.createElement('option');
+      option.value = newSort;
+      option.textContent = `${label} (${newSort.includes('-asc') ? 'A-Z' : 'Z-A'})`;
+      sortSelect.appendChild(option);
+      sortSelect.value = newSort;
+      sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    
+    // Save sort preference
+    try {
+      await window.electron.saveSetting('sortOption', newSort);
+    } catch (error) {
+      console.error('Error saving sort preference:', error);
+    }
+    
+    // Trigger search to re-sort (also triggered by change event, but ensure it happens)
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
+    }
+  });
+  
+  // Add hover effect
+  header.addEventListener('mouseenter', () => {
+    if (!header.classList.contains('sort-active')) {
+      header.style.color = '#fff';
+      sortIndicator.style.opacity = '0.5';
+    }
+  });
+  
+  header.addEventListener('mouseleave', () => {
+    if (!header.classList.contains('sort-active')) {
+      header.style.color = '#aaa';
+      sortIndicator.style.opacity = '0';
+    }
+  });
+  
+  // Function to update sort indicator based on current sort
+  header.updateSortIndicator = function(currentSort) {
+    if (currentSort === `${sortKey}-asc` || currentSort === `${sortKey}-desc`) {
+      header.classList.add('sort-active');
+      header.style.color = '#fff';
+      sortIndicator.style.opacity = '1';
+      
+      // Update arrow direction
+      if (currentSort === `${sortKey}-asc`) {
+        sortIndicator.innerHTML = '↑';
+        sortIndicator.title = 'Sorted ascending';
+      } else {
+        sortIndicator.innerHTML = '↓';
+        sortIndicator.title = 'Sorted descending';
+      }
+    } else {
+      header.classList.remove('sort-active');
+      header.style.color = '#aaa';
+      sortIndicator.style.opacity = '0';
+      sortIndicator.innerHTML = '';
+      sortIndicator.title = '';
+    }
+  };
+  
+  return header;
+}
+
 function createListViewHeader() {
   const header = document.createElement('div');
   header.className = 'list-view-header';
@@ -11214,99 +13817,173 @@ function createListViewHeader() {
   headerInfo.style.display = 'flex';
   headerInfo.style.flexDirection = 'row';
   headerInfo.style.alignItems = 'center';
-  headerInfo.style.gap = '15px';
+  headerInfo.style.gap = '12px';
   headerInfo.style.minWidth = '0';
   
-  // Name column header
-  const nameHeader = document.createElement('div');
-  nameHeader.textContent = 'Name';
-  nameHeader.style.flexShrink = '0';
-  nameHeader.style.width = '180px';
-  nameHeader.style.fontSize = '12px';
-  nameHeader.style.fontWeight = '600';
-  nameHeader.style.color = '#aaa';
-  nameHeader.style.textTransform = 'uppercase';
-  nameHeader.style.letterSpacing = '0.5px';
+  // Name column header (sortable)
+  const nameHeader = createSortableHeader('Name', 'name', '140px');
   headerInfo.appendChild(nameHeader);
   
-  // Size column header
-  const sizeHeader = document.createElement('div');
-  sizeHeader.textContent = 'Size';
-  sizeHeader.style.flexShrink = '0';
-  sizeHeader.style.width = '90px';
-  sizeHeader.style.fontSize = '12px';
-  sizeHeader.style.fontWeight = '600';
-  sizeHeader.style.color = '#aaa';
-  sizeHeader.style.textTransform = 'uppercase';
-  sizeHeader.style.letterSpacing = '0.5px';
-  sizeHeader.style.textAlign = 'center';
+  // Size column header (sortable)
+  const sizeHeader = createSortableHeader('Size', 'size', '75px', { textAlign: 'center' });
   headerInfo.appendChild(sizeHeader);
   
-  // Parent Directory column header (with icon)
-  const directoryHeader = document.createElement('div');
-  directoryHeader.style.display = 'flex';
-  directoryHeader.style.alignItems = 'center';
-  directoryHeader.style.flexShrink = '0';
-  directoryHeader.style.width = '180px';
-  const folderIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/></svg>', 16);
-  directoryHeader.appendChild(folderIcon);
-  const directoryText = document.createElement('span');
-  directoryText.textContent = 'Parent Directory';
-  directoryText.style.fontSize = '12px';
-  directoryText.style.fontWeight = '600';
-  directoryText.style.color = '#aaa';
-  directoryText.style.textTransform = 'uppercase';
-  directoryText.style.letterSpacing = '0.5px';
-  directoryText.style.flex = '1';
-  directoryText.style.minWidth = '0';
-  directoryText.style.overflow = 'hidden';
-  directoryText.style.textOverflow = 'ellipsis';
-  directoryText.style.whiteSpace = 'nowrap';
-  directoryHeader.appendChild(directoryText);
-  headerInfo.appendChild(directoryHeader);
+  // Date Added column header (sortable)
+  const dateAddedHeader = createSortableHeader('Date Added', 'dateadded', '110px', { textAlign: 'center' });
+  headerInfo.appendChild(dateAddedHeader);
   
-  // Designer column header (with icon)
+  // Parent Directory column header (sortable - sorts by filePath)
+  const directoryHeaderContainer = document.createElement('div');
+  directoryHeaderContainer.style.display = 'flex';
+  directoryHeaderContainer.style.alignItems = 'center';
+  directoryHeaderContainer.style.flexShrink = '0';
+  directoryHeaderContainer.style.width = '130px';
+  directoryHeaderContainer.style.cursor = 'pointer';
+  directoryHeaderContainer.style.userSelect = 'none';
+  const folderIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/></svg>', 16);
+  directoryHeaderContainer.appendChild(folderIcon);
+  const directoryHeader = createSortableHeader('Parent Directory', 'directory', 'auto');
+  directoryHeader.style.flex = '1';
+  directoryHeader.style.minWidth = '0';
+  // Make the container clickable - forward clicks to the header
+  directoryHeaderContainer.addEventListener('click', (e) => {
+    // If click is on the icon, trigger the header's click handler
+    if (e.target === folderIcon || folderIcon.contains(e.target)) {
+      directoryHeader.click();
+    }
+  });
+  directoryHeaderContainer.appendChild(directoryHeader);
+  headerInfo.appendChild(directoryHeaderContainer);
+  
+  // Designer column header (sortable with icon)
   const designerHeader = document.createElement('div');
+  designerHeader.className = 'sortable-header';
+  designerHeader.dataset.sortKey = 'designer';
+  designerHeader.style.flexShrink = '0';
+  designerHeader.style.width = '120px';
+  designerHeader.style.fontSize = '12px';
+  designerHeader.style.fontWeight = '600';
+  designerHeader.style.color = '#aaa';
+  designerHeader.style.textTransform = 'uppercase';
+  designerHeader.style.letterSpacing = '0.5px';
+  designerHeader.style.cursor = 'pointer';
   designerHeader.style.display = 'flex';
   designerHeader.style.alignItems = 'center';
-  designerHeader.style.flexShrink = '0';
-  designerHeader.style.width = '180px';
+  designerHeader.style.gap = '6px';
+  designerHeader.style.userSelect = 'none';
+  
   const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#a855f7"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
   designerHeader.appendChild(designerIcon);
-  const designerText = document.createElement('span');
-  designerText.textContent = 'Designer';
-  designerText.style.fontSize = '12px';
-  designerText.style.fontWeight = '600';
-  designerText.style.color = '#aaa';
-  designerText.style.textTransform = 'uppercase';
-  designerText.style.letterSpacing = '0.5px';
-  designerText.style.flex = '1';
-  designerText.style.minWidth = '0';
-  designerText.style.overflow = 'hidden';
-  designerText.style.textOverflow = 'ellipsis';
-  designerText.style.whiteSpace = 'nowrap';
-  designerHeader.appendChild(designerText);
+  
+  const designerLabel = document.createElement('span');
+  designerLabel.textContent = 'Designer';
+  designerHeader.appendChild(designerLabel);
+  
+  const designerSortIndicator = document.createElement('span');
+  designerSortIndicator.className = 'sort-indicator';
+  designerSortIndicator.style.display = 'inline-flex';
+  designerSortIndicator.style.alignItems = 'center';
+  designerSortIndicator.style.marginLeft = '4px';
+  designerSortIndicator.style.opacity = '0';
+  designerSortIndicator.style.transition = 'opacity 0.2s ease';
+  designerHeader.appendChild(designerSortIndicator);
+  
+  // Add click handler
+  designerHeader.addEventListener('click', async () => {
+    const sortSelect = document.getElementById('sort-select');
+    if (!sortSelect) return;
+    
+    const currentSort = sortSelect.value;
+    let newSort;
+    
+    if (currentSort === 'designer-asc') {
+      newSort = 'designer-desc';
+    } else if (currentSort === 'designer-desc') {
+      newSort = 'designer-asc';
+    } else {
+      newSort = 'designer-asc';
+    }
+    
+    // Update sort select - check if option exists first
+    if (sortSelect.querySelector(`option[value="${newSort}"]`)) {
+      sortSelect.value = newSort;
+      sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      console.warn(`Sort option ${newSort} not found in dropdown, adding it dynamically`);
+      const option = document.createElement('option');
+      option.value = newSort;
+      option.textContent = `Designer (${newSort === 'designer-asc' ? 'A-Z' : 'Z-A'})`;
+      sortSelect.appendChild(option);
+      sortSelect.value = newSort;
+      sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    
+    try {
+      await window.electron.saveSetting('sortOption', newSort);
+    } catch (error) {
+      console.error('Error saving sort preference:', error);
+    }
+    
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
+    }
+  });
+  
+  // Add hover effect
+  designerHeader.addEventListener('mouseenter', () => {
+    if (!designerHeader.classList.contains('sort-active')) {
+      designerHeader.style.color = '#fff';
+      designerSortIndicator.style.opacity = '0.5';
+    }
+  });
+  
+  designerHeader.addEventListener('mouseleave', () => {
+    if (!designerHeader.classList.contains('sort-active')) {
+      designerHeader.style.color = '#aaa';
+      designerSortIndicator.style.opacity = '0';
+    }
+  });
+  
+  // Function to update sort indicator
+  designerHeader.updateSortIndicator = function(currentSort) {
+    if (currentSort === 'designer-asc' || currentSort === 'designer-desc') {
+      designerHeader.classList.add('sort-active');
+      designerHeader.style.color = '#fff';
+      designerSortIndicator.style.opacity = '1';
+      
+      if (currentSort === 'designer-asc') {
+        designerSortIndicator.innerHTML = '↑';
+        designerSortIndicator.title = 'Sorted ascending';
+      } else {
+        designerSortIndicator.innerHTML = '↓';
+        designerSortIndicator.title = 'Sorted descending';
+      }
+    } else {
+      designerHeader.classList.remove('sort-active');
+      designerHeader.style.color = '#aaa';
+      designerSortIndicator.style.opacity = '0';
+      designerSortIndicator.innerHTML = '';
+      designerSortIndicator.title = '';
+    }
+  };
+  
   headerInfo.appendChild(designerHeader);
   
-  // Printed column header
-  const printedHeader = document.createElement('div');
-  printedHeader.textContent = 'Printed';
-  printedHeader.style.flexShrink = '0';
-  printedHeader.style.width = '120px';
-  printedHeader.style.fontSize = '12px';
-  printedHeader.style.fontWeight = '600';
-  printedHeader.style.color = '#aaa';
-  printedHeader.style.textTransform = 'uppercase';
-  printedHeader.style.letterSpacing = '0.5px';
-  printedHeader.style.textAlign = 'center';
+  // Parent Model column header (sortable)
+  const parentModelHeader = createSortableHeader('Parent Model', 'parentmodel', '120px');
+  headerInfo.appendChild(parentModelHeader);
+  
+  // Printed column header (sortable - backend supports printed sorting)
+  const printedHeader = createSortableHeader('Printed', 'printed', '100px', { textAlign: 'center' });
   headerInfo.appendChild(printedHeader);
   
-  // Tags column header (with icon)
+  // Tags column header (not easily sortable - tags are in a separate table)
   const tagsHeader = document.createElement('div');
   tagsHeader.style.display = 'flex';
   tagsHeader.style.alignItems = 'center';
-  tagsHeader.style.flexShrink = '0';
-  tagsHeader.style.width = '200px';
+  tagsHeader.style.flexShrink = '1';
+  tagsHeader.style.minWidth = '160px';
+  tagsHeader.style.width = 'auto';
   const tagsIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M240-120q-33 0-56.5-23.5T160-200v-480q0-33 23.5-56.5T240-760h120l80 80h320q33 0 56.5 23.5T820-600v400q0 33-23.5 56.5T740-120H240Zm0-80h500v-400H447l-80-80H240v480Zm0 0v-480 480Zm280-240q17 0 28.5-11.5T560-480q0-17-11.5-28.5T520-520q-17 0-28.5 11.5T480-480q0 17 11.5 28.5T520-440Zm-160 0q17 0 28.5-11.5T400-480q0-17-11.5-28.5T360-520q-17 0-28.5 11.5T320-480q0 17 11.5 28.5T360-440Zm320 0q17 0 28.5-11.5T720-480q0-17-11.5-28.5T680-520q-17 0-28.5 11.5T640-480q0 17 11.5 28.5T680-440ZM520-280q17 0 28.5-11.5T560-320q0-17-11.5-28.5T520-360q-17 0-28.5 11.5T480-320q0 17 11.5 28.5T520-280Zm-160 0q17 0 28.5-11.5T400-320q0-17-11.5-28.5T360-360q-17 0-28.5 11.5T320-320q0 17 11.5 28.5T360-280Zm320 0q17 0 28.5-11.5T720-320q0-17-11.5-28.5T680-360q-17 0-28.5 11.5T640-320q0 17 11.5 28.5T680-280Z"/></svg>', 16);
   tagsHeader.appendChild(tagsIcon);
   const tagsText = document.createElement('span');
@@ -11320,13 +13997,13 @@ function createListViewHeader() {
   tagsHeader.appendChild(tagsText);
   headerInfo.appendChild(tagsHeader);
   
-  // Archive column header (with icon)
+  // Archive column header (with icon, not sortable)
   const archiveHeader = document.createElement('div');
   archiveHeader.style.display = 'flex';
   archiveHeader.style.alignItems = 'center';
   archiveHeader.style.justifyContent = 'center';
   archiveHeader.style.flexShrink = '0';
-  archiveHeader.style.width = '120px';
+  archiveHeader.style.width = '100px';
   const archiveIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M640-480v-80h80v80h-80Zm0 80h-80v-80h80v80Zm0 80v-80h80v80h-80ZM447-640l-80-80H160v480h400v-80h80v80h160v-400H640v80h-80v-80H447ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80v-480 480Z"/></svg>', 16);
   archiveHeader.appendChild(archiveIcon);
   const archiveText = document.createElement('span');
@@ -11341,6 +14018,34 @@ function createListViewHeader() {
   headerInfo.appendChild(archiveHeader);
   
   header.appendChild(headerInfo);
+  
+  // Store references to sortable headers for updating indicators
+  header.sortableHeaders = {
+    name: nameHeader,
+    size: sizeHeader,
+    dateadded: dateAddedHeader,
+    directory: directoryHeader,
+    designer: designerHeader,
+    parentmodel: parentModelHeader,
+    printed: printedHeader
+  };
+  
+  // Function to update all sort indicators
+  header.updateSortIndicators = function() {
+    const sortSelect = document.getElementById('sort-select');
+    const currentSort = sortSelect ? sortSelect.value : 'date-desc';
+    
+    // Update each sortable header's indicator
+    Object.values(header.sortableHeaders).forEach(sortableHeader => {
+      if (sortableHeader && sortableHeader.updateSortIndicator) {
+        sortableHeader.updateSortIndicator(currentSort);
+      }
+    });
+  };
+  
+  // Initial update of sort indicators
+  header.updateSortIndicators();
+  
   return header;
 }
 
@@ -11537,9 +14242,18 @@ async function showDuplicateFiles(duplicates) {
     duplicateGroups.appendChild(group);
   }
 
-  // Set up delete handler
+  // Set up delete handler - remove old handler first to prevent duplicates
   if (deleteButton) {
-    deleteButton.onclick = handleDeleteSelected;
+    // Remove any existing onclick handler
+    deleteButton.onclick = null;
+    // Remove any existing event listeners by cloning
+    const newButton = deleteButton.cloneNode(true);
+    deleteButton.parentNode.replaceChild(newButton, deleteButton);
+    // Set handler on the new button
+    const finalDeleteButton = document.querySelector('.dialog-buttons #delete-selected');
+    if (finalDeleteButton) {
+      finalDeleteButton.onclick = handleDeleteSelected;
+    }
   } else {
     console.error('Delete button not found!');
   }
@@ -11547,6 +14261,12 @@ async function showDuplicateFiles(duplicates) {
 
 async function handleDeleteSelected() {
   console.log('Delete button clicked!');
+  
+  // Prevent multiple confirmations from showing
+  if (isDeletingDuplicates) {
+    console.log('Delete confirmation already in progress, ignoring duplicate call');
+    return;
+  }
 
   const selectedFiles = Array.from(
     document.querySelectorAll('.duplicate-file input[type="checkbox"]:checked')
@@ -11564,20 +14284,28 @@ async function handleDeleteSelected() {
     return;
   }
 
-  // Limit file list display to prevent dialog from becoming too tall
-  const maxFilesToShow = 20;
+  // Limit file list display to prevent dialog from growing beyond the screen
+  const maxFilesToShow = 5;
   const fileList = selectedFiles.slice(0, maxFilesToShow).map(fp => {
     // Extract filename from path (handle both Windows and Unix paths)
     const parts = fp.split(/[/\\]/);
     return parts[parts.length - 1];
   }).join('\n');
-  const moreFiles = selectedFiles.length > maxFilesToShow ? `\n... and ${selectedFiles.length - maxFilesToShow} more file${selectedFiles.length - maxFilesToShow === 1 ? '' : 's'}` : '';
+  const moreCount = selectedFiles.length - maxFilesToShow;
+  const moreFiles = moreCount > 0 ? `\n... and ${moreCount} more` : '';
 
-  const confirm = await window.electron.showMessage(
-    'Confirm Delete',
-    `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
-    ['Yes', 'No']
-  );
+  isDeletingDuplicates = true; // Set flag before showing confirmation
+  let confirm;
+  try {
+    confirm = await window.electron.showMessage(
+      'Confirm Delete',
+      `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
+      ['Yes', 'No']
+    );
+  } finally {
+    // Reset flag after confirmation dialog closes (whether Yes or No)
+    isDeletingDuplicates = false;
+  }
 
   if (confirm === 'Yes') {
     try {
@@ -11590,31 +14318,25 @@ async function handleDeleteSelected() {
         }
       }
 
-      // Close the dedup dialog
       const dialog = document.getElementById('dedup-dialog');
-      dialog.close();
-
-      // Clear selected models
+      // Keep dialog open: refresh grid in background, then refresh duplicate list in place until user clicks Close
       selectedModels.clear();
       
-      // Get current sort option and refresh the grid
+      // Refresh the main grid (non-blocking feel: don't await before refreshing de-dupe list)
       const sortSelect = document.getElementById('sort-select');
-      
-      const models = await window.electron.getAllModels(sortSelect.value);
-      
-      // Use renderFiles instead of refreshModelDisplay
-      await renderFiles(models);
+      window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc').then(models => {
+        renderFiles(models);
+      });
 
-      // Reload and reopen the dedup dialog with fresh data
-      // Skip hash check since we just deleted files and don't need to check again
-      await loadDuplicateFiles(true);
-      dialog.showModal();
+      // Reload duplicate list in place; skip hash check and do not close/reopen dialog (refreshOnly)
+      await loadDuplicateFiles(true, true);
 
     } catch (error) {
       console.error('Error deleting files:', error);
       await window.electron.showMessage('Error', `An error occurred: ${error.message}`);
     }
   }
+  // Flag is already reset in the try/finally block above
 }
 
 // Create a separate function for rendering filtered results
@@ -11875,8 +14597,16 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
         menuItem.appendChild(arrow);
         
         let submenuElement = null;
+        let submenuTimeout = null;
+        let isSubmenuHovered = false;
         
         menuItem.addEventListener('mouseenter', () => {
+          // Clear any pending hide timeout
+          if (submenuTimeout) {
+            clearTimeout(submenuTimeout);
+            submenuTimeout = null;
+          }
+          
           // Create submenu
           if (!submenuElement) {
             submenuElement = document.createElement('div');
@@ -11890,7 +14620,29 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
               box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
               min-width: 200px;
               padding: 4px 0;
+              z-index: 10001;
+              margin-left: 2px;
             `;
+            
+            // Add hover handlers to submenu to keep it visible
+            submenuElement.addEventListener('mouseenter', () => {
+              isSubmenuHovered = true;
+              if (submenuTimeout) {
+                clearTimeout(submenuTimeout);
+                submenuTimeout = null;
+              }
+            });
+            
+            submenuElement.addEventListener('mouseleave', () => {
+              isSubmenuHovered = false;
+              if (submenuElement) {
+                submenuTimeout = setTimeout(() => {
+                  if (!isSubmenuHovered && !menuItem.matches(':hover')) {
+                    submenuElement.style.display = 'none';
+                  }
+                }, 150);
+              }
+            });
             
             item.submenu.forEach((subItem, subIndex) => {
               const subMenuItem = document.createElement('div');
@@ -11927,17 +14679,43 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
             
             menu.appendChild(submenuElement);
           }
+          
+          // Position submenu to align with the current menu item
+          const menuItemRect = menuItem.getBoundingClientRect();
+          submenuElement.style.top = `${menuItem.offsetTop}px`;
           submenuElement.style.display = 'block';
+          
+          // Check if submenu goes off screen and adjust position
+          setTimeout(() => {
+            if (submenuElement) {
+              const submenuRect = submenuElement.getBoundingClientRect();
+              const menuRect = menu.getBoundingClientRect();
+              
+              // If submenu goes off right edge, show it on the left side instead
+              if (submenuRect.right > window.innerWidth) {
+                submenuElement.style.left = 'auto';
+                submenuElement.style.right = '100%';
+                submenuElement.style.marginLeft = '0';
+                submenuElement.style.marginRight = '2px';
+              }
+              
+              // If submenu goes off bottom, adjust top position
+              if (submenuRect.bottom > window.innerHeight) {
+                const overflow = submenuRect.bottom - window.innerHeight;
+                submenuElement.style.top = `${Math.max(0, menuItem.offsetTop - overflow)}px`;
+              }
+            }
+          }, 0);
         });
         
         menuItem.addEventListener('mouseleave', () => {
           if (submenuElement) {
             // Delay hiding to allow moving to submenu
-            setTimeout(() => {
-              if (submenuElement && !submenuElement.matches(':hover') && !menuItem.matches(':hover')) {
+            submenuTimeout = setTimeout(() => {
+              if (!isSubmenuHovered && submenuElement && !submenuElement.matches(':hover')) {
                 submenuElement.style.display = 'none';
               }
-            }, 100);
+            }, 150);
           }
         });
       } else {
@@ -11996,13 +14774,67 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
   }, 10);
 }
 
-window.electron.on('hash-generation-complete', async () => {
+// Register a global listener for hash-generation-progress that works even if dialog isn't shown
+// This handles background hash generation in server mode
+window.electron.on('hash-generation-progress', async (progress) => {
+  // Check if we're in server mode - if so, don't show dialog, just log progress
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  
+  if (serverMode) {
+    // In server mode, hash generation is truly background - just log progress
+    if (progress.processed % 100 === 0 || progress.processed === progress.total) {
+      console.log(`[Hash Generation] Background progress: ${progress.processed}/${progress.total} (${Math.round((progress.processed / progress.total) * 100)}%)`);
+    }
+    return; // Don't show any UI in server mode
+  }
+  
+  // In normal mode, update or create progress dialog if needed
+  const progressDialog = document.querySelector('.progress-dialog');
+  const progressBar = document.getElementById('hash-progress');
+  const progressText = document.getElementById('hash-progress-text');
+  
+  if (progressBar && progressText) {
+    // Update existing progress dialog (user-initiated) - use same format as loadDuplicateFiles listeners to avoid bouncing
+    const percentage = (progress.processed / progress.total) * 100;
+    progressBar.value = percentage;
+    if (progress.success !== undefined && progress.failed !== undefined) {
+      progressText.textContent = `${progress.processed}/${progress.total} (${progress.success} succeeded, ${progress.failed} failed)`;
+    } else {
+      progressText.textContent = `${progress.processed}/${progress.total}`;
+    }
+    
+    // Close dialog when complete
+    if (progress.processed >= progress.total && progressDialog) {
+      setTimeout(() => {
+        progressDialog.close();
+        progressDialog.remove();
+        isHashDialogShowing = false;
+      }, 500);
+    }
+  }
+  // In normal mode, if no dialog exists, don't create one automatically
+  // Only show dialog if user explicitly requested hash generation
+});
+
+window.electron.on('hash-generation-complete', async (result) => {
   try {
     const serverMode = await window.electron.isServerMode().catch(() => false);
     if (!serverMode) return;
     const dialog = document.getElementById('dedup-dialog');
     if (dialog && dialog.open) {
+      // Reload duplicates if DeDup window is open
       await loadDuplicateFiles(true);
+    }
+    // Also close any hash progress dialog that might be open
+    const progressDialog = document.getElementById('hash-progress-dialog') || document.querySelector('.progress-dialog');
+    if (progressDialog) {
+      progressDialog.close();
+      progressDialog.remove();
+      isHashDialogShowing = false;
+    }
+    // Log completion result for debugging
+    if (result) {
+      console.log('Hash generation completed:', result);
     }
   } catch (error) {
     console.error('Error refreshing duplicates after hash completion:', error);
@@ -12504,7 +15336,7 @@ async function initializeApp() {
     const sortSelect = document.getElementById('sort-select');
     if (sortSelect && savedSortOption) {
       // Validate that the saved option is a valid sort option
-      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc'];
+      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc', 'directory-asc', 'directory-desc', 'designer-asc', 'designer-desc', 'parentmodel-asc', 'parentmodel-desc', 'printed-asc', 'printed-desc'];
       if (validOptions.includes(savedSortOption)) {
         sortSelect.value = savedSortOption;
       }
@@ -12741,7 +15573,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
     if (!document.getElementById('server-menu-bar')) {
-      createServerMenuBar();
+      await createServerMenuBar();
     }
   }
 
@@ -13023,6 +15855,27 @@ async function autoSaveMultipleModels(field, value, options = {}) {
     
     // Wait for all UI updates to complete
     await Promise.all(updatePromises);
+    
+    // Update the in-memory currentModels so the virtual grid shows correct data when scrolling.
+    // Without this, only visible DOM was updated; off-screen items are created from currentModels
+    // on scroll, so they would show stale designer/printed/license/parent until reload.
+    const gridContainer = document.querySelector('.file-grid');
+    if (gridContainer && gridContainer.currentModels && modelUpdates.length > 0) {
+      for (const { filePath, model } of modelUpdates) {
+        const normalizedTarget = normalizePathForComparison(filePath);
+        const idx = gridContainer.currentModels.findIndex(m =>
+          normalizePathForComparison(m.filePath || m.id) === normalizedTarget
+        );
+        if (idx !== -1) {
+          gridContainer.currentModels[idx] = { ...model };
+        }
+      }
+      if (gridContainer.renderVisibleItemsFn) {
+        requestAnimationFrame(() => {
+          gridContainer.renderVisibleItemsFn();
+        });
+      }
+    }
     
     console.log(`Finished autoSaveMultipleModels for field ${field}. Updated ${modelsToUpdate.length} models.`);
     return true;
@@ -13817,16 +16670,20 @@ function createModelItem(model, viewMode = null) {
     fileInfo.style.display = 'flex';
     fileInfo.style.flexDirection = 'row';
     fileInfo.style.alignItems = 'center';
-    fileInfo.style.gap = '15px';
+    fileInfo.style.gap = '12px';
     fileInfo.style.minWidth = '0';
     
-    // File name column (fixed width - narrower)
+    // File name column (fixed width)
     fileName.style.flexShrink = '0';
-    fileName.style.width = '180px';
+    fileName.style.width = '140px';
     fileName.style.overflow = 'hidden';
     fileName.style.textOverflow = 'ellipsis';
     fileName.style.whiteSpace = 'nowrap';
     fileName.style.fontSize = '13px';
+    // Add tooltip for truncated file names
+    if (displayFileName) {
+      fileName.setAttribute('title', displayFileName);
+    }
     // Apply zip file styling (isZipFile was already calculated above)
     if (isZipFile) {
       fileName.classList.add('zip-file');
@@ -13841,7 +16698,7 @@ function createModelItem(model, viewMode = null) {
     sizeColumn.style.display = 'flex';
     sizeColumn.style.alignItems = 'center';
     sizeColumn.style.flexShrink = '0';
-    sizeColumn.style.width = '90px';
+    sizeColumn.style.width = '75px';
     sizeColumn.style.justifyContent = 'center';
     if (model.size) {
       const sizeText = document.createElement('span');
@@ -13853,13 +16710,49 @@ function createModelItem(model, viewMode = null) {
     }
     fileInfo.appendChild(sizeColumn);
     
+    // Date Added column (fixed width, center-aligned)
+    const dateAddedColumn = document.createElement('div');
+    dateAddedColumn.className = 'date-added-column';
+    dateAddedColumn.style.display = 'flex';
+    dateAddedColumn.style.alignItems = 'center';
+    dateAddedColumn.style.flexShrink = '0';
+    dateAddedColumn.style.width = '110px';
+    dateAddedColumn.style.justifyContent = 'center';
+    if (model.dateAdded) {
+      const dateText = document.createElement('span');
+      const date = new Date(model.dateAdded);
+      // Format date as MM/DD/YYYY or use locale string
+      const formattedDate = date.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit' 
+      });
+      dateText.textContent = formattedDate;
+      dateText.style.fontSize = '12px';
+      dateText.style.color = '#aaa';
+      dateText.style.fontFamily = 'monospace';
+      // Add tooltip with full date/time if available
+      if (model.dateAdded) {
+        const fullDate = new Date(model.dateAdded);
+        dateText.setAttribute('title', fullDate.toLocaleString());
+      }
+      dateAddedColumn.appendChild(dateText);
+    } else {
+      const emptyText = document.createElement('span');
+      emptyText.textContent = '—';
+      emptyText.style.fontSize = '12px';
+      emptyText.style.color = '#666';
+      dateAddedColumn.appendChild(emptyText);
+    }
+    fileInfo.appendChild(dateAddedColumn);
+    
     // Parent directory column (fixed width, clickable to filter, with icon)
     const directoryColumn = document.createElement('div');
     directoryColumn.className = 'directory-info-column';
     directoryColumn.style.display = 'flex';
     directoryColumn.style.alignItems = 'center';
     directoryColumn.style.flexShrink = '0';
-    directoryColumn.style.width = '180px';
+    directoryColumn.style.width = '130px';
     directoryColumn.style.overflow = 'hidden';
     
     // Add folder icon or archive icon based on whether model is in zip archive
@@ -13880,6 +16773,10 @@ function createModelItem(model, viewMode = null) {
     directoryText.style.fontWeight = parentDir ? '500' : '400';
     directoryText.style.flex = '1';
     directoryText.style.minWidth = '0';
+    // Add tooltip for truncated directory names
+    if (parentDir) {
+      directoryText.setAttribute('title', parentDir);
+    }
     
     // Add click handler to filter by directory
     if (parentDir) {
@@ -13930,6 +16827,12 @@ function createModelItem(model, viewMode = null) {
         
         // Set the global directory filter with the full path
         window.currentDirectoryFilter = directoryFilterPath;
+        if (window.viewingEntireLibrary) {
+          window.viewingEntireLibrary = false;
+        }
+        if (typeof window.applyViewForCurrentFolder === 'function') {
+          await window.applyViewForCurrentFolder();
+        }
         // Trigger combined search to apply filter
         if (typeof window.performCombinedSearch === 'function') {
           await window.performCombinedSearch();
@@ -13955,7 +16858,7 @@ function createModelItem(model, viewMode = null) {
     designerColumn.style.display = 'flex';
     designerColumn.style.alignItems = 'center';
     designerColumn.style.flexShrink = '0';
-    designerColumn.style.width = '180px';
+    designerColumn.style.width = '130px';
     designerColumn.style.overflow = 'hidden';
     
     // Add designer icon
@@ -13972,8 +16875,36 @@ function createModelItem(model, viewMode = null) {
     designerText.style.whiteSpace = 'nowrap';
     designerText.style.flex = '1';
     designerText.style.minWidth = '0';
+    // Add tooltip for truncated designer names
+    if (model.designer) {
+      designerText.setAttribute('title', model.designer);
+    }
     designerColumn.appendChild(designerText);
     fileInfo.appendChild(designerColumn);
+    
+    // Parent Model column
+    const parentModelColumn = document.createElement('div');
+    parentModelColumn.className = 'parent-model-column';
+    parentModelColumn.style.display = 'flex';
+    parentModelColumn.style.alignItems = 'center';
+    parentModelColumn.style.flexShrink = '0';
+    parentModelColumn.style.width = '130px';
+    parentModelColumn.style.overflow = 'hidden';
+    
+    const parentModelText = document.createElement('span');
+    parentModelText.className = 'parent-model-info';
+    parentModelText.textContent = model.parentModel || '';
+    parentModelText.style.fontSize = '12px';
+    parentModelText.style.color = model.parentModel ? '#aaa' : '#666';
+    parentModelText.style.overflow = 'hidden';
+    parentModelText.style.textOverflow = 'ellipsis';
+    parentModelText.style.whiteSpace = 'nowrap';
+    // Add tooltip for truncated parent model names
+    if (model.parentModel) {
+      parentModelText.setAttribute('title', model.parentModel);
+    }
+    parentModelColumn.appendChild(parentModelText);
+    fileInfo.appendChild(parentModelColumn);
     
     // Printed column (status badge only, no icon)
     const printStatusColumn = document.createElement('div');
@@ -13982,7 +16913,7 @@ function createModelItem(model, viewMode = null) {
     printStatusColumn.style.alignItems = 'center';
     printStatusColumn.style.justifyContent = 'center';
     printStatusColumn.style.flexShrink = '0';
-    printStatusColumn.style.width = '120px';
+    printStatusColumn.style.width = '100px';
     
     if (printStatusElement) {
       // Remove all positioning styles and move to column
@@ -14001,13 +16932,14 @@ function createModelItem(model, viewMode = null) {
     }
     fileInfo.appendChild(printStatusColumn);
     
-    // Tags column
+    // Tags column (flexible width to prevent cutoff)
     const tagsColumn = document.createElement('div');
     tagsColumn.className = 'tags-info-column';
     tagsColumn.style.display = 'flex';
     tagsColumn.style.alignItems = 'center';
-    tagsColumn.style.flexShrink = '0';
-    tagsColumn.style.width = '200px';
+    tagsColumn.style.flexShrink = '1';
+    tagsColumn.style.minWidth = '160px';
+    tagsColumn.style.width = 'auto';
     tagsColumn.style.overflow = 'hidden';
     
     // Get tags from model
@@ -14061,7 +16993,7 @@ function createModelItem(model, viewMode = null) {
     archiveStatusColumn.style.justifyContent = 'center';
     archiveStatusColumn.style.gap = '6px';
     archiveStatusColumn.style.flexShrink = '0';
-    archiveStatusColumn.style.width = '120px';
+    archiveStatusColumn.style.width = '100px';
     
     // Only show archive icon and status for files in zip/archive
     if (isZipEntry) {
@@ -14293,25 +17225,17 @@ function createModelItem(model, viewMode = null) {
           
           // Set the global directory filter with the full path
           window.currentDirectoryFilter = directoryFilterPath;
-          
+          if (window.viewingEntireLibrary) {
+            window.viewingEntireLibrary = false;
+          }
+          if (typeof window.applyViewForCurrentFolder === 'function') {
+            await window.applyViewForCurrentFolder();
+          }
           // Instead of filtering just by directory here, trigger the combined search which applies all filters.
-          await performCombinedSearch();
-          
-          // Update the filter indicator to show the active parent directory filter.
-          const filterIndicator = document.getElementById('current-filter');
-          filterIndicator.innerHTML = `
-            Showing models in directory: ${parentDir}
-            <button class="clear-filter-button">Clear Filter</button>
-          `;
-          filterIndicator.classList.add('visible');
-          
-          // Attach a click handler to clear the directory filter.
-          filterIndicator.querySelector('.clear-filter-button')?.addEventListener('click', async () => {
-            window.currentDirectoryFilter = "";
-            filterIndicator.innerHTML = "";
-            filterIndicator.classList.remove('visible');
-            await performCombinedSearch();
-          });
+          // The updateFilterIndicator function in search.js will handle displaying the filter correctly
+          if (typeof window.performCombinedSearch === 'function') {
+            await window.performCombinedSearch();
+          }
         });
         dirSizeRow.appendChild(directoryPart);
       }
@@ -14634,6 +17558,10 @@ function renderVirtualGrid(models) {
     if (currentGridView === 'list') {
       const header = createListViewHeader();
       container.appendChild(header);
+      // Update sort indicators after header is created
+      if (header.updateSortIndicators) {
+        header.updateSortIndicators();
+      }
     }
   } else {
     console.log('renderVirtualGrid: Models did not change, skipping re-render.');
@@ -14654,6 +17582,13 @@ function renderVirtualGrid(models) {
     } else {
       container.appendChild(header);
     }
+    // Update sort indicators after header is created
+    if (header.updateSortIndicators) {
+      header.updateSortIndicators();
+    }
+  } else if (currentGridView === 'list' && listHeader && listHeader.updateSortIndicators) {
+    // Update sort indicators for existing header
+    listHeader.updateSortIndicators();
   }
   
   // Remove header if not in list view

@@ -57,6 +57,55 @@ function removePreview3mfWorker(entry) {
 const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
+
+// Additional file types for scan/library (alphabetical by label). id used in settings; extensions for scan/filter.
+const ADDITIONAL_FILE_TYPES_CATALOG = [
+  { id: '3ds', label: '3DS (.3ds)', extensions: ['.3ds'] },
+  { id: 'amf', label: 'AMF (.amf)', extensions: ['.amf'] },
+  { id: 'blender', label: 'Blender (.blender)', extensions: ['.blender'] },
+  { id: 'dae', label: 'DAE (.dae)', extensions: ['.dae'] },
+  { id: 'dxf', label: 'DXF (.dxf)', extensions: ['.dxf'] },
+  { id: 'dwg', label: 'DWG (.dwg)', extensions: ['.dwg'] },
+  { id: 'fbx', label: 'FBX (.fbx)', extensions: ['.fbx'] },
+  { id: 'f3d', label: 'F3D (.f3d)', extensions: ['.f3d'] },
+  { id: 'f3z', label: 'F3Z (.f3z)', extensions: ['.f3z'] },
+  { id: 'gcode', label: 'G-code (.gcode)', extensions: ['.gcode'] },
+  { id: 'igs', label: 'IGES (.igs/.iges)', extensions: ['.igs', '.iges'] },
+  { id: 'obj', label: 'OBJ (.obj)', extensions: ['.obj'] },
+  { id: 'ply', label: 'PLY (.ply)', extensions: ['.ply'] },
+  { id: 'step', label: 'STEP (.step/.stp)', extensions: ['.step', '.stp'] },
+  { id: 'svg', label: 'SVG (.svg)', extensions: ['.svg'] },
+  { id: 'x3d', label: 'X3D (.x3d)', extensions: ['.x3d'] }
+];
+
+function getScanExtensions(selectedIds) {
+  const extSet = new Set(['.stl', '.3mf']);
+  if (selectedIds && Array.isArray(selectedIds)) {
+    for (const id of selectedIds) {
+      const entry = ADDITIONAL_FILE_TYPES_CATALOG.find(e => e.id === id);
+      if (entry) entry.extensions.forEach(ext => extSet.add(ext));
+    }
+  }
+  return Array.from(extSet);
+}
+
+function getSupportedExtensionsForLibrary(db) {
+  const setting = db && db.prepare ? db.prepare('SELECT value FROM settings WHERE key = ?').get('scanAdditionalFileTypes') : null;
+  let selectedIds = [];
+  try {
+    if (setting && setting.value) selectedIds = JSON.parse(setting.value);
+  } catch (e) { /* ignore */ }
+  return getScanExtensions(selectedIds);
+}
+
+function getExtensionsForFileTypeFilter(fileTypeValue) {
+  if (!fileTypeValue || fileTypeValue === 'zip') return null;
+  const lower = fileTypeValue.toLowerCase();
+  if (lower === 'stl') return ['.stl'];
+  if (lower === '3mf') return ['.3mf'];
+  const entry = ADDITIONAL_FILE_TYPES_CATALOG.find(e => e.id === lower || e.extensions.some(ext => ext.slice(1) === lower));
+  return entry ? entry.extensions : [`.${lower}`];
+}
 const ua = require('universal-analytics');
 const express = require('express');
 const WebSocket = require('ws');
@@ -384,12 +433,17 @@ function isUncPath(path) {
 // Check if running in Docker container
 function isDockerContainer() {
   // Check for Docker environment indicators
-  return fs.existsSync('/.dockerenv') || 
-         fs.existsSync('/proc/self/cgroup') && 
-         fs.readFileSync('/proc/self/cgroup', 'utf8').includes('docker');
+  const hasDockerenv = fs.existsSync('/.dockerenv');
+  const hasCgroup = fs.existsSync('/proc/self/cgroup');
+  const cgroupContainsDocker = hasCgroup && fs.readFileSync('/proc/self/cgroup', 'utf8').includes('docker');
+  const result = hasDockerenv || cgroupContainsDocker;
+  return result;
 }
 
 function validateUncPath(path, operation = 'operation') {
+  if (isUrlModel(path)) {
+    return; // URL-only models (from extension) have no file path to validate
+  }
   if (isServerMode) {
     // In Docker, allow Linux-style absolute paths (mounted shares)
     if (isDockerContainer()) {
@@ -451,10 +505,10 @@ function getWindowFromEvent(event) {
 }
 
 // HTTP Server Function
-function startHttpServer() {
+function startHttpServer(port = 5000, localhostOnly = false) {
   const expressApp = express();
-  const PORT = 5000;
-  const HOST = '0.0.0.0';
+  const PORT = typeof port === 'number' ? port : parseInt(port, 10) || 5000;
+  const HOST = localhostOnly ? '127.0.0.1' : '0.0.0.0';
 
   // Enable CORS for remote access
   expressApp.use((req, res, next) => {
@@ -544,6 +598,23 @@ ${bridgeCode}
     });
   });
   
+  // Add middleware to set proper MIME types for JavaScript modules
+  expressApp.use((req, res, next) => {
+    // Set proper Content-Type for JavaScript modules
+    if (req.path.endsWith('.js')) {
+      // Check if it's requested as a module (from script type="module")
+      // or if it's search.js, slicer.js which are known modules
+      if (req.path.includes('search.js') || req.path.includes('slicer.js') || 
+          req.get('Accept')?.includes('application/javascript') ||
+          req.get('Accept')?.includes('text/javascript')) {
+        res.type('application/javascript');
+      } else {
+        res.type('application/javascript');
+      }
+    }
+    next();
+  });
+
   // Now register static file serving AFTER the route handler
   // This ensures the route handler takes precedence for the root path
   expressApp.use(express.static(appDir));
@@ -562,9 +633,14 @@ ${bridgeCode}
           return;
         }
       } else {
-        // On Windows, require UNC paths
-        if (!isUncPath(filePath)) {
-          res.status(400).send('Invalid path: Server mode requires UNC paths');
+        // On Windows, allow both UNC paths and drive letter paths
+        // In server mode, require UNC paths; in non-server mode, allow both
+        if (!isUncPath(filePath) && !/^[A-Za-z]:/.test(filePath)) {
+          if (isServerMode) {
+            res.status(400).send('Invalid path: Server mode requires UNC paths');
+          } else {
+            res.status(400).send('Invalid path: Must be a UNC path (\\\\server\\share\\path) or drive letter path (C:\\path)');
+          }
           return;
         }
       }
@@ -583,7 +659,25 @@ ${bridgeCode}
         '.zip': 'application/zip',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg'
+        '.jpeg': 'image/jpeg',
+        '.obj': 'application/octet-stream',
+        '.svg': 'image/svg+xml',
+        '.step': 'application/octet-stream',
+        '.stp': 'application/octet-stream',
+        '.3ds': 'application/octet-stream',
+        '.amf': 'application/octet-stream',
+        '.dae': 'application/octet-stream',
+        '.ply': 'application/octet-stream',
+        '.x3d': 'application/octet-stream',
+        '.blender': 'application/octet-stream',
+        '.dxf': 'application/octet-stream',
+        '.dwg': 'application/octet-stream',
+        '.fbx': 'application/octet-stream',
+        '.f3d': 'application/octet-stream',
+        '.f3z': 'application/octet-stream',
+        '.gcode': 'application/octet-stream',
+        '.igs': 'application/octet-stream',
+        '.iges': 'application/octet-stream'
       };
       
       if (mimeTypes[ext]) {
@@ -659,9 +753,14 @@ ${bridgeCode}
           }
         }
       } else {
-        // On Windows, require UNC paths (except temp files)
-        if (!isUncPath(actualFilePath) && !isTempFile && !isServerManagedPath) {
-          res.status(400).send('Invalid path: Server mode requires UNC paths');
+        // On Windows, allow both UNC paths and drive letter paths (except temp files)
+        // In server mode, require UNC paths; in non-server mode, allow both
+        if (!isUncPath(actualFilePath) && !/^[A-Za-z]:/.test(actualFilePath) && !isTempFile && !isServerManagedPath) {
+          if (isServerMode) {
+            res.status(400).send('Invalid path: Server mode requires UNC paths');
+          } else {
+            res.status(400).send('Invalid path: Must be a UNC path (\\\\server\\share\\path) or drive letter path (C:\\path)');
+          }
           return;
         }
       }
@@ -680,7 +779,25 @@ ${bridgeCode}
         '.zip': 'application/zip',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg'
+        '.jpeg': 'image/jpeg',
+        '.obj': 'application/octet-stream',
+        '.svg': 'image/svg+xml',
+        '.step': 'application/octet-stream',
+        '.stp': 'application/octet-stream',
+        '.3ds': 'application/octet-stream',
+        '.amf': 'application/octet-stream',
+        '.dae': 'application/octet-stream',
+        '.ply': 'application/octet-stream',
+        '.x3d': 'application/octet-stream',
+        '.blender': 'application/octet-stream',
+        '.dxf': 'application/octet-stream',
+        '.dwg': 'application/octet-stream',
+        '.fbx': 'application/octet-stream',
+        '.f3d': 'application/octet-stream',
+        '.f3z': 'application/octet-stream',
+        '.gcode': 'application/octet-stream',
+        '.igs': 'application/octet-stream',
+        '.iges': 'application/octet-stream'
       };
       
       if (mimeTypes[ext]) {
@@ -780,12 +897,28 @@ ${bridgeCode}
     });
   });
 
-  // Start server
-  httpServer = expressApp.listen(PORT, HOST, () => {
-    console.log(`Printventory server mode started`);
-    console.log(`Server running at http://${HOST}:${PORT}`);
-    console.log(`Access from remote browsers: http://<your-ip>:${PORT}`);
-    console.log(`Server mode requires UNC paths for all file operations`);
+  // Start server (returns Promise so callers can catch bind errors, e.g. macOS entitlement)
+  const serverPromise = new Promise((resolve, reject) => {
+    if (localhostOnly) {
+      console.log(`[Browser extension] Starting server on http://${HOST}:${PORT}...`);
+    }
+    httpServer = expressApp.listen(PORT, HOST, () => {
+      if (localhostOnly) {
+        console.log(`[Browser extension] Server listening at http://${HOST}:${PORT}`);
+      } else {
+        console.log(`Printventory server mode started`);
+        console.log(`Server running at http://${HOST}:${PORT}`);
+        console.log(`Access from remote browsers: http://<your-ip>:${PORT}`);
+        console.log(`Server mode requires UNC paths for all file operations`);
+      }
+      resolve();
+    });
+    httpServer.on('error', (err) => {
+      console.error('[Browser extension] Server failed to bind:', err.message);
+      console.error('[Browser extension] Code:', err.code, '— If EACCES on macOS, add com.apple.security.network.server to entitlements and rebuild.');
+      httpServer = null;
+      reject(err);
+    });
   });
 
   // Create WebSocket server for IPC bridge
@@ -802,8 +935,46 @@ ${bridgeCode}
         const data = JSON.parse(message.toString());
         const { id, channel, args, type } = data;
         
+        // Handle puter-ai-chat-response events from WebSocket clients (server mode)
+        if (type === 'event' && channel === 'puter-ai-chat-response') {
+          const [requestId, result] = args || [];
+          console.log('[Puter AI] Received response via WebSocket event, requestId:', requestId, 'has result:', !!result, 'has error:', !!(result && result.error));
+          const pending = puterPendingRequests.get(requestId);
+          if (pending) {
+            console.log('[Puter AI] Found pending request, resolving');
+            puterPendingRequests.delete(requestId);
+            if (result && result.error) {
+              pending.reject(new Error(result.error));
+            } else {
+              pending.resolve(result ? result.response : null);
+            }
+          } else {
+            console.warn('[Puter AI] No pending request found for requestId:', requestId, 'Total pending:', puterPendingRequests.size);
+          }
+          return; // Don't process as regular event
+        }
+        
         // Handle event sends (fire and forget) - these are events, not IPC handlers
         if (type === 'send') {
+          // Special handling for puter-ai-chat-response: route to pending request
+          if (channel === 'puter-ai-chat-response') {
+            const [requestId, result] = args || [];
+            console.log('[Puter AI] Received response via WebSocket send, requestId:', requestId, 'has result:', !!result, 'has error:', !!(result && result.error));
+            const pending = puterPendingRequests.get(requestId);
+            if (pending) {
+              console.log('[Puter AI] Found pending request, resolving');
+              puterPendingRequests.delete(requestId);
+              if (result && result.error) {
+                pending.reject(new Error(result.error));
+              } else {
+                pending.resolve(result ? result.response : null);
+              }
+            } else {
+              console.warn('[Puter AI] No pending request found for requestId:', requestId, 'Total pending:', puterPendingRequests.size);
+            }
+            return; // Don't broadcast or process as regular event
+          }
+          
           // These are events that should be broadcast to all clients
           // In server mode, broadcast to all WebSocket clients
           // In normal mode, trigger the ipcMain.on() handler which sends to the renderer
@@ -851,7 +1022,9 @@ ${bridgeCode}
                 }));
               }
             }
-          }
+          },
+          // Add wsClient for server mode so createPuterIPCHandler can use it
+          wsClient: isServerMode ? ws : null
         };
 
         // Call IPC handlers directly instead of through hidden window
@@ -873,7 +1046,9 @@ ${bridgeCode}
                   }));
                 }
               }
-            }
+            },
+            // Add wsClient for server mode so createPuterIPCHandler can use it
+            wsClient: isServerMode ? ws : null
           };
           
           // Check if handler exists in registry (for direct invocation)
@@ -881,7 +1056,16 @@ ${bridgeCode}
           if (handler) {
             // Call the handler directly - much faster and more reliable
             try {
-              const result = await handler(mockEvent, ...(args || []));
+              // Ensure args is a flat array (handle nested arrays from JSON parsing)
+              let flatArgs = args || [];
+              console.log('[WebSocket] Handler found for channel:', channel, 'Raw args:', args, 'Args length:', args?.length, 'Args type:', typeof args);
+              if (flatArgs.length === 1 && Array.isArray(flatArgs[0])) {
+                // If args is [ [arg1, arg2] ], unwrap it to [arg1, arg2]
+                console.log('[WebSocket] Unwrapping nested array');
+                flatArgs = flatArgs[0];
+              }
+              console.log('[WebSocket] Calling handler with flatArgs:', flatArgs, 'Length:', flatArgs.length);
+              const result = await handler(mockEvent, ...flatArgs);
               
               // Convert ArrayBuffer to base64 for WebSocket transmission
               let serializedResult = result;
@@ -1056,14 +1240,8 @@ ${bridgeCode}
     }
   };
 
-  httpServer.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} is already in use. Please stop the other application or use a different port.`);
-    } else {
-      console.error('Server error:', err);
-    }
-    process.exit(1);
-  });
+  // Bind errors are handled in the Promise above (reject). Server-mode callers should catch and exit.
+  return serverPromise;
 }
 
 // Stop HTTP server function
@@ -1152,7 +1330,7 @@ async function restartHttpServer() {
         await new Promise(resolve => setTimeout(resolve, 500));
         
         // Restart the server
-        startHttpServer();
+        await startHttpServer();
         
         console.log('HTTP server restarted successfully');
       } catch (error) {
@@ -1273,7 +1451,12 @@ if (!gotTheLock) {
 
       // Server mode: start HTTP server and create hidden window for IPC
       if (isServerMode) {
-        startHttpServer();
+        try {
+          await startHttpServer(5000, false); // Full server mode - listen on all interfaces
+        } catch (err) {
+          console.error('Server mode: failed to bind:', err.message);
+          process.exit(1);
+        }
         // Create a hidden BrowserWindow to handle IPC (preload script needs a window)
         await createHiddenWindow();
         // Don't quit when all windows are closed in server mode
@@ -1281,6 +1464,22 @@ if (!gotTheLock) {
           // Keep the app running in server mode
         });
       } else {
+        // Normal mode: start localhost-only HTTP server only when Browser Extension is enabled
+        const enableExt = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableBrowserExtension')?.value;
+        const portRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('browserExtensionPort');
+        const extPort = parseInt(portRow?.value || '5000', 10) || 5000;
+        if (enableExt === '1') {
+          console.log('[Browser extension] Setting enabled at startup — starting server on port', extPort);
+          startHttpServer(extPort, true).then(() => {
+            console.log('[Browser extension] Server started successfully at startup');
+          }).catch((err) => {
+            console.error('[Browser extension] Failed to start server at startup:', err.message);
+            console.error('[Browser extension] Run from Terminal to see this, or check entitlements (com.apple.security.network.server) and rebuild.');
+            if (dialog && dialog.showErrorBox) {
+              dialog.showErrorBox('Browser Extension Server', `Could not start server on port ${extPort}: ${err.message}\n\nOn macOS, the app needs the "Allow incoming network connections" entitlement. Rebuild the app after adding com.apple.security.network.server to build/entitlements.mac.plist.`);
+            }
+          });
+        }
         // Normal mode: create window
         createWindow();
 
@@ -1629,11 +1828,14 @@ function initializeDefaultSettings() {
       { key: 'currentVersion', value: version }, // Use imported version from package.json
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
       { key: 'enableZipArchives', value: '0' }, // ZIP archive support disabled by default
+      { key: 'scanAdditionalFileTypes', value: '[]' }, // JSON array of catalog ids for additional scan types (e.g. ["obj","step"])
       { key: 'aiTagMaxTags', value: '10' }, // Maximum number of AI-generated tags
       { key: 'aiTagUseCategories', value: '0' }, // Use category-based tagging
       { key: 'aiTagMergeStrategy', value: 'merge' }, // How to merge AI tags: 'replace', 'merge', 'append'
       { key: 'aiTagAllowRetagging', value: '0' }, // Allow re-tagging even if "AI Tagged" exists
       { key: 'aiTagConcurrency', value: '3' }, // Number of concurrent tag generation requests
+      { key: 'enableBrowserExtension', value: '0' }, // Browser extension local server disabled by default
+      { key: 'browserExtensionPort', value: '5000' }, // Port for browser extension server (default 5000)
     ];
     
     // Insert default settings if they don't exist
@@ -1727,10 +1929,10 @@ function createWindow() {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
-        {
+        ...(isServerMode ? [] : [{
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        },
+        }]),
         {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
@@ -1754,6 +1956,10 @@ function createWindow() {
             mainWindow.webContents.send('open-dedup');
           }
         },
+        ...(isServerMode ? [] : [{
+          label: 'Browser Extension',
+          click: () => mainWindow.webContents.send('open-browser-extension-settings')
+        }]),
         { type: 'separator' },
         {
           label: 'Tag Manager',
@@ -1789,6 +1995,12 @@ function createWindow() {
           label: 'Quick Start Guide',
           click: () => {
             mainWindow.webContents.send('open-guide');
+          }
+        },
+        {
+          label: 'Keyboard Shortcuts',
+          click: () => {
+            mainWindow.webContents.send('open-keyboard-shortcuts');
           }
         },
         {
@@ -1839,6 +2051,12 @@ function createWindow() {
             mainWindow.webContents.send('open-stats');
           }
         },
+        ...(isServerMode ? [{
+          label: 'System Report',
+          click: () => {
+            mainWindow.webContents.send('open-system-report');
+          }
+        }] : []),
         {
           label: 'Server Mode Info',
           click: async () => {
@@ -1913,10 +2131,10 @@ function createApplicationMenu() {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
-        {
+        ...(isServerMode ? [] : [{
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        },
+        }]),
         {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
@@ -1940,6 +2158,10 @@ function createApplicationMenu() {
             mainWindow.webContents.send('open-dedup');
           }
         },
+        ...(isServerMode ? [] : [{
+          label: 'Browser Extension',
+          click: () => mainWindow.webContents.send('open-browser-extension-settings')
+        }]),
         { type: 'separator' },
         {
           label: 'Tag Manager',
@@ -1975,6 +2197,12 @@ function createApplicationMenu() {
           label: 'Quick Start Guide',
           click: () => {
             mainWindow.webContents.send('open-guide');
+          }
+        },
+        {
+          label: 'Keyboard Shortcuts',
+          click: () => {
+            mainWindow.webContents.send('open-keyboard-shortcuts');
           }
         },
         {
@@ -2025,6 +2253,12 @@ function createApplicationMenu() {
             mainWindow.webContents.send('open-stats');
           }
         },
+        ...(isServerMode ? [{
+          label: 'System Report',
+          click: () => {
+            mainWindow.webContents.send('open-system-report');
+          }
+        }] : []),
         {
           label: 'Server Mode Info',
           click: async () => {
@@ -2068,6 +2302,11 @@ ipcMain.handle('save-directory', async (event, directoryPath) => {
 });
 
 ipcMain.handle('open-file-dialog', async () => {
+  // Test mode: use fixed path so Playwright/Cline can run scan without native dialog (desktop: C:\temp, server/docker: /test)
+  const testPath = process.env.PRINTVENTORY_TEST_SCAN_PATH;
+  if (testPath && typeof testPath === 'string') {
+    return [testPath];
+  }
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory']
   });
@@ -2178,6 +2417,52 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
+// Apply path-based metadata for STL Home scan: segments from model level up (0 = parent of file, 1 = grandparent, ...).
+// Only sets designer/parentModel when current value is empty. Uses pathMetadataStlHomeEnabled, pathMetadataUseDesigner,
+// pathMetadataUseParentModel, pathMetadataDesignerIndex, pathMetadataParentModelIndex.
+function applyPathMetadataFromSegments(scanRootPath, filePaths) {
+  if (!db || !db.prepare) return;
+  const enabledRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataStlHomeEnabled');
+  if (!enabledRow || enabledRow.value !== '1') return;
+  const useDesigner = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataUseDesigner');
+  const useParentModel = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataUseParentModel');
+  const designerIndexRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataDesignerIndex');
+  const parentModelIndexRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataParentModelIndex');
+  const applyDesigner = useDesigner?.value === '1';
+  const applyParentModel = useParentModel?.value === '1';
+  if (!applyDesigner && !applyParentModel) return;
+  const designerIndex = Math.max(0, parseInt(designerIndexRow?.value, 10) || 1);
+  const parentModelIndex = Math.max(0, parseInt(parentModelIndexRow?.value, 10) || 0);
+  const getModel = db.prepare('SELECT id, designer, parentModel FROM models WHERE filePath = ?');
+  const updateModel = db.prepare('UPDATE models SET designer = ?, parentModel = ? WHERE id = ?');
+  const normalizedRoot = normalizePath(scanRootPath).replace(/\/$/, '');
+  for (const filePath of filePaths) {
+    let relativeDir;
+    if (filePath.includes('::')) {
+      const entryPath = filePath.split('::')[1] || '';
+      relativeDir = path.dirname(entryPath);
+    } else {
+      const normalizedFile = normalizePath(filePath);
+      const relative = path.relative(normalizedRoot, normalizedFile);
+      relativeDir = path.dirname(relative);
+    }
+    // UI: "level 0 = parent of file, 1 = grandparent, ..." (file upward). path.relative gives root-to-file order, so reverse.
+    const segmentsRootToFile = normalizePath(relativeDir).split('/').filter(Boolean);
+    const segments = segmentsRootToFile.slice().reverse();
+    const derivedDesigner = applyDesigner && segments.length > designerIndex ? segments[designerIndex] : null;
+    const derivedParentModel = applyParentModel && segments.length > parentModelIndex ? segments[parentModelIndex] : null;
+    const model = getModel.get(filePath);
+    if (!model) continue;
+    const currentDesigner = model.designer == null || String(model.designer).trim() === '' ? null : model.designer;
+    const currentParentModel = model.parentModel == null || String(model.parentModel).trim() === '' ? null : model.parentModel;
+    const newDesigner = (currentDesigner == null && derivedDesigner) ? derivedDesigner : currentDesigner;
+    const newParentModel = (currentParentModel == null && derivedParentModel) ? derivedParentModel : currentParentModel;
+    if (newDesigner !== currentDesigner || newParentModel !== currentParentModel) {
+      updateModel.run(newDesigner || null, newParentModel || null, model.id);
+    }
+  }
+}
+
 // Helper function to check if a zip entry exists
 async function checkZipEntryExists(zipPath, entryPath) {
   try {
@@ -2198,31 +2483,32 @@ async function checkZipEntryExists(zipPath, entryPath) {
 // Update the removeNonExistentFiles function
 async function removeNonExistentFiles(scanDirectoryPath, window = null) {
   try {
-    const allModels = db.prepare('SELECT filePath, id FROM models').all();
+    // OPTIMIZATION: Only query models in the scanned directory using SQL instead of loading all models
+    // This dramatically reduces memory usage and improves performance, especially for large databases
+    const normalizedScanPath = normalizePath(scanDirectoryPath).replace(/\/$/, '');
+    const scanPathPattern = normalizedScanPath + '%';
+    
+    // Query only models that are in the scanned directory
+    // Use LIKE for path matching (case-insensitive on Windows)
+    const modelsInDirectory = process.platform === 'win32'
+      ? db.prepare('SELECT filePath, id FROM models WHERE LOWER(filePath) LIKE LOWER(?)').all(scanPathPattern)
+      : db.prepare('SELECT filePath, id FROM models WHERE filePath LIKE ?').all(scanPathPattern);
+    
+    if (modelsInDirectory.length === 0) {
+      return 0; // No models in this directory, nothing to check
+    }
+    
     const filesToDelete = [];
-
-    // First, collect files that would be deleted
-    for (const model of allModels) {
-      // Only check files that are within the scanned directory
-      // Normalize paths and ensure consistent trailing slash handling
-      let normalizedScanPath = normalizePath(scanDirectoryPath);
-      let normalizedFilePath = normalizePath(model.filePath);
-      
-      // Remove trailing slashes for consistent comparison (except for root paths)
-      if (normalizedScanPath.endsWith('/') && normalizedScanPath.length > 1) {
-        normalizedScanPath = normalizedScanPath.slice(0, -1);
-      }
-      if (normalizedFilePath.endsWith('/') && normalizedFilePath.length > 1) {
-        normalizedFilePath = normalizedFilePath.slice(0, -1);
-      }
-      
-      // Check if file is within the scanned directory
-      // Also handle case-insensitive comparison on Windows
-      const isWithinScanDir = process.platform === 'win32' 
-        ? normalizedFilePath.toLowerCase().startsWith(normalizedScanPath.toLowerCase())
-        : normalizedFilePath.startsWith(normalizedScanPath);
-      
-      if (isWithinScanDir) {
+    
+    // OPTIMIZATION: Batch file existence checks with concurrency limit
+    // This prevents overwhelming the file system, especially in Docker/network share scenarios
+    // Sequential checks were causing massive slowdowns (10-100ms per file in Docker)
+    const MAX_CONCURRENT_CHECKS = 20; // Limit concurrent file system operations
+    const checkPromises = [];
+    
+    for (let i = 0; i < modelsInDirectory.length; i += MAX_CONCURRENT_CHECKS) {
+      const batch = modelsInDirectory.slice(i, i + MAX_CONCURRENT_CHECKS);
+      const batchPromises = batch.map(async (model) => {
         const pathInfo = parseZipPath(model.filePath);
         let fileExists = false;
         
@@ -2232,11 +2518,10 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
             fileExists = await checkZipEntryExists(pathInfo.zipPath, pathInfo.entryPath);
           } catch (error) {
             console.error(`Error checking zip entry ${model.filePath}:`, error);
-            fileExists = false; // If check fails, consider file as non-existent
+            fileExists = false;
           }
         } else {
           // For regular files, check if the file exists
-          // Use a more robust check that handles path normalization issues
           try {
             // First try the path as stored
             try {
@@ -2257,21 +2542,22 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
               }
             }
           } catch (error) {
-            // If any error occurs during existence check, log it but don't throw
             console.error(`Error checking file existence for ${model.filePath}:`, error);
             fileExists = false;
           }
         }
         
         if (!fileExists) {
-          // Log for debugging - can be removed in production if too verbose
           debugLog(`File marked as non-existent: ${model.filePath}`);
           filesToDelete.push({
             filePath: model.filePath,
             id: model.id
           });
         }
-      }
+      });
+      
+      // Wait for this batch to complete before starting the next batch
+      await Promise.all(batchPromises);
     }
 
     // If there are files to delete, show confirmation dialog
@@ -2295,13 +2581,23 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
       }).join('\n');
       const moreFiles = filesToDelete.length > 20 ? `\n... and ${filesToDelete.length - 20} more file(s)` : '';
       
-      // In server mode, auto-remove files without showing dialog
+      // In server mode or test mode, avoid blocking dialog
       if (isServerMode) {
-        // Auto-remove in server mode
-        for (const file of filesToDelete) {
-          db.prepare('DELETE FROM models WHERE id = ?').run(file.id);
-        }
+        // Auto-remove in server mode - use transaction for better performance
+        db.transaction(() => {
+          for (const file of filesToDelete) {
+            // First delete from model_tags (child table)
+            db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(file.id);
+            // Then delete from models (parent table)
+            db.prepare('DELETE FROM models WHERE id = ?').run(file.id);
+          }
+        })();
         console.log(`Server mode: Removed ${filesToDelete.length} non-existent files from library`);
+        return filesToDelete.length; // Return early in server mode to avoid duplicate deletion
+      } else if (process.env.PRINTVENTORY_TEST_SCAN_PATH) {
+        // Test mode: skip dialog and skip removal so tests don't hang
+        console.log(`Test mode: skipping removal of ${filesToDelete.length} non-existent files from directory ${scanDirectoryPath}`);
+        return 0;
       } else {
         const result = await dialog.showMessageBox(dialogWindow || undefined, {
           type: 'warning',
@@ -2347,7 +2643,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
 }
 
 // Update the scan-directory handler to use a more efficient scanning process
-ipcMain.handle('scan-directory', async (event, directoryPath) => {
+ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
   try {
     // Validate UNC path in server mode
     try {
@@ -2359,9 +2655,17 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
     
-    // Read enableZipArchives setting from database
+    // Read enableZipArchives and scanAdditionalFileTypes from database
     const zipSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipArchives');
     const enableZipArchives = zipSetting && zipSetting.value === '1';
+    let scanExtensions = ['.stl', '.3mf'];
+    try {
+      const scanTypesSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('scanAdditionalFileTypes');
+      if (scanTypesSetting && scanTypesSetting.value) {
+        const selectedIds = JSON.parse(scanTypesSetting.value);
+        if (Array.isArray(selectedIds)) scanExtensions = getScanExtensions(selectedIds);
+      }
+    } catch (e) { /* ignore */ }
     
     // First, remove any non-existent files from the scanned directory
     // Pass the window so we can show a confirmation dialog if needed (null in server mode)
@@ -2459,15 +2763,28 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             // Track count of newly inserted files
             let newFilesCount = 0;
             
+            // OPTIMIZATION: Batch check existence of all files at once instead of N+1 queries
+            // This dramatically improves performance, especially in Docker environments
+            const allFilePaths = files.map(f => f.filePath);
+            const existingFilePaths = new Set();
+            
+            // Query all existing filePaths in batches to avoid SQLite parameter limits
+            const existenceCheckBatchSize = 500; // SQLite supports up to 999 parameters
+            for (let i = 0; i < allFilePaths.length; i += existenceCheckBatchSize) {
+              const pathBatch = allFilePaths.slice(i, i + existenceCheckBatchSize);
+              const placeholders = pathBatch.map(() => '?').join(',');
+              const existing = db.prepare(`SELECT filePath FROM models WHERE filePath IN (${placeholders})`).all(...pathBatch);
+              existing.forEach(row => existingFilePaths.add(row.filePath));
+            }
+            
             // Use a transaction for better performance
             db.transaction(() => {
               for (let i = 0; i < files.length; i += batchSize) {
                 const batch = files.slice(i, i + batchSize);
                 
                 for (const file of batch) {
-                  const exists = db.prepare('SELECT 1 FROM models WHERE filePath = ?').get(file.filePath);
-                  
-                  if (exists) {
+                  // Use Set lookup instead of database query - O(1) vs O(log n) database query
+                  if (existingFilePaths.has(file.filePath)) {
                     updateExisting.run(
                       file.hash || '',
                       file.size,
@@ -2485,6 +2802,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
                       dateAdded
                     );
                     newFilesCount++;
+                    // Add to set so we don't try to insert duplicates within the same transaction
+                    existingFilePaths.add(file.filePath);
                   }
                 }
                 
@@ -2497,6 +2816,15 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
             })();
 
             worker.terminate();
+
+            // STL Home scan with path metadata: set designer/parent from folder segments (from model level up) when enabled
+            if (options.isStlHomeScan && Array.isArray(allFilePaths) && allFilePaths.length > 0) {
+              try {
+                applyPathMetadataFromSegments(directoryPath, allFilePaths);
+              } catch (pathMetaErr) {
+                console.error('Path metadata from folder (STL Home):', pathMetaErr);
+              }
+            }
             
             resolve({ files, totalFiles, newFilesCount });
 
@@ -2603,6 +2931,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath) => {
         directoryPath, 
         maxFileSize, 
         enableZipArchives,
+        scanExtensions,
         nodeModulesPath: nodeModulesPath
       });
     });
@@ -2692,6 +3021,10 @@ ipcMain.handle('get-models-by-designer', async (event, designer) => {
 
 ipcMain.handle('show-message-box', async (event, options) => {
   try {
+    // Test mode: auto-dismiss "New models found, would you like to see them?" so tests don't hang
+    if (process.env.PRINTVENTORY_TEST_SCAN_PATH && options.title === 'New Models Found') {
+      return { response: 1 };
+    }
     const window = BrowserWindow.fromWebContents(event.sender);
     const result = await dialog.showMessageBox(window || undefined, options);
     return result;
@@ -2701,7 +3034,7 @@ ipcMain.handle('show-message-box', async (event, options) => {
   }
 });
 
-ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
+const getAllModelsHandler = async (event, sortOption, limit = 0) => {
   try {
     // Determine the ORDER BY clause based on sortOption.
     let orderClause = "";
@@ -2747,9 +3080,11 @@ ipcMain.handle('get-all-models', async (event, sortOption, limit = 0) => {
     console.error("Error in getAllModels IPC:", error);
     return [];
   }
-});
+};
+ipcMain.handle('get-all-models', getAllModelsHandler);
+ipcHandlerRegistry.set('get-all-models', getAllModelsHandler);
 
-ipcMain.handle('get-models-filtered', async (event, filters) => {
+const getModelsFilteredHandler = async (event, filters) => {
   try {
     console.log('getModelsFiltered called with filters:', filters);
     console.log('Designer inverted flag:', filters.designerInverted);
@@ -2837,8 +3172,14 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
         conditions.push("filePath LIKE ?");
         params.push('%::%');
       } else {
-        conditions.push("LOWER(fileName) LIKE ?");
-        params.push(`%.${filters.fileType.toLowerCase()}`);
+        const exts = getExtensionsForFileTypeFilter(filters.fileType);
+        if (exts.length === 1) {
+          conditions.push("LOWER(fileName) LIKE ?");
+          params.push(`%${exts[0]}`);
+        } else {
+          conditions.push("(" + exts.map(() => "LOWER(fileName) LIKE ?").join(" OR ") + ")");
+          params.push(...exts.map(ext => `%${ext}`));
+        }
       }
     }
     
@@ -2846,24 +3187,35 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     if (filters.directory) {
       // Ensure the directory path ends with a separator to match only files within that directory
       // This prevents matching subdirectories with similar names (e.g., "test" matching "test2")
-      let directoryPath = filters.directory;
+      // CRITICAL: Normalize the path to match database format (forward slashes)
+      // Paths in the database are stored with forward slashes, so we must normalize here
+      let directoryPath = normalizePath(filters.directory);
+      
       // Add path separator if not already present at the end
-      if (!directoryPath.endsWith('\\') && !directoryPath.endsWith('/') && !directoryPath.endsWith('::')) {
-        // Determine the appropriate separator based on the path
-        if (directoryPath.includes('\\')) {
-          directoryPath += '\\';
-        } else if (directoryPath.includes('/')) {
+      if (!directoryPath.endsWith('/') && !directoryPath.endsWith('::')) {
+        // Use forward slash for normalized paths (consistent with database storage)
+        directoryPath += '/';
+      }
+      
+      // For zip entries (containing ::), ensure both zip path and entry path use forward slashes
+      if (directoryPath.includes('::')) {
+        const [zipPath, entryPath] = directoryPath.split('::');
+        const normalizedZipPath = normalizePath(zipPath);
+        const normalizedEntryPath = entryPath ? normalizePath(entryPath) : '';
+        directoryPath = normalizedEntryPath ? `${normalizedZipPath}::${normalizedEntryPath}` : normalizedZipPath;
+        if (normalizedEntryPath && !directoryPath.endsWith('/') && !directoryPath.endsWith('::')) {
           directoryPath += '/';
-        } else {
-          // Default to backslash for Windows paths
-          directoryPath += '\\';
         }
       }
-      conditions.push("filePath LIKE ?");
-      params.push(`${directoryPath}%`);
+      
+      // Match both / and \ so directory filter works on Windows (DB may store paths with backslashes)
+      const directoryPathForward = `${directoryPath}%`;
+      const directoryPathBackslash = `${directoryPath.replace(/\//g, '\\')}%`;
+      conditions.push("(filePath LIKE ? OR filePath LIKE ?)");
+      params.push(directoryPathForward, directoryPathBackslash);
     }
     
-    // Search term filter (searches in fileName, designer, parentModel, notes, filePath)
+    // Search term filter (searches name, directory, metadata, tags, notes)
     if (filters.search) {
       const searchTerm = `%${filters.search.toLowerCase()}%`;
       if (filters.searchInverted) {
@@ -2873,19 +3225,25 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
           LOWER(COALESCE(designer, '')) NOT LIKE ? AND 
           LOWER(COALESCE(parentModel, '')) NOT LIKE ? AND 
           LOWER(COALESCE(notes, '')) NOT LIKE ? AND
-          LOWER(COALESCE(filePath, '')) NOT LIKE ?
+          LOWER(COALESCE(filePath, '')) NOT LIKE ? AND
+          LOWER(COALESCE(source, '')) NOT LIKE ? AND
+          LOWER(COALESCE(license, '')) NOT LIKE ? AND
+          NOT EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
         )`);
       } else {
-        // Normal: any of the fields may contain the term
+        // Normal: any of the fields or tags may contain the term
         conditions.push(`(
-          LOWER(fileName) LIKE ? OR 
-          LOWER(designer) LIKE ? OR 
-          LOWER(parentModel) LIKE ? OR 
-          LOWER(notes) LIKE ? OR
-          LOWER(filePath) LIKE ?
+          LOWER(COALESCE(fileName, '')) LIKE ? OR 
+          LOWER(COALESCE(designer, '')) LIKE ? OR 
+          LOWER(COALESCE(parentModel, '')) LIKE ? OR 
+          LOWER(COALESCE(notes, '')) LIKE ? OR
+          LOWER(COALESCE(filePath, '')) LIKE ? OR
+          LOWER(COALESCE(source, '')) LIKE ? OR
+          LOWER(COALESCE(license, '')) LIKE ? OR
+          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
         )`);
       }
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     // Date Added filter (filter by dateAdded >= specified date)
@@ -2928,13 +3286,46 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
       case "dateadded-desc":
         orderClause = "ORDER BY dateAdded DESC";
         break;
+      case "printed-asc":
+        orderClause = "ORDER BY printed ASC";
+        break;
+      case "printed-desc":
+        orderClause = "ORDER BY printed DESC";
+        break;
+      case "designer-asc":
+        orderClause = "ORDER BY designer ASC";
+        break;
+      case "designer-desc":
+        orderClause = "ORDER BY designer DESC";
+        break;
+      case "parentmodel-asc":
+        orderClause = "ORDER BY parentModel ASC";
+        break;
+      case "parentmodel-desc":
+        orderClause = "ORDER BY parentModel DESC";
+        break;
+      case "directory-asc":
+        orderClause = "ORDER BY filePath ASC";
+        break;
+      case "directory-desc":
+        orderClause = "ORDER BY filePath DESC";
+        break;
       default:
         orderClause = "ORDER BY modifiedDate DESC";
         break;
     }
     
-    // Execute query
+    // Execute query (optional limit/offset for progressive load when clearing filters in Server/Docker)
+    // SQLite requires LIMIT when using OFFSET; use a large limit when only offset is set
     let query = `SELECT * FROM models ${whereClause} ${orderClause}`;
+    const limit = filters.limit != null && filters.limit > 0 ? Math.min(Number(filters.limit), 10000) : null;
+    const offset = filters.offset != null && filters.offset >= 0 ? Number(filters.offset) : null;
+    if (limit != null) {
+      query += ` LIMIT ${Math.floor(limit)}`;
+      if (offset != null) query += ` OFFSET ${Math.floor(offset)}`;
+    } else if (offset != null) {
+      query += ` LIMIT 999999 OFFSET ${Math.floor(offset)}`;
+    }
     console.log('Executing query:', query);
     console.log('With params:', params);
     
@@ -2970,7 +3361,9 @@ ipcMain.handle('get-models-filtered', async (event, filters) => {
     console.error("Error in getModelsFiltered IPC:", error);
     throw error;
   }
-});
+};
+ipcMain.handle('get-models-filtered', getModelsFilteredHandler);
+ipcHandlerRegistry.set('get-models-filtered', getModelsFilteredHandler);
 
 ipcMain.handle('get-parent-models', async () => {
   try {
@@ -3012,7 +3405,11 @@ ipcMain.handle('save-tag', async (event, tagName) => {
 });
 
 // Add error handling to the getSetting handler
-ipcMain.handle('get-setting', async (event, key) => {
+ipcMain.handle('get-additional-file-types-catalog', async () => {
+  return ADDITIONAL_FILE_TYPES_CATALOG;
+});
+
+const getSettingHandler = async (event, key) => {
   try {
     console.log('Main Process - Getting setting:', key);
     const result = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -3022,10 +3419,22 @@ ipcMain.handle('get-setting', async (event, key) => {
     console.error('Error getting setting:', error);
     return null;
   }
+};
+ipcMain.handle('get-setting', getSettingHandler);
+ipcHandlerRegistry.set('get-setting', getSettingHandler);
+
+// Add handler to get app version directly (fallback for server mode)
+ipcMain.handle('get-app-version', async () => {
+  try {
+    return version;
+  } catch (error) {
+    console.error('Error getting app version:', error);
+    return null;
+  }
 });
 
 // Add error handling to the saveSetting handler
-ipcMain.handle('save-setting', async (event, key, value) => {
+const saveSettingHandler = async (event, key, value) => {
   try {
     console.log('Main Process - Saving setting:', key, value);
     
@@ -3077,7 +3486,9 @@ ipcMain.handle('save-setting', async (event, key, value) => {
     console.error('Error saving setting:', error);
     return false;
   }
-});
+};
+ipcMain.handle('save-setting', saveSettingHandler);
+ipcHandlerRegistry.set('save-setting', saveSettingHandler);
 
 ipcMain.handle('purge-thumbnails', async () => {
   try {
@@ -3273,6 +3684,10 @@ async function saveThumbnail(filePath, thumbnail) {
 
 ipcMain.handle('show-item-in-folder', async (event, filePath) => {
   try {
+    if (isUrlModel(filePath)) {
+      shell.openExternal(filePath.slice(5));
+      return true;
+    }
     // Validate UNC path in server mode
     try {
       validateUncPath(filePath, 'show-item-in-folder');
@@ -3293,6 +3708,10 @@ ipcMain.handle('show-item-in-folder', async (event, filePath) => {
 
 ipcMain.handle('open-path', async (event, path) => {
   try {
+    if (isUrlModel(path)) {
+      shell.openExternal(path.slice(5));
+      return true;
+    }
     await shell.openPath(path);
     return true;
   } catch (error) {
@@ -3842,6 +4261,9 @@ ipcMain.handle('get-duplicate-files', async () => {
 // Add this new handler
 ipcMain.handle('check-files-exist', async (_, filePaths) => {
   const results = await Promise.all(filePaths.map(async (path) => {
+    if (isUrlModel(path)) {
+      return { path, exists: true };
+    }
     try {
       await fs.promises.access(path, fs.constants.F_OK);
       return {
@@ -3861,7 +4283,7 @@ ipcMain.handle('check-files-exist', async (_, filePaths) => {
 // Update the trash-file handler with simpler path normalization
 ipcMain.handle('trash-file', async (event, filePath) => {
   try {
-    // Validate UNC path in server mode
+    // Validate UNC path in server mode (skips URL models)
     try {
       validateUncPath(filePath, 'trash-file');
     } catch (validationError) {
@@ -3878,15 +4300,23 @@ ipcMain.handle('trash-file', async (event, filePath) => {
   console.log('Normalized path:', normalizedPath);
   
   try {
-    console.log('Attempting trashItem with path:', normalizedPath);
-    await shell.trashItem(normalizedPath);
-    console.log('trashItem succeeded');
+    if (!isUrlModel(filePath)) {
+      console.log('Attempting trashItem with path:', normalizedPath);
+      await shell.trashItem(normalizedPath);
+      console.log('trashItem succeeded');
+    }
     
-    // If trash succeeds, remove from database
+    // Remove from database (for both file and URL-only models)
     await new Promise((resolve, reject) => {
       console.log('Deleting from database:', normalizedPath);
-      db.prepare('DELETE FROM models WHERE filePath = ?').run(normalizedPath);
-          resolve();
+      db.transaction(() => {
+        const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(normalizedPath);
+        if (model) {
+          db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+          db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
+        }
+      })();
+      resolve();
     });
     
     return true;
@@ -4054,6 +4484,7 @@ ipcMain.handle('get-stats', async () => {
     // File type breakdown
     const stlCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) LIKE '%.stl'").get();
     const threeMfCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) LIKE '%.3mf'").get();
+    const otherCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) NOT LIKE '%.stl' AND LOWER(fileName) NOT LIKE '%.3mf'").get();
     
     // Archived models (models inside ZIP files)
     const archivedCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE filePath LIKE '%::%'").get();
@@ -4085,7 +4516,8 @@ ipcMain.handle('get-stats', async () => {
       totalModels: totalCount,
       fileTypes: {
         stl: stlCount ? stlCount.count : 0,
-        threeMf: threeMfCount ? threeMfCount.count : 0
+        threeMf: threeMfCount ? threeMfCount.count : 0,
+        other: otherCount ? otherCount.count : 0
       },
       archivedModels: archivedCount ? archivedCount.count : 0,
       percentages: {
@@ -4105,6 +4537,127 @@ ipcMain.handle('get-stats', async () => {
   } catch (error) {
     console.error('Error getting stats:', error);
     throw error;
+  }
+});
+
+// System Report handlers
+ipcMain.handle('get-gpu-info', async () => {
+  try {
+    // GPU detection is primarily client-side (WebGL), but we can return basic info
+    // The actual WebGL detection will be done in the renderer
+    return {
+      available: true, // Will be checked client-side
+      message: 'GPU detection is performed client-side via WebGL'
+    };
+  } catch (error) {
+    console.error('Error getting GPU info:', error);
+    return { available: false, error: error.message };
+  }
+});
+
+ipcMain.handle('benchmark-filesystem', async () => {
+  try {
+    const dbPath = getDatabasePath();
+    const dbDir = path.dirname(dbPath);
+    const testFilePath = path.join(dbDir, 'benchmark-test.tmp');
+    
+    const iterations = 10;
+    const fileSize = 1024 * 1024; // 1MB test file
+    const testData = Buffer.alloc(fileSize, 'A');
+    
+    // Write benchmark
+    const writeStart = Date.now();
+    for (let i = 0; i < iterations; i++) {
+      await fs.promises.writeFile(testFilePath, testData);
+    }
+    const writeTime = Date.now() - writeStart;
+    const writeSpeed = (iterations * fileSize) / (writeTime / 1000); // bytes per second
+    
+    // Read benchmark
+    const readStart = Date.now();
+    for (let i = 0; i < iterations; i++) {
+      await fs.promises.readFile(testFilePath);
+    }
+    const readTime = Date.now() - readStart;
+    const readSpeed = (iterations * fileSize) / (readTime / 1000); // bytes per second
+    
+    // Cleanup
+    try {
+      await fs.promises.unlink(testFilePath);
+    } catch (cleanupError) {
+      console.warn('Failed to cleanup benchmark test file:', cleanupError);
+    }
+    
+    return {
+      success: true,
+      write: {
+        time: writeTime,
+        speed: writeSpeed,
+        speedMBps: (writeSpeed / (1024 * 1024)).toFixed(2)
+      },
+      read: {
+        time: readTime,
+        speed: readSpeed,
+        speedMBps: (readSpeed / (1024 * 1024)).toFixed(2)
+      },
+      iterations: iterations,
+      fileSize: fileSize
+    };
+  } catch (error) {
+    console.error('Error benchmarking filesystem:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('benchmark-database', async () => {
+  try {
+    if (!db) {
+      return { success: false, error: 'Database not initialized' };
+    }
+    
+    const iterations = 100;
+    
+    // Write benchmark - insert test records
+    const insertStmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+    const writeStart = Date.now();
+    const transaction = db.transaction(() => {
+      for (let i = 0; i < iterations; i++) {
+        insertStmt.run(`benchmark_test_${i}`, `test_value_${i}`);
+      }
+    });
+    transaction();
+    const writeTime = Date.now() - writeStart;
+    const writeOpsPerSec = (iterations / (writeTime / 1000)).toFixed(2);
+    
+    // Read benchmark - select test records
+    const selectStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
+    const readStart = Date.now();
+    for (let i = 0; i < iterations; i++) {
+      selectStmt.get(`benchmark_test_${i}`);
+    }
+    const readTime = Date.now() - readStart;
+    const readOpsPerSec = (iterations / (readTime / 1000)).toFixed(2);
+    
+    // Cleanup - delete test records
+    const deleteStmt = db.prepare('DELETE FROM settings WHERE key LIKE ?');
+    deleteStmt.run('benchmark_test_%');
+    
+    return {
+      success: true,
+      write: {
+        time: writeTime,
+        operations: iterations,
+        opsPerSec: writeOpsPerSec
+      },
+      read: {
+        time: readTime,
+        operations: iterations,
+        opsPerSec: readOpsPerSec
+      }
+    };
+  } catch (error) {
+    console.error('Error benchmarking database:', error);
+    return { success: false, error: error.message };
   }
 });
 
@@ -4176,25 +4729,31 @@ ipcMain.handle('delete-metadata', async (event, type, name) => {
 });
 
 // Update the purge-models handler
-ipcMain.handle('purge-models', async () => {
+const purgeModelsHandler = async (event) => {
   try {
-    // First ask for confirmation
-    const result = await dialog.showMessageBox({
-      type: 'warning',
-      title: 'Purge Models',
-      message: 'Are you sure you want to purge all models?',
-      detail: 'This will remove all model data from the database. This action cannot be undone.',
-      buttons: ['Cancel', 'Purge All Models'],
-      defaultId: 0,
-      cancelId: 0,
-    });
+    // In server/Docker mode (WebSocket), skip native dialog - user already confirmed in browser UI
+    const fromWebSocket = !!(event && event.wsClient);
+    let doPurge = fromWebSocket;
 
-    if (result.response === 1) { // User clicked "Purge All Models"
+    if (!doPurge) {
+      const result = await dialog.showMessageBox({
+        type: 'warning',
+        title: 'Purge Models',
+        message: 'Are you sure you want to purge all models?',
+        detail: 'This will remove all model data from the database. This action cannot be undone.',
+        buttons: ['Cancel', 'Purge All Models'],
+        defaultId: 0,
+        cancelId: 0,
+      });
+      doPurge = result.response === 1; // User clicked "Purge All Models"
+    }
+
+    if (doPurge) {
       // Check if database is open, if not reopen it
       if (!db.open) {
         const dbPath = getDatabasePath();
-        db = new Database(dbPath, { 
-          verbose: DEBUG ? console.log : null 
+        db = new Database(dbPath, {
+          verbose: DEBUG ? console.log : null
         });
       }
 
@@ -4202,14 +4761,14 @@ ipcMain.handle('purge-models', async () => {
         // Execute each statement individually to avoid transaction issues
         // First clear the model_tags table (child table)
         db.prepare('DELETE FROM model_tags').run();
-        
+
         // Then clear the models table (parent table)
         db.prepare('DELETE FROM models').run();
-        
+
         // Finally clear unused tags
         db.prepare('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM model_tags)').run();
 
-      return true;
+        return true;
       } catch (dbError) {
         console.error('Database error during purge:', dbError);
         throw dbError;
@@ -4220,7 +4779,9 @@ ipcMain.handle('purge-models', async () => {
     console.error('Error purging models:', error);
     throw error;
   }
-});
+};
+ipcMain.handle('purge-models', purgeModelsHandler);
+ipcHandlerRegistry.set('purge-models', purgeModelsHandler);
 
 // Update the show-context-menu handler
 ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
@@ -4251,21 +4812,30 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         click: async () => {
           try {
             console.log('Preview clicked for file:', fp);
+            // In server mode (including Docker), use broadcastEvent to send to all WebSocket clients
             if (isServerMode && global.broadcastEvent) {
+              console.log('Broadcasting preview-model event via WebSocket');
               global.broadcastEvent('preview-model', fp);
-            } else {
+            } else if (event && event.sender) {
+              // In normal mode, use event.sender.send
+              console.log('Sending preview-model event via event.sender');
               event.sender.send('preview-model', fp);
+            } else {
+              console.error('Cannot send preview event: no sender and not in server mode');
+              throw new Error('Cannot preview file: no connection available');
             }
           } catch (error) {
             console.error('Error triggering preview:', error);
-            const win = BrowserWindow.fromWebContents(event.sender);
-            if (win) {
-              dialog.showMessageBox(win, {
-                type: 'error',
-                title: 'Error',
-                message: 'Could not preview file',
-                detail: error.message
-              });
+            if (event && event.sender) {
+              const win = BrowserWindow.fromWebContents(event.sender);
+              if (win) {
+                dialog.showMessageBox(win, {
+                  type: 'error',
+                  title: 'Error',
+                  message: 'Could not preview file',
+                  detail: error.message
+                });
+              }
             }
           }
         }
@@ -4274,8 +4844,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     }
   }
   
-  // Add "Download" option for server/docker mode at the top
-  if ((isServerMode || isDockerContainer()) && filePaths.length === 1) {
+  // Add "Download" option for server mode at the top
+  if (isServerMode && filePaths.length === 1) {
     menuItems.push({
       label: 'Download',
       click: async () => {
@@ -4283,7 +4853,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           console.log('Download clicked for file:', filePaths[0]);
           // Send download event to renderer
           // In server mode, use broadcastEvent to send to all WebSocket clients
-          if (isServerMode && global.broadcastEvent) {
+          if (global.broadcastEvent) {
             console.log('Broadcasting download-model event via WebSocket');
             global.broadcastEvent('download-model', filePaths[0]);
           } else {
@@ -4308,20 +4878,13 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     menuItems.push({ type: 'separator' });
   }
   
-  // Add "Open File" option
-  menuItems.push({
-    label: 'Open File',
-    enabled: filePaths.length === 1,
-    click: async () => {
-      try {
-        if (isServerMode || isDockerContainer()) {
-          // In server/Docker mode: trigger download so user can open locally
-          if (isServerMode && global.broadcastEvent) {
-            global.broadcastEvent('download-model', filePaths[0]);
-          } else {
-            event.sender.send('download-model', filePaths[0]);
-          }
-        } else {
+  // Add "Open File" option (only in normal mode, not server mode)
+  if (!isServerMode) {
+    menuItems.push({
+      label: 'Open File',
+      enabled: filePaths.length === 1,
+      click: async () => {
+        try {
           // Normal mode: open with system default application
           if (isZipEntry && pathInfo) {
             // Extract to temp file first
@@ -4331,24 +4894,24 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           } else {
             await shell.openPath(filePaths[0]);
           }
-        }
-      } catch (error) {
-        console.error('Error opening file:', error);
-        const win = BrowserWindow.fromWebContents(event.sender);
-        if (win) {
-          dialog.showMessageBox(win, {
-            type: 'error',
-            title: 'Error',
-            message: 'Could not open file',
-            detail: error.message
-          });
+        } catch (error) {
+          console.error('Error opening file:', error);
+          const win = getWindowFromEvent(event);
+          if (win && !win.isDestroyed()) {
+            dialog.showMessageBox(win, {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open file',
+              detail: error.message
+            });
+          }
         }
       }
-    }
-  });
+    });
+  }
   
-  // Add "Open Directory" only if NOT in server/Docker mode
-  if (!isServerMode && !isDockerContainer()) {
+  // Add "Open Directory" only if NOT in server mode
+  if (!isServerMode) {
     menuItems.push({
       label: 'Open Directory',
       enabled: filePaths.length === 1,
@@ -4373,8 +4936,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     });
   }
   
-  // Add extract options for zip entries (disabled in server/Docker mode)
-  if (isZipEntry && pathInfo && filePaths.length === 1 && !isServerMode && !isDockerContainer()) {
+  // Add extract options for zip entries (disabled in server mode)
+  if (isZipEntry && pathInfo && filePaths.length === 1 && !isServerMode) {
     menuItems.push(
       { type: 'separator' },
       {
@@ -4453,20 +5016,94 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     console.error('Error getting slicers:', error);
   }
   
-  // Add "Open in Slicer" submenu if there are configured slicers and only one file is selected
-  if (slicers.length > 0 && filePaths.length === 1) {
+  // Add "Open in Slicer" submenu if there are configured slicers and only one file is selected (only in normal mode, not server mode)
+  if (!isServerMode && slicers.length > 0 && filePaths.length === 1) {
     const slicerSubmenu = {
       label: 'Open in Slicer',
       submenu: slicers.map(slicer => ({
         label: slicer.name,
         click: async () => {
           try {
+            // In server mode, "Open in Slicer" should execute on the client machine, not the server
+            // Send command to client to execute locally
+            if (isServerMode) {
+              let modelPath = filePaths[0];
+              
+              // If it's a zip entry, we need to handle it (extract on client or download)
+              if (isZipEntry && pathInfo) {
+                // For zip entries, send both zip path and entry path
+                modelPath = `${pathInfo.zipPath}::${pathInfo.entryPath}`;
+              }
+              
+              // Send command to client to execute slicer locally
+              if (global.broadcastEvent) {
+                global.broadcastEvent('execute-client-command', {
+                  type: 'open-in-slicer',
+                  filePath: modelPath,
+                  slicerName: slicer.name,
+                  slicerPath: slicer.path,
+                  isZipEntry: isZipEntry || false,
+                  zipPath: isZipEntry ? pathInfo.zipPath : null,
+                  entryPath: isZipEntry ? pathInfo.entryPath : null
+                });
+              } else {
+                event.sender.send('execute-client-command', {
+                  type: 'open-in-slicer',
+                  filePath: modelPath,
+                  slicerName: slicer.name,
+                  slicerPath: slicer.path,
+                  isZipEntry: isZipEntry || false,
+                  zipPath: isZipEntry ? pathInfo.zipPath : null,
+                  entryPath: isZipEntry ? pathInfo.entryPath : null
+                });
+              }
+              return; // Don't try to execute on server
+            }
+            
+            // For hidden Electron window or normal mode, check Docker/Windows path compatibility
+            const inDocker = isDockerContainer();
+            if (inDocker) {
+              // Check if slicer path is a Windows path (starts with drive letter like C:\ or UNC like \\server)
+              const hasWindowsDrive = /^[A-Za-z]:[\\/]/.test(slicer.path);
+              const hasUncPath = /^\\\\/.test(slicer.path);
+              const isWindowsPath = hasWindowsDrive || hasUncPath;
+              
+              if (isWindowsPath) {
+                console.error('[Slicer] Cannot execute Windows slicer in Docker:', slicer.path);
+                const win = getWindowFromEvent(event);
+                const errorMessage = `The slicer path "${slicer.path}" is a Windows path, but the application is running in a Docker container (Linux).\n\n` +
+                  `In Docker/Server mode, slicer paths must be:\n` +
+                  `- Linux executable paths (e.g., /usr/bin/slicer)\n` +
+                  `- Paths accessible from within the container\n\n` +
+                  `If you need to use a Windows slicer, you must run Printventory in normal mode (not Docker/Server mode).`;
+                
+                if (win && !win.isDestroyed()) {
+                  dialog.showMessageBox(win, {
+                    type: 'warning',
+                    title: 'Slicer Path Not Compatible',
+                    message: 'Cannot execute Windows executable in Docker container',
+                    detail: errorMessage
+                  });
+                } else {
+                  console.error('[Slicer] Slicer Path Not Compatible:', errorMessage);
+                }
+                return; // Exit early - don't try to execute
+              }
+            }
+            
+            // Execute slicer command (only in normal mode, not server mode)
             const { exec } = require('child_process');
             let modelPath = filePaths[0]; // Use the first file selected
             
             // If it's a zip entry, extract to temp first
             if (isZipEntry && pathInfo) {
               modelPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+            }
+            
+            // Final safety check: if we're in Docker and path looks like Windows, don't execute
+            if (inDocker && (/^[A-Za-z]:[\\/]/.test(slicer.path) || /^\\\\/.test(slicer.path))) {
+              console.error('[Slicer] Blocked Windows path execution in Docker:', slicer.path);
+              throw new Error('Cannot execute Windows executable in Docker container. Please use a Linux-compatible slicer path.');
             }
             
             let command;
@@ -4479,17 +5116,26 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             exec(command, (error, stdout, stderr) => {
               if (error) {
                 console.error('Error executing slicer command:', error);
-                dialog.showErrorBox('Slice Model Error', error.message);
+                const win = getWindowFromEvent(event);
+                if (win && !win.isDestroyed()) {
+                  dialog.showErrorBox('Slice Model Error', error.message);
+                }
               }
             });
           } catch (error) {
             console.error('Error slicing model:', error);
-            dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
-              type: 'error',
-              title: 'Error',
-              message: 'Could not slice model',
-              detail: error.message
-            });
+            const win = getWindowFromEvent(event);
+            if (win && !win.isDestroyed()) {
+              dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'Error',
+                message: 'Could not slice model',
+                detail: error.message
+              });
+            } else {
+              // In server mode without a window, re-throw so it gets sent to client via WebSocket
+              throw error;
+            }
           }
         }
       }))
@@ -4507,16 +5153,33 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   
   // Add "Generate Tags" option if API key exists OR if using Puter (which doesn't need API key)
   if (apiKey || aiService === 'puter') {
+    // Capture event.sender for use in the click handler (needed for desktop mode)
+    const sender = event.sender;
     menuItems.push({
       label: 'Generate Tags',
       // Remove the restriction to only one file
-      click: async () => {
+      click: async (clickEvent) => {
+        console.log('[Generate Tags] Click handler called, filePaths:', filePaths);
+        // Use clickEvent.sender if available (server mode), otherwise use captured sender (desktop mode)
+        const eventSender = (clickEvent && clickEvent.sender) ? clickEvent.sender : sender;
+        console.log('[Generate Tags] Event sender:', { 
+          hasClickEventSender: !!(clickEvent && clickEvent.sender),
+          hasCapturedSender: !!sender,
+          usingSender: !!eventSender,
+          hasSend: !!(eventSender && eventSender.send)
+        });
         try {
           const aitagging = require('./aitagging');
           const settings = getSettings();
+          console.log('[Generate Tags] Settings loaded, filesToProcess will be determined');
           
           // Create puter IPC handler if service is puter
-          const puterIPCHandler = settings.aiService === 'puter' ? createPuterIPCHandler() : null;
+          // Pass clickEvent (which is the mockEvent with proper WebSocket routing) so it can route to the correct client
+          // If clickEvent doesn't have sender, create a mock event with the captured sender
+          const eventForPuter = clickEvent && clickEvent.sender ? clickEvent : { sender: sender, wsClient: null };
+          console.log('[Generate Tags] Creating puterIPCHandler, aiService:', settings.aiService, 'has clickEvent:', !!clickEvent, 'has wsClient:', !!(clickEvent?.wsClient));
+          const puterIPCHandler = settings.aiService === 'puter' ? createPuterIPCHandler(eventForPuter) : null;
+          console.log('[Generate Tags] puterIPCHandler created:', { hasHandler: !!puterIPCHandler, handlerType: typeof puterIPCHandler });
           
           // Initialize OpenAI with the API key
           aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService, puterIPCHandler);
@@ -4524,13 +5187,48 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           // Filter out invalid file paths first
           const validFilePaths = filePaths.filter(fp => fp && typeof fp === 'string');
           
-          // Use validFilePaths for processing
-          const filesToProcess = validFilePaths.length > 0 ? validFilePaths : filePaths;
+          // Deduplicate by normalized path (avoids duplicate entries when new models added before refresh, e.g. server/docker)
+          const normalizePathForDedup = (p) => (p && typeof p === 'string') ? p.replace(/\\/g, '/').toLowerCase().trim() : '';
+          const seenPaths = new Set();
+          const filesToProcess = [];
+          for (const fp of (validFilePaths.length > 0 ? validFilePaths : filePaths)) {
+            const norm = normalizePathForDedup(fp);
+            if (norm && !seenPaths.has(norm)) {
+              seenPaths.add(norm);
+              filesToProcess.push(fp);
+            }
+          }
           
           // Start tag generation - show review dialog immediately for both single and multiple files
           if (filesToProcess.length > 1) {
             // Send all file paths so the dialog can show all models immediately
-            event.sender.send('start-batch-tag-generation', filesToProcess.length, filesToProcess);
+            console.log('[Generate Tags] Sending start-batch-tag-generation event, count:', filesToProcess.length, 'isServerMode:', isServerMode);
+            if (isServerMode && global.broadcastEvent) {
+              // In server mode, use broadcastEvent to send to all WebSocket clients
+              console.log('[Generate Tags] Broadcasting start-batch-tag-generation via WebSocket');
+              global.broadcastEvent('start-batch-tag-generation', filesToProcess.length, filesToProcess);
+            } else if (eventSender && eventSender.send) {
+              // Normal mode - use captured sender or clickEvent sender
+              console.log('[Generate Tags] Sending start-batch-tag-generation via eventSender.send');
+              console.log('[Generate Tags] eventSender details:', {
+                hasSend: typeof eventSender.send === 'function',
+                isDestroyed: eventSender.isDestroyed ? eventSender.isDestroyed() : 'N/A'
+              });
+              try {
+                eventSender.send('start-batch-tag-generation', filesToProcess.length, filesToProcess);
+                console.log('[Generate Tags] Successfully sent start-batch-tag-generation event');
+              } catch (sendError) {
+                console.error('[Generate Tags] Error sending start-batch-tag-generation event:', sendError);
+              }
+            } else {
+              console.error('[Generate Tags] No valid way to send start-batch-tag-generation event', {
+                hasClickEvent: !!clickEvent,
+                hasClickEventSender: !!(clickEvent && clickEvent.sender),
+                hasCapturedSender: !!sender,
+                hasEventSender: !!eventSender,
+                hasSend: !!(eventSender && eventSender.send)
+              });
+            }
           } else if (filesToProcess.length === 1) {
             // For single file, also open dialog immediately with "Generating..." status
             const singleModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filesToProcess[0]);
@@ -4543,13 +5241,40 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               `).all(singleModel.id);
               const modelTags = modelTagRows.map(row => row.name);
               
-              console.log('Sending start-single-tag-generation event');
-              event.sender.send('start-single-tag-generation', filesToProcess[0], {
+              const modelData = {
                 filePath: filesToProcess[0],
                 model: singleModel,
                 generatedTags: undefined, // undefined means "generating"
                 existingTags: modelTags
-              });
+              };
+              
+              console.log('[Generate Tags] Sending start-single-tag-generation event, isServerMode:', isServerMode);
+              if (isServerMode && global.broadcastEvent) {
+                // In server mode, use broadcastEvent to send to all WebSocket clients
+                console.log('[Generate Tags] Broadcasting start-single-tag-generation via WebSocket');
+                global.broadcastEvent('start-single-tag-generation', filesToProcess[0], modelData);
+              } else if (eventSender && eventSender.send) {
+                // Normal mode - use captured sender or clickEvent sender
+                console.log('[Generate Tags] Sending start-single-tag-generation via eventSender.send');
+                console.log('[Generate Tags] eventSender details:', {
+                  hasSend: typeof eventSender.send === 'function',
+                  isDestroyed: eventSender.isDestroyed ? eventSender.isDestroyed() : 'N/A'
+                });
+                try {
+                  eventSender.send('start-single-tag-generation', filesToProcess[0], modelData);
+                  console.log('[Generate Tags] Successfully sent start-single-tag-generation event');
+                } catch (sendError) {
+                  console.error('[Generate Tags] Error sending start-single-tag-generation event:', sendError);
+                }
+              } else {
+                console.error('[Generate Tags] No valid way to send start-single-tag-generation event', {
+                  hasClickEvent: !!clickEvent,
+                  hasClickEventSender: !!(clickEvent && clickEvent.sender),
+                  hasCapturedSender: !!sender,
+                  hasEventSender: !!eventSender,
+                  hasSend: !!(eventSender && eventSender.send)
+                });
+              }
             } else {
               console.log('Model not found in database for single file generation');
             }
@@ -4563,6 +5288,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           const totalFiles = filesToProcess.length;
           
           // Helper function to process a single file
+          // Use eventSender (captured from event or clickEvent) for sending events
           const processFile = async (filePath, index) => {
             try {
               // Get the model from the database to access its thumbnail
@@ -4571,8 +5297,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               if (!model) {
                 console.log(`Model not found in database: ${filePath}, skipping`);
                 completed++;
-                // Send empty tags for skipped models so they appear in the review dialog
-                event.sender.send('tags-generated', filePath, [], null);
+                      // Send empty tags for skipped models so they appear in the review dialog
+                      if (isServerMode && global.broadcastEvent) {
+                        global.broadcastEvent('tags-generated', filePath, [], null);
+                      } else if (eventSender && eventSender.send) {
+                        eventSender.send('tags-generated', filePath, [], null);
+                      }
                 return;
               }
               
@@ -4591,7 +5321,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                 console.log(`Model ${filePath} already has AI Tagged tag, skipping generation`);
               completed++;
               // Send empty tags for already-tagged models so they appear in the review dialog
-              event.sender.send('tags-generated', filePath, [], null);
+              if (isServerMode && global.broadcastEvent) {
+                global.broadcastEvent('tags-generated', filePath, [], null);
+              } else if (eventSender && eventSender.send) {
+                eventSender.send('tags-generated', filePath, [], null);
+              }
               return;
               }
               
@@ -4620,7 +5354,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                   // Check if it's a rate limit error
                   if (error.message && error.message.includes('Rate limit')) {
                     // Send error info with empty tags
-                    event.sender.send('tags-generated', filePath, [], error.message);
+                    if (isServerMode && global.broadcastEvent) {
+                      global.broadcastEvent('tags-generated', filePath, [], error.message);
+                    } else if (eventSender && eventSender.send) {
+                      eventSender.send('tags-generated', filePath, [], error.message);
+                    }
                     completed++;
                     return;
                   }
@@ -4643,7 +5381,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                     // Check if it's a rate limit error
                     if (error.message && error.message.includes('Rate limit')) {
                       // Send error info with empty tags
-                      event.sender.send('tags-generated', filePath, [], error.message);
+                      if (isServerMode && global.broadcastEvent) {
+                        global.broadcastEvent('tags-generated', filePath, [], error.message);
+                      } else if (eventSender && eventSender.send) {
+                        eventSender.send('tags-generated', filePath, [], error.message);
+                      }
                       completed++;
                       return;
                     }
@@ -4652,7 +5394,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               }
               
               // Send the generated tags back to the renderer process
-              event.sender.send('tags-generated', filePath, tags, null);
+              if (isServerMode && global.broadcastEvent) {
+                global.broadcastEvent('tags-generated', filePath, tags, null);
+              } else if (eventSender && eventSender.send) {
+                eventSender.send('tags-generated', filePath, tags, null);
+              }
               
               completed++;
               // Progress is now shown in the review dialog
@@ -4663,10 +5409,18 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               // Check if it's a rate limit error
               if (error.message && error.message.includes('Rate limit')) {
                 // Send error info with empty tags
-                event.sender.send('tags-generated', filePath, [], error.message);
+                if (isServerMode && global.broadcastEvent) {
+                  global.broadcastEvent('tags-generated', filePath, [], error.message);
+                } else if (eventSender && eventSender.send) {
+                  eventSender.send('tags-generated', filePath, [], error.message);
+                }
               } else {
                 // Send empty tags for failed models so they appear in the review dialog
-                event.sender.send('tags-generated', filePath, []);
+                if (isServerMode && global.broadcastEvent) {
+                  global.broadcastEvent('tags-generated', filePath, []);
+                } else if (eventSender && eventSender.send) {
+                  eventSender.send('tags-generated', filePath, []);
+                }
               }
             }
           };
@@ -4681,14 +5435,18 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           
           // Signal batch completion for multiple files
           if (totalFiles > 1) {
-            event.sender.send('batch-tag-generation-complete');
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('batch-tag-generation-complete');
+            } else if (eventSender && eventSender.send) {
+              eventSender.send('batch-tag-generation-complete');
+            }
           }
         } catch (error) {
           console.error('Error generating tags:', error);
           
           // Close progress dialog if open
-          if (filePaths.length > 1) {
-            event.sender.send('close-progress-dialog');
+          if (filePaths.length > 1 && eventSender && eventSender.send) {
+            eventSender.send('close-progress-dialog');
           }
           
           // Provide more user-friendly error messages
@@ -4920,9 +5678,9 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       label: 'Add Image',
       click: async () => {
         try {
-          if (isServerMode || isDockerContainer()) {
-            // In server/Docker mode: send event to renderer to show file input dialog
-            if (isServerMode && global.broadcastEvent) {
+          if (isServerMode) {
+            // In server mode: send event to renderer to show file input dialog
+            if (global.broadcastEvent) {
               global.broadcastEvent('add-image-request', filePaths[0]);
             } else {
               event.sender.send('add-image-request', filePaths[0]);
@@ -4994,17 +5752,60 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         }
       }
     });
+    
+    // Add "Manage Thumbnails" option for single file selection
+    menuItems.push({
+      label: 'Manage Thumbnails',
+      click: async () => {
+        try {
+          // Check if model has at least one thumbnail
+          const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
+          const thumbnails = model?.thumbnail ? parseThumbnails(model.thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')) : [];
+          
+          if (thumbnails.length === 0) {
+            const win = BrowserWindow.fromWebContents(event.sender);
+            if (win) {
+              await dialog.showMessageBox(win, {
+                type: 'info',
+                title: 'No Thumbnails',
+                message: 'This model has no thumbnails to manage.',
+                detail: 'Please add an image first using "Add Image".'
+              });
+            }
+            return;
+          }
+          
+          // Send event to renderer to show manage thumbnails modal
+          if (isServerMode && global.broadcastEvent) {
+            global.broadcastEvent('manage-thumbnails-request', filePaths[0]);
+          } else {
+            event.sender.send('manage-thumbnails-request', filePaths[0]);
+          }
+        } catch (error) {
+          console.error('Error opening manage thumbnails:', error);
+          const win = BrowserWindow.fromWebContents(event.sender);
+          if (win) {
+            dialog.showMessageBox(win, {
+              type: 'error',
+              title: 'Error',
+              message: 'Could not open thumbnail manager',
+              detail: error.message
+            });
+          }
+        }
+      }
+    });
   }
 
   // Add separator before file operations
   menuItems.push({ type: 'separator' });
 
   // Add Move and new file operations
-  // Note: "Move" is excluded in server/Docker mode
+  // Note: "Move" is excluded in server mode
   const fileOperationItems = [];
   
-  // Add "Move" only if NOT in server/Docker mode
-  if (!isServerMode && !isDockerContainer()) {
+  // Add "Move" only if NOT in server mode
+  if (!isServerMode) {
     fileOperationItems.push({
       label: 'Move',
       click: async () => {
@@ -5126,9 +5927,9 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   // Get the window - use helper function that handles server mode
   const win = getWindowFromEvent(event);
   
-  // In server mode accessed via browser (WebSocket), we can't show native menu
-  // Instead, return menu items as JSON so browser can render HTML context menu
-  if (isServerMode && !win) {
+  // Test mode or server mode without window: return HTML menu so Playwright can assert on it
+  const useHtmlMenu = (process.env.PRINTVENTORY_TEST_SCAN_PATH && process.env.PRINTVENTORY_TEST_SCAN_PATH.length > 0) || (isServerMode && !win);
+  if (useHtmlMenu) {
     // Generate unique request ID for this context menu
     const requestId = `ctx_${++contextMenuRequestIdCounter}_${Date.now()}`;
     
@@ -5183,7 +5984,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   if (win) {
     menu.popup({ window: win });
   } else if (mainWindow && !mainWindow.isDestroyed()) {
-    // Fallback to mainWindow in server/Docker mode
+    // Fallback to mainWindow in server mode
     menu.popup({ window: mainWindow });
   } else {
     // Last resort: popup without window (uses current focused window)
@@ -5196,6 +5997,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
 
 // IPC handler to execute context menu actions (for server mode browser access)
 const executeContextMenuActionHandler = async (event, requestId, itemIndex, subIndex) => {
+  console.log('[Context Menu] executeContextMenuActionHandler called, requestId:', requestId, 'itemIndex:', itemIndex, 'subIndex:', subIndex);
   const menuData = pendingContextMenus.get(requestId);
   if (!menuData) {
     throw new Error('Context menu request not found or expired');
@@ -5208,6 +6010,8 @@ const executeContextMenuActionHandler = async (event, requestId, itemIndex, subI
     throw new Error('Menu item not found');
   }
   
+  console.log('[Context Menu] Menu item label:', menuItem.label, 'has click:', !!menuItem.click, 'has submenu:', !!menuItem.submenu);
+  
   // Handle submenu items
   if (subIndex !== undefined && subIndex !== null && menuItem.submenu) {
     const subMenuItem = menuItem.submenu[subIndex];
@@ -5215,21 +6019,91 @@ const executeContextMenuActionHandler = async (event, requestId, itemIndex, subI
       throw new Error('Submenu item not found or has no action');
     }
     
-    // Create a mock event for the click handler
-    const mockEvent = {
-      sender: originalEvent.sender
+    // Use the event passed in (has proper WebSocket routing in server mode)
+    // Fallback to originalEvent if event doesn't have sender (backward compatibility)
+    // IMPORTANT: Preserve wsClient from the event parameter for Puter AI routing
+    const mockEvent = event && event.sender ? {
+      ...event,
+      // Ensure wsClient is preserved
+      wsClient: event.wsClient || null
+    } : {
+      sender: originalEvent.sender,
+      wsClient: event?.wsClient || originalEvent?.wsClient || null
     };
+    
+    console.log('[Context Menu] Created mockEvent for submenu click handler:', {
+      hasSender: !!mockEvent.sender,
+      hasWsClient: !!mockEvent.wsClient,
+      isServerMode
+    });
     
     // Execute the submenu item's click handler
-    await subMenuItem.click(mockEvent);
+    // Wrap in try-catch to handle errors gracefully
+    console.log('[Context Menu] Executing submenu item click handler:', subMenuItem.label);
+    try {
+      const result = subMenuItem.click(mockEvent);
+      // If it returns a promise, don't await it to avoid IPC timeout
+      // The handler should send events immediately (like dialog opening)
+      if (result && typeof result.then === 'function') {
+        // Async handler - let it run in background, return immediately
+        result.catch(err => {
+          console.error('Error in async context menu click handler:', err);
+        });
+        pendingContextMenus.delete(requestId);
+        return { success: true };
+      } else {
+        // Sync handler - already completed
+        pendingContextMenus.delete(requestId);
+        return { success: true };
+      }
+    } catch (err) {
+      console.error('Error in context menu click handler:', err);
+      pendingContextMenus.delete(requestId);
+      throw err;
+    }
   } else if (menuItem.click) {
-    // Create a mock event for the click handler
-    const mockEvent = {
-      sender: originalEvent.sender
+    // Use the event passed in (has proper WebSocket routing in server mode)
+    // Fallback to originalEvent if event doesn't have sender (backward compatibility)
+    // IMPORTANT: Preserve wsClient from the event parameter for Puter AI routing
+    const mockEvent = event && event.sender ? {
+      ...event,
+      // Ensure wsClient is preserved
+      wsClient: event.wsClient || null
+    } : {
+      sender: originalEvent.sender,
+      wsClient: event?.wsClient || originalEvent?.wsClient || null
     };
     
+    console.log('[Context Menu] Created mockEvent for click handler:', {
+      hasSender: !!mockEvent.sender,
+      hasWsClient: !!mockEvent.wsClient,
+      isServerMode
+    });
+    
     // Execute the menu item's click handler
-    await menuItem.click(mockEvent);
+    // Wrap in try-catch to handle errors gracefully
+    console.log('[Context Menu] Executing menu item click handler:', menuItem.label);
+    try {
+      const result = menuItem.click(mockEvent);
+      // If it returns a promise, don't await it to avoid IPC timeout
+      // The handler should send events immediately (like dialog opening)
+      if (result && typeof result.then === 'function') {
+        // Async handler - let it run in background, return immediately
+        result.catch(err => {
+          console.error('Error in async context menu click handler:', err);
+        });
+        pendingContextMenus.delete(requestId);
+        return { success: true };
+      } else {
+        // Sync handler - already completed
+        pendingContextMenus.delete(requestId);
+        return { success: true };
+      }
+    } catch (err) {
+      console.error('Error in context menu click handler:', err);
+      pendingContextMenus.delete(requestId);
+      throw err;
+    }
   }
   
   // Clean up after execution
@@ -5245,8 +6119,10 @@ ipcHandlerRegistry.set('execute-context-menu-action', executeContextMenuActionHa
 // Update the deleteFile function
 async function deleteFile(filePath) {
   try {
-    // Delete the actual file
-    await fs.promises.unlink(filePath);
+    if (!isUrlModel(filePath)) {
+      // Delete the actual file
+      await fs.promises.unlink(filePath);
+    }
     
     // Use a transaction to handle database operations
     db.transaction(() => {
@@ -5317,6 +6193,33 @@ ipcMain.handle('saveSetting', async (event, key, value) => {
   }
 });
 
+// Browser extension server control (normal mode only)
+ipcMain.handle('start-extension-server', async (event, port) => {
+  if (isServerMode) return { success: false, message: 'Not available in server mode' };
+  try {
+    const portNum = parseInt(port, 10) || 5000;
+    if (httpServer) await stopHttpServer();
+    console.log('[Browser extension] Starting server on port', portNum, '...');
+    await startHttpServer(portNum, true);
+    console.log('[Browser extension] Server started successfully');
+    return { success: true };
+  } catch (error) {
+    console.error('[Browser extension] Error starting extension server:', error.message);
+    return { success: false, message: error?.message || 'Failed to start' };
+  }
+});
+
+ipcMain.handle('stop-extension-server', async () => {
+  if (isServerMode) return { success: false, message: 'Not available in server mode' };
+  try {
+    await stopHttpServer();
+    return { success: true };
+  } catch (error) {
+    console.error('Error stopping extension server:', error);
+    return { success: false, message: error?.message || 'Failed to stop' };
+  }
+});
+
 // Update the database path handling
 function getDatabasePath() {
   try {
@@ -5349,8 +6252,16 @@ function getDatabasePath() {
 }
 
 // Add these IPC handlers
+// Helper: URL-only models (added by Chrome extension) have filePath "url::https://..."
+function isUrlModel(filePath) {
+  return typeof filePath === 'string' && filePath.startsWith('url::');
+}
+
 // Helper function to parse zip path format
 function parseZipPath(filePath) {
+  if (isUrlModel(filePath)) {
+    return { zipPath: filePath, entryPath: null, isZipEntry: false };
+  }
   if (filePath.includes('::')) {
     const [zipPath, entryPath] = filePath.split('::');
     return { zipPath, entryPath, isZipEntry: true };
@@ -5576,6 +6487,7 @@ async function extract3MFMetadata(filePath) {
 }
 
 ipcMain.handle('get3MFImages', async (event, filePath) => {
+  if (isUrlModel(filePath)) return [];
   // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
     console.log('Skipping file from __MACOSX directory:', filePath);
@@ -5837,6 +6749,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
 });
 
 ipcMain.handle('get3MFSTL', async (event, filePath) => {
+  if (isUrlModel(filePath)) return null;
   try {
     // Check if this is a zip entry
     const pathInfo = parseZipPath(filePath);
@@ -5896,6 +6809,7 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
 
 // Read model file for preview (STL parsing in renderer)
 const readModelFileHandler = async (event, filePath) => {
+  if (isUrlModel(filePath)) throw new Error('URL-only model has no file to read');
   try {
     // Handle zip entries
     if (filePath.includes('::')) {
@@ -5916,7 +6830,18 @@ ipcMain.handle('read-model-file', readModelFileHandler);
 // Register in handler registry for direct WebSocket invocation
 ipcHandlerRegistry.set('read-model-file', readModelFileHandler);
 
-ipcMain.handle('parse-3mf-preview', async (event, filePath, requestId) => {
+// Parse 3MF preview handler
+const parse3mfPreviewHandler = async (event, filePath, requestId) => {
+  // Validate arguments - ensure filePath is a string, not an array
+  if (Array.isArray(filePath)) {
+    console.error('parse-3mf-preview: filePath is an array, extracting first element');
+    filePath = filePath[0];
+  }
+  if (typeof filePath !== 'string') {
+    throw new Error(`parse-3mf-preview: filePath must be a string, received ${typeof filePath}`);
+  }
+  if (isUrlModel(filePath)) throw new Error('URL-only model has no file to preview');
+  
   const pathInfo = parseZipPath(filePath);
   let actualFilePath = filePath;
   let shouldCleanup = false;
@@ -5987,7 +6912,12 @@ ipcMain.handle('parse-3mf-preview', async (event, filePath, requestId) => {
     const onMessage = async (message) => {
       const { ok, json, error, type, message: statusMessage } = message || {};
       if (type === 'status') {
-        event.sender.send('3mf-preview-status', requestId, statusMessage);
+        // Use global.sendEvent for server mode compatibility
+        if (isServerMode && global.broadcastEvent) {
+          global.broadcastEvent('3mf-preview-status', requestId, statusMessage);
+        } else if (event && event.sender) {
+          event.sender.send('3mf-preview-status', requestId, statusMessage);
+        }
         return;
       }
 
@@ -6029,7 +6959,11 @@ ipcMain.handle('parse-3mf-preview', async (event, filePath, requestId) => {
 
     worker.postMessage({ filePath: actualFilePath });
   });
-});
+};
+
+ipcMain.handle('parse-3mf-preview', parse3mfPreviewHandler);
+// Register in handler registry for direct WebSocket invocation
+ipcHandlerRegistry.set('parse-3mf-preview', parse3mfPreviewHandler);
 
 ipcMain.handle('cancel-3mf-preview', async (event, requestId) => {
   const entry = preview3mfWorkers.get(requestId);
@@ -6196,6 +7130,7 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
 
 // Add handler to extract model from zip to temp file
 ipcMain.handle('extract-model-from-zip', async (event, filePath) => {
+  if (isUrlModel(filePath)) throw new Error('URL-only model has no file to extract');
   try {
     const pathInfo = parseZipPath(filePath);
     if (!pathInfo.isZipEntry) {
@@ -6239,44 +7174,63 @@ ipcMain.handle('extract-zip-archive', async (event, filePath, destinationPath) =
 });
 
 // Add a new IPC handler for getting duplicates
-ipcMain.handle('get-duplicates', async (event, includeZip = false) => {
-  try {
-    // Get all models with their hashes
-    const models = db.prepare(`
-      SELECT filePath, fileName, hash, size 
-      FROM models 
-      WHERE hash IS NOT NULL
-    `).all();
+const getDuplicatesHandler = async (event, includeZip = false) => {
+  const maxRetries = isServerMode && isGeneratingHashes ? 5 : 1;
+  const retryDelayMs = 150;
+  let lastError;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Get all models with their hashes - explicitly filter out NULL and empty strings
+      const models = db.prepare(`
+        SELECT filePath, fileName, hash, size 
+        FROM models 
+        WHERE hash IS NOT NULL 
+          AND hash != '' 
+          AND LENGTH(TRIM(hash)) > 0
+      `).all();
 
-    // Filter out zip entries if includeZip is false
-    const filteredModels = includeZip 
-      ? models 
-      : models.filter(model => !model.filePath.includes('::'));
+      // Filter out zip entries if includeZip is false
+      const filteredModels = includeZip
+        ? models
+        : models.filter(model => !model.filePath.includes('::'));
 
-    // Group by hash to find duplicates
-    const duplicates = filteredModels.reduce((acc, model) => {
-      if (!acc[model.hash]) {
-        acc[model.hash] = [];
-      }
-      acc[model.hash].push(model);
-      return acc;
-    }, {});
-
-    // Filter out unique files (groups with only one file)
-    const duplicateGroups = Object.entries(duplicates)
-      .filter(([hash, files]) => files.length > 1)
-      .reduce((acc, [hash, files]) => {
-        acc[hash] = files;
+      // Group by hash to find duplicates - dedupe by filePath so each path appears once per group
+      // (avoids double entries when DB has duplicate rows or in Server/Docker fallback path)
+      const seenByHash = new Map();
+      const duplicates = filteredModels.reduce((acc, model) => {
+        if (!model.hash || model.hash.trim() === '') return acc;
+        if (!acc[model.hash]) acc[model.hash] = [];
+        const key = model.hash;
+        const seen = seenByHash.get(key) || new Set();
+        if (seen.has(model.filePath)) return acc;
+        seen.add(model.filePath);
+        seenByHash.set(key, seen);
+        acc[model.hash].push(model);
         return acc;
       }, {});
 
-    console.log('Found duplicate groups:', Object.keys(duplicateGroups).length);
-    return duplicateGroups;
-  } catch (error) {
-    console.error('Error getting duplicates:', error);
-    throw error;
+      // Filter out unique files (groups with only one file)
+      const duplicateGroups = Object.entries(duplicates)
+        .filter(([hash, files]) => files.length > 1)
+        .reduce((acc, [hash, files]) => {
+          acc[hash] = files;
+          return acc;
+        }, {});
+
+      console.log('Found duplicate groups:', Object.keys(duplicateGroups).length);
+      return duplicateGroups;
+    } catch (error) {
+      lastError = error;
+      console.error('Error getting duplicates (attempt ' + (attempt + 1) + '/' + maxRetries + '):', error);
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, retryDelayMs));
+      }
+    }
   }
-});
+  throw lastError;
+};
+ipcMain.handle('get-duplicates', getDuplicatesHandler);
+ipcHandlerRegistry.set('get-duplicates', getDuplicatesHandler);
 
 // Internal function to calculate missing hashes
 async function calculateMissingHashesInternal(event) {
@@ -6300,19 +7254,68 @@ async function calculateMissingHashesInternal(event) {
 
     console.log('Starting parallel hash calculation for', modelsWithMissingHashes.length, 'files');
 
-    let calculatedCount = 0;
+    let processedCount = 0;
+    let successCount = 0;
+    let failedCount = 0;
     const updateHash = db.prepare('UPDATE models SET hash = ? WHERE filePath = ?');
 
     // Send initial progress update
-    if (event && event.sender) {
+    // In server mode, use broadcastEvent to send to all WebSocket clients
+    // In normal mode, use event.sender.send
+    if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent('hash-generation-progress', {
+        processed: 0,
+        total: modelsWithMissingHashes.length,
+        success: 0,
+        failed: 0
+      });
+    } else if (event && event.sender) {
       event.sender.send('hash-generation-progress', {
         processed: 0,
-        total: modelsWithMissingHashes.length
+        total: modelsWithMissingHashes.length,
+        success: 0,
+        failed: 0
       });
     }
 
     // Process files in parallel with concurrency limit
-    const concurrencyLimit = 50; // Process up to 50 files simultaneously
+    // Lower concurrency in Docker/Server mode for network files to avoid overwhelming the file system
+    const concurrencyLimit = isServerMode ? 20 : 50;
+    
+    // Helper function to calculate hash with retry and timeout
+    const calculateFileHashWithRetry = async (filePath, maxRetries = 2) => {
+      let lastError;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          // Add timeout for file operations (especially important for network files in Docker)
+          const timeoutMs = isServerMode ? 300000 : 60000; // 5 min for server mode, 1 min for normal
+          const hashPromise = calculateFileHash(filePath);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(`Hash calculation timeout after ${timeoutMs}ms`)), timeoutMs)
+          );
+          
+          return await Promise.race([hashPromise, timeoutPromise]);
+        } catch (error) {
+          lastError = error;
+          // Only retry on certain errors (network issues, timeouts, temporary file system errors)
+          const isRetryableError = error.code === 'ETIMEDOUT' || 
+                                   error.code === 'ENOENT' || 
+                                   error.code === 'EACCES' ||
+                                   error.message.includes('timeout') ||
+                                   error.message.includes('ENOTFOUND');
+          
+          if (attempt < maxRetries && isRetryableError) {
+            console.warn(`Retry ${attempt + 1}/${maxRetries} for ${filePath}: ${error.message}`);
+            // Exponential backoff: 1s, 2s, 4s
+            await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw lastError;
+    };
+
     const processFile = async (model) => {
       try {
         // Check if file exists (for regular files) or zip file exists (for zip entries)
@@ -6328,37 +7331,60 @@ async function calculateMissingHashesInternal(event) {
         }
 
         if (fileExists) {
-          const hash = await calculateFileHash(model.filePath);
-          updateHash.run(hash, model.filePath);
-          calculatedCount++;
-          console.log(`Hash calculated for: ${model.filePath} (${calculatedCount}/${modelsWithMissingHashes.length})`);
-          
-          // Send progress update after each file
-          if (event && event.sender) {
-            event.sender.send('hash-generation-progress', {
-              processed: calculatedCount,
-              total: modelsWithMissingHashes.length
-            });
+          try {
+            const hash = await calculateFileHashWithRetry(model.filePath);
+            updateHash.run(hash, model.filePath);
+            successCount++;
+            console.log(`Hash calculated for: ${model.filePath} (${successCount} succeeded, ${failedCount} failed, ${processedCount + 1}/${modelsWithMissingHashes.length} total)`);
+          } catch (hashError) {
+            failedCount++;
+            console.error(`Failed to calculate hash for ${model.filePath} after retries:`, hashError.message);
           }
         } else {
           console.warn(`File no longer exists: ${model.filePath}`);
-          // Still update progress even if file doesn't exist
-          calculatedCount++;
-          if (event && event.sender) {
-            event.sender.send('hash-generation-progress', {
-              processed: calculatedCount,
-              total: modelsWithMissingHashes.length
-            });
-          }
+          failedCount++;
+        }
+        
+        processedCount++;
+        
+        // Send progress update after each file
+        // In server mode, use broadcastEvent to send to all WebSocket clients
+        // In normal mode, use event.sender.send
+        if (isServerMode && global.broadcastEvent) {
+          global.broadcastEvent('hash-generation-progress', {
+            processed: processedCount,
+            total: modelsWithMissingHashes.length,
+            success: successCount,
+            failed: failedCount
+          });
+        } else if (event && event.sender) {
+          event.sender.send('hash-generation-progress', {
+            processed: processedCount,
+            total: modelsWithMissingHashes.length,
+            success: successCount,
+            failed: failedCount
+          });
         }
       } catch (error) {
-        console.error(`Error calculating hash for ${model.filePath}:`, error);
-        // Update progress even on error to prevent hanging
-        calculatedCount++;
-        if (event && event.sender) {
+        console.error(`Unexpected error processing ${model.filePath}:`, error);
+        failedCount++;
+        processedCount++;
+        
+        // In server mode, use broadcastEvent to send to all WebSocket clients
+        // In normal mode, use event.sender.send
+        if (isServerMode && global.broadcastEvent) {
+          global.broadcastEvent('hash-generation-progress', {
+            processed: processedCount,
+            total: modelsWithMissingHashes.length,
+            success: successCount,
+            failed: failedCount
+          });
+        } else if (event && event.sender) {
           event.sender.send('hash-generation-progress', {
-            processed: calculatedCount,
-            total: modelsWithMissingHashes.length
+            processed: processedCount,
+            total: modelsWithMissingHashes.length,
+            success: successCount,
+            failed: failedCount
           });
         }
       }
@@ -6372,13 +7398,27 @@ async function calculateMissingHashesInternal(event) {
 
     isGeneratingHashes = false;
 
+    console.log(`Hash generation complete: ${successCount} succeeded, ${failedCount} failed out of ${modelsWithMissingHashes.length} total`);
+
     if (isServerMode && global.broadcastEvent) {
-      global.broadcastEvent('hash-generation-complete');
+      global.broadcastEvent('hash-generation-complete', {
+        success: successCount,
+        failed: failedCount,
+        total: modelsWithMissingHashes.length
+      });
     } else if (event && event.sender) {
-      event.sender.send('hash-generation-complete');
+      event.sender.send('hash-generation-complete', {
+        success: successCount,
+        failed: failedCount,
+        total: modelsWithMissingHashes.length
+      });
     }
 
-    return { calculated: calculatedCount, total: modelsWithMissingHashes.length };
+    return { 
+      calculated: successCount, 
+      failed: failedCount,
+      total: modelsWithMissingHashes.length 
+    };
   } catch (error) {
     isGeneratingHashes = false;
     console.error('Error calculating missing hashes:', error);
@@ -6393,6 +7433,21 @@ ipcMain.handle('calculate-missing-hashes', async (event) => {
 
 // Add IPC handler for generateMissingHashes (calls the same internal function)
 ipcMain.handle('generateMissingHashes', async (event) => {
+  // Check if hash generation is already in progress
+  if (isGeneratingHashes) {
+    console.log('Hash generation already in progress, returning current status');
+    // Return a status indicating it's already running
+    // The caller should attach to existing progress events
+    const modelsWithMissingHashes = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM models 
+      WHERE hash IS NULL OR hash = '' OR LENGTH(hash) = 64
+    `).get();
+    return { 
+      alreadyRunning: true, 
+      total: modelsWithMissingHashes ? modelsWithMissingHashes.count : 0 
+    };
+  }
   return await calculateMissingHashesInternal(event);
 });
 
@@ -6418,6 +7473,7 @@ ipcMain.handle('is-generating-hashes', async () => {
 
 // Add IPC handler to calculate and save hash for a single file
 ipcMain.handle('calculate-file-hash', async (event, filePath) => {
+  if (isUrlModel(filePath)) return '';
   try {
     const hash = await calculateFileHash(filePath);
     // Update the database with the calculated hash
@@ -6595,6 +7651,53 @@ ipcMain.handle('set-default-thumbnail', async (event, filePath, index) => {
     return true;
   } catch (error) {
     console.error('Error setting default thumbnail:', error);
+    throw error;
+  }
+});
+
+// IPC handler to delete a thumbnail by index
+ipcMain.handle('delete-thumbnail', async (event, filePath, index) => {
+  try {
+    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    if (!model || !model.thumbnail) return false;
+    
+    const thumbnails = parseThumbnails(model.thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image'));
+    
+    // Ensure model has at least one thumbnail and index is valid
+    if (thumbnails.length <= 1) {
+      throw new Error('Cannot delete thumbnail: model must have at least one thumbnail');
+    }
+    
+    if (index < 0 || index >= thumbnails.length) {
+      throw new Error('Invalid thumbnail index');
+    }
+    
+    // Cannot delete the active (first) thumbnail
+    if (index === 0) {
+      throw new Error('Cannot delete the active thumbnail');
+    }
+    
+    // Remove the thumbnail at the specified index
+    thumbnails.splice(index, 1);
+    const updatedThumbnail = thumbnails.join('::');
+    await saveThumbnail(filePath, updatedThumbnail);
+    
+    // Send refresh event
+    if (event && event.sender) {
+      event.sender.send('thumbnail-deleted', {
+        filePath: filePath,
+        thumbnailCount: thumbnails.length
+      });
+    } else if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent('thumbnail-deleted', {
+        filePath: filePath,
+        thumbnailCount: thumbnails.length
+      });
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error deleting thumbnail:', error);
     throw error;
   }
 });
@@ -6781,20 +7884,50 @@ ipcMain.handle('open-slicer-dialog', async (event, title) => {
 });
 
 // Add IPC handlers for AI Config
-ipcMain.handle('test-ai-config', async (event, apiKey, baseURL, model, service) => {
+const testAIConfigHandler = async (event, apiKey, baseURL, model, service) => {
   const aitagging = require('./aitagging');
+  // Normalize service to handle case/whitespace variations
+  const normalizedService = service ? String(service).toLowerCase().trim() : 'openai';
+  // If endpoint contains puter.com, treat as Puter service
+  const isPuterService = normalizedService === 'puter' || 
+    (baseURL && (baseURL.includes('puter.com') || baseURL.includes('js.puter.com')));
+  
+  console.log('[Main] test-ai-config handler:', { 
+    service, 
+    normalizedService, 
+    baseURL, 
+    isPuterService,
+    hasEvent: !!event,
+    isServerMode,
+    apiKeyLength: apiKey ? apiKey.length : 0,
+    model
+  });
+  
   // Create puter IPC handler if service is puter
-  const puterIPCHandler = service === 'puter' ? createPuterIPCHandler() : null;
+  // Pass event so it can route to the correct client (WebSocket in server mode, IPC in normal mode)
+  const puterIPCHandler = isPuterService ? createPuterIPCHandler(event) : null;
+  console.log('[Main] Created puterIPCHandler:', { 
+    isPuterService, 
+    hasHandler: !!puterIPCHandler,
+    handlerType: typeof puterIPCHandler
+  });
+  
   return await aitagging.testAIConfig(apiKey, baseURL, model, service, puterIPCHandler);
-});
+};
+
+// Register handler for both IPC and WebSocket (server mode)
+registerIpcHandler('test-ai-config', testAIConfigHandler);
 
 // Helper function for puter.com AI calls (forwards to renderer)
 let puterResponseListenerSet = false;
-const puterPendingRequests = new Map();
+const puterPendingRequests = new Map(); // Maps requestId -> { resolve, reject, webContents, wsClient }
 
-function createPuterIPCHandler() {
-  // Set up a single listener for all puter responses
+function createPuterIPCHandler(event = null) {
+  console.log('[Puter IPC Handler] createPuterIPCHandler called, has event:', !!event, 'event keys:', event ? Object.keys(event) : []);
+  
+  // Set up a single listener for all puter responses (both IPC and WebSocket)
   if (!puterResponseListenerSet) {
+    // Handle IPC responses (normal mode)
     ipcMain.on('puter-ai-chat-response', (event, requestId, result) => {
       const pending = puterPendingRequests.get(requestId);
       if (pending) {
@@ -6809,11 +7942,55 @@ function createPuterIPCHandler() {
     puterResponseListenerSet = true;
   }
   
+  // Extract webContents and wsClient from event if available
+  let webContents = null;
+  let wsClient = null;
+  
+  if (event) {
+    // In normal mode, event.sender is the webContents
+    if (event.sender && event.sender.send) {
+      webContents = event.sender;
+      console.log('[Puter IPC Handler] Found webContents from event.sender');
+    }
+    // In server mode, event might have a wsClient property (set by WebSocket handler)
+    if (event.wsClient) {
+      wsClient = event.wsClient;
+      console.log('[Puter IPC Handler] Found wsClient from event.wsClient');
+    } else {
+      console.log('[Puter IPC Handler] No wsClient found in event, isServerMode:', isServerMode);
+    }
+  } else {
+    console.log('[Puter IPC Handler] No event provided');
+  }
+  
+  console.log('[Puter IPC Handler] Extracted:', { hasWebContents: !!webContents, hasWsClient: !!wsClient, isServerMode });
+  
   return async (prompt, imageUrl, model) => {
     const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
-      puterPendingRequests.set(requestId, { resolve, reject });
-      mainWindow.webContents.send('puter-ai-chat-request', requestId, prompt, imageUrl, model);
+      // Store both webContents and wsClient for routing responses
+      puterPendingRequests.set(requestId, { resolve, reject, webContents, wsClient });
+      
+      // In server mode with WebSocket client, send via WebSocket
+      // This routes to the browser client where Puter.js is loaded and can show the captcha
+      if (isServerMode && wsClient) {
+        console.log('[Puter AI] Sending request to browser client via WebSocket (captcha will appear in browser window)');
+        wsClient.send(JSON.stringify({
+          type: 'event',
+          channel: 'puter-ai-chat-request',
+          args: [requestId, prompt, imageUrl, model]
+        }));
+      } else if (webContents) {
+        // Normal mode: use the webContents from the event
+        webContents.send('puter-ai-chat-request', requestId, prompt, imageUrl, model);
+      } else if (mainWindow && !mainWindow.isDestroyed()) {
+        // Fallback: use mainWindow (for backward compatibility)
+        mainWindow.webContents.send('puter-ai-chat-request', requestId, prompt, imageUrl, model);
+      } else {
+        reject(new Error('No valid client available for Puter AI request'));
+        return;
+      }
+      
       // Timeout after 60 seconds
       setTimeout(() => {
         if (puterPendingRequests.has(requestId)) {
@@ -6827,7 +8004,8 @@ function createPuterIPCHandler() {
 
 // IPC handler for puter.com AI calls (forwards to renderer)
 ipcMain.handle('puter-ai-chat', async (event, prompt, imageUrl, model) => {
-  const handler = createPuterIPCHandler();
+  // Pass event so it can route to the correct client (WebSocket in server mode, IPC in normal mode)
+  const handler = createPuterIPCHandler(event);
   return await handler(prompt, imageUrl, model);
 });
 
@@ -6837,7 +8015,8 @@ ipcMain.handle('generate-tags', async (event, filePath) => {
     const settings = getSettings();
     
     // Create puter IPC handler if service is puter
-    const puterIPCHandler = settings.aiService === 'puter' ? createPuterIPCHandler() : null;
+    // Pass event so it can route to the correct client (WebSocket in server mode, IPC in normal mode)
+    const puterIPCHandler = settings.aiService === 'puter' ? createPuterIPCHandler(event) : null;
     
     // Initialize OpenAI with the API key
     aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService, puterIPCHandler);
@@ -7117,8 +8296,29 @@ ipcMain.handle('delete-slicer', (event, id) => {
   }
 });
 
-ipcMain.handle('clear-and-save-slicers', async (event, slicers) => {
+const clearAndSaveSlicersHandler = async (event, slicers) => {
   try {
+    // Ensure slicers is an array (WebSocket might wrap it in an array)
+    let slicersArray = slicers;
+    if (!Array.isArray(slicersArray)) {
+      // If it's not an array, try to extract it
+      if (Array.isArray(slicersArray) === false && slicersArray && typeof slicersArray === 'object') {
+        // Might be wrapped: [slicers] -> slicers
+        slicersArray = Array.isArray(slicersArray) ? slicersArray : [slicersArray];
+      } else if (Array.isArray(slicersArray) && slicersArray.length === 1 && Array.isArray(slicersArray[0])) {
+        // Unwrap if double-wrapped: [[slicers]] -> [slicers]
+        slicersArray = slicersArray[0];
+      } else {
+        // Last resort: convert to array
+        slicersArray = [slicersArray];
+      }
+    }
+    
+    // Validate that we have an array
+    if (!Array.isArray(slicersArray)) {
+      throw new Error('slicers parameter must be an array');
+    }
+    
     // Ensure the slicers table exists before clearing and saving
     const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='slicers'`).get();
     if (!tableExists) {
@@ -7132,17 +8332,27 @@ ipcMain.handle('clear-and-save-slicers', async (event, slicers) => {
       
       // Insert new entries
       const insert = db.prepare('INSERT INTO slicers (name, path) VALUES (?, ?)');
-      slicers.forEach(slicer => {
-        insert.run(slicer.name, slicer.path);
+      slicersArray.forEach(slicer => {
+        // Validate slicer object
+        if (slicer && typeof slicer === 'object' && slicer.name && slicer.path) {
+          insert.run(slicer.name, slicer.path);
+        } else {
+          console.warn('Invalid slicer object skipped:', slicer);
+        }
       });
     })();
     
     return true;
   } catch (error) {
     console.error('Error clearing and saving slicers:', error);
+    console.error('slicers parameter type:', typeof slicers, 'isArray:', Array.isArray(slicers), 'value:', slicers);
     throw error;
   }
-});
+};
+
+ipcMain.handle('clear-and-save-slicers', clearAndSaveSlicersHandler);
+// Register in handler registry for WebSocket/Server mode
+ipcHandlerRegistry.set('clear-and-save-slicers', clearAndSaveSlicersHandler);
 
 ipcMain.handle('get-file-stats', async (event, filePath) => {
   try {
@@ -7153,6 +8363,80 @@ ipcMain.handle('get-file-stats', async (event, filePath) => {
     throw error;
   }
 });
+
+// IPC handler for executing commands on client machine (for server mode Electron clients)
+// Note: In server mode, browser clients receive this as an event and handle it in renderer.js
+const executeClientCommandHandler = async (event, commandData) => {
+  try {
+    if (!commandData || !commandData.type) {
+      throw new Error('Invalid command data');
+    }
+
+    const { type, filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath } = commandData;
+
+    if (type === 'open-file') {
+      // Open file with system default application
+      if (isZipEntry && zipPath && entryPath) {
+        // For zip entries, open the zip file
+        await shell.openPath(zipPath);
+      } else {
+        await shell.openPath(filePath);
+      }
+      return { success: true };
+    } else if (type === 'open-in-slicer') {
+      // Execute slicer command on client machine
+      const { exec } = require('child_process');
+      let modelPath = filePath;
+      
+      // Handle zip entries - would need extraction, but for now just use zip path
+      if (isZipEntry && zipPath && entryPath) {
+        // For zip entries, we can't easily pass the entry to the slicer
+        // Show a message instead
+        const win = getWindowFromEvent(event);
+        if (win && !win.isDestroyed()) {
+          dialog.showMessageBox(win, {
+            type: 'info',
+            title: 'ZIP Entry',
+            message: 'Cannot open ZIP entry directly in slicer',
+            detail: `To open ${entryPath} from ${zipPath}:\n\n` +
+              `1. Extract ${entryPath} from the ZIP file\n` +
+              `2. Open the extracted file in ${slicerName}`
+          });
+        }
+        return { success: false, message: 'ZIP entries require extraction first' };
+      }
+      
+      // Construct command based on platform
+      let command;
+      if (process.platform === 'darwin' && slicerPath.toLowerCase().endsWith('.app')) {
+        command = `open -a "${slicerPath}" --args "${modelPath}"`;
+      } else {
+        command = `"${slicerPath}" "${modelPath}"`;
+      }
+      
+      return new Promise((resolve) => {
+        exec(command, (error, stdout, stderr) => {
+          if (error) {
+            console.error('Error executing slicer command on client:', error);
+            resolve({ success: false, error: error.message });
+          } else {
+            console.log('Successfully executed slicer command on client');
+            resolve({ success: true });
+          }
+        });
+      });
+    }
+    
+    return { success: false, error: 'Unknown command type' };
+  } catch (error) {
+    console.error('Error executing client command:', error);
+    throw error;
+  }
+};
+
+ipcMain.handle('execute-client-command', executeClientCommandHandler);
+// Register in handler registry for WebSocket/Server mode (though it should be sent as event, not IPC call)
+ipcHandlerRegistry.set('execute-client-command', executeClientCommandHandler);
 
 ipcMain.handle('get-all-model-references', async () => {
   try {
@@ -7458,6 +8742,49 @@ async function saveModel(modelData) {
       tags: rawTags
     } = modelData;
 
+    // Standalone .zip: only add if "Include zipped models" is enabled; add each STL/3MF inside (like scan)
+    if (filePath && filePath.toLowerCase().endsWith('.zip') && !filePath.includes('::')) {
+      const zipSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipArchives');
+      const enableZipArchives = zipSetting && zipSetting.value === '1';
+      if (!enableZipArchives) {
+        throw new Error('ZIP archives are disabled. Enable "Include zipped models" in Settings to add .zip files.');
+      }
+      // List STL/3MF entries and save each as zipPath::entryPath (same as scan)
+      const StreamZip = require('node-stream-zip');
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`ZIP file not found: ${filePath}`);
+      }
+      const zip = new StreamZip.async({ file: filePath });
+      const entries = await zip.entries();
+      await zip.close();
+      const modelExts = getSupportedExtensionsForLibrary(db);
+      const toAdd = Object.values(entries).filter(
+        (e) => !e.isDirectory && modelExts.includes(path.extname(e.name).toLowerCase())
+      );
+      if (toAdd.length === 0) {
+        throw new Error('No supported model files found in the ZIP file. Enable additional file types in Settings > File Type if needed.');
+      }
+      const baseMeta = {
+        designer,
+        source,
+        notes,
+        printed,
+        parentModel,
+        license,
+        tags: rawTags
+      };
+      for (const entry of toAdd) {
+        const entryPath = `${filePath}::${entry.name}`;
+        const entryFileName = path.basename(entry.name);
+        await saveModel({
+          ...baseMeta,
+          filePath: entryPath,
+          fileName: entryFileName
+        });
+      }
+      return { success: true, expanded: true, count: toAdd.length };
+    }
+
     // Ensure tags is always an array, even if a single string was passed
     const tags = rawTags ? (Array.isArray(rawTags) ? rawTags : [rawTags]) : [];
 
@@ -7679,6 +9006,9 @@ async function saveModel(modelData) {
     throw error;
   }
 }
+
+// Register save-model for Chrome extension (WebSocket works in normal and server mode)
+ipcHandlerRegistry.set('save-model', async (event, modelData) => await saveModel(modelData));
 
 // Add this function before saveModel
 function verifyDatabaseIntegrity() {
