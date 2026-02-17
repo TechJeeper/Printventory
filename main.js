@@ -522,6 +522,9 @@ function startHttpServer(port = 5000, localhostOnly = false) {
     }
   });
 
+  // JSON body parser for extension upload (large payloads for base64 file)
+  expressApp.use(express.json({ limit: '50mb' }));
+
   // Serve static files from the application directory
   const appDir = __dirname;
   // Ensure renderer.js, styles.css, images, and server-bridge.js are served
@@ -619,6 +622,20 @@ ${bridgeCode}
   // This ensures the route handler takes precedence for the root path
   expressApp.use(express.static(appDir));
 
+  // Extension upload: accept file bytes + metadata, write to configured directory (e.g. NAS), then saveModel
+  expressApp.post('/api/extension-upload', async (req, res) => {
+    try {
+      const result = await saveModelFromUpload(req.body || {});
+      res.status(200).json(result || { success: true });
+    } catch (err) {
+      console.error('Extension upload error:', err);
+      const msg = err && err.message ? err.message : 'Upload failed';
+      if (msg.includes('not configured')) res.status(400).json({ error: msg });
+      else if (msg.includes('Invalid') || msg.includes('Empty') || msg.includes('Missing')) res.status(400).json({ error: msg });
+      else res.status(500).json({ error: msg });
+    }
+  });
+
   // Serve files via HTTP for server mode (UNC paths or Docker-mounted paths)
   expressApp.get('/api/file/*', (req, res) => {
     try {
@@ -627,9 +644,9 @@ ${bridgeCode}
       
       // Validate path (UNC paths on Windows, absolute paths in Docker)
       if (isDockerContainer()) {
-        // In Docker, require absolute paths starting with /
+        // In Docker, require absolute paths starting with /. Client paths (e.g. C:\ from extension) are not on the server.
         if (!filePath.startsWith('/') && !isUncPath(filePath)) {
-          res.status(400).send('Invalid path: Docker server mode requires absolute paths (e.g., /mnt/network-share/path/to/file.stl)');
+          res.status(404).setHeader('X-File-Not-On-Server', '1').send('File not on server (path is on client). Use extension "Use upload for server" to add files to the server.');
           return;
         }
       } else {
@@ -1439,6 +1456,21 @@ if (!gotTheLock) {
         }
       }
 
+      // Check for EXTENSION_UPLOAD_DIR environment variable (Docker/NAS: where to save extension-uploaded files)
+      const extensionUploadDirEnv = process.env.EXTENSION_UPLOAD_DIR;
+      if (extensionUploadDirEnv && extensionUploadDirEnv.trim() !== '') {
+        try {
+          db.prepare(`
+            INSERT INTO settings (key, value) 
+            VALUES (?, ?) 
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+          `).run('extensionUploadDirectory', extensionUploadDirEnv.trim());
+          console.log('EXTENSION_UPLOAD_DIR environment variable set to:', extensionUploadDirEnv.trim());
+        } catch (extUploadError) {
+          console.error('Error setting EXTENSION_UPLOAD_DIR from environment variable:', extUploadError);
+        }
+      }
+
       // Check for updates before creating window (skip in server mode)
       if (!isServerMode) {
         try {
@@ -1459,6 +1491,8 @@ if (!gotTheLock) {
         }
         // Create a hidden BrowserWindow to handle IPC (preload script needs a window)
         await createHiddenWindow();
+        // Schedule background hash generation for any existing models with missing hashes
+        scheduleBackgroundHashGeneration('startup');
         // Don't quit when all windows are closed in server mode
         app.on('window-all-closed', () => {
           // Keep the app running in server mode
@@ -2417,13 +2451,15 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
-// Apply path-based metadata for STL Home scan: segments from model level up (0 = parent of file, 1 = grandparent, ...).
-// Only sets designer/parentModel when current value is empty. Uses pathMetadataStlHomeEnabled, pathMetadataUseDesigner,
-// pathMetadataUseParentModel, pathMetadataDesignerIndex, pathMetadataParentModelIndex.
+// Apply path-based metadata for STL Home scan: segments from root (From Root) or from model up (From Model).
+// Only sets designer/parentModel when current value is empty. Uses pathMetadataStlHomeEnabled, pathMetadataStlHomeDirection,
+// pathMetadataUseDesigner, pathMetadataUseParentModel, pathMetadataDesignerIndex, pathMetadataParentModelIndex.
 function applyPathMetadataFromSegments(scanRootPath, filePaths) {
   if (!db || !db.prepare) return;
   const enabledRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataStlHomeEnabled');
   if (!enabledRow || enabledRow.value !== '1') return;
+  const directionRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataStlHomeDirection');
+  const fromRoot = directionRow?.value === 'fromRoot';
   const useDesigner = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataUseDesigner');
   const useParentModel = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataUseParentModel');
   const designerIndexRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('pathMetadataDesignerIndex');
@@ -2446,9 +2482,9 @@ function applyPathMetadataFromSegments(scanRootPath, filePaths) {
       const relative = path.relative(normalizedRoot, normalizedFile);
       relativeDir = path.dirname(relative);
     }
-    // UI: "level 0 = parent of file, 1 = grandparent, ..." (file upward). path.relative gives root-to-file order, so reverse.
     const segmentsRootToFile = normalizePath(relativeDir).split('/').filter(Boolean);
-    const segments = segmentsRootToFile.slice().reverse();
+    // From Root: level 0 = first folder under STL Home, 1 = second, ... From Model: level 0 = parent of file, 1 = grandparent, ...
+    const segments = fromRoot ? segmentsRootToFile : segmentsRootToFile.slice().reverse();
     const derivedDesigner = applyDesigner && segments.length > designerIndex ? segments[designerIndex] : null;
     const derivedParentModel = applyParentModel && segments.length > parentModelIndex ? segments[parentModelIndex] : null;
     const model = getModel.get(filePath);
@@ -2748,9 +2784,11 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
           try {
             // Process files in larger batches for better performance
             const batchSize = 100; // Increased batch size
+            // Preserve existing hash when scan doesn't provide one (worker sends null to avoid slow scans).
+            // Otherwise every scan would overwrite hashes with '' and trigger full hash regeneration on each start.
             const updateExisting = db.prepare(`
               UPDATE models 
-              SET hash = ?, size = ?, modifiedDate = ?
+              SET hash = COALESCE(NULLIF(?, ''), hash), size = ?, modifiedDate = ?
               WHERE filePath = ?
             `);
             
@@ -2969,6 +3007,10 @@ ipcMain.handle('get-model', async (event, filePath) => {
 // Update the save-model handler to not store tags in the models table
 ipcMain.handle('save-model', async (event, modelData) => {
   return await saveModel(modelData);
+});
+
+ipcMain.handle('save-model-from-upload', async (event, payload) => {
+  return await saveModelFromUpload(payload);
 });
 
 ipcMain.handle('save-model-batch', async (event, modelDataBatch) => {
@@ -3407,6 +3449,54 @@ ipcMain.handle('save-tag', async (event, tagName) => {
 // Add error handling to the getSetting handler
 ipcMain.handle('get-additional-file-types-catalog', async () => {
   return ADDITIONAL_FILE_TYPES_CATALOG;
+});
+
+/** Get extensions (e.g. ['.obj']) for catalog ids (e.g. ['obj']). Used to find/remove models by file type. */
+function getExtensionsForCatalogIds(catalogIds) {
+  if (!catalogIds || !Array.isArray(catalogIds) || catalogIds.length === 0) return [];
+  const extSet = new Set();
+  for (const id of catalogIds) {
+    const entry = ADDITIONAL_FILE_TYPES_CATALOG.find(e => e.id === id);
+    if (entry) entry.extensions.forEach(ext => extSet.add(ext));
+  }
+  return Array.from(extSet);
+}
+
+ipcMain.handle('get-model-count-by-file-type-ids', async (event, catalogIds) => {
+  try {
+    const exts = getExtensionsForCatalogIds(catalogIds);
+    if (exts.length === 0) return 0;
+    const conditions = exts.map(() => 'LOWER(fileName) LIKE ?').join(' OR ');
+    const params = exts.map(ext => `%${ext}`);
+    const row = db.prepare(`SELECT COUNT(*) AS count FROM models WHERE ${conditions}`).get(...params);
+    return row ? row.count : 0;
+  } catch (error) {
+    console.error('Error getting model count by file type ids:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('remove-models-by-file-type-ids', async (event, catalogIds) => {
+  try {
+    const exts = getExtensionsForCatalogIds(catalogIds);
+    if (exts.length === 0) return { deleted: 0 };
+    const conditions = exts.map(() => 'LOWER(fileName) LIKE ?').join(' OR ');
+    const params = exts.map(ext => `%${ext}`);
+    const modelRows = db.prepare(`SELECT id FROM models WHERE ${conditions}`).all(...params);
+    const ids = modelRows.map(r => r.id);
+    if (ids.length === 0) return { deleted: 0 };
+    const deleted = db.transaction(() => {
+      for (const id of ids) {
+        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(id);
+        db.prepare('DELETE FROM models WHERE id = ?').run(id);
+      }
+      return ids.length;
+    })();
+    return { deleted };
+  } catch (error) {
+    console.error('Error removing models by file type ids:', error);
+    throw error;
+  }
 });
 
 const getSettingHandler = async (event, key) => {
@@ -5188,7 +5278,11 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           const validFilePaths = filePaths.filter(fp => fp && typeof fp === 'string');
           
           // Deduplicate by normalized path (avoids duplicate entries when new models added before refresh, e.g. server/docker)
-          const normalizePathForDedup = (p) => (p && typeof p === 'string') ? p.replace(/\\/g, '/').toLowerCase().trim() : '';
+          const normalizePathForDedup = (p) => {
+            if (!p || typeof p !== 'string') return '';
+            const n = p.replace(/\\/g, '/').toLowerCase().trim();
+            return n.replace(/^\/+/, ''); // strip leading slashes so "/3dmodels/..." and "3dmodels/..." match
+          };
           const seenPaths = new Set();
           const filesToProcess = [];
           for (const fp of (validFilePaths.length > 0 ? validFilePaths : filePaths)) {
@@ -5329,12 +5423,14 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               return;
               }
               
-              // Prepare tag generation options
+              // Prepare tag generation options (read aiTagPrompt from DB so we always have latest)
+              const aiTagPromptValue = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagPrompt')?.value ?? null;
               const tagOptions = {
                 maxTags: settings.aiTagMaxTags,
                 useCategories: settings.aiTagUseCategories,
                 useJsonResponse: settings.aiTagUseJsonResponse,
-                detailLevel: settings.aiTagDetailLevel
+                detailLevel: settings.aiTagDetailLevel,
+                customPrompt: (aiTagPromptValue != null && String(aiTagPromptValue).trim() !== '') ? String(aiTagPromptValue).trim() : null
               };
               
               let tags = [];
@@ -5672,18 +5768,18 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     });
   }
 
-  // Add "Add Image" option for single file selection
-  if (filePaths.length === 1) {
+  // Add "Add Image" option for single or multi selection (same image added to all selected)
+  if (filePaths.length >= 1) {
     menuItems.push({
       label: 'Add Image',
       click: async () => {
         try {
           if (isServerMode) {
-            // In server mode: send event to renderer to show file input dialog
+            // In server mode: send event to renderer to show file input dialog (pass all paths for multi-edit)
             if (global.broadcastEvent) {
-              global.broadcastEvent('add-image-request', filePaths[0]);
+              global.broadcastEvent('add-image-request', filePaths);
             } else {
-              event.sender.send('add-image-request', filePaths[0]);
+              event.sender.send('add-image-request', filePaths);
             }
           } else {
             // Normal mode: use native file dialog
@@ -5711,31 +5807,24 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               const base64Data = imageData.toString('base64');
               const dataUrl = `data:${mimeType};base64,${base64Data}`;
               
-              // Add thumbnail to model
-              const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
-              const currentThumbnail = model?.thumbnail || null;
-              const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, dataUrl);
-              
-              // Parse thumbnails to get count
-              const thumbnails = parseThumbnails(thumbnailsWithNew);
-              const newImageIndex = thumbnails.length - 1; // The new image is at the end
-              
-              // Make the new image the default (move it to the front)
-              const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
-              await saveThumbnail(filePaths[0], updatedThumbnail);
-              
-              // Verify the save was successful
-              const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
-              const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
-              
-              // Send message to renderer to refresh the grid with updated thumbnail
-              // The renderer will handle the refresh with a delay to ensure database write completes
-              event.sender.send('thumbnail-added', {
-                filePath: filePaths[0],
-                thumbnailCount: finalThumbnails.length,
-                hasMultiple: finalThumbnails.length > 1,
-                newImageIsDefault: true
-              });
+              // Add the same image to each selected model
+              for (const filePath of filePaths) {
+                const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+                const currentThumbnail = model?.thumbnail || null;
+                const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, dataUrl);
+                const thumbnails = parseThumbnails(thumbnailsWithNew);
+                const newImageIndex = thumbnails.length - 1;
+                const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
+                await saveThumbnail(filePath, updatedThumbnail);
+                const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+                const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
+                event.sender.send('thumbnail-added', {
+                  filePath: filePath,
+                  thumbnailCount: finalThumbnails.length,
+                  hasMultiple: finalThumbnails.length > 1,
+                  newImageIsDefault: true
+                });
+              }
             }
           }
         } catch (error) {
@@ -5752,8 +5841,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         }
       }
     });
-    
-    // Add "Manage Thumbnails" option for single file selection
+  }
+
+  // Add "Manage Thumbnails" option for single file selection only
+  if (filePaths.length === 1) {
     menuItems.push({
       label: 'Manage Thumbnails',
       click: async () => {
@@ -5840,42 +5931,47 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     {
       label: 'Remove from Library',
       click: async () => {
-        // Limit file list display to prevent dialog from becoming too tall
-        const maxFilesToShow = 20;
-        const fileList = filePaths.slice(0, maxFilesToShow).map(fp => path.basename(fp)).join('\n');
-        const moreFiles = filePaths.length > maxFilesToShow ? `\n... and ${filePaths.length - maxFilesToShow} more file${filePaths.length - maxFilesToShow === 1 ? '' : 's'}` : '';
-        
-        const confirm = await dialog.showMessageBox({
-          type: 'warning',
-          title: 'Confirm Remove',
-          message: `Are you sure you want to remove ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${fileList}${moreFiles}`,
-          buttons: ['Yes', 'No'],
-          defaultId: 1,
-          cancelId: 1,
-        });
-        if (confirm.response === 0) { // User clicked "Yes"
+        // In server mode (Docker/browser), no native dialog - proceed and broadcast refresh
+        let confirmed = isServerMode;
+        if (!isServerMode) {
+          const maxFilesToShow = 20;
+          const fileList = filePaths.slice(0, maxFilesToShow).map(fp => path.basename(fp)).join('\n');
+          const moreFiles = filePaths.length > maxFilesToShow ? `\n... and ${filePaths.length - maxFilesToShow} more file${filePaths.length - maxFilesToShow === 1 ? '' : 's'}` : '';
+          const confirm = await dialog.showMessageBox({
+            type: 'warning',
+            title: 'Confirm Remove',
+            message: `Are you sure you want to remove ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${fileList}${moreFiles}`,
+            buttons: ['Yes', 'No'],
+            defaultId: 1,
+            cancelId: 1,
+          });
+          confirmed = confirm.response === 0;
+        }
+        if (confirmed) {
           try {
-            // Use a transaction to handle all removals
             db.transaction(() => {
               filePaths.forEach(fp => {
                 const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
                 if (model) {
-                  // First delete from model_tags (child table)
                   db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-                  // Then delete from models (parent table)
                   db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
                 }
               });
             })();
-            
-            event.sender.send('refresh-grid');
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('refresh-grid');
+            } else {
+              event.sender.send('refresh-grid');
+            }
           } catch (error) {
             console.error('Error removing from library:', error);
-            await dialog.showMessageBox({
-              type: 'error',
-              title: 'Error',
-              message: `An error occurred while removing from library: ${error.message}`
-            });
+            if (!isServerMode) {
+              await dialog.showMessageBox({
+                type: 'error',
+                title: 'Error',
+                message: `An error occurred while removing from library: ${error.message}`
+              });
+            }
           }
         }
       }
@@ -5883,24 +5979,27 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     {
       label: 'Delete from Disk',  // Renamed from just "Delete"
       click: async () => {
-        // Limit file list display to prevent dialog from becoming too tall
-        const maxFilesToShow = 20;
-        const fileList = filePaths.slice(0, maxFilesToShow).map(fp => path.basename(fp)).join('\n');
-        const moreFiles = filePaths.length > maxFilesToShow ? `\n... and ${filePaths.length - maxFilesToShow} more file${filePaths.length - maxFilesToShow === 1 ? '' : 's'}` : '';
-        
-        const confirm = await dialog.showMessageBox({
-          type: 'warning',
-          title: 'Confirm Delete',
-          message: `Are you sure you want to DELETE ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from disk?\nThis will permanently delete the files and cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
-          buttons: ['Yes', 'No'],
-          defaultId: 1,
-          cancelId: 1,
-        });
-        if (confirm.response === 0) { // User clicked "Yes"
+        // In server mode (Docker/browser), no native dialog - proceed and broadcast refresh
+        let confirmed = isServerMode;
+        if (!isServerMode) {
+          const maxFilesToShow = 20;
+          const fileList = filePaths.slice(0, maxFilesToShow).map(fp => path.basename(fp)).join('\n');
+          const moreFiles = filePaths.length > maxFilesToShow ? `\n... and ${filePaths.length - maxFilesToShow} more file${filePaths.length - maxFilesToShow === 1 ? '' : 's'}` : '';
+          const confirm = await dialog.showMessageBox({
+            type: 'warning',
+            title: 'Confirm Delete',
+            message: `Are you sure you want to DELETE ${filePaths.length} file${filePaths.length === 1 ? '' : 's'} from disk?\nThis will permanently delete the files and cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
+            buttons: ['Yes', 'No'],
+            defaultId: 1,
+            cancelId: 1,
+          });
+          confirmed = confirm.response === 0;
+        }
+        if (confirmed) {
           for (const fp of filePaths) {
             try {
               const success = await deleteFile(fp);
-              if (!success) {
+              if (!success && !isServerMode) {
                 await dialog.showMessageBox({
                   type: 'error',
                   title: 'Error',
@@ -5909,14 +6008,20 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               }
             } catch (error) {
               console.error('Error deleting file:', error);
-              await dialog.showMessageBox({
-                type: 'error',
-                title: 'Error',
-                message: `An error occurred: ${error.message}`
-              });
+              if (!isServerMode) {
+                await dialog.showMessageBox({
+                  type: 'error',
+                  title: 'Error',
+                  message: `An error occurred: ${error.message}`
+                });
+              }
             }
           }
-          event.sender.send('refresh-grid');
+          if (isServerMode && global.broadcastEvent) {
+            global.broadcastEvent('refresh-grid');
+          } else {
+            event.sender.send('refresh-grid');
+          }
         }
       }
     }
@@ -6269,6 +6374,19 @@ function parseZipPath(filePath) {
   return { zipPath: filePath, entryPath: null, isZipEntry: false };
 }
 
+// Skip macOS resource-fork / AppleDouble entries (._*) - they are not valid 3MF/ZIP
+function isMacOsResourceForkEntry(entryPath) {
+  if (!entryPath) return false;
+  const base = path.basename(entryPath);
+  return base.startsWith('._');
+}
+
+// Minimum ZIP is 22 bytes (end-of-central-directory). 3MF is ZIP-based (starts with PK).
+function isLikelyValidZipBuffer(data) {
+  if (!Buffer.isBuffer(data) || data.length < 22) return false;
+  return data[0] === 0x50 && data[1] === 0x4B; // PK
+}
+
 // Helper function to extract model from zip to temp file or specified destination
 async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
   try {
@@ -6426,6 +6544,10 @@ async function extract3MFMetadata(filePath) {
     let actualFilePath = filePath;
     let shouldCleanup = false;
     
+    if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+      return null;
+    }
+    
     if (pathInfo.isZipEntry) {
       // Extract to temp file first
       try {
@@ -6443,10 +6565,19 @@ async function extract3MFMetadata(filePath) {
       return null;
     }
     
+    const data = await fs.promises.readFile(actualFilePath);
+    if (!isLikelyValidZipBuffer(data)) {
+      return null;
+    }
+    
     // Use JSZip to extract the 3MF file (which is a zip file)
     const zip = new JSZip();
-    const data = await fs.promises.readFile(actualFilePath);
-    const contents = await zip.loadAsync(data);
+    let contents;
+    try {
+      contents = await zip.loadAsync(data);
+    } catch (zipError) {
+      return null;
+    }
     
     // Parse 3dmodel.model XML file to extract metadata
     const modelXmlPath = '3D/3dmodel.model';
@@ -6498,6 +6629,12 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   const pathInfo = parseZipPath(filePath);
   let actualFilePath = filePath;
   
+  // Skip macOS resource-fork entries (._*) - not valid 3MF
+  if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+    console.log('Skipping macOS resource-fork entry (not a 3MF):', pathInfo.entryPath);
+    return [];
+  }
+  
   if (pathInfo.isZipEntry) {
     // Extract to temp file first
     try {
@@ -6517,16 +6654,26 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       return [];
     }
     
-    // Use JSZip to extract the 3MF file (which is a zip file)
-    console.log('Creating JSZip instance...');
-    const zip = new JSZip();
-    
-    console.log('Reading file data...');
     const data = await fs.promises.readFile(actualFilePath);
-    console.log('File read successfully, size:', data.length, 'bytes');
+    if (!isLikelyValidZipBuffer(data)) {
+      console.log('Skipping non-ZIP or too-small file (e.g. macOS ._ file):', actualFilePath, 'size:', data.length);
+      return [];
+    }
     
-    console.log('Loading zip contents...');
-    const contents = await zip.loadAsync(data);
+    // Use JSZip to extract the 3MF file (which is a zip file)
+    const zip = new JSZip();
+    let contents;
+    try {
+      contents = await zip.loadAsync(data);
+    } catch (zipError) {
+      const msg = zipError && zipError.message ? zipError.message : String(zipError);
+      if (/end of central directory|not a zip/i.test(msg)) {
+        console.log('Invalid or truncated ZIP/3MF, skipping:', actualFilePath);
+      } else {
+        console.error('Error loading 3MF as ZIP:', zipError);
+      }
+      return [];
+    }
     console.log('Zip contents loaded successfully');
     
     // Log all files in the 3MF
@@ -6756,6 +6903,10 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
     let actualFilePath = filePath;
     let shouldCleanup = false;
     
+    if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+      return null;
+    }
+    
     if (pathInfo.isZipEntry) {
       // Extract to temp file first
       try {
@@ -6767,9 +6918,18 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
       }
     }
     
-    const zip = new JSZip();
     const data = await fs.promises.readFile(actualFilePath);
-    const contents = await zip.loadAsync(data);
+    if (!isLikelyValidZipBuffer(data)) {
+      return null;
+    }
+    
+    const zip = new JSZip();
+    let contents;
+    try {
+      contents = await zip.loadAsync(data);
+    } catch (zipError) {
+      return null;
+    }
     
     // Look for STL files in the 3MF
     for (const [entryPath, file] of Object.entries(contents.files)) {
@@ -6848,6 +7008,9 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
   let fileStat = null;
 
   if (pathInfo.isZipEntry) {
+    if (isMacOsResourceForkEntry(pathInfo.entryPath)) {
+      throw new Error('macOS resource-fork entry is not a valid 3MF');
+    }
     actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
     shouldCleanup = true;
   }
@@ -7548,16 +7711,16 @@ ipcMain.handle('add-thumbnail', async (event, filePath, imageDataUrl) => {
     const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
     
     // Send message to renderer to refresh the grid with updated thumbnail
-    if (event && event.sender) {
-      event.sender.send('thumbnail-added', {
+    // In server mode always broadcast so browser clients get the update (invoke may come via hidden window)
+    if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent('thumbnail-added', {
         filePath: filePath,
         thumbnailCount: finalThumbnails.length,
         hasMultiple: finalThumbnails.length > 1,
         newImageIsDefault: true
       });
-    } else if (isServerMode && global.broadcastEvent) {
-      // In server mode, broadcast the event to all clients
-      global.broadcastEvent('thumbnail-added', {
+    } else if (event && event.sender) {
+      event.sender.send('thumbnail-added', {
         filePath: filePath,
         thumbnailCount: finalThumbnails.length,
         hasMultiple: finalThumbnails.length > 1,
@@ -7918,6 +8081,17 @@ const testAIConfigHandler = async (event, apiKey, baseURL, model, service) => {
 // Register handler for both IPC and WebSocket (server mode)
 registerIpcHandler('test-ai-config', testAIConfigHandler);
 
+ipcMain.handle('get-default-ai-prompt', async () => {
+  const settings = getSettings();
+  const aitagging = require('./aitagging');
+  return aitagging.getDefaultPrompt({
+    maxTags: settings.aiTagMaxTags,
+    useCategories: settings.aiTagUseCategories,
+    useJsonResponse: settings.aiTagUseJsonResponse,
+    detailLevel: settings.aiTagDetailLevel
+  });
+});
+
 // Helper function for puter.com AI calls (forwards to renderer)
 let puterResponseListenerSet = false;
 const puterPendingRequests = new Map(); // Maps requestId -> { resolve, reject, webContents, wsClient }
@@ -8045,14 +8219,16 @@ ipcMain.handle('generate-tags', async (event, filePath) => {
       return [];
     }
     
-    // Prepare tag generation options
+    // Prepare tag generation options (read aiTagPrompt from DB so we always have latest)
+    const aiTagPromptValue = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagPrompt')?.value ?? null;
     const tagOptions = {
       maxTags: settings.aiTagMaxTags,
       useCategories: settings.aiTagUseCategories,
       useJsonResponse: settings.aiTagUseJsonResponse,
-      detailLevel: settings.aiTagDetailLevel
+      detailLevel: settings.aiTagDetailLevel,
+      customPrompt: (aiTagPromptValue != null && String(aiTagPromptValue).trim() !== '') ? String(aiTagPromptValue).trim() : null
     };
-    
+
     if (!model.thumbnail) {
       // If no thumbnail exists, we need to generate one or use a default image
       console.log('No thumbnail found for model, using default image');
@@ -8111,6 +8287,7 @@ function getSettings() {
   const aiTagAllowRetaggingRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagAllowRetagging');
   const aiTagConcurrencyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagConcurrency');
   const aiTagDetailLevelRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagDetailLevel');
+  const aiTagPromptRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagPrompt');
   
   return {
     apiKey: apiKeyRow ? apiKeyRow.value : null,
@@ -8123,7 +8300,8 @@ function getSettings() {
     aiTagMergeStrategy: aiTagMergeStrategyRow ? aiTagMergeStrategyRow.value : 'merge',
     aiTagAllowRetagging: aiTagAllowRetaggingRow ? aiTagAllowRetaggingRow.value === '1' : false,
     aiTagConcurrency: aiTagConcurrencyRow ? parseInt(aiTagConcurrencyRow.value) || 3 : 3,
-    aiTagDetailLevel: aiTagDetailLevelRow ? aiTagDetailLevelRow.value : 'medium'
+    aiTagDetailLevel: aiTagDetailLevelRow ? aiTagDetailLevelRow.value : 'medium',
+    aiTagPrompt: aiTagPromptRow ? aiTagPromptRow.value : null
   };
 }
 
@@ -8729,9 +8907,9 @@ async function saveModel(modelData) {
   try {
     console.log('saveModel called with data:', JSON.stringify(modelData, null, 2));
     
-    const {
+    let {
       id: inputId, // Rename to avoid confusion
-      filePath,
+      filePath: filePathIn,
       fileName,
       designer,
       source,
@@ -8741,6 +8919,41 @@ async function saveModel(modelData) {
       license,
       tags: rawTags
     } = modelData;
+
+    // Extension path mapping (Docker: client path -> container path) and optional copy to NAS
+    let resolvedFilePath = filePathIn;
+    const clientPrefixRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('extensionClientPathPrefix');
+    const containerPrefixRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('extensionContainerPathPrefix');
+    const copyToNasRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('extensionCopyToNasPath');
+    const clientPrefix = (clientPrefixRow && clientPrefixRow.value) ? String(clientPrefixRow.value).replace(/\\/g, '/').trim().replace(/\/+$/, '') : '';
+    const containerPrefix = (containerPrefixRow && containerPrefixRow.value) ? String(containerPrefixRow.value).replace(/\\/g, '/').trim().replace(/\/+$/, '') : '';
+    const copyToNasPath = (copyToNasRow && copyToNasRow.value) ? String(copyToNasRow.value).replace(/\\/g, '/').trim().replace(/\/+$/, '') : '';
+    if (clientPrefix && containerPrefix && filePathIn && typeof filePathIn === 'string') {
+      const normalizedInput = filePathIn.replace(/\\/g, '/').trim();
+      const prefixNorm = clientPrefix.toLowerCase();
+      const inputNorm = normalizedInput.toLowerCase();
+      if (inputNorm.startsWith(prefixNorm)) {
+        const rest = normalizedInput.slice(clientPrefix.length).replace(/^\//, '');
+        resolvedFilePath = containerPrefix + (rest ? '/' + rest : '');
+      }
+    }
+    const zipSepForCopy = resolvedFilePath ? resolvedFilePath.indexOf('::') : -1;
+    const srcFileForCopy = (resolvedFilePath && zipSepForCopy >= 0) ? resolvedFilePath.slice(0, zipSepForCopy) : resolvedFilePath;
+    if (copyToNasPath && srcFileForCopy && fs.existsSync(srcFileForCopy)) {
+      const base = path.basename(srcFileForCopy);
+      const destFile = path.join(copyToNasPath, base);
+      if (!fs.existsSync(path.dirname(destFile))) fs.mkdirSync(path.dirname(destFile), { recursive: true });
+      if (path.resolve(srcFileForCopy) !== path.resolve(destFile)) {
+        fs.copyFileSync(srcFileForCopy, destFile);
+        resolvedFilePath = (zipSepForCopy >= 0) ? destFile + resolvedFilePath.slice(zipSepForCopy) : destFile;
+      }
+    } else if (copyToNasPath && resolvedFilePath) {
+      const srcFile = (zipSepForCopy >= 0) ? resolvedFilePath.slice(0, zipSepForCopy) : resolvedFilePath;
+      if (srcFile && !fs.existsSync(srcFile)) {
+        console.warn('saveModel: extension path mapping resolved path not found on server:', srcFile);
+      }
+    }
+    const filePath = resolvedFilePath;
 
     // Standalone .zip: only add if "Include zipped models" is enabled; add each STL/3MF inside (like scan)
     if (filePath && filePath.toLowerCase().endsWith('.zip') && !filePath.includes('::')) {
@@ -9009,6 +9222,42 @@ async function saveModel(modelData) {
 
 // Register save-model for Chrome extension (WebSocket works in normal and server mode)
 ipcHandlerRegistry.set('save-model', async (event, modelData) => await saveModel(modelData));
+
+// Extension upload: write file to configured directory then saveModel (used by POST /api/extension-upload and IPC)
+async function saveModelFromUpload(payload) {
+  if (!db) throw new Error('Database not ready');
+  const { fileBase64, fileName: requestedFileName, designer, source, notes, parentModel, license } = payload || {};
+  if (!fileBase64 || typeof fileBase64 !== 'string') throw new Error('Missing or invalid fileBase64');
+  const uploadDirRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('extensionUploadDirectory');
+  let uploadDir = (uploadDirRow && uploadDirRow.value) ? String(uploadDirRow.value).trim() : '';
+  if (!uploadDir && process.env.EXTENSION_UPLOAD_DIR) uploadDir = String(process.env.EXTENSION_UPLOAD_DIR).trim();
+  if (!uploadDir) throw new Error('Extension upload directory not configured. Set Settings > Chrome Extension > Upload directory, or EXTENSION_UPLOAD_DIR in Docker.');
+  const baseName = requestedFileName && path.basename(String(requestedFileName).trim()) || 'model.stl';
+  const safeFileName = baseName.replace(/[<>:"/\\|?*]/g, '_') || 'model.stl';
+  const resolvedUploadDir = path.resolve(uploadDir);
+  const targetPath = path.join(resolvedUploadDir, safeFileName);
+  const targetPathResolved = path.resolve(targetPath);
+  if (!targetPathResolved.startsWith(resolvedUploadDir)) throw new Error('Invalid path');
+  if (!fs.existsSync(resolvedUploadDir)) fs.mkdirSync(resolvedUploadDir, { recursive: true });
+  let buffer;
+  try {
+    buffer = Buffer.from(fileBase64, 'base64');
+  } catch (e) {
+    throw new Error('Invalid base64 file content');
+  }
+  if (buffer.length === 0) throw new Error('Empty file');
+  fs.writeFileSync(targetPathResolved, buffer);
+  return await saveModel({
+    filePath: targetPathResolved,
+    fileName: safeFileName,
+    designer: designer || null,
+    source: source || null,
+    notes: notes || null,
+    parentModel: parentModel || null,
+    license: license || null
+  });
+}
+ipcHandlerRegistry.set('save-model-from-upload', async (event, payload) => await saveModelFromUpload(payload));
 
 // Add this function before saveModel
 function verifyDatabaseIntegrity() {

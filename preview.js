@@ -289,6 +289,20 @@ console.log('[Preview] preview.js script loaded');
     }
   }
 
+  const MAX_STL_TRIANGLES = 10000000;
+
+  function validateSTLBuffer(buffer) {
+    if (buffer.byteLength < 84) throw new Error('STL file too small to be valid');
+    const dv = new DataView(buffer);
+    const triangleCount = dv.getUint32(80, true);
+    const expectedBinarySize = 84 + triangleCount * 50;
+    if (expectedBinarySize === buffer.byteLength && triangleCount > MAX_STL_TRIANGLES) {
+      throw new Error(
+        `STL has too many triangles (${triangleCount.toLocaleString()}). Max ${MAX_STL_TRIANGLES.toLocaleString()}. File may be corrupted.`
+      );
+    }
+  }
+
   function loadSTLFromPath(filePath, loadToken) {
     return new Promise((resolve, reject) => {
       if (!THREE.STLLoader) {
@@ -299,9 +313,16 @@ console.log('[Preview] preview.js script loaded');
       const loader = new THREE.STLLoader();
       const encodedFilePath = getEncodedFilePath(filePath);
 
-      loader.load(
-        encodedFilePath,
-        (geometry) => {
+      fetch(encodedFilePath)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.arrayBuffer();
+        })
+        .then((buffer) => {
+          validateSTLBuffer(buffer);
+          return loader.parse(buffer);
+        })
+        .then((geometry) => {
           if (loadToken !== previewLoadToken) {
             reject(new Error('Preview cancelled'));
             return;
@@ -325,13 +346,11 @@ console.log('[Preview] preview.js script loaded');
 
           const mesh = new THREE.Mesh(geometry, material);
           resolve(mesh);
-        },
-        undefined,
-        (error) => {
+        })
+        .catch((error) => {
           console.error('STL preview load error:', error);
           reject(error);
-        }
-      );
+        });
     });
   }
 
@@ -466,7 +485,7 @@ console.log('[Preview] preview.js script loaded');
             return;
           }
           console.log('STL file read, size:', arrayBuffer.byteLength, 'bytes');
-          
+          validateSTLBuffer(arrayBuffer);
           // Parse the STL data
           console.log('Parsing STL data...');
           const geometry = loader.parse(arrayBuffer);

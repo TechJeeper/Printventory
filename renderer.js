@@ -115,17 +115,40 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
   const dialogEl = document.getElementById('file-type-settings-dialog');
   if (!dialogEl || !window.electron?.saveSetting) return;
   try {
-    const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
-    const enableZipArchives = checkbox?.checked ? '1' : '0';
-    await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+    // Get previously saved scan types to detect unchecked (removed) types
+    let previousIds = [];
+    try {
+      const previousRaw = await window.electron.getSetting('scanAdditionalFileTypes');
+      if (previousRaw) previousIds = JSON.parse(previousRaw);
+    } catch (e) { /* ignore */ }
 
-    // Read additional file type checkboxes from the dialog so state is correct in Docker/server
     const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
     const selectedScanTypes = [];
     for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
       const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
       if (el && el.checked) selectedScanTypes.push(id);
     }
+    const uncheckedIds = previousIds.filter(id => !selectedScanTypes.includes(id));
+
+    if (uncheckedIds.length > 0 && window.electron?.getModelCountByFileTypeIds && window.electron?.removeModelsByFileTypeIds) {
+      const count = await window.electron.getModelCountByFileTypeIds(uncheckedIds);
+      if (count > 0) {
+        const catalog = await window.electron.getAdditionalFileTypesCatalog().catch(() => []);
+        const labels = uncheckedIds.map(id => (catalog.find(e => e.id === id) || {}).label || id).join(', ');
+        const message = count === 1
+          ? `Unchecking "${labels}" will remove 1 file of that type from the library. This cannot be undone. Continue?`
+          : `Unchecking ${labels} will remove ${count} files of those types from the library. This cannot be undone. Continue?`;
+        const confirmResult = await window.electron.showMessage('Remove file type from library?', message, ['Yes', 'No']);
+        if (confirmResult !== 'Yes') return;
+        await window.electron.removeModelsByFileTypeIds(uncheckedIds);
+        if (typeof window.performCombinedSearch === 'function') await window.performCombinedSearch();
+      }
+    }
+
+    const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
+    const enableZipArchives = checkbox?.checked ? '1' : '0';
+    await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+
     const scanTypesValue = JSON.stringify(selectedScanTypes);
     await window.electron.saveSetting('scanAdditionalFileTypes', scanTypesValue);
 
@@ -657,6 +680,7 @@ function runScanSTLHomeImpl() {
       if (progressText) progressText.textContent = `Checking files: ${lastScanProcessed}`;
     });
     window.electron.onDbProgress((progress) => {
+      if (window._scanThumbnailProgress) return; // Thumbnail phase drives progress so bar stays in sync with renders
       const percent = progress.total ? (progress.processed / progress.total) * 100 : 0;
       const renderProgressBar = document.getElementById('render-progress-bar');
       const renderProgressText = document.getElementById('render-progress-text');
@@ -698,6 +722,8 @@ window._runScanSTLHomeImpl = runScanSTLHomeImpl;
 // Add these queue-related variables
 let renderQueue = [];
 let pendingThumbnails = new Set(); // Track files currently being rendered
+// When set during scan, any thumbnail completion (scan or grid) increments progress so bar stays in sync with visible renders
+window._scanThumbnailProgress = null;
 let activeRenders = 0;
 let isProcessingQueue = false;
 
@@ -785,6 +811,34 @@ function generateTypedPlaceholder(extension) {
   }
 }
 
+function generateCorruptedPlaceholder() {
+  const size = 250;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '3d.png';
+  const bg = (typeof getComputedStyle !== 'undefined' && document.documentElement
+    ? getComputedStyle(document.documentElement).getPropertyValue('--model-background-color').trim()
+    : '') || '#070147';
+  ctx.fillStyle = bg || '#070147';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(255, 120, 100, 0.95)';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Model may be', size / 2, size / 2 - 14);
+  ctx.fillText('corrupted', size / 2, size / 2 + 10);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.font = '12px sans-serif';
+  ctx.fillText('(could not load)', size / 2, size / 2 + 32);
+  try {
+    return canvas.toDataURL('image/png');
+  } catch (e) {
+    return '3d.png';
+  }
+}
+
 async function loadModel(filePath, options = {}) {
   if (filePath && filePath.startsWith('url::')) {
     return null;
@@ -820,8 +874,8 @@ async function loadModel(filePath, options = {}) {
       return null;
     }
     
-    // Only STL and 3MF are loadable for 3D preview; other types use typed placeholder
-    if (fileExtension !== 'stl' && fileExtension !== '3mf') {
+    // Only STL, 3MF, and OBJ are loadable for 3D preview; other types use typed placeholder
+    if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj') {
       return null;
     }
     
@@ -871,6 +925,16 @@ async function loadModel(filePath, options = {}) {
         encodedFilePath = `http://localhost:${serverPort}/api/file/${encodedPath}`;
       }
       console.log(`loadModel: Using HTTP endpoint ${serverMode ? 'for server mode' : 'for UNC path'}:`, encodedFilePath);
+      // In server mode, client paths (e.g. C:\ from extension) are not on the server; avoid loader error by checking first
+      if (serverMode && /^[A-Za-z]:/.test(actualFilePath)) {
+        try {
+          const check = await fetch(encodedFilePath, { method: 'HEAD' });
+          if (check.status === 404) {
+            console.log('loadModel: File not on server (client path), skipping 3D load');
+            return null;
+          }
+        } catch (e) { /* proceed to load */ }
+      }
     } else if (/^[A-Za-z]:/.test(actualFilePath)) {
       // Check if we're running on Windows (starts with drive letter)
       // For Windows paths: 
@@ -945,6 +1009,69 @@ async function loadModel(filePath, options = {}) {
         throw new Error('THREE.STLLoader not initialized');
       }
       loader = new THREE.STLLoader();
+      // STL: fetch and validate binary header before parse to avoid RangeError from corrupted/huge triangle count
+      const MAX_STL_TRIANGLES = 10000000; // 10M triangles (~500MB) - prevents allocation failure / overflow
+      return new Promise((resolve, reject) => {
+        fetch(encodedFilePath)
+          .then((res) => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.arrayBuffer();
+          })
+          .then((buffer) => {
+            if (buffer.byteLength < 84) {
+              throw new Error('STL file too small to be valid');
+            }
+            const dv = new DataView(buffer);
+            const triangleCount = dv.getUint32(80, true);
+            const expectedBinarySize = 84 + triangleCount * 50;
+            // Only enforce limits when file looks like binary (size matches); otherwise loader may use ASCII path
+            if (expectedBinarySize === buffer.byteLength) {
+              if (triangleCount > MAX_STL_TRIANGLES) {
+                throw new Error(
+                  `STL has too many triangles (${triangleCount.toLocaleString()}). Max ${MAX_STL_TRIANGLES.toLocaleString()}. File may be corrupted.`
+                );
+              }
+            }
+            return buffer;
+          })
+          .then((buffer) => {
+            const object = loader.parse(buffer);
+            try {
+              let mesh;
+              if (object.isBufferGeometry) {
+                if (!THREE.MeshStandardMaterial || !THREE.Mesh) {
+                  throw new Error('THREE.MeshStandardMaterial or THREE.Mesh not initialized');
+                }
+                const material = new THREE.MeshStandardMaterial({
+                  color: getModelColor(),
+                  metalness: 0.3,
+                  roughness: 0.4
+                });
+                object.computeBoundingBox();
+                object.center();
+                object.computeVertexNormals();
+                mesh = new THREE.Mesh(object, material);
+                mesh.rotation.x = -Math.PI / 2;
+              } else {
+                reject(new Error('Unsupported object type'));
+                return;
+              }
+              resolve(mesh);
+            } catch (err) {
+              console.error('loadModel: Error processing loaded STL object:', err);
+              reject(err);
+            }
+          })
+          .catch((error) => {
+            console.error('loadModel: Loader error:', error);
+            if (tempFilePath) {
+              window.electron.deleteTempFile?.(tempFilePath).catch((cleanupError) => {
+                console.error('Error cleaning up temp file:', cleanupError);
+              });
+            }
+            reject(error);
+          });
+      });
     } else if (fileExtension === '3mf') {
       if (!THREE.ThreeMFLoader) {
         console.error('loadModel: THREE.ThreeMFLoader not available');
@@ -956,6 +1083,12 @@ async function loadModel(filePath, options = {}) {
       }
       THREE.ThreeMFLoader.fflate = fflate;
       loader = new THREE.ThreeMFLoader();
+    } else if (fileExtension === 'obj') {
+      if (!THREE.OBJLoader) {
+        console.error('loadModel: THREE.OBJLoader not available');
+        throw new Error('THREE.OBJLoader not initialized');
+      }
+      loader = new THREE.OBJLoader();
     } else {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
@@ -1020,7 +1153,7 @@ async function loadModel(filePath, options = {}) {
                       }
                     }
                   });
-                  if (fileExtension === '3mf') {
+                  if (fileExtension === '3mf' || fileExtension === 'obj') {
                     mesh.rotation.x = -Math.PI / 2;
                   }
                 } else {
@@ -3180,8 +3313,20 @@ function createMenuDropdown(label, items) {
   return menuContainer;
 }
 
-// Gray out path-metadata options when "Enable" is unchecked (used by STL Home dialog)
-function updateStlHomePathMetadataGrayed() {
+  // Show/hide direction description paragraphs when "Use folder path" dropdown changes (STL Home dialog)
+  function updateStlHomePathDirectionDesc() {
+    const sel = document.getElementById('stl-home-path-direction');
+    const fromModelDesc = document.getElementById('stl-home-path-desc-from-model');
+    const fromRootDesc = document.getElementById('stl-home-path-desc-from-root');
+    if (!sel || !fromModelDesc || !fromRootDesc) return;
+    const isFromRoot = sel.value === 'fromRoot';
+    fromModelDesc.style.display = isFromRoot ? 'none' : '';
+    fromRootDesc.style.display = isFromRoot ? '' : 'none';
+  }
+  window.updateStlHomePathDirectionDesc = updateStlHomePathDirectionDesc;
+
+  // Gray out path-metadata options when "Enable" is unchecked (used by STL Home dialog)
+  function updateStlHomePathMetadataGrayed() {
   const enableEl = document.getElementById('stl-home-path-metadata-enabled');
   const optionsEl = document.getElementById('stl-home-path-metadata-options');
   if (optionsEl) optionsEl.classList.toggle('grayed', !enableEl?.checked);
@@ -3209,22 +3354,26 @@ window.openSTLHomeDialog = async function() {
   const updateFrequencyGroup = document.getElementById('stl-home-update-frequency-group');
   const chooseButton = document.getElementById('choose-stl-home-button');
 
-  // Load path metadata from folder (STL Home only): enabled + use Designer/Parent checkboxes + segment indices
+  // Load path metadata from folder (STL Home only): enabled + direction + use Designer/Parent checkboxes + segment indices
   const pathMetaEnabled = await window.electron.getSetting('pathMetadataStlHomeEnabled');
+  const pathMetaDirection = await window.electron.getSetting('pathMetadataStlHomeDirection');
   const pathMetaUseDesigner = await window.electron.getSetting('pathMetadataUseDesigner');
   const pathMetaUseParentModel = await window.electron.getSetting('pathMetadataUseParentModel');
   const pathMetaDesignerIndex = await window.electron.getSetting('pathMetadataDesignerIndex');
   const pathMetaParentModelIndex = await window.electron.getSetting('pathMetadataParentModelIndex');
   const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
+  const pathMetaDirectionEl = document.getElementById('stl-home-path-direction');
   const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
   const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
   const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
   const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
   if (pathMetaEnabledEl) pathMetaEnabledEl.checked = pathMetaEnabled === '1';
+  if (pathMetaDirectionEl) pathMetaDirectionEl.value = (pathMetaDirection === 'fromRoot' || pathMetaDirection === 'fromModel') ? pathMetaDirection : 'fromModel';
   if (pathMetaUseDesignerEl) pathMetaUseDesignerEl.checked = pathMetaUseDesigner !== '0';
   if (pathMetaUseParentModelEl) pathMetaUseParentModelEl.checked = pathMetaUseParentModel !== '0';
   if (pathMetaDesignerIndexEl) pathMetaDesignerIndexEl.value = (pathMetaDesignerIndex !== null && pathMetaDesignerIndex !== '') ? String(pathMetaDesignerIndex) : '1';
   if (pathMetaParentModelIndexEl) pathMetaParentModelIndexEl.value = (pathMetaParentModelIndex !== null && pathMetaParentModelIndex !== '') ? String(pathMetaParentModelIndex) : '0';
+  if (typeof window.updateStlHomePathDirectionDesc === 'function') window.updateStlHomePathDirectionDesc();
   updateStlHomePathMetadataGrayed();
   // Re-apply grayed state after paint (fixes Docker/server mode where checkbox state wasn't reflected)
   requestAnimationFrame(() => updateStlHomePathMetadataGrayed());
@@ -3264,12 +3413,14 @@ window.openSTLHomeDialog = async function() {
       const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
       const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
       const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
+      const pathMetaDirectionEl = document.getElementById('stl-home-path-direction');
       const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
       const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
       try {
         console.log('[STL Home] Saving stlHome:', stlDir);
         await window.electron.saveSetting('stlHome', stlDir);
         await window.electron.saveSetting('pathMetadataStlHomeEnabled', pathMetaEnabledEl?.checked ? '1' : '0');
+        await window.electron.saveSetting('pathMetadataStlHomeDirection', (pathMetaDirectionEl?.value === 'fromRoot' || pathMetaDirectionEl?.value === 'fromModel') ? pathMetaDirectionEl.value : 'fromModel');
         await window.electron.saveSetting('pathMetadataUseDesigner', pathMetaUseDesignerEl?.checked ? '1' : '0');
         await window.electron.saveSetting('pathMetadataUseParentModel', pathMetaUseParentModelEl?.checked ? '1' : '0');
         await window.electron.saveSetting('pathMetadataDesignerIndex', pathMetaDesignerIndexEl?.value ?? '1');
@@ -5202,6 +5353,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       window.electron.onDbProgress((progress) => {
+        if (window._scanThumbnailProgress) return;
         const percent = progress.total ? (progress.processed / progress.total) * 100 : 0;
         renderProgressBar.style.width = `${percent}%`;
         renderProgressText.textContent = `Processing models: ${progress.processed} / ${progress.total}`;
@@ -7483,7 +7635,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   
     } catch (error) {
       console.error('Error rendering STL:', error);
-      return displayThumbnail('3d.png', container, thumbnailSize);
+      return displayThumbnail(generateCorruptedPlaceholder(), container, thumbnailSize);
     } finally {
       // Clean up THREE.js resources
       if (scene) {
@@ -7878,6 +8030,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.updateScanStlHomeButtonVisibility = updateScanStlHomeButtonVisibility;
 
   document.getElementById('clear-stl-home-button')?.addEventListener('click', () => window.clearSTLHomeDirectory());
+  document.getElementById('stl-home-path-direction')?.addEventListener('change', () => { if (window.updateStlHomePathDirectionDesc) window.updateStlHomePathDirectionDesc(); });
 
   // Periodic STL Home scanning for server mode
   let stlHomeScanInterval = null;
@@ -7944,6 +8097,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
     const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
     const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
+    const pathMetaDirectionEl = document.getElementById('stl-home-path-direction');
     const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
     const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
     const stlDir = stlDirEl ? stlDirEl.value.trim() : '';
@@ -7951,6 +8105,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('[STL Home] Saving stlHome:', stlDir);
       await window.electron.saveSetting('stlHome', stlDir);
       await window.electron.saveSetting('pathMetadataStlHomeEnabled', pathMetaEnabledEl?.checked ? '1' : '0');
+      await window.electron.saveSetting('pathMetadataStlHomeDirection', (pathMetaDirectionEl?.value === 'fromRoot' || pathMetaDirectionEl?.value === 'fromModel') ? pathMetaDirectionEl.value : 'fromModel');
       await window.electron.saveSetting('pathMetadataUseDesigner', pathMetaUseDesignerEl?.checked ? '1' : '0');
       await window.electron.saveSetting('pathMetadataUseParentModel', pathMetaUseParentModelEl?.checked ? '1' : '0');
       await window.electron.saveSetting('pathMetadataDesignerIndex', pathMetaDesignerIndexEl?.value ?? '1');
@@ -8314,6 +8469,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('ai-config-dialog').close();
   });
 
+  document.getElementById('edit-ai-prompt')?.addEventListener('click', async () => {
+    const editDialog = document.getElementById('ai-prompt-edit-dialog');
+    const textarea = document.getElementById('ai-prompt-textarea');
+    if (!editDialog || !textarea) return;
+    const current = await window.electron.getSetting('aiTagPrompt').catch(() => null);
+    if (current != null && String(current).trim() !== '') {
+      textarea.value = current;
+    } else {
+      const defaultPrompt = await (window.electron.getDefaultAIPrompt && window.electron.getDefaultAIPrompt()).catch(() => '');
+      textarea.value = defaultPrompt || '';
+    }
+    editDialog.showModal();
+  });
+
+  document.getElementById('reset-ai-prompt')?.addEventListener('click', async () => {
+    if (!window.electron?.saveSetting) return;
+    try {
+      await window.electron.saveSetting('aiTagPrompt', '');
+      if (window.electron?.showMessage) await window.electron.showMessage('AI Prompt', 'Prompt reset to default.');
+    } catch (err) {
+      console.error('Reset AI prompt error:', err);
+      if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to reset prompt');
+    }
+  });
+
+  document.getElementById('save-ai-prompt-edit')?.addEventListener('click', async () => {
+    const editDialog = document.getElementById('ai-prompt-edit-dialog');
+    const textarea = document.getElementById('ai-prompt-textarea');
+    if (!editDialog || !textarea || !window.electron?.saveSetting) return;
+    try {
+      await window.electron.saveSetting('aiTagPrompt', textarea.value || '');
+      editDialog.close();
+      if (window.electron?.showMessage) await window.electron.showMessage('AI Prompt', 'Prompt saved.');
+    } catch (err) {
+      console.error('Save AI prompt error:', err);
+      if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to save prompt');
+    }
+  });
+
+  document.getElementById('cancel-ai-prompt-edit')?.addEventListener('click', () => {
+    document.getElementById('ai-prompt-edit-dialog')?.close();
+  });
+
   // Populate File Type filter dropdown with only enabled types (from Settings > File Type)
   async function populateFileTypeFilter() {
     const select = document.getElementById('filetype-select');
@@ -8413,15 +8611,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dialogEl = document.getElementById('file-type-settings-dialog');
     if (!dialogEl) return;
     try {
-      const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
-      const enableZipArchives = checkbox?.checked ? '1' : '0';
-      await window.electron.saveSetting('enableZipArchives', enableZipArchives);
+      let previousIds = [];
+      try {
+        const previousRaw = await window.electron.getSetting('scanAdditionalFileTypes');
+        if (previousRaw) previousIds = JSON.parse(previousRaw);
+      } catch (e) { /* ignore */ }
+
       const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
       const selectedScanTypes = [];
       for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
         const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
         if (el && el.checked) selectedScanTypes.push(id);
       }
+      const uncheckedIds = previousIds.filter(id => !selectedScanTypes.includes(id));
+
+      if (uncheckedIds.length > 0 && window.electron?.getModelCountByFileTypeIds && window.electron?.removeModelsByFileTypeIds) {
+        const count = await window.electron.getModelCountByFileTypeIds(uncheckedIds);
+        if (count > 0) {
+          const catalog = await window.electron.getAdditionalFileTypesCatalog().catch(() => []);
+          const labels = uncheckedIds.map(id => (catalog.find(e => e.id === id) || {}).label || id).join(', ');
+          const message = count === 1
+            ? `Unchecking "${labels}" will remove 1 file of that type from the library. This cannot be undone. Continue?`
+            : `Unchecking ${labels} will remove ${count} files of those types from the library. This cannot be undone. Continue?`;
+          const confirmResult = await window.electron.showMessage('Remove file type from library?', message, ['Yes', 'No']);
+          if (confirmResult !== 'Yes') return;
+          await window.electron.removeModelsByFileTypeIds(uncheckedIds);
+          if (typeof window.performCombinedSearch === 'function') await window.performCombinedSearch();
+        }
+      }
+
+      const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
+      const enableZipArchives = checkbox?.checked ? '1' : '0';
+      await window.electron.saveSetting('enableZipArchives', enableZipArchives);
       await window.electron.saveSetting('scanAdditionalFileTypes', JSON.stringify(selectedScanTypes));
       const designerCheckbox = dialogEl.querySelector('#enable-3mf-designer') || document.getElementById('enable-3mf-designer');
       const parentModelCheckbox = dialogEl.querySelector('#enable-3mf-parent-model') || document.getElementById('enable-3mf-parent-model');
@@ -8457,10 +8678,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!dialog) return;
     const enabled = await window.electron.getSetting('enableBrowserExtension');
     const port = await window.electron.getSetting('browserExtensionPort');
+    const uploadDir = await window.electron.getSetting('extensionUploadDirectory');
+    const clientPrefix = await window.electron.getSetting('extensionClientPathPrefix');
+    const containerPrefix = await window.electron.getSetting('extensionContainerPathPrefix');
+    const copyToNas = await window.electron.getSetting('extensionCopyToNasPath');
     const check = document.getElementById('enable-browser-extension');
     const portInput = document.getElementById('browser-extension-port');
+    const uploadDirInput = document.getElementById('extension-upload-directory');
+    const clientPrefixInput = document.getElementById('extension-client-path-prefix');
+    const containerPrefixInput = document.getElementById('extension-container-path-prefix');
+    const copyToNasInput = document.getElementById('extension-copy-to-nas-path');
     if (check) check.checked = enabled === '1';
     if (portInput) portInput.value = port || '5000';
+    if (uploadDirInput) uploadDirInput.value = uploadDir || '';
+    if (clientPrefixInput) clientPrefixInput.value = clientPrefix || '';
+    if (containerPrefixInput) containerPrefixInput.value = containerPrefix || '';
+    if (copyToNasInput) copyToNasInput.value = copyToNas || '';
     dialog.showModal();
   };
   if (window._electronPendingEvents['open-browser-extension-settings']) {
@@ -8474,10 +8707,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     event.preventDefault();
     const check = document.getElementById('enable-browser-extension');
     const portInput = document.getElementById('browser-extension-port');
+    const uploadDirInput = document.getElementById('extension-upload-directory');
+    const clientPrefixInput = document.getElementById('extension-client-path-prefix');
+    const containerPrefixInput = document.getElementById('extension-container-path-prefix');
+    const copyToNasInput = document.getElementById('extension-copy-to-nas-path');
     const enabled = check?.checked ? '1' : '0';
     const port = Math.min(65535, Math.max(1024, parseInt(portInput?.value || '5000', 10) || 5000));
     await window.electron.saveSetting('enableBrowserExtension', enabled);
     await window.electron.saveSetting('browserExtensionPort', String(port));
+    await window.electron.saveSetting('extensionUploadDirectory', (uploadDirInput?.value || '').trim());
+    await window.electron.saveSetting('extensionClientPathPrefix', (clientPrefixInput?.value || '').trim());
+    await window.electron.saveSetting('extensionContainerPathPrefix', (containerPrefixInput?.value || '').trim());
+    await window.electron.saveSetting('extensionCopyToNasPath', (copyToNasInput?.value || '').trim());
     if (enabled === '1') {
       const result = await window.electron.startExtensionServer(port);
       if (result && !result.success) {
@@ -8509,9 +8750,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   let reviewDialogOpen = false;
   let rateLimitDialogShown = false; // Track if rate limit dialog has been shown during current batch
 
-  // Helper function to normalize file paths for comparison
+  // Helper function to normalize file paths for comparison (Docker/server may use leading slash or not)
   function normalizeFilePath(path) {
-    return path ? path.replace(/\\/g, '/').toLowerCase().trim() : '';
+    if (!path) return '';
+    const normalized = path.replace(/\\/g, '/').toLowerCase().trim();
+    return normalized.replace(/^\/+/, ''); // strip leading slashes so "/3dmodels/..." and "3dmodels/..." match
   }
 
   // Helper function to get filePath from modelData (checks both locations)
@@ -9927,14 +10170,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     window._downloadHandlerRegistered = true;
     const activeDownloads = new Set(); // Track active downloads to prevent duplicates
     
-  // Handle add-image-request event (for server/Docker mode)
+  // Handle add-image-request event (for server/Docker mode). Accepts single filePath or array for multi-edit.
   let activeImageInput = null; // Track active file input to prevent duplicates
-  window.electron.on('add-image-request', async (filePath) => {
+  window.electron.on('add-image-request', async (filePathOrPaths) => {
     // Prevent multiple file input dialogs from opening
     if (activeImageInput) {
       console.log('Image file input dialog already open, ignoring request');
       return;
     }
+    const paths = Array.isArray(filePathOrPaths) ? filePathOrPaths : [filePathOrPaths];
     
     try {
       // Create a file input element
@@ -9974,14 +10218,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           reader.onload = async (event) => {
             try {
               const dataUrl = event.target.result;
-              
-              // Add thumbnail to model via IPC (server will set it as default and send refresh event)
-              await window.electron.addThumbnail(filePath, dataUrl);
-              
-              // The server-side handler will automatically:
-              // 1. Add the thumbnail
-              // 2. Set it as default
-              // 3. Send the thumbnail-added event to refresh the UI
+              // Add thumbnail to each selected model (multi-edit: same image to all)
+              for (const filePath of paths) {
+                await window.electron.addThumbnail(filePath, dataUrl);
+              }
+              // Server-side handler sends thumbnail-added per model to refresh the UI
             } catch (error) {
               console.error('Error adding image:', error);
               alert('Error adding image: ' + error.message);
@@ -10453,7 +10694,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         try {
           // 0. Non-previewable types: use typed placeholder (file type label)
-          if (fileExt !== 'stl' && fileExt !== '3mf' && fileExt !== 'svg') {
+          if (fileExt !== 'stl' && fileExt !== '3mf' && fileExt !== 'obj' && fileExt !== 'svg') {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             if (!model.hash || model.hash === '') {
@@ -11356,6 +11597,20 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
           renderProgressText.textContent = `${completed} / ${filesNeedingThumbnails.length} models`;
         }
       };
+      // So progress bar advances with every thumbnail completion (scan or grid), not only scan tasks
+      window._scanThumbnailProgress = {
+        completed: 0,
+        total: filesNeedingThumbnails.length,
+        onComplete() {
+          this.completed++;
+          const c = Math.min(this.completed, this.total);
+          if (!background) {
+            const progress = (c / this.total) * 100;
+            renderProgressBar.style.width = `${progress}%`;
+            renderProgressText.textContent = `${c} / ${this.total} models`;
+          }
+        }
+      };
 
       // Improved thumbnail generation with concurrency control and cancellation
       // Higher concurrency in Server/Docker mode to compensate for slower file system operations
@@ -11470,8 +11725,10 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
             } catch (error) {
               console.error('Error caching thumbnail:', error);
             } finally {
-              completedThumbnails++;
-              thumbnailProgressUpdate(completedThumbnails);
+              if (!window._scanThumbnailProgress) {
+                completedThumbnails++;
+                thumbnailProgressUpdate(completedThumbnails);
+              }
               activePromises.delete(promise);
             }
           })();
@@ -11487,6 +11744,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         // Check for cancellation after each batch
         if (isCancelled) {
           console.log('Thumbnail generation cancelled, stopping process');
+          window._scanThumbnailProgress = null;
           break;
         }
       }
@@ -11495,6 +11753,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       if (activePromises.size > 0) {
         await Promise.all(Array.from(activePromises));
       }
+      window._scanThumbnailProgress = null;
     } else {
       if (!background) {
         renderProgressBar.style.width = '100%';
@@ -11586,6 +11845,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
     }
   } catch (error) {
     console.error('Error scanning directory:', error);
+    window._scanThumbnailProgress = null;
     if (!background) {
       renderProgressText.textContent = `Error: ${error.message}`;
       // Show alert for UNC path validation errors
@@ -11594,6 +11854,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       }
     }
   } finally {
+    window._scanThumbnailProgress = null;
     // Clean up event listener
     stopButton.removeEventListener('click', handleStopClick);
     
@@ -12091,23 +12352,33 @@ async function processRenderQueue() {
   }
 
   isProcessingQueue = true;
-  
+
   try {
+    // Start up to MAX_CONCURRENT_RENDERS tasks in parallel (don't await inside loop)
     while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
       const task = renderQueue.shift();
       activeRenders++;
-      
-      try {
-        const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
-        task.resolve(result);
-      } catch (error) {
-        console.error(`Render task failed: ${error.message}`);
-        // Retry once after longer delay
-        setTimeout(() => renderQueue.push(task), 2000);
-      } finally {
-        activeRenders--;
-        await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
-      }
+
+      (async () => {
+        try {
+          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
+          task.resolve(result);
+          // So progress bar stays in sync with visible thumbnails (scan and grid share the same queue)
+          if (window._scanThumbnailProgress && typeof window._scanThumbnailProgress.onComplete === 'function') {
+            window._scanThumbnailProgress.onComplete();
+          }
+        } catch (error) {
+          console.error(`Render task failed: ${error.message}`);
+          // Retry once after longer delay
+          setTimeout(() => renderQueue.push(task), 2000);
+        } finally {
+          activeRenders--;
+          await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
+          if (renderQueue.length > 0) {
+            setTimeout(processRenderQueue, 0);
+          }
+        }
+      })();
     }
   } finally {
     isProcessingQueue = false;
@@ -12246,7 +12517,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
   }
 
   // Non-previewable types: show typed placeholder (file type label on image)
-  if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'svg') {
+  if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj' && fileExtension !== 'svg') {
     const dataUrl = generateTypedPlaceholder(fileExtension);
     const img = document.createElement('img');
     img.src = dataUrl;
@@ -12364,13 +12635,15 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
 
   } catch (error) {
     console.error('Error rendering model:', error);
+    const corruptedDataUrl = generateCorruptedPlaceholder();
     const img = document.createElement('img');
-    img.src = '3d.png';
+    img.src = corruptedDataUrl;
     img.style.width = '250px';
     img.style.height = '250px';
+    img.alt = 'Model may be corrupted';
     container.innerHTML = '';
     container.appendChild(img);
-    return '3d.png';
+    return corruptedDataUrl;
   } finally {
     // Cleanup code that uses model
     if (model) {

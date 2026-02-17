@@ -8,6 +8,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
@@ -541,9 +542,17 @@
             <label for="stl-home-path-metadata-enabled">Enable: use folder path to set Designer and Parent model</label>
           </div>
           <div id="stl-home-path-metadata-options" class="stl-home-path-metadata-options">
-          <p class="setting-description" style="margin-top: 0.25rem; margin-bottom: 0.5rem;">When you run “Scan STL Home”, folder names are read from the file upward. Values are only applied when the field is empty.</p>
-          <p class="setting-description" style="margin-bottom: 0.25rem; font-size: 0.9em;">Folder level: 0 = parent of file, 1 = grandparent, 2 = great-grandparent, etc.</p>
-          <p class="setting-description" style="margin-bottom: 0.5rem; font-size: 0.85em;"><span class="path-example">Example: D:\MODELS\DESIGNER\PARENT\MODEL.3MF</span> — level 0 = PARENT, level 1 = DESIGNER.</p>
+          <div class="form-group stl-home-path-direction-row">
+            <label for="stl-home-path-direction">Use folder path:</label>
+            <select id="stl-home-path-direction" aria-label="Path direction for folder levels">
+              <option value="fromModel">From Model</option>
+              <option value="fromRoot">From Root</option>
+            </select>
+          </div>
+          <p class="setting-description" style="margin-top: 0.25rem; margin-bottom: 0.5rem;">When you run “Scan STL Home”, folder names are used to set Designer and Parent model. Values are only applied when the field is empty.</p>
+          <p class="setting-description stl-home-path-direction-desc" id="stl-home-path-desc-from-model" style="margin-bottom: 0.25rem; font-size: 0.9em;">From Model: level 0 = parent of file, 1 = grandparent, 2 = great-grandparent, etc.</p>
+          <p class="setting-description stl-home-path-direction-desc" id="stl-home-path-desc-from-root" style="margin-bottom: 0.25rem; font-size: 0.9em; display: none;">From Root: level 0 = first folder under STL Home, 1 = second, 2 = third, etc.</p>
+          <p class="setting-description" style="margin-bottom: 0.5rem; font-size: 0.85em;"><span class="path-example">Example: D:\MODELS\DESIGNER\PARENT\MODEL.3MF</span> — From Model: level 0 = PARENT, level 1 = DESIGNER. From Root: level 0 = DESIGNER, level 1 = PARENT.</p>
           <div class="path-metadata-indices">
             <div class="form-group path-metadata-col">
               <div class="form-group checkbox-container stl-home-path-metadata-checkbox-row" style="margin-bottom: 0.5rem;">
@@ -658,6 +667,27 @@
             <input type="number" id="browser-extension-port" min="1024" max="65535" value="5000">
             <p class="setting-description">Port for the local server (default 5000). The Chrome extension must use the same port in its options.</p>
           </div>
+          <div class="form-group">
+            <label for="extension-upload-directory">Extension upload directory (Docker/NAS):</label>
+            <input type="text" id="extension-upload-directory" placeholder="e.g. /mnt/network-share/models">
+            <p class="setting-description">When the extension uses "Use upload for server", files are saved here. Use an absolute path (e.g. a NAS mount). In Docker, set EXTENSION_UPLOAD_DIR or configure here.</p>
+          </div>
+          <p class="setting-description" style="margin-top: 12px; font-weight: 500;">Path mapping (optional, when Downloads is mounted in container)</p>
+          <div class="form-group">
+            <label for="extension-client-path-prefix">Client path prefix:</label>
+            <input type="text" id="extension-client-path-prefix" placeholder="e.g. C:\Users\You\Downloads">
+            <p class="setting-description">Path on the machine where the browser runs (extension sends this). Leave empty to disable mapping.</p>
+          </div>
+          <div class="form-group">
+            <label for="extension-container-path-prefix">Container path prefix:</label>
+            <input type="text" id="extension-container-path-prefix" placeholder="e.g. /mnt/downloads">
+            <p class="setting-description">Mounted path inside the container that corresponds to the client path above.</p>
+          </div>
+          <div class="form-group">
+            <label for="extension-copy-to-nas-path">Copy to NAS path:</label>
+            <input type="text" id="extension-copy-to-nas-path" placeholder="e.g. /mnt/network-share/models">
+            <p class="setting-description">If set, extension-added files are copied here and the library uses this path (so files live on the share).</p>
+          </div>
         </div>
         <div class="dialog-buttons">
           <button type="button" id="save-browser-extension-settings">Save</button>
@@ -736,12 +766,37 @@
           <input type="number" id="ai-tag-concurrency" min="1" max="10" value="3" required>
           <small>Number of tag generation requests to process simultaneously (1-10)</small>
         </div>
+        <div class="form-group">
+          <label>AI Prompt:</label>
+          <div class="dialog-buttons" style="margin-top: 6px; justify-content: flex-start;">
+            <button type="button" id="edit-ai-prompt">Edit Prompt</button>
+            <button type="button" id="reset-ai-prompt">Reset Prompt</button>
+          </div>
+          <small>Customize the system prompt used for tag generation. Reset restores the built-in default.</small>
+        </div>
         <div class="dialog-buttons">
           <button type="button" id="test-ai-config" onclick="event.preventDefault(); event.stopPropagation(); if(typeof window.testAIConfigFromDialog==='function'){ window.testAIConfigFromDialog(); }">Test</button>
           <button type="button" id="save-ai-config" onclick="if(typeof window.saveAIConfigFromDialog==='function')window.saveAIConfigFromDialog()">Save</button>
           <button type="button" id="cancel-ai-config" onclick="document.getElementById('ai-config-dialog')?.close()">Cancel</button>
         </div>
         <div id="ai-config-result" class="result-message"></div>
+      </form>
+    </dialog>
+
+    <dialog id="ai-prompt-edit-dialog" class="modal">
+      <form method="dialog">
+        <h3>Edit AI Prompt</h3>
+        <p class="setting-description">
+          This prompt is sent to the AI when generating tags. Leave empty to use the built-in default. Filename context is appended automatically when available.
+        </p>
+        <div class="form-group">
+          <label for="ai-prompt-textarea">Prompt:</label>
+          <textarea id="ai-prompt-textarea" rows="16" style="width: 100%; min-height: 280px; resize: vertical; font-family: inherit; padding: 8px;"></textarea>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="save-ai-prompt-edit">Save</button>
+          <button type="button" id="cancel-ai-prompt-edit">Cancel</button>
+        </div>
       </form>
     </dialog>
 

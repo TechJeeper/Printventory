@@ -690,6 +690,33 @@ button:disabled {
   width: 4rem;
 }
 
+/* STL Home: path metadata options block – consistent spacing under Enable checkbox */
+#stl-home-dialog .stl-home-path-metadata-options {
+  margin-top: 0.75rem;
+  margin-left: 0;
+  text-align: left;
+}
+
+/* STL Home: path direction row – label above select, same pattern as Folder level rows */
+#stl-home-dialog .stl-home-path-direction-row {
+  margin-bottom: 0.75rem;
+  max-width: 14rem;
+}
+#stl-home-dialog .stl-home-path-direction-row label {
+  display: block;
+  margin-bottom: 6px;
+  text-align: left;
+}
+#stl-home-dialog .stl-home-path-direction-row select {
+  width: 100%;
+  min-width: 0;
+}
+
+/* STL Home: path direction description paragraphs – align with direction row */
+#stl-home-dialog .stl-home-path-metadata-options .stl-home-path-direction-desc {
+  margin-top: 0;
+}
+
 /* STL Home: gray out options when "Enable" is unchecked */
 .stl-home-path-metadata-options.grayed {
   opacity: 0.5;
@@ -940,7 +967,7 @@ main {
 .file-item-list .print-status {
   position: static !important;
   display: inline-block;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.5);
   padding: 2px 6px;
   border-radius: 3px;
   font-size: 11px;
@@ -950,22 +977,22 @@ main {
 }
 
 .file-item-list .print-status:hover {
-  background: rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, 0.75);
   transform: scale(1.05);
 }
 
 .file-item-list .print-status.printed {
-  background: rgba(46, 204, 113, 0.9);
+  background: rgba(46, 204, 113, 0.6);
 }
 
 .file-item-list .print-status.printed:hover {
-  background: rgba(46, 204, 113, 1);
+  background: rgba(46, 204, 113, 0.85);
 }
 
 .file-item-list .archive-status {
   position: static !important;
   display: inline-block;
-  background: rgba(255, 152, 0, 0.9);
+  background: rgba(255, 152, 0, 0.6);
   padding: 2px 6px;
   border-radius: 3px;
   font-size: 11px;
@@ -1436,34 +1463,7 @@ main {
 }
 
 .file-item.selected::before {
-  content: '✓';
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  background: var(--primary-gradient, linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%));
-  color: white;
-  width: 28px;
-  height: 28px;
-  border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  font-weight: 600;
-  z-index: 1;
-  box-shadow: 0 4px 12px var(--primary-shadow, rgba(91, 159, 255, 0.4));
-  animation: checkmark-appear 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes checkmark-appear {
-  0% {
-    transform: scale(0) rotate(-180deg);
-    opacity: 0;
-  }
-  100% {
-    transform: scale(1) rotate(0deg);
-    opacity: 1;
-  }
+  display: none; /* Selection check bubble removed; selection still shown via border/outline */
 }
 
 .file-item.selected .model-preview {
@@ -4409,7 +4409,7 @@ header {
   position: absolute;
   top: 8px;
   left: 8px;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.5);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;
@@ -4420,16 +4420,16 @@ header {
 }
 
 .print-status:hover {
-  background: rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, 0.75);
   transform: scale(1.05);
 }
 
 .print-status.printed {
-  background: rgba(46, 204, 113, 0.9);
+  background: rgba(46, 204, 113, 0.6);
 }
 
 .print-status.printed:hover {
-  background: rgba(46, 204, 113, 1);
+  background: rgba(46, 204, 113, 0.85);
 }
 
 .setting-description {
@@ -5514,7 +5514,7 @@ header {
   position: absolute;
   top: 8px;
   left: 8px;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.5);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;
@@ -5523,14 +5523,14 @@ header {
 }
 
 .file-grid .print-status.printed {
-  background: rgba(46, 204, 113, 0.9);
+  background: rgba(46, 204, 113, 0.6);
 }
 
 .file-grid .archive-status {
   position: absolute;
   top: 8px;
   right: 8px;
-  background: rgba(255, 152, 0, 0.9);
+  background: rgba(255, 152, 0, 0.6);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;

@@ -55,14 +55,17 @@ function initializeOpenAI(apiKey, baseURL, service = 'openai', puterIPCHandler =
   };
   
   // Add baseURL if provided or use default based on service
+  const GEMINI_OPENAI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai/';
   if (baseURL) {
-    config.baseURL = baseURL;
+    const trimmed = baseURL.trim();
+    // Ensure single trailing slash so path concatenation is correct (helps avoid 400 in Docker/proxy)
+    config.baseURL = trimmed ? (trimmed.replace(/\/+$/, '') + '/') : (normalizedService === 'gemini' ? GEMINI_OPENAI_BASE : 'https://api.openai.com/v1');
   } else if (normalizedService === 'gemini') {
-    config.baseURL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+    config.baseURL = GEMINI_OPENAI_BASE;
   } else {
     config.baseURL = 'https://api.openai.com/v1';
   }
-  
+
   openaiClient = new OpenAI(config);
 }
 
@@ -261,6 +264,21 @@ function extractKeywordsFromFilename(filename) {
   return [...new Set(words)]; // Remove duplicates
 }
 
+// Build filename context snippet (used in buildPrompt and when using custom prompt)
+function getFilenameContext(filename) {
+  if (!filename) return '';
+  const filenameKeywords = extractKeywordsFromFilename(filename);
+  const fileNameOnly = filename.split(/[/\\]/).pop();
+  const nameWithoutExt = fileNameOnly.replace(/\.[^/.]+$/, '');
+  let ctx = `The filename is "${fileNameOnly}" (without extension: "${nameWithoutExt}"). `;
+  if (filenameKeywords.length > 0) {
+    ctx += `The filename contains these keywords: ${filenameKeywords.join(', ')}. `;
+    ctx += `Use these keywords as tags if they accurately describe what you see in the image. For example, if the filename contains "dragon" and you see a dragon in the image, include "Dragon" as a tag. `;
+  }
+  ctx += `The filename provides important context - extract meaningful words from it and use them as tags when they match what you see. `;
+  return ctx;
+}
+
 // Build prompt based on options
 function buildPrompt(options = {}, filename = null) {
   const maxTags = options.maxTags || DEFAULT_OPTIONS.maxTags;
@@ -270,22 +288,7 @@ function buildPrompt(options = {}, filename = null) {
   
   let prompt = `You are helping organize 3D models in a library. Analyze this image of a 3D model thumbnail and generate ${maxTags} useful category tags that will help users find and organize this model. `;
   
-  // Extract and use filename keywords
-  let filenameKeywords = [];
-  if (filename) {
-    filenameKeywords = extractKeywordsFromFilename(filename);
-    const fileNameOnly = filename.split(/[/\\]/).pop();
-    const nameWithoutExt = fileNameOnly.replace(/\.[^/.]+$/, '');
-    
-    prompt += `The filename is "${fileNameOnly}" (without extension: "${nameWithoutExt}"). `;
-    
-    if (filenameKeywords.length > 0) {
-      prompt += `The filename contains these keywords: ${filenameKeywords.join(', ')}. `;
-      prompt += `Use these keywords as tags if they accurately describe what you see in the image. For example, if the filename contains "dragon" and you see a dragon in the image, include "Dragon" as a tag. `;
-    }
-    
-    prompt += `The filename provides important context - extract meaningful words from it and use them as tags when they match what you see. `;
-  }
+  prompt += getFilenameContext(filename);
   
   prompt += `Focus ONLY on the 3D model itself - completely ignore any background, text, or UI elements. `;
   prompt += `Do NOT use generic terms like "3D Model", "model", "object", "item", "tag", "tags", "thing", "stuff", or "piece". `;
@@ -316,18 +319,16 @@ function buildPrompt(options = {}, filename = null) {
     prompt += `Organize tags into these categories: object type, style, complexity, material. `;
   }
   
-  if (useJsonResponse) {
-    prompt += `You MUST respond with ONLY a valid JSON object. The JSON must be complete and valid. `;
-    prompt += `Use this exact format: {"tags": ["tag1", "tag2", "tag3"]}. `;
-    prompt += `Do not include any explanatory text, markdown formatting, or code blocks - only the raw JSON object. `;
-    prompt += `If you cannot identify the model, return {"tags": []}. `;
-    prompt += `Ensure the JSON is properly closed with all brackets and quotes. `;
-  } else {
-    prompt += `Respond with a comma-separated list of tags only. `;
-    prompt += `If you cannot identify the model, return nothing or an empty string. `;
-  }
-  
+  // JSON response instructions are never part of the editable prompt; they are always appended in generateTagsForImage
   return prompt;
+}
+
+// Always appended to the prompt when calling the API (not included in editable/default prompt)
+const JSON_RESPONSE_INSTRUCTIONS = `You MUST respond with ONLY a valid JSON object. The JSON must be complete and valid. Use this exact format: {"tags": ["tag1", "tag2", "tag3"]}. Do not include any explanatory text, markdown formatting, or code blocks - only the raw JSON object. If you cannot identify the model, return {"tags": []}. Ensure the JSON is properly closed with all brackets and quotes. `;
+
+// Return default prompt for current options (no filename). Used for Edit Prompt dialog and Reset.
+function getDefaultPrompt(options = {}) {
+  return buildPrompt({ ...DEFAULT_OPTIONS, ...options }, null);
 }
 
 // Generate tags for a given image with retry logic
@@ -342,8 +343,15 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
   const maxTags = mergedOptions.maxTags || DEFAULT_OPTIONS.maxTags;
   const useJsonResponse = mergedOptions.useJsonResponse || false;
 
-  // Build the prompt (include filename if provided)
-  const prompt = buildPrompt(mergedOptions, filename);
+  // Use custom prompt from settings if set; otherwise build from options. Always append JSON response instructions.
+  let basePrompt;
+  if (mergedOptions.customPrompt && String(mergedOptions.customPrompt).trim() !== '') {
+    basePrompt = String(mergedOptions.customPrompt).trim() + (filename ? getFilenameContext(filename) : '');
+  } else {
+    basePrompt = buildPrompt(mergedOptions, filename);
+  }
+  const prompt = basePrompt + JSON_RESPONSE_INSTRUCTIONS;
+  console.log('[AITagging] Prompt (first 800 chars):', prompt.length > 800 ? prompt.substring(0, 800) + '...' : prompt);
 
   // Handle puter service differently
   if (currentService === 'puter') {
@@ -417,7 +425,10 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
 
       console.log(`Attempting to generate tags with model: ${model || "gpt-4o-mini"} (attempt ${attempt + 1}/${maxRetries})`);
 
-      const completion = await openaiClient.chat.completions.create({
+      // Gemini's OpenAI-compatible endpoint can return 400 with no body when given
+      // max_tokens or response_format (e.g. in Docker or behind proxies). Use minimal payload for Gemini.
+      const isGemini = currentService === 'gemini';
+      const createPayload = {
         messages: [{
           role: "user",
           content: [
@@ -425,11 +436,15 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
             { type: "image_url", image_url: { url: "data:image/png;base64," + base64Image } }
           ]
         }],
-        model: model || "gpt-4o-mini",
-        max_tokens: useJsonResponse ? 1000 : 300,
-        response_format: useJsonResponse ? { type: "json_object" } : undefined,
+        model: model || (isGemini ? "gemini-2.5-flash" : "gpt-4o-mini"),
         temperature: 0.3 // Lower temperature for more consistent JSON output
-      });
+      };
+      if (!isGemini) {
+        createPayload.max_tokens = useJsonResponse ? 1000 : 300;
+        createPayload.response_format = useJsonResponse ? { type: "json_object" } : undefined;
+      }
+
+      const completion = await openaiClient.chat.completions.create(createPayload);
 
       const responseContent = completion.choices[0].message.content;
       
@@ -476,8 +491,14 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
       } 
       // Handle bad request (invalid image format, etc.)
       else if (error.response && error.response.status === 400) {
-        const errorMessage = error.response.data?.error?.message || error.message || 'Invalid request';
+        const errorBody = error.response.data;
+        const errorMessage = (typeof errorBody === 'object' && errorBody?.error?.message)
+          ? errorBody.error.message
+          : (typeof errorBody === 'string' ? errorBody : error.message) || 'Invalid request';
         console.error("Error 400: Bad request:", errorMessage);
+        if (errorBody && typeof errorBody === 'object' && Object.keys(errorBody).length > 0) {
+          console.error("Error 400 response body:", JSON.stringify(errorBody).substring(0, 500));
+        }
         if (attempt < 1) {
           // Retry once for 400 errors in case it's a transient issue
           console.log('Retrying once for 400 error...');
@@ -636,27 +657,34 @@ async function testAIConfig(apiKey, baseURL, model, service = 'openai', puterIPC
       return { success: false, error: 'OpenAI client is not initialized' };
     }
     
-    // Instead of using an image, just send a simple text message
-    console.log('[AITagging] Testing AI configuration with text-only request for service:', normalizedService);
-    
-    const completion = await openaiClient.chat.completions.create({
-      messages: [{
-        role: "user",
-        content: "test"
-      }],
-      model: model || "gpt-4o-mini",
-      max_tokens: 50,
-    });
-    
-    // Return a tags array to maintain compatibility with the renderer
-    return { 
-      success: true, 
-      tags: ["API connection successful"],
+    // Minimal request: for Gemini use only model + messages (no max_tokens) to avoid 400 from gateways/proxies
+    const testModel = model && model.trim() ? model.trim() : (normalizedService === 'gemini' ? 'gemini-2.5-flash' : 'gpt-4o-mini');
+    const isGemini = normalizedService === 'gemini' || (baseURL && baseURL.includes('generativelanguage.googleapis.com'));
+    const payload = {
+      messages: [{ role: 'user', content: 'test' }],
+      model: testModel,
+    };
+    if (!isGemini) {
+      payload.max_tokens = 50;
+    }
+    console.log('[AITagging] Testing AI configuration with text-only request for service:', normalizedService, 'model:', testModel);
+    const completion = await openaiClient.chat.completions.create(payload);
+
+    return {
+      success: true,
+      tags: ['API connection successful'],
       response: completion.choices[0].message.content
     };
   } catch (error) {
     console.error('Error testing AI config:', error);
-    return { success: false, error: error.message };
+    const msg = error && error.message;
+    const status = error && error.status;
+    const is400NoBody = status === 400 && msg && msg.includes('no body');
+    if (is400NoBody) {
+      const hint = 'If you are running Printventory in Docker or behind a proxy, the API may be returning 400 with an empty response. Check that the container can reach the AI provider (e.g. generativelanguage.googleapis.com for Gemini), that no proxy is altering requests, and that the API key and model name are correct.';
+      return { success: false, error: msg + ' ' + hint };
+    }
+    return { success: false, error: msg || String(error) };
   }
 }
 
@@ -666,5 +694,6 @@ module.exports = {
   testAIConfig,
   parseTagsFromResponse,
   normalizeTag,
-  deduplicateTags
+  deduplicateTags,
+  getDefaultPrompt
 };
