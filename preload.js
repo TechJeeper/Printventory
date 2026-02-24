@@ -139,7 +139,7 @@ contextBridge.exposeInMainWorld('electron', {
     return ipcRenderer.invoke('delete-file', filePath);
   },
   fetchThangsPage: (url) => ipcRenderer.invoke('fetch-thangs-page', url),
-  purgeModels: () => ipcRenderer.invoke('purge-models'),
+  purgeModels: (options) => ipcRenderer.invoke('purge-models', options || {}),
   onOpenPurgeModels: (callback) => ipcRenderer.on('open-purge-models', callback),
   onGenerateMissingThumbnails: (callback) => ipcRenderer.on('generate-missing-thumbnails', callback),
   onPingRequest: (callback) => ipcRenderer.on('ping', callback),

@@ -2467,11 +2467,14 @@ function applyPathMetadataFromSegments(scanRootPath, filePaths) {
   const applyDesigner = useDesigner?.value === '1';
   const applyParentModel = useParentModel?.value === '1';
   if (!applyDesigner && !applyParentModel) return;
-  const designerIndex = Math.max(0, parseInt(designerIndexRow?.value, 10) || 1);
-  const parentModelIndex = Math.max(0, parseInt(parentModelIndexRow?.value, 10) || 0);
+  const rawDesigner = parseInt(designerIndexRow?.value, 10);
+  const rawParent = parseInt(parentModelIndexRow?.value, 10);
+  const designerIndex = Math.max(0, Number.isInteger(rawDesigner) ? rawDesigner : 0);
+  const parentModelIndex = Math.max(0, Number.isInteger(rawParent) ? rawParent : 0);
   const getModel = db.prepare('SELECT id, designer, parentModel FROM models WHERE filePath = ?');
   const updateModel = db.prepare('UPDATE models SET designer = ?, parentModel = ? WHERE id = ?');
   const normalizedRoot = normalizePath(scanRootPath).replace(/\/$/, '');
+  const rootSegment = normalizedRoot.split('/').filter(Boolean).pop() || '';
   for (const filePath of filePaths) {
     let relativeDir;
     if (filePath.includes('::')) {
@@ -2483,8 +2486,8 @@ function applyPathMetadataFromSegments(scanRootPath, filePaths) {
       relativeDir = path.dirname(relative);
     }
     const segmentsRootToFile = normalizePath(relativeDir).split('/').filter(Boolean);
-    // From Root: level 0 = first folder under STL Home, 1 = second, ... From Model: level 0 = parent of file, 1 = grandparent, ...
-    const segments = fromRoot ? segmentsRootToFile : segmentsRootToFile.slice().reverse();
+    // From Root: level 0 = STL Home, 1 = first folder under it, ... From Model: level 0 = parent of file, 1 = grandparent, ...
+    const segments = fromRoot ? [rootSegment, ...segmentsRootToFile] : segmentsRootToFile.slice().reverse();
     const derivedDesigner = applyDesigner && segments.length > designerIndex ? segments[designerIndex] : null;
     const derivedParentModel = applyParentModel && segments.length > parentModelIndex ? segments[parentModelIndex] : null;
     const model = getModel.get(filePath);
@@ -4819,11 +4822,12 @@ ipcMain.handle('delete-metadata', async (event, type, name) => {
 });
 
 // Update the purge-models handler
-const purgeModelsHandler = async (event) => {
+const purgeModelsHandler = async (event, options = {}) => {
   try {
-    // In server/Docker mode (WebSocket), skip native dialog - user already confirmed in browser UI
+    // Skip native dialog only when user already confirmed in UI (in-app dialog or server/Docker)
     const fromWebSocket = !!(event && event.wsClient);
-    let doPurge = fromWebSocket;
+    const confirmedInDialog = !!(options && options.confirmedInDialog);
+    let doPurge = fromWebSocket || confirmedInDialog;
 
     if (!doPurge) {
       const result = await dialog.showMessageBox({

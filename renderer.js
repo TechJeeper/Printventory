@@ -189,7 +189,7 @@ window.toggleDedupFullscreen = function toggleDedupFullscreen() {
 window.confirmPurgeModelsFromDialog = async function confirmPurgeModelsFromDialog() {
   if (!window.electron?.purgeModels) return;
   try {
-    const success = await window.electron.purgeModels();
+    const success = await window.electron.purgeModels({ confirmedInDialog: true });
     if (success) {
       const container = document.querySelector('.file-grid');
       if (container) container.innerHTML = '';
@@ -6678,7 +6678,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Purge Models: full implementation (overwrites early stub so updateModelCounts is available)
   async function confirmPurgeModelsFromDialog() {
     try {
-      const success = await window.electron.purgeModels();
+      const success = await window.electron.purgeModels({ confirmedInDialog: true });
       if (success) {
         const container = document.querySelector('.file-grid');
         if (container) container.innerHTML = '';
