@@ -3113,12 +3113,14 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
         break;
     }
 
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+
     let models;
     if (limit === 0) {
       // When limit is 0, load all models without a limit
-      models = db.prepare(`SELECT * FROM models ${orderClause}`).all();
+      models = db.prepare(`SELECT ${selectCols} FROM models ${orderClause}`).all();
     } else {
-      models = db.prepare(`SELECT * FROM models ${orderClause} LIMIT ?`).all(limit);
+      models = db.prepare(`SELECT ${selectCols} FROM models ${orderClause} LIMIT ?`).all(limit);
     }
     return models;
   } catch (error) {
@@ -3360,9 +3362,11 @@ const getModelsFilteredHandler = async (event, filters) => {
         break;
     }
     
+    const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+
     // Execute query (optional limit/offset for progressive load when clearing filters in Server/Docker)
     // SQLite requires LIMIT when using OFFSET; use a large limit when only offset is set
-    let query = `SELECT * FROM models ${whereClause} ${orderClause}`;
+    let query = `SELECT ${selectCols} FROM models ${whereClause} ${orderClause}`;
     const limit = filters.limit != null && filters.limit > 0 ? Math.min(Number(filters.limit), 10000) : null;
     const offset = filters.offset != null && filters.offset >= 0 ? Number(filters.offset) : null;
     if (limit != null) {
@@ -6291,8 +6295,8 @@ ipcMain.handle('getSetting', async (event, key) => {
 ipcMain.handle('saveSetting', async (event, key, value) => {
   try {
     db.prepare(`
-      INSERT INTO settings (key, value) 
-      VALUES (?, ?) 
+      INSERT INTO settings (key, value)
+      VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
     return true;
@@ -8337,7 +8341,8 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-    const models = db.prepare('SELECT * FROM models WHERE filePath LIKE ?').all(`${directoryPath}%`);
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const models = db.prepare(`SELECT ${selectCols} FROM models WHERE filePath LIKE ?`).all(`${directoryPath}%`);
     return models;
   } catch (error) {
     console.error('Error fetching models by directory:', error);
@@ -8349,8 +8354,9 @@ ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
 ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) => {
   try {
     const offset = (page - 1) * pageSize;
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
     const models = db.prepare(
-      `SELECT * FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
+      `SELECT ${selectCols} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);
     return models;
   } catch (error) {

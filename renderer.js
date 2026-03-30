@@ -16537,37 +16537,55 @@ function createModelItem(model, viewMode = null) {
     });
   };
 
-  // Parse thumbnails from model.thumbnail
+  // Parse thumbnails from model.thumbnail if available
   // The model.thumbnail should contain all thumbnails separated by ::
   const thumbnailString = model.thumbnail;
+  const hasThumbnailFlag = !!model.hasThumbnail;
   
   const allThumbnails = thumbnailString ? parseThumbnails(thumbnailString) : [];
-  const hasMultipleThumbnails = allThumbnails.length > 1;
+  let hasMultipleThumbnails = allThumbnails.length > 1;
   const currentThumbnailIndex = 0; // Start with first thumbnail (default)
-  const currentThumbnail = allThumbnails.length > 0 ? allThumbnails[currentThumbnailIndex] : null;
+  let currentThumbnail = allThumbnails.length > 0 ? allThumbnails[currentThumbnailIndex] : null;
   
+  // Add image element right away to reserve space
+  const img = document.createElement('img');
+  img.style.width = thumbSize.width;
+  img.style.height = thumbSize.height;
+  img.src = currentThumbnail || '3d.png';
+  thumbnailContainer.appendChild(img);
+
   // For detailed view, if we don't have multiple thumbnails in the model object,
   // try to fetch from database asynchronously (but don't block rendering)
-  if (view === 'detailed' && !hasMultipleThumbnails && model.filePath) {
-    window.electron.getAllThumbnails(model.filePath).then(allThumbs => {
-      if (allThumbs && allThumbs.length > 1) {
-        // Find the item and update it
-        const item = document.querySelector(`[data-filepath="${model.filePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`);
-        if (item) {
-          const wrapper = item.querySelector('.thumbnail-wrapper');
-          const container = item.querySelector('.thumbnail-container');
-          if (container && !wrapper) {
-            // Re-create with navigation - user can refresh to see navigation controls
+  if (model.filePath) {
+    if (view === 'detailed') {
+      window.electron.getAllThumbnails(model.filePath).then(allThumbs => {
+        if (allThumbs && allThumbs.length > 0) {
+          if (allThumbs.length > 1) {
+            // It has multiple thumbnails, we may need to reload this item
+            hasMultipleThumbnails = true;
+          }
+          if (img.src.includes('3d.png') && allThumbs[0] !== '3d.png') {
+            img.src = allThumbs[0];
           }
         }
-      }
-    }).catch(e => {
-      // Silently fail - not critical
-    });
+      }).catch(e => {
+        // Silently fail - not critical
+      });
+    } else if (!currentThumbnail && hasThumbnailFlag) {
+      window.electron.getThumbnail(model.filePath).then(thumb => {
+        if (thumb && thumb !== '3d.png') {
+          img.src = thumb;
+        }
+      }).catch(e => {
+        // Silently fail
+      });
+    }
   }
 
   // In detailed view with multiple thumbnails, wrap in navigation container
   let thumbnailWrapper = thumbnailContainer;
+  // NOTE: navigation will not initialize on first lazy load if hasMultipleThumbnails isn't updated in time.
+  // Reloading the list works.
   if (view === 'detailed' && hasMultipleThumbnails) {
     thumbnailWrapper = document.createElement('div');
     thumbnailWrapper.className = 'thumbnail-wrapper';
@@ -16751,21 +16769,8 @@ function createModelItem(model, viewMode = null) {
     
   }
 
-  if (currentThumbnail) {
-    const img = document.createElement('img');
-    img.src = currentThumbnail;
-    img.style.width = thumbSize.width;
-    img.style.height = thumbSize.height;
-    thumbnailContainer.appendChild(img);
-  } else {
-    // Show placeholder/loading state
-    const img = document.createElement('img');
-    img.src = '3d.png';
-    img.style.width = thumbSize.width;
-    img.style.height = thumbSize.height;
-    // Add loading class if needed
-    thumbnailContainer.appendChild(img);
-
+  // Only queue if it doesn't have a thumbnail string AND the flag is false
+  if (!currentThumbnail && !hasThumbnailFlag) {
     // Queue thumbnail generation if not already pending
     if (!pendingThumbnails.has(model.filePath)) {
       pendingThumbnails.add(model.filePath);
