@@ -3737,7 +3737,13 @@ async function scanDirectory(directoryPath, isValidFile) {
 
 // Helper functions for managing multiple thumbnails
 function parseThumbnails(thumbnailString) {
-  if (!thumbnailString || thumbnailString === '3d.png' || !thumbnailString.includes('::')) {
+  if (!thumbnailString || thumbnailString === '3d.png') {
+    return [thumbnailString].filter(Boolean);
+  }
+  if (typeof thumbnailString !== 'string') {
+    return [];
+  }
+  if (!thumbnailString.includes('::')) {
     return [thumbnailString].filter(Boolean);
   }
   return thumbnailString.split('::').filter(Boolean);

@@ -16528,7 +16528,13 @@ function createModelItem(model, viewMode = null) {
 
   // Parse thumbnails to check if multiple exist
   const parseThumbnails = (thumbnailString) => {
-    if (!thumbnailString || thumbnailString === '3d.png' || !thumbnailString.includes('::')) {
+    if (!thumbnailString || thumbnailString === '3d.png') {
+      return [thumbnailString].filter(t => t && t !== '3d.png' && t.length > 0);
+    }
+    if (typeof thumbnailString !== 'string') {
+      return [];
+    }
+    if (!thumbnailString.includes('::')) {
       return [thumbnailString].filter(t => t && t !== '3d.png' && t.length > 0);
     }
     // Split and filter out invalid entries - only keep valid data URLs
