@@ -1001,191 +1001,80 @@ async function loadModel(filePath, options = {}) {
       console.log('loadModel: Encoded Unix path:', encodedFilePath);
     }
     
-    // If no embedded image found, proceed with 3D loading
-    let loader;
-    if (fileExtension === 'stl') {
-      if (!THREE.STLLoader) {
-        console.error('loadModel: THREE.STLLoader not available');
-        throw new Error('THREE.STLLoader not initialized');
-      }
-      loader = new THREE.STLLoader();
-      // STL: fetch and validate binary header before parse to avoid RangeError from corrupted/huge triangle count
-      const MAX_STL_TRIANGLES = 10000000; // 10M triangles (~500MB) - prevents allocation failure / overflow
-      return new Promise((resolve, reject) => {
-        fetch(encodedFilePath)
-          .then((res) => {
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return res.arrayBuffer();
-          })
-          .then((buffer) => {
-            if (buffer.byteLength < 84) {
-              throw new Error('STL file too small to be valid');
-            }
-            const dv = new DataView(buffer);
-            const triangleCount = dv.getUint32(80, true);
-            const expectedBinarySize = 84 + triangleCount * 50;
-            // Only enforce limits when file looks like binary (size matches); otherwise loader may use ASCII path
-            if (expectedBinarySize === buffer.byteLength) {
-              if (triangleCount > MAX_STL_TRIANGLES) {
-                throw new Error(
-                  `STL has too many triangles (${triangleCount.toLocaleString()}). Max ${MAX_STL_TRIANGLES.toLocaleString()}. File may be corrupted.`
-                );
-              }
-            }
-            return buffer;
-          })
-          .then((buffer) => {
-            const object = loader.parse(buffer);
-            try {
-              let mesh;
-              if (object.isBufferGeometry) {
-                if (!THREE.MeshStandardMaterial || !THREE.Mesh) {
-                  throw new Error('THREE.MeshStandardMaterial or THREE.Mesh not initialized');
-                }
-                const material = new THREE.MeshStandardMaterial({
-                  color: getModelColor(),
-                  metalness: 0.3,
-                  roughness: 0.4
-                });
-                object.computeBoundingBox();
-                object.center();
-                object.computeVertexNormals();
-                mesh = new THREE.Mesh(object, material);
-                mesh.rotation.x = -Math.PI / 2;
-              } else {
-                reject(new Error('Unsupported object type'));
-                return;
-              }
-              resolve(mesh);
-            } catch (err) {
-              console.error('loadModel: Error processing loaded STL object:', err);
-              reject(err);
-            }
-          })
-          .catch((error) => {
-            console.error('loadModel: Loader error:', error);
-            if (tempFilePath) {
-              window.electron.deleteTempFile?.(tempFilePath).catch((cleanupError) => {
-                console.error('Error cleaning up temp file:', cleanupError);
-              });
-            }
-            reject(error);
-          });
-      });
-    } else if (fileExtension === '3mf') {
-      if (!THREE.ThreeMFLoader) {
-        console.error('loadModel: THREE.ThreeMFLoader not available');
-        throw new Error('THREE.ThreeMFLoader not initialized');
-      }
-      if (!fflate) {
-        console.error('loadModel: fflate not available');
-        throw new Error('fflate not initialized');
-      }
-      THREE.ThreeMFLoader.fflate = fflate;
-      loader = new THREE.ThreeMFLoader();
-    } else if (fileExtension === 'obj') {
-      if (!THREE.OBJLoader) {
-        console.error('loadModel: THREE.OBJLoader not available');
-        throw new Error('THREE.OBJLoader not initialized');
-      }
-      loader = new THREE.OBJLoader();
-    } else {
+    // If no embedded image found, proceed with 3D loading using Web Worker
+    if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj') {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
 
-    if (!loader) {
-      throw new Error('Failed to initialize loader');
-    }
-
     return new Promise((resolve, reject) => {
-      try {
-        loader.load(
-            encodedFilePath, // Use the encoded path instead of the original
-            (object) => {
-              try {
-                let mesh;
-                if (object.isBufferGeometry) {
-                  if (!THREE.MeshStandardMaterial) {
-                    console.error('loadModel: THREE.MeshStandardMaterial not available');
-                    throw new Error('THREE.MeshStandardMaterial not initialized');
-                  }
-                  const material = new THREE.MeshStandardMaterial({
-                    color: getModelColor(),
-                    metalness: 0.3,
-                    roughness: 0.4
-                  });
-                  if (!THREE.Mesh) {
-                    console.error('loadModel: THREE.Mesh not available');
-                    throw new Error('THREE.Mesh not initialized');
-                  }
-                  
-                  // Proper geometry centering instead of normalization
-                  object.computeBoundingBox();
-                  object.center();
-                  object.computeVertexNormals();
-                  
-                  mesh = new THREE.Mesh(object, material);
-                  
-                  if (fileExtension === 'stl') {
-                    mesh.rotation.x = -Math.PI / 2;
-                  }
-                } else if (object.isObject3D) {
-                  mesh = object;
-                  mesh.traverse((child) => {
-                    if (child.isMesh) {
-                      // Ensure geometry has normals for proper lighting
-                      if (child.geometry && !child.geometry.attributes.normal) {
-                        child.geometry.computeVertexNormals();
-                      }
-                      
-                      // Handle both single materials and material arrays
-                      // Create new material with explicit color to override any black/default materials
-                      const newMaterial = new THREE.MeshStandardMaterial({
-                        color: getModelColor(),
-                        metalness: 0.3,
-                        roughness: 0.4
-                      });
-                      
-                      if (Array.isArray(child.material)) {
-                        child.material = child.material.map(() => newMaterial.clone());
-                      } else {
-                        child.material = newMaterial;
-                      }
-                    }
-                  });
-                  if (fileExtension === '3mf' || fileExtension === 'obj') {
-                    mesh.rotation.x = -Math.PI / 2;
-                  }
-                } else {
-                  reject(new Error('Unsupported object type'));
-                  return;
-                }
-                resolve(mesh);
-              } catch (error) {
-                console.error('loadModel: Error processing loaded object:', error);
-                // Note: Temp file cleanup handled by OS
-                reject(error);
-              }
-            },
-            (progress) => {
-              // Progress callback
-            },
-            (error) => {
-              console.error('loadModel: Loader error:', error);
-              // Clean up temp file on error
-              if (tempFilePath) {
-                window.electron.deleteTempFile?.(tempFilePath).catch(cleanupError => {
-                  console.error('Error cleaning up temp file:', cleanupError);
-                });
-              }
-              reject(error);
+      const worker = new Worker('parse-worker.js');
+      const jobId = Date.now().toString() + Math.random().toString();
+
+      worker.onmessage = function(e) {
+        const data = e.data;
+        if (data.id !== jobId) return;
+
+        worker.terminate();
+
+        if (!data.success) {
+          console.error('Worker error:', data.error);
+          if (tempFilePath) {
+            window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
+          }
+          reject(new Error(data.error));
+          return;
+        }
+
+        try {
+          const group = new THREE.Group();
+          const material = new THREE.MeshStandardMaterial({
+            color: getModelColor(),
+            metalness: 0.3,
+            roughness: 0.4
+          });
+
+          data.geometries.forEach(geoData => {
+            const geometry = new THREE.BufferGeometry();
+            if (geoData.position) geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
+            if (geoData.normal) geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
+            if (geoData.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(geoData.uv, 2));
+            if (geoData.index) geometry.setIndex(new THREE.BufferAttribute(geoData.index, 1));
+
+            const mesh = new THREE.Mesh(geometry, material);
+            if (geoData.matrix) {
+              mesh.applyMatrix4(new THREE.Matrix4().fromArray(geoData.matrix));
             }
-        );
-      } catch (error) {
-        console.error('loadModel: Error in loader.load:', error);
-        // Note: Temp file cleanup handled by OS
+            group.add(mesh);
+          });
+
+          if (fileExtension === 'stl' || fileExtension === '3mf' || fileExtension === 'obj') {
+            group.rotation.x = -Math.PI / 2;
+          }
+
+          resolve(group);
+        } catch (err) {
+          console.error('loadModel: Error processing geometries from worker:', err);
+          if (tempFilePath) {
+            window.electron.deleteTempFile?.(tempFilePath).catch(err2 => console.error(err2));
+          }
+          reject(err);
+        }
+      };
+
+      worker.onerror = function(error) {
+        console.error('Worker failed:', error.message);
+        worker.terminate();
+        if (tempFilePath) {
+          window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
+        }
         reject(error);
-      }
+      };
+
+      worker.postMessage({
+        id: jobId,
+        fileExtension,
+        url: encodedFilePath
+      });
     });
   } catch (error) {
     console.error('loadModel error:', error);
@@ -12606,7 +12495,23 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     if (!loadModelFunc) {
       throw new Error('loadModel function is not available.');
     }
-    model = await loadModelFunc(filePath);
+
+    // Add a timeout to prevent hanging indefinitely (e.g. on network shares or parsing errors)
+    const timeoutMs = 30000; // 30 seconds should be enough even for large models
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(`Loading model timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+
+    try {
+      model = await Promise.race([
+        loadModelFunc(filePath),
+        timeoutPromise
+      ]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     if (!model) {
       console.log(`[DEBUG] renderModelToPNG: loadModel returned null (embedded image, zip container, or url), using placeholder`);
       const img = document.createElement('img');
@@ -12652,10 +12557,26 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
           child.geometry.dispose();
           child.geometry = null;
         }
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach(m => m && m.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
       });
       model = null;
     }
-    // ... rest of cleanup code ...
+
+    if (renderer) {
+      renderer.forceContextLoss();
+      renderer.dispose();
+      renderer = null;
+    }
+
+    scene = null;
+    camera = null;
+    canvas = null;
   }
 }
 
