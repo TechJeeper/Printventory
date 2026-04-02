@@ -7562,7 +7562,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Reset renderer state but keep the instance
       if (sharedRenderer) {
-        sharedRenderer.forceContextLoss();
+        // sharedRenderer.forceContextLoss(); // Do not force context loss as it destroys the WebGL context
         sharedRenderer.resetState();
         sharedRenderer.clear();
       }
@@ -12445,24 +12445,12 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     return fallback;
   }
 
-  let renderer, scene, camera, canvas;
+  let scene, camera;
   let model = null; // Declare model in outer scope
+  const renderer = getSharedRenderer();
 
   try {
-    canvas = document.createElement('canvas');
-    canvas.width = 250;
-    canvas.height = 250;
-    
-    renderer = new THREE.WebGLRenderer({
-        antialias: false,
-        alpha: true,
-        canvas: canvas,
-        powerPreference: 'low-power',
-        precision: 'lowp',
-        setPixelRatio: .2,
-        setClearColor: 0x000000,
-    });
-    
+    renderer.setSize(250, 250);
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
 
@@ -12527,7 +12515,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     fitCameraToObject(camera, model, scene, renderer);
     renderer.render(scene, camera);
 
-    const imgData = canvas.toDataURL('image/png');
+    const imgData = renderer.domElement.toDataURL('image/png');
 
     const img = document.createElement('img');
     img.src = imgData;
@@ -12568,15 +12556,32 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
       model = null;
     }
 
-    if (renderer) {
-      renderer.forceContextLoss();
-      renderer.dispose();
-      renderer = null;
+    if (scene) {
+      scene.traverse((object) => {
+        if (object.geometry) {
+          object.geometry.dispose();
+          object.geometry = null;
+        }
+        if (object.material) {
+          if (Array.isArray(object.material)) {
+            object.material.forEach(material => {
+              material && material.dispose();
+            });
+          } else {
+            object.material.dispose();
+          }
+        }
+      });
+      scene.clear();
+      scene = null;
     }
 
-    scene = null;
+    // Reset renderer state but keep the instance
+    if (sharedRenderer) {
+      sharedRenderer.clear();
+    }
+
     camera = null;
-    canvas = null;
   }
 }
 
