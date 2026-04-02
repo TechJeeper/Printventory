@@ -1,0 +1,108 @@
+--- renderer.js
++++ renderer.js
+@@ -7387,51 +7387,6 @@
+   // 1. Implement thumbnail caching system
+   const thumbnailCache = new Map();
+
+-  // 2. Optimize renderer settings and reuse renderer instance
+-  let sharedRenderer = null;
+-  let sharedCanvas = null;
+-  const MAX_CONTEXT_REUSE_COUNT = 100; // Number of renders before recreating context
+-  let contextUseCount = 0;
+-
+-  function getSharedRenderer() {
+-    if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
+-      // Clean up existing resources before creating new ones
+-      if (sharedRenderer) {
+-        sharedRenderer.dispose();
+-        sharedRenderer.forceContextLoss();
+-        sharedRenderer = null;
+-      }
+-      if (sharedCanvas) {
+-        sharedCanvas.remove();
+-        sharedCanvas = null;
+-      }
+-
+-      // Create new canvas and renderer
+-      sharedCanvas = document.createElement('canvas');
+-      sharedCanvas.width = 250;
+-      sharedCanvas.height = 250;
+-
+-      sharedRenderer = new THREE.WebGLRenderer({
+-        antialias: false,
+-        alpha: true,
+-        canvas: sharedCanvas,
+-        powerPreference: 'low-power',
+-        preserveDrawingBuffer: true // Add this for better context management
+-      });
+-
+-      contextUseCount = 0;
+-
+-      // Add context loss handler
+-      sharedCanvas.addEventListener('webglcontextlost', (event) => {
+-        event.preventDefault();
+-        sharedRenderer.dispose();
+-        sharedRenderer = null;
+-        sharedCanvas = null;
+-      }, false);
+-    }
+-    contextUseCount++;
+-    return sharedRenderer;
+-  }
+-
+   // extract3MFThumbnail moved to top level for generateThumbnail access
+
+   async function extract3MFSTL(filePath) {
+@@ -12278,6 +12233,52 @@
+   }
+ }
+
++// 2. Optimize renderer settings and reuse renderer instance
++let sharedRenderer = null;
++let sharedCanvas = null;
++const MAX_CONTEXT_REUSE_COUNT = 100; // Number of renders before recreating context
++let contextUseCount = 0;
++
++function getSharedRenderer() {
++  if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
++    // Clean up existing resources before creating new ones
++    if (sharedRenderer) {
++      sharedRenderer.dispose();
++      sharedRenderer.forceContextLoss();
++      sharedRenderer = null;
++    }
++    if (sharedCanvas) {
++      sharedCanvas.remove();
++      sharedCanvas = null;
++    }
++
++    // Create new canvas and renderer
++    sharedCanvas = document.createElement('canvas');
++    sharedCanvas.width = 250;
++    sharedCanvas.height = 250;
++
++    sharedRenderer = new THREE.WebGLRenderer({
++      antialias: false,
++      alpha: true,
++      canvas: sharedCanvas,
++      powerPreference: 'low-power',
++      preserveDrawingBuffer: true // Add this for better context management
++    });
++
++    contextUseCount = 0;
++
++    // Add context loss handler
++    sharedCanvas.addEventListener('webglcontextlost', (event) => {
++      event.preventDefault();
++      sharedRenderer.dispose();
++      sharedRenderer = null;
++      sharedCanvas = null;
++    }, false);
++  }
++  contextUseCount++;
++  return sharedRenderer;
++}
++
+ async function renderModelToPNG(filePath, container, existingThumbnail) {
+   const startTime = Date.now();
+   console.log(`[DEBUG] renderModelToPNG: Start rendering ${filePath}`);
