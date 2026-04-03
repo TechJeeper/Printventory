@@ -39,6 +39,7 @@ $rootFiles = @(
     "styles.css",
     "server-bridge.js",
     "scan-worker.js",
+    "parse-worker.js",
     "aitagging.js",
     "slicer.js",
     "guide.js",
@@ -84,6 +85,14 @@ if (Test-Path "guide") {
     Copy-Item -Path "guide" -Destination (Join-Path $stagingPath "guide") -Recurse -Force
 }
 
+# vendor/ (Three.js + loaders - required for index.html and parse-worker importScripts)
+if (Test-Path "vendor") {
+    Write-Host "Copying vendor/"
+    Copy-Item -Path "vendor" -Destination (Join-Path $stagingPath "vendor") -Recurse -Force
+} else {
+    Write-Warning "vendor/ folder missing - macOS build will fail to load 3D previews."
+}
+
 # README for the zip
 $readme = @"
 Printventory macOS build package ($version)
@@ -108,4 +117,4 @@ Remove-Item $stagingPath -Recurse -Force
 
 Write-Host ""
 Write-Host "Done. Package: $zipPath" -ForegroundColor Green
-Write-Host "On macOS: unzip, then npm install && npm run build:mac"
+Write-Host "On macOS: unzip, then npm install; npm run build:mac"

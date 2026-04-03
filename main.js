@@ -1471,16 +1471,6 @@ if (!gotTheLock) {
         }
       }
 
-      // Check for updates before creating window (skip in server mode)
-      if (!isServerMode) {
-        try {
-          await checkForUpdates();
-        } catch (updateError) {
-          console.error('Error checking version on startup:', updateError);
-          // Continue with app startup even if version check fails
-        }
-      }
-
       // Server mode: start HTTP server and create hidden window for IPC
       if (isServerMode) {
         try {
@@ -1493,6 +1483,13 @@ if (!gotTheLock) {
         await createHiddenWindow();
         // Schedule background hash generation for any existing models with missing hashes
         scheduleBackgroundHashGeneration('startup');
+        setTimeout(() => {
+          try {
+            verifyDatabaseIntegrity();
+          } catch (e) {
+            console.error('Deferred database integrity check failed:', e);
+          }
+        }, 3000);
         // Don't quit when all windows are closed in server mode
         app.on('window-all-closed', () => {
           // Keep the app running in server mode
@@ -1524,11 +1521,29 @@ if (!gotTheLock) {
         });
 
         createApplicationMenu();
+
+        // Version check after first window paint (HTTPS can block for seconds)
+        setImmediate(() => {
+          checkForUpdates().catch((updateError) => {
+            console.error('Error checking version on startup:', updateError);
+          });
+        });
+
+        // PRAGMA integrity_check + orphan cleanup can be slow on huge DBs — defer past cold start
+        setTimeout(() => {
+          try {
+            verifyDatabaseIntegrity();
+          } catch (e) {
+            console.error('Deferred database integrity check failed:', e);
+          }
+        }, 3000);
       }
       
-      // Track application usage after initialization (skip in server mode)
+      // Track application usage after initialization (skip in server mode; do not block ready)
       if (!isServerMode) {
-        await trackAppUsage();
+        setImmediate(() => {
+          trackAppUsage().catch((e) => console.error('trackAppUsage:', e));
+        });
       }
     } catch (error) {
       console.error('Error during app initialization:', error);
@@ -1675,7 +1690,9 @@ function initializeDatabase() {
     
     // Initialize default settings
     initializeDefaultSettings();
-    
+
+    // Integrity / orphan cleanup: deferred in app.whenReady so startup is not blocked (see setTimeout there)
+
     return true;
   } catch (err) {
     console.error('Error initializing database:', err);
@@ -8915,7 +8932,7 @@ async function updateModelsBatch(modelDataBatch) {
 // Add this function before the IPC handlers
 async function saveModel(modelData) {
   try {
-    console.log('saveModel called with data:', JSON.stringify(modelData, null, 2));
+    console.log('saveModel:', modelData?.filePath, modelData?.id != null ? `(id ${modelData.id})` : '');
     
     let {
       id: inputId, // Rename to avoid confusion
@@ -9012,14 +9029,6 @@ async function saveModel(modelData) {
     const tags = rawTags ? (Array.isArray(rawTags) ? rawTags : [rawTags]) : [];
 
     console.log(`Processing notes field: "${notes}"`);
-
-    // Verify database integrity before proceeding
-    try {
-      verifyDatabaseIntegrity();
-    } catch (verifyError) {
-      console.error('Error verifying database integrity:', verifyError);
-      // Continue with the save even if verification fails
-    }
 
     // Enable foreign key constraints
     db.pragma('foreign_keys = ON');

@@ -5,6 +5,17 @@ const os = require('os');
 
 const projectRoot = path.join(__dirname, '..');
 const distDir = path.join(projectRoot, 'dist');
+const DOCKERFILE_NAME = 'Dockerfile.build-linux';
+
+function removeGeneratedDockerfile(dockerfilePath) {
+  try {
+    if (fs.existsSync(dockerfilePath)) {
+      fs.unlinkSync(dockerfilePath);
+    }
+  } catch (_) {
+    // ignore cleanup errors
+  }
+}
 
 console.log('Building Linux AppImage from Windows...\n');
 
@@ -178,15 +189,20 @@ RUN npm run build:linux:internal
 # The output will be in /app/dist
 `;
 
-  const dockerfilePath = path.join(projectRoot, 'Dockerfile.build-linux');
-  fs.writeFileSync(dockerfilePath, dockerfileContent);
-  
+  const dockerfilePath = path.join(projectRoot, DOCKERFILE_NAME);
+  fs.writeFileSync(dockerfilePath, dockerfileContent, 'utf8');
+
   console.log('Building Docker image for Linux build...');
   try {
-    execSync(`docker build -f "${dockerfilePath}" -t printventory-linux-builder "${projectRoot}"`, { stdio: 'inherit' });
+    // Use cwd + relative -f so Docker Desktop (WSL2 backend) resolves the Dockerfile reliably;
+    // absolute Windows paths to -f often fail with "no such file" / tiny dockerfile transfer.
+    execSync(`docker build -f ${DOCKERFILE_NAME} -t printventory-linux-builder .`, {
+      stdio: 'inherit',
+      cwd: projectRoot,
+    });
   } catch (error) {
     console.error('Failed to build Docker image');
-    fs.unlinkSync(dockerfilePath);
+    removeGeneratedDockerfile(dockerfilePath);
     process.exit(1);
   }
   
@@ -247,7 +263,7 @@ RUN npm run build:linux:internal
     // Cleanup
     console.log('Cleaning up container...');
     execSync(`docker rm "${containerName}"`, { stdio: 'ignore' });
-    fs.unlinkSync(dockerfilePath);
+    removeGeneratedDockerfile(dockerfilePath);
     
     console.log('\n✓ Build completed successfully!');
     console.log(`AppImage should be in: ${distDir}`);
@@ -257,7 +273,7 @@ RUN npm run build:linux:internal
     try {
       execSync(`docker rm "${containerName}"`, { stdio: 'ignore' });
     } catch (e) {}
-    fs.unlinkSync(dockerfilePath);
+    removeGeneratedDockerfile(dockerfilePath);
     process.exit(1);
   }
 }

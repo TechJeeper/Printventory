@@ -35,6 +35,10 @@ Copy-Item "index.html" $dockerDistDir
 Copy-Item "styles.css" $dockerDistDir
 Copy-Item "server-bridge.js" $dockerDistDir
 Copy-Item "scan-worker.js" $dockerDistDir
+Copy-Item "parse-worker.js" $dockerDistDir
+Copy-Item "preview.js" $dockerDistDir -ErrorAction SilentlyContinue
+Copy-Item "preview-3mf-worker-node.js" $dockerDistDir -ErrorAction SilentlyContinue
+Copy-Item "threemf-loader-simple.js" $dockerDistDir -ErrorAction SilentlyContinue
 Copy-Item "aitagging.js" $dockerDistDir
 Copy-Item "slicer.js" $dockerDistDir
 Copy-Item "guide.js" $dockerDistDir
@@ -49,6 +53,12 @@ Get-ChildItem -Filter "*.bmp" | Copy-Item -Destination $dockerDistDir -ErrorActi
 # Copy guide directory
 if (Test-Path "guide") {
     Copy-Item "guide" $dockerDistDir -Recurse
+}
+
+# Three.js vendor bundle (index.html + parse-worker)
+if (Test-Path "vendor") {
+    Write-Host "Copying vendor..."
+    Copy-Item "vendor" $dockerDistDir -Recurse
 }
 
 # Create README for Docker distribution

@@ -565,6 +565,9 @@ function debugLog(...args) {
   }
 }
 
+// Above this many scan hits without thumbnails, skip bulk scan-time rendering; grid queues thumbs when cells mount.
+const DEFER_SCAN_BATCH_THUMBNAILS_THRESHOLD = 80;
+
 let BATCH_SIZE = 50; // Default batch size for database operations
 let MAX_FILE_SIZE_MB = 50; // Default max file size in MB
 const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
@@ -1139,14 +1142,52 @@ function normalizePathForComparison(path) {
   normalized = normalized.replace(/\\/g, '/');
   // Trim whitespace
   normalized = normalized.trim();
+  // Windows drive letter: compare case-insensitively (C: vs c:)
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    normalized = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
   return normalized;
+}
+
+/** Merge fresh model into virtual grid's currentModels when paths match (normalized). */
+function mergeModelIntoGridCurrentModels(model) {
+  const container = document.querySelector('.file-grid');
+  if (!container || !container.currentModels || !model) return false;
+  const target = normalizePathForComparison(model.filePath || '');
+  if (!target) return false;
+  const idx = container.currentModels.findIndex(m =>
+    normalizePathForComparison(m.filePath || m.id || '') === target
+  );
+  if (idx === -1) return false;
+  container.currentModels[idx] = model;
+  return true;
+}
+
+/** Insert a new detailed-view metadata row in the same order as createModelItem (dir row, designer, source, parent, license, tags). */
+function insertDetailedMetadataRowBefore(metadataContainer, el, selectorList) {
+  for (const sel of selectorList) {
+    const ref = metadataContainer.querySelector(sel);
+    if (ref) {
+      metadataContainer.insertBefore(el, ref);
+      return;
+    }
+  }
+  const dirRow = metadataContainer.querySelector('.dir-size-row');
+  if (dirRow) {
+    if (dirRow.nextSibling) {
+      metadataContainer.insertBefore(el, dirRow.nextSibling);
+    } else {
+      metadataContainer.appendChild(el);
+    }
+  } else if (metadataContainer.firstChild) {
+    metadataContainer.insertBefore(el, metadataContainer.firstChild);
+  } else {
+    metadataContainer.appendChild(el);
+  }
 }
 
 async function updateModelElement(filePath) {
   try {
-    // Small delay to ensure database is updated
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
     const model = await window.electron.getModel(filePath);
     if (!model) {
       console.warn('updateModelElement: Model not found for', filePath);
@@ -1235,27 +1276,27 @@ async function updateModelElement(filePath) {
                        tagsMatch;
     }
 
-    // Find existing element by iterating through all file items
-    // This avoids CSS escaping issues with special characters in file paths
-    const allFileItems = document.querySelectorAll('.file-item');
-    let existingElement = null;
-    
-    // Normalize the target file path for comparison
     const normalizedTargetPath = normalizePathForComparison(filePath);
-    
-    for (const item of allFileItems) {
-      const itemPath = item.getAttribute('data-filepath') || item.dataset.filepath;
-      // Normalize both paths before comparison
-      const normalizedItemPath = normalizePathForComparison(itemPath);
-      if (normalizedItemPath === normalizedTargetPath) {
-        existingElement = item;
-        break;
+    let existingElement = null;
+    try {
+      existingElement = document.querySelector(`.file-item[data-filepath="${CSS.escape(filePath)}"]`);
+    } catch (e) {
+      /* invalid path for selector */
+    }
+    if (!existingElement) {
+      for (const item of document.querySelectorAll('.file-item')) {
+        const itemPath = item.getAttribute('data-filepath') || item.dataset.filepath;
+        if (normalizePathForComparison(itemPath) === normalizedTargetPath) {
+          existingElement = item;
+          break;
+        }
       }
     }
     
     if (!existingElement) {
-      console.warn('updateModelElement: Element not found for path:', filePath);
-      debugLog('Element not found for path:', filePath);
+      // Virtual grid only mounts visible rows — bulk edits often have no DOM node; still sync in-memory list.
+      mergeModelIntoGridCurrentModels(model);
+      debugLog('updateModelElement: no visible .file-item for path (expected for off-screen/filtered):', filePath);
       return;
     }
     
@@ -1370,11 +1411,11 @@ async function updateModelElement(filePath) {
     // Designer is already shown in the metadata section, so we don't need it here
     const fileInfo = existingElement.querySelector('.file-info');
     if (fileInfo) {
-      // Only remove designer-info elements if we're NOT in list view
-      // In list view, designer-info is inside designer-info-column and should be updated, not removed
+      // Only remove legacy designer-info nodes outside metadata (detailed view stores designer in .metadata-container)
       if (!isListView) {
-        const existingDesignerElements = fileInfo.querySelectorAll('.designer-info');
-        existingDesignerElements.forEach(el => el.remove());
+        fileInfo.querySelectorAll('.designer-info').forEach(el => {
+          if (!el.closest('.metadata-container')) el.remove();
+        });
       }
     }
     
@@ -1389,25 +1430,41 @@ async function updateModelElement(filePath) {
     // isListView and isPreviewView are already defined above
     
     if (metadataContainer && (isDetailedView || currentViewIsDetailed)) {
+      // Detailed grid rows for designer/source/parent/license are only created in createModelItem when the
+      // field already had a value — new models get no row, so updates must insert or remove rows here.
+
       // Update designer
-      const designerItem = metadataContainer.querySelector('.designer-item');
-      console.log('updateModelElement: designerItem found?', !!designerItem);
+      let designerItem = metadataContainer.querySelector('.designer-item');
+      const designerValue = (model.designer && model.designer.trim()) ? model.designer.trim() : '';
+      const hasDesigner = designerValue && designerValue !== '';
+      console.log('updateModelElement: designerItem found?', !!designerItem, 'designerValue =', designerValue);
+
+      if (designerItem && !hasDesigner) {
+        designerItem.remove();
+        designerItem = null;
+      }
+      if (!designerItem && hasDesigner) {
+        designerItem = document.createElement('div');
+        designerItem.className = 'metadata-item designer-item';
+        designerItem.innerHTML = `
+          <span class="metadata-icon">👤</span>
+          <span class="metadata-value designer-info" style="color: #ccc; display: inline-block;" title=""></span>
+        `;
+        insertDetailedMetadataRowBefore(metadataContainer, designerItem, [
+          '.source-item', '.parent-item', '.license-item', '.tags-item'
+        ]);
+      }
+
       if (designerItem) {
-        const designerValue = (model.designer && model.designer.trim()) ? model.designer.trim() : '';
-        const hasDesigner = designerValue && designerValue !== '';
-        console.log('updateModelElement: designerValue =', designerValue, 'hasDesigner =', hasDesigner);
-        let designerValueSpan = designerItem.querySelector('.metadata-value.designer-info');
-        console.log('updateModelElement: designerValueSpan found?', !!designerValueSpan);
+        let designerValueSpan = designerItem.querySelector(':scope > span.metadata-value.designer-info')
+          || designerItem.querySelector(':scope > span.metadata-value')
+          || designerItem.querySelector('span.designer-info');
         if (!designerValueSpan) {
-          // If the span doesn't exist, create it
-          console.log('Creating missing designer value span');
           designerValueSpan = document.createElement('span');
           designerValueSpan.className = 'metadata-value designer-info';
           designerValueSpan.style.display = 'inline-block';
-          // Find the icon and insert after it
           const iconSpan = designerItem.querySelector('.metadata-icon');
           if (iconSpan) {
-            // Insert after the icon
             if (iconSpan.nextSibling) {
               iconSpan.parentNode.insertBefore(designerValueSpan, iconSpan.nextSibling);
             } else {
@@ -1421,13 +1478,10 @@ async function updateModelElement(filePath) {
           designerValueSpan.textContent = hasDesigner ? designerValue : '—';
           designerValueSpan.style.color = hasDesigner ? '#ccc' : '#666';
           designerValueSpan.setAttribute('title', hasDesigner ? designerValue : '');
-          console.log('updateModelElement: Updated designer to', designerValueSpan.textContent);
         }
-        // Update clickability
         if (hasDesigner) {
           designerItem.style.cursor = 'pointer';
           designerItem.classList.add('clickable-metadata');
-          // Re-add click handler
           designerItem.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -1445,14 +1499,28 @@ async function updateModelElement(filePath) {
           designerItem.onclick = null;
         }
       }
-      
+
       // Update source
-      const sourceItem = metadataContainer.querySelector('.source-item');
+      let sourceItem = metadataContainer.querySelector('.source-item');
+      const sourceValue = (model.source && String(model.source).trim()) ? String(model.source).trim() : '';
+      if (sourceItem && !sourceValue) {
+        sourceItem.remove();
+        sourceItem = null;
+      }
+      if (!sourceItem && sourceValue) {
+        sourceItem = document.createElement('div');
+        sourceItem.className = 'metadata-item source-item';
+        sourceItem.innerHTML = `
+          <span class="metadata-icon">🔗</span>
+          <span class="metadata-value source-info" style="color: #ccc" title=""></span>
+        `;
+        insertDetailedMetadataRowBefore(metadataContainer, sourceItem, [
+          '.parent-item', '.license-item', '.tags-item'
+        ]);
+      }
       if (sourceItem) {
-        const sourceValue = model.source || '';
         let sourceValueSpan = sourceItem.querySelector('.metadata-value.source-info');
         if (!sourceValueSpan) {
-          // Create the span if it doesn't exist
           sourceValueSpan = document.createElement('span');
           sourceValueSpan.className = 'metadata-value source-info';
           const iconSpan = sourceItem.querySelector('.metadata-icon');
@@ -1466,18 +1534,30 @@ async function updateModelElement(filePath) {
           sourceValueSpan.textContent = sourceValue || '—';
           sourceValueSpan.style.color = sourceValue ? '#ccc' : '#666';
           sourceValueSpan.setAttribute('title', sourceValue || '');
-          console.log('updateModelElement: Updated source to', sourceValueSpan.textContent);
         }
-      } else {
       }
-      
+
       // Update parent model
-      const parentItem = metadataContainer.querySelector('.parent-item');
+      let parentItem = metadataContainer.querySelector('.parent-item');
+      const parentValue = (model.parentModel && String(model.parentModel).trim()) ? String(model.parentModel).trim() : '';
+      if (parentItem && !parentValue) {
+        parentItem.remove();
+        parentItem = null;
+      }
+      if (!parentItem && parentValue) {
+        parentItem = document.createElement('div');
+        parentItem.className = 'metadata-item parent-item';
+        parentItem.style.cursor = 'pointer';
+        parentItem.classList.add('clickable-metadata');
+        parentItem.innerHTML = `
+          <span class="metadata-icon">📦</span>
+          <span class="metadata-value parent-info" style="color: #ccc" title=""></span>
+        `;
+        insertDetailedMetadataRowBefore(metadataContainer, parentItem, ['.license-item', '.tags-item']);
+      }
       if (parentItem) {
-        const parentValue = model.parentModel || '';
         let parentValueSpan = parentItem.querySelector('.metadata-value.parent-info');
         if (!parentValueSpan) {
-          // Create the span if it doesn't exist
           parentValueSpan = document.createElement('span');
           parentValueSpan.className = 'metadata-value parent-info';
           const iconSpan = parentItem.querySelector('.metadata-icon');
@@ -1491,13 +1571,10 @@ async function updateModelElement(filePath) {
           parentValueSpan.textContent = parentValue || '—';
           parentValueSpan.style.color = parentValue ? '#ccc' : '#666';
           parentValueSpan.setAttribute('title', parentValue || '');
-          console.log('updateModelElement: Updated parentModel to', parentValueSpan.textContent);
         }
-        // Update clickability
         if (parentValue) {
           parentItem.style.cursor = 'pointer';
           parentItem.classList.add('clickable-metadata');
-          // Re-add click handler
           parentItem.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -1515,14 +1592,28 @@ async function updateModelElement(filePath) {
           parentItem.onclick = null;
         }
       }
-      
+
       // Update license
-      const licenseItem = metadataContainer.querySelector('.license-item');
+      let licenseItem = metadataContainer.querySelector('.license-item');
+      const licenseValue = (model.license && String(model.license).trim()) ? String(model.license).trim() : '';
+      if (licenseItem && !licenseValue) {
+        licenseItem.remove();
+        licenseItem = null;
+      }
+      if (!licenseItem && licenseValue) {
+        licenseItem = document.createElement('div');
+        licenseItem.className = 'metadata-item license-item';
+        licenseItem.style.cursor = 'pointer';
+        licenseItem.classList.add('clickable-metadata');
+        licenseItem.innerHTML = `
+          <span class="metadata-icon">📜</span>
+          <span class="metadata-value license-info" style="color: #ccc" title=""></span>
+        `;
+        insertDetailedMetadataRowBefore(metadataContainer, licenseItem, ['.tags-item']);
+      }
       if (licenseItem) {
-        const licenseValue = model.license || '';
         let licenseValueSpan = licenseItem.querySelector('.metadata-value.license-info');
         if (!licenseValueSpan) {
-          // Create the span if it doesn't exist
           licenseValueSpan = document.createElement('span');
           licenseValueSpan.className = 'metadata-value license-info';
           const iconSpan = licenseItem.querySelector('.metadata-icon');
@@ -1536,13 +1627,10 @@ async function updateModelElement(filePath) {
           licenseValueSpan.textContent = licenseValue || '—';
           licenseValueSpan.style.color = licenseValue ? '#ccc' : '#666';
           licenseValueSpan.setAttribute('title', licenseValue || '');
-          console.log('updateModelElement: Updated license to', licenseValueSpan.textContent);
         }
-        // Update clickability
         if (licenseValue) {
           licenseItem.style.cursor = 'pointer';
           licenseItem.classList.add('clickable-metadata');
-          // Re-add click handler
           licenseItem.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -1740,43 +1828,10 @@ async function updateModelElement(filePath) {
     });
 
     // Update the model in the currentModels array so virtual grid uses fresh data
-    const container = document.querySelector('.file-grid');
-    if (container && container.currentModels) {
-      const modelIndex = container.currentModels.findIndex(m => 
-        (m.id || m.filePath) === (model.id || model.filePath)
-      );
-      if (modelIndex !== -1) {
-        // Update the model in the array with fresh data from database
-        container.currentModels[modelIndex] = model;
-        
-        // Recalculate field analysis since a model's metadata may have changed
-        // This ensures the field analysis is up-to-date for future renders
-        if (container.currentModels.length > 0) {
-          window.modelFieldAnalysis = analyzeModelFields(container.currentModels);
-        }
-      }
-    }
+    mergeModelIntoGridCurrentModels(model);
 
-    // For virtual grid, we need to remove the existing item so it gets recreated with fresh data
-    // This ensures the grid shows the updated details
-    const virtualContent = container?.querySelector('.virtual-content');
-    if (virtualContent && existingElement && existingElement.parentNode === virtualContent) {
-      // Remove the item so it will be recreated with updated data
-      existingElement.remove();
-      
-      // Trigger virtual grid refresh to recreate the item with updated data
-      if (container && container.renderVisibleItemsFn) {
-        // Use requestAnimationFrame to batch updates and avoid excessive renders
-        requestAnimationFrame(() => {
-          container.renderVisibleItemsFn();
-        });
-      }
-    } else if (container && container.renderVisibleItemsFn) {
-      // If not in virtual grid or item not found, just trigger refresh
-      requestAnimationFrame(() => {
-        container.renderVisibleItemsFn();
-      });
-    }
+    // In-place DOM updates above are enough; do not remove the grid item or force renderVisibleItemsFn here.
+    // Removing + re-rendering the virtual cell was causing multi-second freezes and duplicate updateModelElement runs.
 
   } catch (error) {
     console.error('Error updating model element:', error);
@@ -2327,10 +2382,14 @@ async function showModelDetails(filePath) {
       return;
     }
     
-    // Load tags if they exist
+    // Load tags if they exist (skipSave: data is already persisted; avoids N redundant saveModel calls)
     if (model.tags && Array.isArray(model.tags)) {
-      model.tags.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-      model.tags.forEach(tag => addTagToModel(tag, 'model-tags'));
+      const tagNames = model.tags.map(t => (typeof t === 'string' ? t : (t && (t.name || t)) || '')).filter(Boolean);
+      tagNames.sort((a, b) => a.localeCompare(b));
+      for (const tagName of tagNames) {
+        if (currentModelDetailsAbort || currentModelDetailsPath !== filePath) return;
+        await addTagToModel(tagName, 'model-tags', { skipSave: true });
+      }
     }
     
     // Final check before showing the panel
@@ -7806,8 +7865,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
 
-      // Check for updates on startup (silent)
-      await checkForUpdates(true);
+      // Defer silent check so settings/dialogs can paint first (IPC + network; main also checks)
+      setTimeout(() => {
+        checkForUpdates(true).catch((err) => console.error('Silent update check:', err));
+      }, 2000);
       
     } catch (error) {
       console.error('Error during initialization:', error);
@@ -8029,13 +8090,29 @@ document.addEventListener('DOMContentLoaded', async () => {
       performSTLHomeScan(stlHome).catch(err => console.error('Background STL Home scan on server load:', err));
       startPeriodicSTLHomeScan();
     } else {
-      console.log("STL Home is set. Scanning directory:", stlHome);
-      await scanAndRenderDirectory(stlHome);
+      console.log("STL Home is set. Showing library from database; STL Home scan in background:", stlHome);
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      }
       await populateDesignerDropdown();
       await populateParentModelFilter();
       await populateTagFilter();
       await populateLicenseFilter();
+      scanAndRenderDirectory(stlHome, true, true)
+        .then(async () => {
+          try {
+            await populateDesignerDropdown();
+            await populateParentModelFilter();
+            await populateTagFilter();
+            await populateLicenseFilter();
+          } catch (e) {
+            console.error('Startup STL Home scan: filter refresh failed:', e);
+          }
+        })
+        .catch((err) => console.error('Background STL Home scan on startup:', err));
     }
+  } else if (typeof window.performCombinedSearch === 'function') {
+    await window.performCombinedSearch();
   }
   // Ensure "Scan STL Home" button is visible when STL Home is set (Docker/server: may be set via env before UI ready)
   if (typeof window.updateScanStlHomeButtonVisibility === 'function') {
@@ -10654,6 +10731,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           });
           activePromises.add(promise);
         }
+
+        if (hasProgressUI && totalThumbnailsToGenerate > 0) {
+          const done = Math.min(generatedThumbnailsCount, totalThumbnailsToGenerate);
+          activeProgressText.textContent = `Processing ${done}/${totalThumbnailsToGenerate} (${activePromises.size} active)`;
+        }
         
         // Wait for at least one promise to complete before continuing
         if (activePromises.size > 0) {
@@ -11420,18 +11502,36 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       const thumb = existingThumbnails.get(file.filePath);
       return !thumb || thumb === '3d.png' || (typeof thumb === 'string' && thumb.trim() === '');
     });
+    const deferScanThumbnails =
+      filesNeedingThumbnails.length > DEFER_SCAN_BATCH_THUMBNAILS_THRESHOLD;
+
     if (!background) {
       if (filesNeedingThumbnails.length > 0) {
-        progressText.textContent = `${filesNeedingThumbnails.length} models found`;
+        progressText.textContent = deferScanThumbnails
+          ? ''
+          : `${filesNeedingThumbnails.length} models found`;
       } else {
         progressText.textContent = '';
       }
       renderProgressBar.style.width = '0%';
-      renderProgressText.textContent = `0 / ${filesNeedingThumbnails.length} models`;
-      container.innerHTML = '';
+      renderProgressText.textContent = deferScanThumbnails
+        ? 'Thumbnails will load as you scroll'
+        : `0 / ${filesNeedingThumbnails.length} models`;
+      if (!deferScanThumbnails) {
+        container.innerHTML = '';
+      }
     }
 
-    if (filesNeedingThumbnails.length > 0) {
+    if (filesNeedingThumbnails.length > 0 && deferScanThumbnails) {
+      if (!background) {
+        renderProgressBar.style.width = '100%';
+        renderProgressText.textContent = `${filesNeedingThumbnails.length} models — open the grid to generate previews`;
+      }
+      window._scanThumbnailProgress = null;
+      console.log(
+        `[scan] Deferred ${filesNeedingThumbnails.length} thumbnails (threshold ${DEFER_SCAN_BATCH_THUMBNAILS_THRESHOLD}); lazy queue will render visible items.`
+      );
+    } else if (filesNeedingThumbnails.length > 0) {
       let completedThumbnails = 0;
       const thumbnailProgressUpdate = (completed) => {
         if (!background) {
@@ -11612,8 +11712,8 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       document.getElementById('printed-select').value = 'all';
       document.getElementById('tag-filter').value = '';
 
-      const finalModels = await window.electron.getAllModels();
-      await updateModelCounts(finalModels.length);
+      const totalInDb = await window.electron.getTotalModelCount();
+      await updateModelCounts(totalInDb);
       
       // Show dialog if new files were found
       if (newFilesCount > 0) {
@@ -11670,8 +11770,12 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
           if (typeof window.performCombinedSearch === 'function') {
             await window.performCombinedSearch();
           } else {
-            // Fallback to renderFiles if performCombinedSearch is not available
-            await renderFiles(finalModels);
+            const sortSelect = document.getElementById('sort-select');
+            const fallbackModels = await window.electron.getAllModels(
+              sortSelect ? sortSelect.value : 'date-desc',
+              0
+            );
+            await renderFiles(fallbackModels);
           }
         }
       } else {
@@ -11681,8 +11785,12 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         if (typeof window.performCombinedSearch === 'function') {
           await window.performCombinedSearch();
         } else {
-          // Fallback to renderFiles if performCombinedSearch is not available
-          await renderFiles(finalModels);
+          const sortSelect = document.getElementById('sort-select');
+          const fallbackModels = await window.electron.getAllModels(
+            sortSelect ? sortSelect.value : 'date-desc',
+            0
+          );
+          await renderFiles(fallbackModels);
         }
       }
     }
@@ -13427,7 +13535,9 @@ async function populateRemoveTagSelect() {
 }
 
 // Update the addTagToModel function
-async function addTagToModel(tagName, containerId) {
+// skipSave: use when populating tags from DB (showModelDetails / loadModelTags) to avoid redundant saves
+async function addTagToModel(tagName, containerId, options = {}) {
+  const { skipSave = false } = options;
   const tagContainer = document.getElementById(containerId);
   if (!tagContainer) {
     console.error(`Tag container with ID ${containerId} not found`);
@@ -13474,6 +13584,10 @@ async function addTagToModel(tagName, containerId) {
   });
 
   tagContainer.appendChild(tag); // Add tag visually
+
+  if (skipSave) {
+    return;
+  }
 
   // Auto-save logic after ADDING a tag
   if (containerId === 'multi-tags') {
@@ -13529,7 +13643,9 @@ async function loadModelTags(modelIdOrPath) {
       // Extract tag names (tags might be objects with .name property or just strings)
       const tagNames = tags.map(tag => typeof tag === 'string' ? tag : (tag.name || tag));
       tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-      tagNames.forEach(tagName => addTagToModel(tagName, 'model-tags'));
+      for (const tagName of tagNames) {
+        await addTagToModel(tagName, 'model-tags', { skipSave: true });
+      }
     }
   } catch (error) {
     console.error('Error loading model tags:', error);
@@ -15908,11 +16024,6 @@ async function autoSaveModel(field, value, filePath) {
     // Save the updated model
     await window.electron.saveModel(model);
     
-    // For tags, add a slightly longer delay to ensure database is fully updated
-    if (field === 'tags') {
-      await new Promise(resolve => setTimeout(resolve, 150));
-    }
-    
     // If this was called from the details panel, update the displayed file
     await updateModelElement(filePath);
     
@@ -16038,33 +16149,33 @@ async function autoSaveMultipleModels(field, value, options = {}) {
       }
     }
     
-    // Update UI for all models at once (batch update)
-    // Use requestAnimationFrame to batch DOM updates
     await new Promise(resolve => requestAnimationFrame(resolve));
-    
-    // Update all model elements in a single batch
-    const updatePromises = modelUpdates.map(({ filePath }) => 
-      updateModelElement(filePath).catch(err => {
-        console.error(`Error updating UI for ${filePath}:`, err);
-      })
-    );
-    
-    // Wait for all UI updates to complete
-    await Promise.all(updatePromises);
-    
-    // Update the in-memory currentModels so the virtual grid shows correct data when scrolling.
-    // Without this, only visible DOM was updated; off-screen items are created from currentModels
-    // on scroll, so they would show stale designer/printed/license/parent until reload.
+
+    // Merge into virtual grid memory, drop stale visible DOM for updated paths, then re-run visible render.
+    // renderVisibleItems reuses matching .file-item nodes and only moves them — it does not refresh metadata,
+    // so without removing those nodes bulk designer/printed/license changes would not show on screen.
     const gridContainer = document.querySelector('.file-grid');
     if (gridContainer && gridContainer.currentModels && modelUpdates.length > 0) {
+      const updatedNorm = new Set(
+        modelUpdates.map(({ filePath }) => normalizePathForComparison(filePath))
+      );
       for (const { filePath, model } of modelUpdates) {
         const normalizedTarget = normalizePathForComparison(filePath);
         const idx = gridContainer.currentModels.findIndex(m =>
-          normalizePathForComparison(m.filePath || m.id) === normalizedTarget
+          normalizePathForComparison(m.filePath || m.id || '') === normalizedTarget
         );
         if (idx !== -1) {
           gridContainer.currentModels[idx] = { ...model };
         }
+      }
+      const virtualContent = gridContainer.querySelector('.virtual-content');
+      if (virtualContent) {
+        virtualContent.querySelectorAll('.file-item').forEach((el) => {
+          const p = el.getAttribute('data-filepath');
+          if (p && updatedNorm.has(normalizePathForComparison(p))) {
+            el.remove();
+          }
+        });
       }
       if (gridContainer.renderVisibleItemsFn) {
         requestAnimationFrame(() => {

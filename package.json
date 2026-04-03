@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.0.16",
+  "version": "2.0.19",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -10,7 +10,7 @@
     "build": "electron-builder -mw",
     "prebuild:mac": "node scripts/check-mac-dependencies.js",
     "build:mac": "electron-builder --mac --universal",
-    "build:win": "electron-builder -w --config.nsis.differentialPackage=false && node scripts/cleanup-win-build.js",
+    "build:win": "node scripts/build-win.js",
     "build:linux": "node scripts/build-linux-appimage.js",
     "build:linux:internal": "electron-builder --linux --x64",
     "build:docker": "node scripts/create-docker-distribution.js",
@@ -121,6 +121,9 @@
       "bg.png",
       "search.js",
       "scan-worker.js",
+      "parse-worker.js",
+      "vendor/**",
+      "vendor/**/*",
       "server-bridge.js",
       "installer.nsh",
       "node_modules/node-stream-zip/**/*"

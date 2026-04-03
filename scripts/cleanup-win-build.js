@@ -17,9 +17,10 @@ files.forEach(file => {
   const filePath = path.join(distDir, file);
   const stat = fs.statSync(filePath);
   
-  // Remove blockmap files, win-unpacked directory, intermediate build files, and builder config files
+  // Remove blockmap files, win-unpacked directory, electron-builder staging dirs, intermediate build files, and builder config files
   if (file.endsWith('.blockmap') || 
       file === 'win-unpacked' || 
+      (file.startsWith('win-staging-') && stat.isDirectory()) ||
       file.endsWith('.nsis.7z') ||
       file.startsWith('builder-')) {
     try {

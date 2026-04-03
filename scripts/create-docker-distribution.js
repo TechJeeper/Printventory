@@ -38,6 +38,7 @@ const filesToCopy = [
   'styles.css',
   'server-bridge.js',
   'scan-worker.js',
+  'parse-worker.js',
   'aitagging.js',
   'slicer.js',
   'guide.js',
@@ -69,6 +70,12 @@ console.log('Copying assets...');
 if (fs.existsSync('guide')) {
   console.log('Copying guide directory...');
   fs.cpSync('guide', path.join(dockerDistDir, 'guide'), { recursive: true });
+}
+
+// Copy vendor (3D loaders, parse-worker importScripts)
+if (fs.existsSync('vendor')) {
+  console.log('Copying vendor directory...');
+  fs.cpSync('vendor', path.join(dockerDistDir, 'vendor'), { recursive: true });
 }
 
 // Create README

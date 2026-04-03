@@ -119,27 +119,42 @@ async function performCombinedSearch() {
     const viewLibMsg = document.getElementById("view-library-message");
     if (viewLibMsg) { viewLibMsg.style.display = "none"; }
 
-    const serverMode = await window.electron.isServerMode().catch(() => false);
-    const PROGRESSIVE_INITIAL = 400;
+    // Full library (no filters): load in chunks so we do not pull/render tens of thousands of rows in one IPC pass.
+    // Cannot use SQL LIMIT when tag filter is active — main process applies tags after the query.
+    const PROGRESSIVE_INITIAL = 500;
+    const PROGRESSIVE_CHUNK = 1200;
+    const useProgressiveFullLibrary = noFiltersActive && !tagFilter;
 
     let filteredModels;
-    if (noFiltersActive && serverMode) {
-      // Progressive load: show first batch quickly to reduce perceived lag when clearing filters (Server/Docker)
+    if (useProgressiveFullLibrary) {
       filteredModels = await getCombinedFilteredModels({ limit: PROGRESSIVE_INITIAL });
       if (searchGeneration !== myGeneration) return;
       updateFilterIndicator(filteredModels.length);
       await window.renderFiles(filteredModels);
-      // Allow filter changes while rest loads; only apply rest if this search is still current
       isFilteringInProgress = false;
-      getCombinedFilteredModels({ offset: PROGRESSIVE_INITIAL })
-        .then((rest) => {
-          if (searchGeneration !== myGeneration) return;
-          const full = filteredModels.concat(rest);
-          updateFilterIndicator(full.length);
-          return window.renderFiles(full);
-        })
-        .catch((err) => console.error("Progressive load rest failed:", err));
-      return; // exit so finally runs; rest runs in background
+
+      (async () => {
+        try {
+          let acc = filteredModels.slice();
+          let offset = acc.length;
+          while (true) {
+            const chunk = await getCombinedFilteredModels({
+              limit: PROGRESSIVE_CHUNK,
+              offset
+            });
+            if (searchGeneration !== myGeneration) return;
+            if (!chunk || chunk.length === 0) break;
+            acc = acc.concat(chunk);
+            offset += chunk.length;
+            updateFilterIndicator(acc.length);
+            await window.renderFiles(acc);
+            await new Promise((r) => requestAnimationFrame(r));
+          }
+        } catch (err) {
+          console.error("Progressive library load failed:", err);
+        }
+      })();
+      return;
     }
 
     filteredModels = await getCombinedFilteredModels();

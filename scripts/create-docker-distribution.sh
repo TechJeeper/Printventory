@@ -31,6 +31,10 @@ cp index.html "${DOCKER_DIST_DIR}/"
 cp styles.css "${DOCKER_DIST_DIR}/"
 cp server-bridge.js "${DOCKER_DIST_DIR}/"
 cp scan-worker.js "${DOCKER_DIST_DIR}/"
+cp parse-worker.js "${DOCKER_DIST_DIR}/"
+cp preview.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
+cp preview-3mf-worker-node.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
+cp threemf-loader-simple.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
 cp aitagging.js "${DOCKER_DIST_DIR}/"
 cp slicer.js "${DOCKER_DIST_DIR}/"
 cp guide.js "${DOCKER_DIST_DIR}/"
@@ -45,6 +49,12 @@ cp *.bmp "${DOCKER_DIST_DIR}/" 2>/dev/null || true
 # Copy guide directory
 if [ -d "guide" ]; then
     cp -r guide "${DOCKER_DIST_DIR}/"
+fi
+
+# Three.js vendor bundle (index.html + parse-worker)
+if [ -d "vendor" ]; then
+    echo "Copying vendor..."
+    cp -r vendor "${DOCKER_DIST_DIR}/"
 fi
 
 # Create README for Docker distribution

@@ -161,9 +161,12 @@ contextBridge.exposeInMainWorld('electron', {
   extractModelFromZip: (filePath) => ipcRenderer.invoke('extract-model-from-zip', filePath),
   extractZipArchive: (filePath, destinationPath) => ipcRenderer.invoke('extract-zip-archive', filePath, destinationPath),
   onScanProgress: (callback) => {
+    // Avoid stacking duplicate listeners on each scan (would freeze UI / stale progress text)
+    ipcRenderer.removeAllListeners('scan-progress');
     ipcRenderer.on('scan-progress', (_, progress) => callback(progress));
   },
   onDbProgress: (callback) => {
+    ipcRenderer.removeAllListeners('db-progress');
     ipcRenderer.on('db-progress', (_, progress) => callback(progress));
   },
   onDbCleanup: (callback) => {
