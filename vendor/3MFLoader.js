@@ -976,6 +976,40 @@
 
 			}
 
+			// Slicers (Bambu Studio, Orca, etc.) often emit triangle <pid> values that are not listed in
+			// basematerials/texture2dgroup/colorgroup (namespaces, extensions, or id mismatch). Build geometry
+			// from triangle properties so preview/thumbnails still work.
+			function buildFallbackMesh( triangleProperties, meshData ) {
+
+				const geometry = new THREE.BufferGeometry();
+				const positionData = [];
+				const vertices = meshData.vertices;
+
+				for ( let i = 0, l = triangleProperties.length; i < l; i ++ ) {
+
+					const triangleProperty = triangleProperties[ i ];
+					positionData.push( vertices[ triangleProperty.v1 * 3 + 0 ] );
+					positionData.push( vertices[ triangleProperty.v1 * 3 + 1 ] );
+					positionData.push( vertices[ triangleProperty.v1 * 3 + 2 ] );
+					positionData.push( vertices[ triangleProperty.v2 * 3 + 0 ] );
+					positionData.push( vertices[ triangleProperty.v2 * 3 + 1 ] );
+					positionData.push( vertices[ triangleProperty.v2 * 3 + 2 ] );
+					positionData.push( vertices[ triangleProperty.v3 * 3 + 0 ] );
+					positionData.push( vertices[ triangleProperty.v3 * 3 + 1 ] );
+					positionData.push( vertices[ triangleProperty.v3 * 3 + 2 ] );
+
+				}
+
+				geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( positionData, 3 ) );
+
+				const material = new THREE.MeshPhongMaterial( {
+					color: 0xaaaaff,
+					flatShading: true
+				} );
+				return new THREE.Mesh( geometry, material );
+
+			}
+
 			function buildMeshes( resourceMap, meshData, objects, modelData, textureData, objectData ) {
 
 				const keys = Object.keys( resourceMap );
@@ -1016,7 +1050,16 @@
 							break;
 
 						default:
-							console.error( 'THREE.3MFLoader: Unsupported resource type.' );
+							if ( triangleProperties.length > 0 ) {
+
+								console.debug( 'THREE.3MFLoader: Unknown material pid "' + resourceId + '"; using fallback mesh.' );
+								meshes.push( buildFallbackMesh( triangleProperties, meshData ) );
+
+							} else {
+
+								console.error( 'THREE.3MFLoader: Unsupported resource type.' );
+
+							}
 
 					}
 
@@ -1028,15 +1071,20 @@
 
 			function getResourceType( pid, modelData ) {
 
-				if ( modelData.resources.texture2dgroup[ pid ] !== undefined ) {
+				const pidAlt = ( pid !== undefined && pid !== null && typeof pid !== 'string' ) ? String( pid ) : pid;
+				const tg = modelData.resources.texture2dgroup;
+				const bm = modelData.resources.basematerials;
+				const cg = modelData.resources.colorgroup;
+
+				if ( tg[ pid ] !== undefined || ( pidAlt !== pid && tg[ pidAlt ] !== undefined ) ) {
 
 					return 'texture';
 
-				} else if ( modelData.resources.basematerials[ pid ] !== undefined ) {
+				} else if ( bm[ pid ] !== undefined || ( pidAlt !== pid && bm[ pidAlt ] !== undefined ) ) {
 
 					return 'material';
 
-				} else if ( modelData.resources.colorgroup[ pid ] !== undefined ) {
+				} else if ( cg[ pid ] !== undefined || ( pidAlt !== pid && cg[ pidAlt ] !== undefined ) ) {
 
 					return 'vertexColors';
 

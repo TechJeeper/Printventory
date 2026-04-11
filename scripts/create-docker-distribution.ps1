@@ -32,6 +32,9 @@ Copy-Item "main.js" $dockerDistDir
 Copy-Item "preload.js" $dockerDistDir
 Copy-Item "renderer.js" $dockerDistDir
 Copy-Item "index.html" $dockerDistDir
+if (Test-Path "favicon.ico") {
+    Copy-Item "favicon.ico" $dockerDistDir
+}
 Copy-Item "styles.css" $dockerDistDir
 Copy-Item "server-bridge.js" $dockerDistDir
 Copy-Item "scan-worker.js" $dockerDistDir

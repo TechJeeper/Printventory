@@ -35,10 +35,14 @@ const filesToCopy = [
   'preload.js',
   'renderer.js',
   'index.html',
+  'favicon.ico',
   'styles.css',
   'server-bridge.js',
   'scan-worker.js',
   'parse-worker.js',
+  'preview-3mf-worker-node.js',
+  'threemf-loader-simple.js',
+  'preview.js',
   'aitagging.js',
   'slicer.js',
   'guide.js',
@@ -97,7 +101,13 @@ This package contains everything needed to run Printventory in server mode using
    \`\`\`
 
 3. **Access the server:**
-   Open your browser to: http://localhost:5000
+   Open your browser to: http://localhost:5000 (or https:// if you enable TLS — see docker-compose comments)
+
+## HTTPS in Docker (optional)
+
+Set \`PRINTVENTORY_TLS_CERT\` and \`PRINTVENTORY_TLS_KEY\` to PEM file paths inside the container (mount a volume for your certs). The app serves HTTPS on the same port; the browser bridge uses \`wss://\` automatically.
+
+If you use a reverse proxy for HTTPS instead, do **not** set these — keep the container on HTTP and configure **WebSocket upgrade** on the proxy so \`wss://\` reaches port 5000.
 
 ## Alternative: Build and Run Manually
 

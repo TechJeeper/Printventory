@@ -504,6 +504,39 @@ function getWindowFromEvent(event) {
   }
 }
 
+/**
+ * Optional TLS for server mode (e.g. Docker without a reverse proxy).
+ * Set PRINTVENTORY_TLS_CERT and PRINTVENTORY_TLS_KEY to PEM paths (inside the container).
+ * Also accepts SSL_CERT_FILE / SSL_KEY_FILE. Optional chain: PRINTVENTORY_TLS_CA.
+ */
+function loadOptionalServerTlsOptions() {
+  const certEnv = process.env.PRINTVENTORY_TLS_CERT || process.env.SSL_CERT_FILE;
+  const keyEnv = process.env.PRINTVENTORY_TLS_KEY || process.env.SSL_KEY_FILE;
+  if (!certEnv || !keyEnv) return null;
+  const certPath = path.resolve(certEnv);
+  const keyPath = path.resolve(keyEnv);
+  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+    console.warn('[Server] TLS env vars set but certificate files not found.');
+    console.warn('[Server] cert:', certPath, 'exists:', fs.existsSync(certPath));
+    console.warn('[Server] key:', keyPath, 'exists:', fs.existsSync(keyPath));
+    return null;
+  }
+  const opts = {
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath)
+  };
+  const caEnv = process.env.PRINTVENTORY_TLS_CA;
+  if (caEnv) {
+    const caPath = path.resolve(caEnv);
+    if (fs.existsSync(caPath)) {
+      opts.ca = fs.readFileSync(caPath);
+    } else {
+      console.warn('[Server] PRINTVENTORY_TLS_CA not found:', caPath);
+    }
+  }
+  return opts;
+}
+
 // HTTP Server Function
 function startHttpServer(port = 5000, localhostOnly = false) {
   const expressApp = express();
@@ -529,6 +562,40 @@ function startHttpServer(port = 5000, localhostOnly = false) {
   const appDir = __dirname;
   // Ensure renderer.js, styles.css, images, and server-bridge.js are served
   // Without this, the browser won't load app scripts and buttons won't work
+
+  /** Inject server-bridge before the first app script (same order as static index.html). */
+  function injectBridgeIntoIndexHtml(htmlData, bridgeCode, bridgeReadError) {
+    const bridgeScript = bridgeReadError
+      ? '<script src="/server-bridge.js"></script>'
+      : `<script>
+// Server bridge initialization
+try {
+${bridgeCode}
+} catch (error) {
+  console.error('[Bridge] Error initializing server bridge:', error);
+  if (typeof window !== 'undefined' && !window.electron) {
+    window.electron = {};
+    window.electron.on = function() {};
+    window.electron.send = function() {};
+    console.warn('[Bridge] Created fallback window.electron object');
+  }
+}
+</script>`;
+    const appScriptRegex = /(<script(?:\s+type=["']module["'])?\s+src=["'](?:search|renderer|slicer|preview|guide)\.js["'][^>]*>)/i;
+    if (appScriptRegex.test(htmlData)) {
+      return htmlData.replace(appScriptRegex, `${bridgeScript}\n$1`);
+    }
+    if (htmlData.includes('<script type="module" src="search.js"></script>')) {
+      return htmlData.replace('<script type="module" src="search.js"></script>', `${bridgeScript}\n<script type="module" src="search.js"></script>`);
+    }
+    if (htmlData.includes('<script src="renderer.js"></script>')) {
+      return htmlData.replace('<script src="renderer.js"></script>', `${bridgeScript}\n<script src="renderer.js"></script>`);
+    }
+    if (htmlData.includes('</body>')) {
+      return htmlData.replace('</body>', `${bridgeScript}\n</body>`);
+    }
+    return htmlData;
+  }
   
   // CRITICAL: Inject server-bridge.js route handler BEFORE express.static
   // This ensures the route handler runs and injects the bridge code
@@ -537,7 +604,6 @@ function startHttpServer(port = 5000, localhostOnly = false) {
     const htmlPath = path.join(appDir, 'index.html');
     const bridgePath = path.join(appDir, 'server-bridge.js');
     
-    // Read both files
     fs.readFile(htmlPath, 'utf8', (err, htmlData) => {
       if (err) {
         res.status(500).send('Error loading index.html');
@@ -547,56 +613,8 @@ function startHttpServer(port = 5000, localhostOnly = false) {
       fs.readFile(bridgePath, 'utf8', (err, bridgeCode) => {
         if (err) {
           console.error('Error loading server-bridge.js, falling back to script tag:', err);
-          // Fallback to script tag if file can't be read
-          const bridgeScript = '<script src="/server-bridge.js"></script>';
-          let modifiedHtml = htmlData;
-          const appScriptRegex = /(<script(?:\s+type=["']module["'])?\s+src=["'](?:search|renderer|slicer|preview|guide)\.js["'][^>]*>)/i;
-          if (appScriptRegex.test(htmlData)) {
-            modifiedHtml = htmlData.replace(appScriptRegex, `${bridgeScript}\n$1`);
-          } else if (htmlData.includes('</body>')) {
-            modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
-          }
-          res.send(modifiedHtml);
-          return;
         }
-        
-        // Inject server-bridge.js code INLINE before application scripts
-        // This ensures it executes synchronously and immediately
-        // Wrap in try-catch to ensure it doesn't break if there's an error
-        const bridgeScript = `<script>
-// Server bridge initialization
-try {
-${bridgeCode}
-} catch (error) {
-  console.error('[Bridge] Error initializing server bridge:', error);
-  // Ensure window.electron exists even if bridge fails
-  if (typeof window !== 'undefined' && !window.electron) {
-    window.electron = {};
-    window.electron.on = function() {};
-    window.electron.send = function() {};
-    console.warn('[Bridge] Created fallback window.electron object');
-  }
-}
-</script>`;
-        let modifiedHtml = htmlData;
-        
-        // Find the first application script (search.js, renderer.js, slicer.js, preview.js, or guide.js)
-        // and inject server-bridge.js right before it
-        const appScriptRegex = /(<script(?:\s+type=["']module["'])?\s+src=["'](?:search|renderer|slicer|preview|guide)\.js["'][^>]*>)/i;
-        if (appScriptRegex.test(htmlData)) {
-          // Insert before first application script
-          modifiedHtml = htmlData.replace(appScriptRegex, `${bridgeScript}\n$1`);
-        } else if (htmlData.includes('<script type="module" src="search.js"></script>')) {
-          // Specific pattern for search.js module
-          modifiedHtml = htmlData.replace('<script type="module" src="search.js"></script>', `${bridgeScript}\n<script type="module" src="search.js"></script>`);
-        } else if (htmlData.includes('<script src="renderer.js"></script>')) {
-          // Fallback: before renderer.js
-          modifiedHtml = htmlData.replace('<script src="renderer.js"></script>', `${bridgeScript}\n<script src="renderer.js"></script>`);
-        } else if (htmlData.includes('</body>')) {
-          // Last resort: insert before closing body tag
-          modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
-        }
-        res.send(modifiedHtml);
+        res.send(injectBridgeIntoIndexHtml(htmlData, bridgeCode, !!err));
       });
     });
   });
@@ -883,9 +901,10 @@ ${bridgeCode}
 
   // Handle 404 - serve index.html for SPA routing (with bridge injection)
   expressApp.get('*', (req, res) => {
-    // Don't inject bridge for static assets
+    // Missing static files: express.static already called next(); respond or the client hangs (blocks parser on <script src>)
     if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
-      return; // Let express.static handle it
+      res.status(404).type('text/plain').send('Not Found');
+      return;
     }
     
     const htmlPath = path.join(appDir, 'index.html');
@@ -899,37 +918,45 @@ ${bridgeCode}
       
       fs.readFile(bridgePath, 'utf8', (err, bridgeCode) => {
         if (err) {
-          // Fallback to script tag
-          const bridgeScript = '<script src="/server-bridge.js"></script>';
-          const modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
-          res.send(modifiedHtml);
-          return;
+          console.error('Error loading server-bridge.js for SPA fallback, using script tag:', err);
         }
-        
-        // Inject server-bridge.js code INLINE before closing body tag
-        const bridgeScript = `<script>\n${bridgeCode}\n</script>`;
-        const modifiedHtml = htmlData.replace('</body>', `${bridgeScript}\n</body>`);
-        res.send(modifiedHtml);
+        res.send(injectBridgeIntoIndexHtml(htmlData, bridgeCode, !!err));
       });
     });
   });
 
+  const tlsOptions = loadOptionalServerTlsOptions();
+  const useTls = !!tlsOptions;
+
   // Start server (returns Promise so callers can catch bind errors, e.g. macOS entitlement)
   const serverPromise = new Promise((resolve, reject) => {
+    const scheme = useTls ? 'https' : 'http';
     if (localhostOnly) {
-      console.log(`[Browser extension] Starting server on http://${HOST}:${PORT}...`);
+      console.log(`[Browser extension] Starting server on ${scheme}://${HOST}:${PORT}...`);
     }
-    httpServer = expressApp.listen(PORT, HOST, () => {
+
+    const onListening = () => {
       if (localhostOnly) {
-        console.log(`[Browser extension] Server listening at http://${HOST}:${PORT}`);
+        console.log(`[Browser extension] Server listening at ${scheme}://${HOST}:${PORT}`);
       } else {
         console.log(`Printventory server mode started`);
-        console.log(`Server running at http://${HOST}:${PORT}`);
-        console.log(`Access from remote browsers: http://<your-ip>:${PORT}`);
+        console.log(`Server running at ${scheme}://${HOST}:${PORT}`);
+        console.log(`Access from remote browsers: ${scheme}://<your-ip>:${PORT}`);
+        if (useTls) {
+          console.log('TLS enabled: browser will use wss:// for the Printventory bridge (same port).');
+        }
         console.log(`Server mode requires UNC paths for all file operations`);
       }
       resolve();
-    });
+    };
+
+    if (useTls) {
+      httpServer = https.createServer(tlsOptions, expressApp);
+      httpServer.listen(PORT, HOST, onListening);
+    } else {
+      httpServer = expressApp.listen(PORT, HOST, onListening);
+    }
+
     httpServer.on('error', (err) => {
       console.error('[Browser extension] Server failed to bind:', err.message);
       console.error('[Browser extension] Code:', err.code, '— If EACCES on macOS, add com.apple.security.network.server to entitlements and rebuild.');
@@ -1440,36 +1467,11 @@ if (!gotTheLock) {
         console.error('Error updating currentVersion in database:', versionError);
       }
 
-      // Check for STL_HOME environment variable and set it if provided
-      // This allows Docker users to configure STL Home via docker-compose.yml
-      const stlHomeEnv = process.env.STL_HOME;
-      if (stlHomeEnv && stlHomeEnv.trim() !== '') {
-        try {
-          db.prepare(`
-            INSERT INTO settings (key, value) 
-            VALUES (?, ?) 
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-          `).run('stlHome', stlHomeEnv.trim());
-          console.log('STL_HOME environment variable set to:', stlHomeEnv.trim());
-        } catch (stlHomeError) {
-          console.error('Error setting STL_HOME from environment variable:', stlHomeError);
-        }
-      }
-
-      // Check for EXTENSION_UPLOAD_DIR environment variable (Docker/NAS: where to save extension-uploaded files)
-      const extensionUploadDirEnv = process.env.EXTENSION_UPLOAD_DIR;
-      if (extensionUploadDirEnv && extensionUploadDirEnv.trim() !== '') {
-        try {
-          db.prepare(`
-            INSERT INTO settings (key, value) 
-            VALUES (?, ?) 
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-          `).run('extensionUploadDirectory', extensionUploadDirEnv.trim());
-          console.log('EXTENSION_UPLOAD_DIR environment variable set to:', extensionUploadDirEnv.trim());
-        } catch (extUploadError) {
-          console.error('Error setting EXTENSION_UPLOAD_DIR from environment variable:', extUploadError);
-        }
-      }
+      // STL_HOME / EXTENSION_UPLOAD_DIR: seed from env when the setting is empty, or always when
+      // PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 (legacy Docker behavior). Otherwise UI changes persist
+      // across container restarts instead of being overwritten every startup.
+      applyDockerEnvSettingIfNeeded('stlHome', process.env.STL_HOME);
+      applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
 
       // Server mode: start HTTP server and create hidden window for IPC
       if (isServerMode) {
@@ -6350,13 +6352,76 @@ ipcMain.handle('stop-extension-server', async () => {
   }
 });
 
+/** Copy SQLite main + sidecar files (-wal / -shm) when migrating paths. */
+function copySqliteDbFiles(srcBase, destBase) {
+  fs.copyFileSync(srcBase, destBase);
+  for (const ext of ['-wal', '-shm']) {
+    const s = srcBase + ext;
+    const d = destBase + ext;
+    if (fs.existsSync(s)) fs.copyFileSync(s, d);
+  }
+}
+
+/**
+ * Docker/server previously used isDev → __dirname/printventory.db (ephemeral /app).
+ * If the persisted userData DB does not exist yet, copy from that legacy file once.
+ */
+function migrateLegacyServerDbIfNeeded(persistedPath) {
+  if (!isServerMode || fs.existsSync(persistedPath)) return;
+  const legacy = path.join(__dirname, 'printventory.db');
+  if (!fs.existsSync(legacy)) return;
+  try {
+    copySqliteDbFiles(legacy, persistedPath);
+    console.log('[Server mode] Migrated SQLite from', legacy, 'to', persistedPath);
+  } catch (e) {
+    console.error('[Server mode] Could not migrate legacy database:', e);
+  }
+}
+
+/**
+ * Apply Docker/env defaults without clobbering user-saved settings on every restart.
+ * Set PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 to always apply env (old behavior).
+ */
+function applyDockerEnvSettingIfNeeded(key, envValue) {
+  if (!db || !envValue || !String(envValue).trim()) return;
+  const trimmed = String(envValue).trim();
+  const force = process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === '1' ||
+    process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === 'true';
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    const current = row?.value != null ? String(row.value).trim() : '';
+    if (!force && current !== '') return;
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, trimmed);
+    console.log(`Startup env applied setting ${key}:`, trimmed, force ? '(PRINTVENTORY_ENV_OVERRIDES_SETTINGS)' : '');
+  } catch (e) {
+    console.error(`Error applying env to setting ${key}:`, e);
+  }
+}
+
 // Update the database path handling
 function getDatabasePath() {
   try {
-    if (isDev) {
+    const envDb = process.env.PRINTVENTORY_DB_PATH?.trim();
+    if (envDb) {
+      const resolved = path.isAbsolute(envDb) ? envDb : path.resolve(process.cwd(), envDb);
+      const dir = path.dirname(resolved);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      debugLog('Using database path from PRINTVENTORY_DB_PATH:', resolved);
+      return resolved;
+    }
+
+    // Local dev (Electron .npm start): keep a single DB in the repo. Server/Docker/docker-entrypoint
+    // runs unpackaged Electron which sets isDev, but we must still use userData so compose volumes work.
+    if (isDev && !isServerMode) {
       return path.join(__dirname, 'printventory.db');
     }
-    
+
     // Handle different OS paths
     let userDataPath;
     if (process.platform === 'darwin') { // macOS
@@ -6373,6 +6438,7 @@ function getDatabasePath() {
     }
 
     const dbPath = path.join(userDataPath, 'printventory.db');
+    migrateLegacyServerDbIfNeeded(dbPath);
     debugLog('Using database path:', dbPath);
     return dbPath;
   } catch (error) {
@@ -6482,6 +6548,23 @@ function cleanDescriptionText(text) {
   return cleaned;
 }
 
+/** Locate main model part in a 3MF zip (JSZip contents). Handles alternate paths/casing. */
+function find3dModelZipEntry(contents) {
+  if (!contents || !contents.files) return null;
+  const preferred = ['3D/3dmodel.model', '/3D/3dmodel.model'];
+  for (const p of preferred) {
+    const f = contents.files[p];
+    if (f && !f.dir) return f;
+  }
+  for (const key of Object.keys(contents.files)) {
+    const f = contents.files[key];
+    if (f.dir) continue;
+    const norm = key.replace(/\\/g, '/');
+    if (/(^|\/)3dmodel\.model$/i.test(norm)) return f;
+  }
+  return null;
+}
+
 // Helper function to parse 3MF model XML and extract metadata
 function parse3MFModelXML(xmlContent) {
   const metadata = {
@@ -6492,14 +6575,15 @@ function parse3MFModelXML(xmlContent) {
   };
 
   try {
-    // Extract metadata values using regex
-    // Pattern: <metadata name="FieldName">value</metadata>
-    // Updated to handle multiline content and CDATA sections
-    const metadataPattern = /<metadata\s+name="([^"]+)"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/metadata>/gis;
+    // Match <metadata ...> regardless of attribute order (some writers put type before name)
+    const metadataPattern = /<metadata\b([^>]*)>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/metadata>/gi;
     let match;
 
     while ((match = metadataPattern.exec(xmlContent)) !== null) {
-      const fieldName = match[1].trim();
+      const attrChunk = match[1];
+      const nameMatch = attrChunk.match(/\bname\s*=\s*["']([^"']+)["']/i);
+      if (!nameMatch) continue;
+      const fieldName = nameMatch[1].trim();
       let fieldValue = match[2].trim();
       
       // If the value is in a CDATA section, it's already extracted by the regex
@@ -6604,12 +6688,7 @@ async function extract3MFMetadata(filePath) {
       return null;
     }
     
-    // Parse 3dmodel.model XML file to extract metadata
-    const modelXmlPath = '3D/3dmodel.model';
-    const altModelXmlPath = '/3D/3dmodel.model';
-    
-    // Try both path variations (with and without leading slash)
-    let modelXmlFile = contents.files[modelXmlPath] || contents.files[altModelXmlPath];
+    const modelXmlFile = find3dModelZipEntry(contents);
     
     if (modelXmlFile && !modelXmlFile.dir) {
       const xmlContent = await modelXmlFile.async('string');
@@ -6712,11 +6791,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     
     // Parse 3dmodel.model XML file to extract metadata
     try {
-      const modelXmlPath = '3D/3dmodel.model';
-      const altModelXmlPath = '/3D/3dmodel.model';
-      
-      // Try both path variations (with and without leading slash)
-      let modelXmlFile = contents.files[modelXmlPath] || contents.files[altModelXmlPath];
+      const modelXmlFile = find3dModelZipEntry(contents);
       
       if (modelXmlFile && !modelXmlFile.dir) {
         console.log('Found 3dmodel.model file, parsing metadata...');
@@ -6835,38 +6910,57 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       return mimeMap[ext] || 'png';
     };
 
+    // Normalized archive path (zip may use \ or /; match Auxiliaries at any depth)
+    const isInAuxiliariesPath = (normLower) =>
+      normLower.startsWith('auxiliaries/') ||
+      normLower.includes('/auxiliaries/') ||
+      normLower.startsWith('auxiliary/') ||
+      normLower.includes('/auxiliary/');
+
     // Helper to calculate score for an image to determine priority
     const calculateScore = (path, size) => {
       let score = 0;
-      const lowerPath = path.toLowerCase();
-      const fileName = path.split('/').pop().toLowerCase();
+      const norm = path.replace(/\\/g, '/').toLowerCase();
+      const fileName = norm.split('/').pop().toLowerCase();
+      const inAuxiliaries = isInAuxiliariesPath(norm);
 
-      // 0. HIGHEST PRIORITY: Images in 3D/Textures/ or 3D/Texture/ directories (3MF standard location)
-      if (lowerPath.includes('3d/textures/') || lowerPath.includes('3d/texture/')) {
-        score += 200; // Very high priority for 3MF texture images
+      // Bambu Studio / Orca / PrusaSlicer: project cover is often Metadata/thumbnail.png
+      if (/(^|\/)metadata\/thumbnail\.(png|jpe?g|webp|gif)$/.test(norm)) {
+        score += 280;
       }
 
-      // 1. Plate images (high priority) - prefer images with "plate" in name
+      // 0. HIGHEST: Auxiliaries/ (any subfolder) — slicer/preview thumbnails per 3MF auxiliary content
+      if (inAuxiliaries) {
+        score += 220;
+      }
+
+      // 1. Very high: Images in 3D/Textures/ or 3D/Texture/ (3MF standard texture location)
+      if (norm.includes('3d/textures/') || norm.includes('3d/texture/')) {
+        score += 200;
+      }
+
+      // 2. Plate images (high priority) - prefer images with "plate" in name
       if (fileName.includes('plate')) score += 150; // Prefer plate images like plate_1.jpg
 
-      // 2. Camera photos (high priority) - specific patterns
+      // 3. Camera photos (high priority) - specific patterns
       if (fileName.match(/^dsc/)) score += 100; // Nikon/Sony
       if (fileName.match(/^img/)) score += 100; // Canon/generic
       if (fileName.match(/^pxl/)) score += 100; // Pixel
       if (fileName.match(/^\d{8}_\d{6}/)) score += 100; // Android date format
 
-      // 3. Metadata/Generated thumbnails (lower priority)
-      if (lowerPath.includes('metadata')) score -= 50;
-      if (fileName.includes('thumbnail')) score -= 20;
-      if (fileName.includes('preview')) score -= 10;
+      // 4. Paths containing "metadata" (lower priority) unless it is the slicer project thumbnail above
+      const isSlicerThumbnailPath = /(^|\/)metadata\/thumbnail\.(png|jpe?g|webp|gif)$/.test(norm);
+      if (!inAuxiliaries && norm.includes('metadata') && !isSlicerThumbnailPath) score -= 50;
+      if (!inAuxiliaries && fileName.includes('thumbnail')) score -= 20;
+      if (!inAuxiliaries && fileName.includes('preview')) score -= 10;
 
-      // 3. File size (preference for larger, likely higher res images)
+      // 5. File size (preference for larger, likely higher res images)
       // Cap size bonus at 50 points (assuming size is in bytes)
       // Use 0 if size is undefined
       const safeSize = size || 0;
       score += Math.min(safeSize / 1024, 50);
 
-      // 4. Prefer webp/jpg over png (often photos vs generated)
+      // 6. Prefer webp/jpg over png (often photos vs generated)
       if (fileName.endsWith('.webp') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) {
         score += 10;
       }
@@ -6893,14 +6987,20 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
       }
     }
 
-    // Sort images by score descending
+    // Sort images by score descending (default thumbnail order: highest score first)
     allImages.sort((a, b) => b.score - a.score);
 
-    // Extract top images
+    // Extract images in priority order. Cap avoids huge photo dumps blowing IPC + DB row size.
+    const MAX_3MF_IMAGES_TO_EXTRACT = 250;
     const imageFiles = [];
-    const maxImagesToExtract = 5; // Limit to top 5 to save memory
+    const toExtract = allImages.slice(0, MAX_3MF_IMAGES_TO_EXTRACT);
+    if (allImages.length > MAX_3MF_IMAGES_TO_EXTRACT) {
+      console.warn(
+        `3MF has ${allImages.length} image entries; extracting ${MAX_3MF_IMAGES_TO_EXTRACT} highest-priority (memory / DB safety cap).`
+      );
+    }
 
-    for (const imgObj of allImages.slice(0, maxImagesToExtract)) {
+    for (const imgObj of toExtract) {
       console.log(`Extracting: ${imgObj.path} (Score: ${imgObj.score})`);
       const imageData = await imgObj.file.async('base64');
       const mimeType = getMimeType(imgObj.path);
@@ -6909,7 +7009,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     
     console.log('\nExtracted total images:', imageFiles.length);
     if (imageFiles.length === 0) {
-      console.log('No images found in 3MF file. Make sure images are in 3D/Textures/ or 3D/Texture/ directories.');
+      console.log('No images found in 3MF file. Expected under Auxiliaries/ (any subfolder), 3D/Textures/, or 3D/Texture/.');
     }
     return imageFiles.length > 0 ? imageFiles : [];
   } catch (error) {

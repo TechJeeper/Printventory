@@ -2049,6 +2049,18 @@ header {
   margin-top: 20px;
 }
 
+/* Center close button in manage thumbnails dialog */
+#manage-thumbnails-dialog .dialog-buttons {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+#manage-thumbnails-dialog .dialog-buttons button {
+  width: auto;
+  flex: 0 0 auto;
+}
+
 #new-designer-name {
   width: 100%;
   padding: 8px;

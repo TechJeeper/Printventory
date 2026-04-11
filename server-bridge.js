@@ -760,43 +760,8 @@
   console.log('[Bridge] onHashGenerationProgress defined:', typeof window.electron.onHashGenerationProgress);
   console.log('[Bridge] on method defined:', typeof window.electron.on);
   console.log('[Bridge] _electronEventListeners initialized:', !!window._electronEventListeners);
-  
-  // CRITICAL: Register preview-model listener directly in bridge
-  // This ensures it works even if preview.js has issues
-  console.log('[Bridge] Registering preview-model listener directly in bridge');
-  window.electron.on('preview-model', (filePath) => {
-    console.log('[Bridge] preview-model event received:', filePath);
-    // Try to call window.openPreview if it exists (from preview.js)
-    if (typeof window.openPreview === 'function') {
-      console.log('[Bridge] Calling window.openPreview');
-      try {
-        window.openPreview(filePath);
-      } catch (error) {
-        console.error('[Bridge] Error calling window.openPreview:', error);
-      }
-    } else {
-      console.warn('[Bridge] window.openPreview not available yet, will retry when preview.js loads');
-      // Retry mechanism: check for openPreview periodically
-      let attempts = 0;
-      const maxAttempts = 50; // 5 seconds
-      const retryInterval = setInterval(() => {
-        attempts++;
-        if (typeof window.openPreview === 'function') {
-          console.log('[Bridge] window.openPreview now available, calling it');
-          clearInterval(retryInterval);
-          try {
-            window.openPreview(filePath);
-          } catch (error) {
-            console.error('[Bridge] Error calling window.openPreview:', error);
-          }
-        } else if (attempts >= maxAttempts) {
-          console.error('[Bridge] window.openPreview never became available');
-          clearInterval(retryInterval);
-        }
-      }, 100);
-    }
-  });
-  console.log('[Bridge] preview-model listener registered. Count:', (window._electronEventListeners['preview-model'] || []).length);
+  // preview-model is handled only by preview.js (loaded first after this bridge) to avoid
+  // racing window.openPreview and duplicate opens when both bridge and preview registered.
   
   // Connect when script loads
   connect();

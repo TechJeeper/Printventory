@@ -8,10 +8,12 @@ services:
     container_name: printventory-server
     ports:
       - "5000:5000"
+      # For HTTPS inside the container, map 443 (or keep 5000) and set TLS env vars below.
+      # - "443:5000"
     volumes:
       # Persist database and application data to local directory
-      # On Linux, Electron stores user data in ~/.config/Printventory
-      # Using bind mount to local ./data directory so data persists on host filesystem
+      # Server mode stores the SQLite DB at /root/.config/Printventory/data/printventory.db
+      # (host path: ./data/data/printventory.db). Optional: PRINTVENTORY_DB_PATH to override.
       - ./data:/root/.config/Printventory
       # Mount network shares for accessing files
       # For Windows Docker Desktop:
@@ -28,6 +30,8 @@ services:
       # Then uncomment: - /mnt/network-share:/mnt/network-share:ro
       # Option 3: Mount local directory (if files are on the Docker host)
       # - /path/to/local/files:/mnt/models:ro
+      # Optional: TLS certificate directory for PRINTVENTORY_TLS_* (see environment section)
+      # - ./certs:/certs:ro
     environment:
       - DISPLAY=:99
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
@@ -36,11 +40,21 @@ services:
       - DCONF_DISABLE=1
       - GIO_USE_VFS=local
       - GIO_USE_VOLUME_MONITOR=unix
-      # Optional: Set STL Home directory via environment variable
-      # This will automatically configure the STL Home setting in Printventory
+      # Optional: Set STL Home directory via environment variable (applied when unset in DB, or set
+      # PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 to always apply env on every start — legacy behavior).
       # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
-      # The path must match a mounted volume in your Docker configuration
       # - STL_HOME=/mnt/network-share/models
+      #
+      # --- HTTPS (optional): TLS terminates in Printventory (no reverse proxy required) ---
+      # Mount PEM files and point env vars at them. Browser uses https:// and wss:// automatically.
+      # - PRINTVENTORY_TLS_CERT=/certs/fullchain.pem
+      # - PRINTVENTORY_TLS_KEY=/certs/privkey.pem
+      # Optional intermediate CA bundle:
+      # - PRINTVENTORY_TLS_CA=/certs/chain.pem
+      # (SSL_CERT_FILE / SSL_KEY_FILE are also accepted.)
+      #
+      # If you terminate TLS with Traefik/Caddy/nginx instead, leave these unset (container stays HTTP)
+      # and configure WebSocket upgrade (wss) on the proxy — otherwise the UI will misbehave over https://.
     restart: unless-stopped
     # Optional: Set resource limits
     # deploy:

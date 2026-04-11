@@ -161,6 +161,28 @@ function isDockerContainer() {
 
 const MAX_CONCURRENT_OPS = isDockerContainer() ? 100 : 50; // Higher concurrency in Docker
 
+/** Always scanned; main's getScanExtensions() merges these with settings-driven additional types. */
+const BASE_SCAN_EXTENSIONS = ['.stl', '.3mf'];
+
+/**
+ * Normalize extension list from main (includes ADDITIONAL_FILE_TYPES_CATALOG selections: .obj, .step, .stp, …).
+ * Used for both directory-queue filtering and processFile / ZIP entry matching so behavior stays consistent.
+ */
+function buildScanExtensionSet(scanExtensions) {
+  const set = new Set();
+  const add = (raw) => {
+    if (raw == null || raw === '') return;
+    const s = String(raw).trim().toLowerCase();
+    if (!s) return;
+    set.add(s.startsWith('.') ? s : `.${s}`);
+  };
+  BASE_SCAN_EXTENSIONS.forEach(add);
+  if (Array.isArray(scanExtensions)) {
+    for (const ext of scanExtensions) add(ext);
+  }
+  return set;
+}
+
 async function calculateFileHash(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('md5');
@@ -192,10 +214,31 @@ async function calculateFileHash(filePath) {
   });
 }
 
-async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = ['.stl', '.3mf']) {
+async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = null) {
   const files = [];
-  let processedFiles = 0;
-  const extSet = new Set(scanExtensions.map(e => e.toLowerCase().startsWith('.') ? e.toLowerCase() : '.' + e.toLowerCase()));
+  /** Every file-type dirent seen while walking the tree (matches legacy totalFiles meaning). */
+  let traversedFileEntries = 0;
+  const extSet = buildScanExtensionSet(scanExtensions);
+
+  const shouldQueueFile = (fileName) => {
+    const ext = path.extname(fileName).toLowerCase();
+    if (extSet.has(ext)) return true;
+    if (enableZipArchives && ext === '.zip') return true;
+    return false;
+  };
+
+  // Throttle progress IPC: walking huge folders is sync; avoid flooding the main process.
+  const TRAVERSE_PROGRESS_INTERVAL = isDockerContainer() ? 2000 : 1000;
+
+  const reportTraversedFile = () => {
+    traversedFileEntries++;
+    if (traversedFileEntries % TRAVERSE_PROGRESS_INTERVAL === 0) {
+      parentPort.postMessage({
+        type: 'progress',
+        processed: traversedFileEntries
+      });
+    }
+  };
 
   // Use a simple queue system
   const queue = [{ type: 'dir', path: directoryPath }];
@@ -209,7 +252,13 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   const processNext = () => {
     // If no active ops and queue is empty, we are done
     if (activeOps === 0 && queue.length === 0) {
-      resolveDone({ files, totalFiles: processedFiles });
+      if (traversedFileEntries > 0) {
+        parentPort.postMessage({
+          type: 'progress',
+          processed: traversedFileEntries
+        });
+      }
+      resolveDone({ files, totalFiles: traversedFileEntries });
       return;
     }
 
@@ -251,7 +300,12 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
           // Actually directories first might discover more work faster.
           queue.push({ type: 'dir', path: fullPath });
         } else {
-          queue.push({ type: 'file', path: fullPath, name: entry.name });
+          // Only queue model-like files (and zips when enabled). Queuing every file caused
+          // millions of async processFile() calls on large trees even when stat() was skipped.
+          reportTraversedFile();
+          if (shouldQueueFile(entry.name)) {
+            queue.push({ type: 'file', path: fullPath, name: entry.name });
+          }
         }
       }
     } catch (err) {
@@ -290,17 +344,6 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
       // For all other files, do nothing - no stat() call!
     } catch (error) {
       console.error(`Error processing file ${filePath}:`, error);
-    } finally {
-      processedFiles++;
-      // Report progress more frequently in Docker (every 25 files) since operations are slower
-      // Less frequently in normal mode (every 15 files) to reduce overhead
-      const progressInterval = isDockerContainer() ? 25 : 15;
-      if (processedFiles % progressInterval === 0) {
-        parentPort.postMessage({
-          type: 'progress',
-          processed: processedFiles
-        });
-      }
     }
   };
 
@@ -357,19 +400,21 @@ parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives,
     console.log(`[Worker] Received node_modules path: ${nodeModulesPath}`);
   }
   
-  const extList = Array.isArray(scanExtensions) && scanExtensions.length > 0 ? scanExtensions : ['.stl', '.3mf'];
+  const extList = Array.from(buildScanExtensionSet(scanExtensions));
   
-  // Load StreamZip now that we have the path
-  try {
-    loadStreamZip();
-    if (!StreamZip) {
-      throw new Error('loadStreamZip() returned without setting StreamZip');
+  // Load StreamZip only when ZIP archives are enabled (saves startup I/O on every scan).
+  if (enableZipArchives) {
+    try {
+      loadStreamZip();
+      if (!StreamZip) {
+        throw new Error('loadStreamZip() returned without setting StreamZip');
+      }
+    } catch (error) {
+      console.error(`[Worker] Error loading node-stream-zip:`, error);
+      console.error(`[Worker] Error stack:`, error.stack);
+      parentPort.postMessage({ type: 'error', error: `Failed to load node-stream-zip: ${error.message}` });
+      return;
     }
-  } catch (error) {
-    console.error(`[Worker] Error loading node-stream-zip:`, error);
-    console.error(`[Worker] Error stack:`, error.stack);
-    parentPort.postMessage({ type: 'error', error: `Failed to load node-stream-zip: ${error.message}` });
-    return;
   }
   try {
     const result = await scanDirectory(directoryPath, maxFileSize, enableZipArchives, extList);

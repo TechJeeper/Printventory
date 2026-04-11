@@ -3,6 +3,12 @@
 importScripts('vendor/three.min.js');
 importScripts('vendor/STLLoader.js');
 importScripts('vendor/fflate.min.js');
+// Dedicated Web Workers have no DOMParser; THREE.3MFLoader needs it for XML.
+importScripts('vendor/xmldom-worker-bundle.js');
+if (typeof DOMParser === 'undefined') {
+  self.DOMParser = __xmldom.DOMParser;
+}
+importScripts('vendor/worker-xmldom-queryselector-polyfill.js');
 importScripts('vendor/3MFLoader.js');
 importScripts('vendor/OBJLoader.js');
 
@@ -71,7 +77,7 @@ function processObject(object, id) {
           object.computeVertexNormals();
       }
       const geo = extractGeometry(object, null, transferables);
-      geometries.push(geo);
+      if (geo) geometries.push(geo);
     } else if (object.isObject3D) {
       object.updateMatrixWorld(true);
       object.traverse((child) => {
@@ -80,7 +86,7 @@ function processObject(object, id) {
                 child.geometry.computeVertexNormals();
             }
             const geo = extractGeometry(child.geometry, child.matrixWorld.elements, transferables);
-            geometries.push(geo);
+            if (geo) geometries.push(geo);
         }
       });
     }
@@ -90,6 +96,7 @@ function processObject(object, id) {
 
 function extractGeometry(geometry, matrix, transferables) {
     const posArray = geometry.attributes.position ? geometry.attributes.position.array : null;
+    if (!posArray || posArray.length < 9) return null;
     const normArray = geometry.attributes.normal ? geometry.attributes.normal.array : null;
     const uvArray = geometry.attributes.uv ? geometry.attributes.uv.array : null;
     const indexArray = geometry.index ? geometry.index.array : null;

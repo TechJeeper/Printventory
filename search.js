@@ -61,11 +61,8 @@ async function getCombinedFilteredModels(overrides = {}) {
   if (overrides.limit != null) filters.limit = overrides.limit;
   if (overrides.offset != null) filters.offset = overrides.offset;
 
-  console.log("Requesting filtered models from backend:", filters);
-
   try {
     const models = await window.electron.getModelsFiltered(filters);
-    console.log(`Received ${models.length} models from backend`);
     return models;
   } catch (error) {
     console.error("Error fetching filtered models:", error);
@@ -75,9 +72,6 @@ async function getCombinedFilteredModels(overrides = {}) {
 
 async function performCombinedSearch() {
   try {
-    // Log the call stack to see what's calling this
-    console.log("performCombinedSearch called from:", new Error().stack);
-    
     // If a filtering operation is already in progress, don't start another one
     if (isFilteringInProgress) {
       console.log("Filtering operation already in progress, ignoring new request");
@@ -129,6 +123,16 @@ async function performCombinedSearch() {
     if (useProgressiveFullLibrary) {
       filteredModels = await getCombinedFilteredModels({ limit: PROGRESSIVE_INITIAL });
       if (searchGeneration !== myGeneration) return;
+      if (filteredModels.length === 0) {
+        const welcomeDialog = document.getElementById('welcome-message');
+        if (welcomeDialog) welcomeDialog.showModal();
+        const viewLibMsg = document.getElementById('view-library-message');
+        if (viewLibMsg) viewLibMsg.style.display = 'none';
+        updateFilterIndicator(0);
+        await window.renderFiles(filteredModels);
+        isFilteringInProgress = false;
+        return;
+      }
       updateFilterIndicator(filteredModels.length);
       await window.renderFiles(filteredModels);
       isFilteringInProgress = false;
@@ -148,7 +152,14 @@ async function performCombinedSearch() {
             offset += chunk.length;
             updateFilterIndicator(acc.length);
             await window.renderFiles(acc);
-            await new Promise((r) => requestAnimationFrame(r));
+            // Yield so layout, thumbnail decode, and input can run between large virtual-grid updates.
+            await new Promise((r) => {
+              if (typeof requestIdleCallback !== 'undefined') {
+                requestIdleCallback(() => r(), { timeout: 100 });
+              } else {
+                setTimeout(r, 48);
+              }
+            });
           }
         } catch (err) {
           console.error("Progressive library load failed:", err);
@@ -161,6 +172,15 @@ async function performCombinedSearch() {
     console.log(`Got ${filteredModels.length} filtered models, rendering...`, window.dateAddedFilter ? `(filtered by dateAdded)` : '');
     updateFilterIndicator(filteredModels.length);
     await window.renderFiles(filteredModels);
+    // renderer.js sync can lose to rAF/layout; run again after paint (stale Model Details path/name)
+    if (typeof window.syncSelectionWithFilteredModels === 'function') {
+      window.syncSelectionWithFilteredModels(filteredModels);
+      requestAnimationFrame(() => {
+        if (typeof window.syncSelectionWithFilteredModels === 'function') {
+          window.syncSelectionWithFilteredModels(filteredModels);
+        }
+      });
+    }
  
   } catch (error) {
     console.error("Error performing combined search:", error);
@@ -344,6 +364,9 @@ function updateFilterIndicator(count) {
       
       // Let the cleared UI paint first, then run the search (reduces perceived delay)
       await new Promise(r => requestAnimationFrame(r));
+      if (typeof window.resetFilterSelectionAndDetails === 'function') {
+        window.resetFilterSelectionAndDetails();
+      }
       await performCombinedSearch();
     });
   }
@@ -394,6 +417,9 @@ function updateFilterIndicator(count) {
           break;
       }
       
+      if (typeof window.resetFilterSelectionAndDetails === 'function') {
+        window.resetFilterSelectionAndDetails();
+      }
       // Perform search with updated filters
       await performCombinedSearch();
     });
@@ -505,7 +531,10 @@ async function initializeCombinedSearch() {
         window.viewingEntireLibrary = false;
         
         // DO NOT clear search input - preserve the search term
-        // Just perform search with updated filters
+        // Clear selection + Model Details synchronously before await (renderer.js state; avoids stale sidebar)
+        if (typeof window.resetFilterSelectionAndDetails === 'function') {
+          window.resetFilterSelectionAndDetails();
+        }
         await performCombinedSearch();
       });
     }
@@ -521,6 +550,9 @@ async function initializeCombinedSearch() {
     }
     // Reset the viewingEntireLibrary flag when search is applied
     window.viewingEntireLibrary = false;
+    if (typeof window.resetFilterSelectionAndDetails === 'function') {
+      window.resetFilterSelectionAndDetails();
+    }
     await performCombinedSearch();
   });
 
@@ -543,6 +575,9 @@ async function initializeCombinedSearch() {
     searchInput.value = "";
     clearButton.classList.add("hidden");
     clearButton.style.display = "none";
+    if (typeof window.resetFilterSelectionAndDetails === 'function') {
+      window.resetFilterSelectionAndDetails();
+    }
     await performCombinedSearch();
     searchInput.focus();
   });

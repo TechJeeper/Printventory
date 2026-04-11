@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.0.19",
+  "version": "2.1.0",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -21,6 +21,7 @@
     "docker:push:latest": "node scripts/docker-hub-push.js push-latest",
     "docker:hub:all": "node scripts/docker-hub-push.js all",
     "zip:macos": "powershell -ExecutionPolicy Bypass -File scripts/zip-macos-build.ps1",
+    "zip:github-source": "node scripts/create-github-source-zip.js",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "TechJeeper Designs",
@@ -139,6 +140,9 @@
     "@playwright/test": "^1.57.0",
     "electron": "^39.2.4",
     "electron-builder": "^26.5.0"
+  },
+  "overrides": {
+    "tar": "^6.2.1"
   },
   "dependencies": {
     "better-sqlite3": "^12.5.0",

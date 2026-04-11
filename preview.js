@@ -13,9 +13,7 @@ console.log('[Preview] preview.js script loaded');
   let previewLoadToken = 0;
   let preview3mfRequestId = null;
 
-  // Register preview-model listener
-  // In server mode: server-bridge.js registers the listener and calls window.openPreview
-  // In normal mode: preview.js registers the listener directly
+  // Register preview-model listener (server mode WebSocket and normal IPC both dispatch here)
   const previewCallback = (filePath) => {
     console.log('[Preview] Received preview-model event for file:', filePath);
     try {
@@ -25,9 +23,7 @@ console.log('[Preview] preview.js script loaded');
     }
   };
   
-  // Register listener - works in both normal mode and server mode
-  // In server mode, server-bridge.js will also register, but that's OK - it calls window.openPreview
-  // In normal mode, this is the only registration
+  // Register listener - works in both normal mode and server mode (bridge does not register preview-model)
   if (window.electron && typeof window.electron.receive === 'function') {
     console.log('[Preview] Registering preview-model listener via receive()');
     window.electron.receive('preview-model', previewCallback);
@@ -174,8 +170,7 @@ console.log('[Preview] preview.js script loaded');
     }
   }
   
-  // CRITICAL: Expose openPreview globally immediately after function definition
-  // This allows the bridge to find and call it in server/Docker mode
+  // Exposed for debugging and any late-loaded code; server bridge no longer calls this directly
   window.openPreview = openPreview;
   console.log('[Preview] Exposed window.openPreview globally');
 
@@ -214,6 +209,9 @@ console.log('[Preview] preview.js script loaded');
       antialias: true,
       alpha: false
     });
+    if (previewRenderer.debug) {
+      previewRenderer.debug.checkShaderErrors = false;
+    }
     previewRenderer.setSize(width, height);
     previewRenderer.setPixelRatio(window.devicePixelRatio);
     previewRenderer.shadowMap.enabled = true;

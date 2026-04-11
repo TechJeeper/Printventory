@@ -190,7 +190,10 @@ RUN npm run build:linux:internal
 `;
 
   const dockerfilePath = path.join(projectRoot, DOCKERFILE_NAME);
-  fs.writeFileSync(dockerfilePath, dockerfileContent, 'utf8');
+  const hadDockerfile = fs.existsSync(dockerfilePath);
+  if (!hadDockerfile) {
+    fs.writeFileSync(dockerfilePath, dockerfileContent, 'utf8');
+  }
 
   console.log('Building Docker image for Linux build...');
   try {
@@ -202,7 +205,7 @@ RUN npm run build:linux:internal
     });
   } catch (error) {
     console.error('Failed to build Docker image');
-    removeGeneratedDockerfile(dockerfilePath);
+    if (!hadDockerfile) removeGeneratedDockerfile(dockerfilePath);
     process.exit(1);
   }
   
@@ -263,8 +266,8 @@ RUN npm run build:linux:internal
     // Cleanup
     console.log('Cleaning up container...');
     execSync(`docker rm "${containerName}"`, { stdio: 'ignore' });
-    removeGeneratedDockerfile(dockerfilePath);
-    
+    if (!hadDockerfile) removeGeneratedDockerfile(dockerfilePath);
+
     console.log('\n✓ Build completed successfully!');
     console.log(`AppImage should be in: ${distDir}`);
   } catch (error) {
@@ -273,7 +276,7 @@ RUN npm run build:linux:internal
     try {
       execSync(`docker rm "${containerName}"`, { stdio: 'ignore' });
     } catch (e) {}
-    removeGeneratedDockerfile(dockerfilePath);
+    if (!hadDockerfile) removeGeneratedDockerfile(dockerfilePath);
     process.exit(1);
   }
 }

@@ -83,7 +83,7 @@ window._electronPendingEvents = {};
 const earlyEventChannels = [
   'open-theme-settings', 'regenerate-thumbnails', 'generate-missing-thumbnails',
   'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-stats',
-  'open-backup-restore', 'open-ai-config', 'open-performance-settings',
+  'open-backup-restore', 'open-ai-config', 'open-file-type-settings', 'open-performance-settings',
   'open-slicer-settings', 'open-browser-extension-settings', 'open-purge-models',
   'open-metadata-editor', 'open-system-report', 'open-manage-thumbnails',
   'open-settings', 'open-guide', 'open-about', 'open-keyboard-shortcuts',
@@ -105,10 +105,33 @@ earlyEventChannels.forEach(function(channel) {
         window._electronPendingEvents[channel] = [];
       }
       window._electronPendingEvents[channel].push(args);
-      console.log('[Bridge] Event', channel, 'queued (real handler not ready yet).');
+      console.debug('[Bridge] Event', channel, 'queued (real handler not ready yet).');
     }
   });
 });
+
+// Performance dialog: register before main DOMContentLoaded async work (avoids menu IPC race + bridge log)
+window._openPerformanceSettingsDialog = async function _openPerformanceSettingsDialog() {
+  const dialog = document.getElementById('performance-settings-dialog');
+  if (!dialog) return;
+  try {
+    if (window.electron && typeof window.electron.getSetting === 'function') {
+      const maxFileSize = (await window.electron.getSetting('maxFileSizeMB')) || '50';
+      const input = document.getElementById('max-file-size');
+      if (input) input.value = maxFileSize;
+    }
+  } catch (e) {
+    console.error('Error loading performance settings for dialog:', e);
+  }
+  try {
+    dialog.showModal();
+  } catch (e) {
+    console.error('Error opening performance settings dialog:', e);
+  }
+};
+window._electronRealEventHandlers['open-performance-settings'] = function() {
+  window._openPerformanceSettingsDialog();
+};
 
 // File Type Settings: expose save early so Save button onclick works in Docker/server (before DOMContentLoaded block runs)
 window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromDialog() {
@@ -724,7 +747,76 @@ window._runScanSTLHomeImpl = runScanSTLHomeImpl;
 
 // Add these queue-related variables
 let renderQueue = [];
+/** Lower values run first. Scan / off-grid work uses THUMB_PRIORITY_BACKGROUND so on-screen grid cells win. */
+const THUMB_PRIORITY_BACKGROUND = 1e12;
+/** Priorities at or above this are off-viewport grid rows (see computeThumbPriorityForScroll / refresh). */
+const THUMB_PRIORITY_LOW_TIER_MIN = 2e9;
+/** Extra delay after each low-priority render so visible/interactive work stays smooth. */
+let RENDER_DELAY_BACKGROUND = 750;
+/** When the queue has only off-screen work, cap parallel WebGL thumbs (foreground uses MAX_CONCURRENT_RENDERS). */
+let MAX_CONCURRENT_RENDERS_BACKGROUND = 2;
 let pendingThumbnails = new Set(); // Track files currently being rendered
+
+function isLowPriorityThumbnailTask(task) {
+  const p = task?.thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
+  return p >= THUMB_PRIORITY_LOW_TIER_MIN;
+}
+
+function renderQueueHasOnlyLowPriorityWork() {
+  if (renderQueue.length === 0) return false;
+  return renderQueue.every(isLowPriorityThumbnailTask);
+}
+
+function effectiveMaxConcurrentRenders() {
+  return renderQueueHasOnlyLowPriorityWork()
+    ? Math.min(MAX_CONCURRENT_RENDERS, MAX_CONCURRENT_RENDERS_BACKGROUND)
+    : MAX_CONCURRENT_RENDERS;
+}
+
+function computeThumbPriorityForScroll(scrollTop, clientHeight, itemContentY, itemHeight, col = 0) {
+  const EPS = 1;
+  const itemBottom = itemContentY + itemHeight;
+  if (itemBottom <= scrollTop + EPS) {
+    return 3e9 + itemContentY + col * 1e-6;
+  }
+  if (itemContentY >= scrollTop + clientHeight - EPS) {
+    return 2e9 + itemContentY + col * 1e-6;
+  }
+  return itemContentY - scrollTop + col * 1e-6;
+}
+
+function refreshThumbnailQueuePriorities() {
+  const grid = document.querySelector('.file-grid');
+  if (!grid || renderQueue.length === 0) return;
+  const gr = grid.getBoundingClientRect();
+  const vh = grid.clientHeight;
+  const NEAR = 80;
+  for (const task of renderQueue) {
+    if (!task || !task.container) continue;
+    if (!task.container.isConnected) continue;
+    const tr = task.container.getBoundingClientRect();
+    const relTop = tr.top - gr.top;
+    const relBottom = tr.bottom - gr.top;
+    if (relBottom < -NEAR) task.thumbPriority = 3e9 + relTop;
+    else if (relTop > vh + NEAR) task.thumbPriority = 2e9 + relTop;
+    else task.thumbPriority = relTop;
+  }
+}
+
+function dequeueNextRenderTask() {
+  if (renderQueue.length === 0) return null;
+  if (renderQueue.length === 1) return renderQueue.shift();
+  let minIdx = 0;
+  let minP = renderQueue[0].thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
+  for (let i = 1; i < renderQueue.length; i++) {
+    const p = renderQueue[i].thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
+    if (p < minP) {
+      minP = p;
+      minIdx = i;
+    }
+  }
+  return renderQueue.splice(minIdx, 1)[0];
+}
 // When set during scan, any thumbnail completion (scan or grid) increments progress so bar stays in sync with visible renders
 window._scanThumbnailProgress = null;
 let activeRenders = 0;
@@ -1037,10 +1129,17 @@ async function loadModel(filePath, options = {}) {
           });
 
           data.geometries.forEach(geoData => {
+            if (!geoData.position || geoData.position.length < 9) return;
             const geometry = new THREE.BufferGeometry();
-            if (geoData.position) geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
-            if (geoData.normal) geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
-            if (geoData.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(geoData.uv, 2));
+            geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
+            if (geoData.normal && geoData.normal.length >= geoData.position.length) {
+              geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
+            } else {
+              geometry.computeVertexNormals();
+            }
+            if (geoData.uv && geoData.uv.length >= (geoData.position.length / 3) * 2) {
+              geometry.setAttribute('uv', new THREE.BufferAttribute(geoData.uv, 2));
+            }
             if (geoData.index) geometry.setIndex(new THREE.BufferAttribute(geoData.index, 1));
 
             const mesh = new THREE.Mesh(geometry, material);
@@ -1049,6 +1148,14 @@ async function loadModel(filePath, options = {}) {
             }
             group.add(mesh);
           });
+
+          if (group.children.length === 0) {
+            if (tempFilePath) {
+              window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
+            }
+            reject(new Error('Model contains no drawable mesh geometry'));
+            return;
+          }
 
           if (fileExtension === 'stl' || fileExtension === '3mf' || fileExtension === 'obj') {
             group.rotation.x = -Math.PI / 2;
@@ -1104,24 +1211,32 @@ let contextUseCount = 0;
 const MAX_CONTEXT_USES = 20; // Reset context after this many uses
 const MAX_CONTEXT_REUSE_COUNT = 100; // Add this missing constant
 
+// Debounce total-count IPC: progressive library load calls updateModelCounts every chunk; one fetch is enough.
+let updateTotalCountDebounce = null;
+function scheduleTotalModelCountRefresh() {
+  if (updateTotalCountDebounce) clearTimeout(updateTotalCountDebounce);
+  updateTotalCountDebounce = setTimeout(async () => {
+    updateTotalCountDebounce = null;
+    try {
+      const totalCount = await window.electron.getTotalModelCount();
+      const totalElement = document.getElementById('total-count');
+      if (totalElement) {
+        totalElement.textContent = `${totalCount} model${totalCount !== 1 ? 's' : ''} total`;
+      }
+    } catch (error) {
+      console.error('Error updating total model count:', error);
+    }
+  }, 350);
+}
+
 // Add these functions near the top of the file
 async function updateModelCounts(viewCount) {
   try {
-    // Update view count (for models currently visible in the grid)
     const viewElement = document.getElementById('view-count');
     if (viewElement) {
       viewElement.textContent = `${viewCount} model${viewCount !== 1 ? 's' : ''} in view`;
     }
-
-    // Get the total count from the database using the new IPC handler
-    const totalCount = await window.electron.getTotalModelCount();
-    
-    // Update the total count element
-    const totalElement = document.getElementById('total-count');
-    if (totalElement) {
-      totalElement.textContent = `${totalCount} model${totalCount !== 1 ? 's' : ''} total`;
-    }
-
+    scheduleTotalModelCountRefresh();
   } catch (error) {
     console.error('Error updating model counts:', error);
   }
@@ -1649,38 +1764,57 @@ async function updateModelElement(filePath) {
         }
       }
       
-      // Update tags
-      const tagsItem = metadataContainer.querySelector('.tags-item');
-      if (tagsItem) {
-        let tagsDisplay = '';
-        if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-          const tagNames = model.tags.map(t => t.name || t);
-          tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-          tagsDisplay = tagNames.join(', ');
-        } else if (model.id) {
-          // Load tags asynchronously if not present
-          window.electron.getModelTags(model.id).then(tags => {
-            if (tags && tags.length > 0) {
-              const tagNames = tags.map(t => t.name || t);
-              tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-              const tagsText = tagNames.join(', ');
-              const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
-              if (tagsValueSpan) {
-                tagsValueSpan.textContent = tagsText;
-                tagsValueSpan.setAttribute('title', tagsText);
-                tagsValueSpan.style.color = '#ccc';
-              }
-            }
-          }).catch(err => console.error('Error loading tags:', err));
+      // Update tags — create .tags-item if missing (initial detailed render removes the row when a model had no tags)
+      let tagsItem = metadataContainer.querySelector('.tags-item');
+      const normalizeTagNames = (arr) => {
+        if (!Array.isArray(arr)) return [];
+        const names = arr
+          .map(t => (typeof t === 'string' ? t : (t && (t.name || t)) || ''))
+          .filter(Boolean);
+        names.sort((a, b) => a.localeCompare(b));
+        return names;
+      };
+      let tagNames = normalizeTagNames(model.tags);
+
+      const applyDetailedTagsRow = (names) => {
+        const text = names.join(', ');
+        if (names.length === 0) {
+          if (tagsItem) {
+            tagsItem.remove();
+            tagsItem = null;
+          }
+          return;
+        }
+        if (!tagsItem) {
+          tagsItem = document.createElement('div');
+          tagsItem.className = 'metadata-item tags-item';
+          tagsItem.style.gridColumn = '1 / -1';
+          tagsItem.innerHTML = `
+          <span class="metadata-icon">🏷️</span>
+          <span class="metadata-value tags-info" style="color: #ccc" title=""></span>
+        `;
+          metadataContainer.appendChild(tagsItem);
         }
         const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
         if (tagsValueSpan) {
-          tagsValueSpan.textContent = tagsDisplay || '—';
-          tagsValueSpan.style.color = tagsDisplay ? '#ccc' : '#666';
-          tagsValueSpan.setAttribute('title', tagsDisplay || '');
-        } else {
-          console.warn('Tags value span not found in tags item');
+          tagsValueSpan.textContent = text;
+          tagsValueSpan.setAttribute('title', text);
+          tagsValueSpan.style.color = '#ccc';
         }
+      };
+
+      if (tagNames.length > 0) {
+        applyDetailedTagsRow(tagNames);
+      } else if (model.id) {
+        window.electron.getModelTags(model.id).then((dbTags) => {
+          const names = normalizeTagNames(dbTags);
+          const mc = existingElement.querySelector('.metadata-container');
+          if (!mc) return;
+          tagsItem = mc.querySelector('.tags-item');
+          applyDetailedTagsRow(names);
+        }).catch(err => console.error('Error loading tags:', err));
+      } else {
+        applyDetailedTagsRow([]);
       }
     } else if (isDetailedView || currentViewIsDetailed) {
       // Only warn if we're in detailed view but metadata container is missing
@@ -1750,30 +1884,39 @@ async function updateModelElement(filePath) {
         if (tagsElement) {
           let tagsDisplay = '';
           if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-            // Handle both object format (with .name) and string format
-            const tagNames = model.tags.map(t => t.name || t);
+            const tagNames = model.tags.map(t =>
+              typeof t === 'string' ? t : (t && (t.name || t)) || ''
+            ).filter(Boolean);
             tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
             tagsDisplay = tagNames.join(', ');
           } else if (model.id) {
-            // Load tags asynchronously if not present
+            tagsDisplay = '—';
             window.electron.getModelTags(model.id).then(tags => {
               if (tags && tags.length > 0) {
-                const tagNames = tags.map(t => t.name || t);
+                const tagNames = tags.map(t =>
+                  typeof t === 'string' ? t : (t && (t.name || t)) || ''
+                ).filter(Boolean);
                 tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
                 const tagsText = tagNames.join(', ');
                 tagsElement.textContent = tagsText;
                 tagsElement.style.color = '#aaa';
+                tagsElement.setAttribute('title', tagsText);
               } else {
                 tagsElement.textContent = '—';
                 tagsElement.style.color = '#666';
+                tagsElement.removeAttribute('title');
               }
             }).catch(err => console.error('Error loading tags:', err));
-            return; // Early return since we're loading tags asynchronously
           } else {
             tagsDisplay = '—';
           }
           tagsElement.textContent = tagsDisplay;
           tagsElement.style.color = tagsDisplay && tagsDisplay !== '—' ? '#aaa' : '#666';
+          if (tagsDisplay && tagsDisplay !== '—') {
+            tagsElement.setAttribute('title', tagsDisplay);
+          } else if (!(model.id && (!model.tags || model.tags.length === 0))) {
+            tagsElement.removeAttribute('title');
+          }
           console.log('updateModelElement: Updated tags in list view to', tagsDisplay);
         } else {
           console.warn('updateModelElement: .tags-info not found inside .tags-info-column');
@@ -1784,28 +1927,39 @@ async function updateModelElement(filePath) {
         if (tagsElement) {
           let tagsDisplay = '';
           if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-            const tagNames = model.tags.map(t => t.name || t);
+            const tagNames = model.tags.map(t =>
+              typeof t === 'string' ? t : (t && (t.name || t)) || ''
+            ).filter(Boolean);
             tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
             tagsDisplay = tagNames.join(', ');
           } else if (model.id) {
+            tagsDisplay = '—';
             window.electron.getModelTags(model.id).then(tags => {
               if (tags && tags.length > 0) {
-                const tagNames = tags.map(t => t.name || t);
+                const tagNames = tags.map(t =>
+                  typeof t === 'string' ? t : (t && (t.name || t)) || ''
+                ).filter(Boolean);
                 tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
                 const tagsText = tagNames.join(', ');
                 tagsElement.textContent = tagsText;
                 tagsElement.style.color = '#aaa';
+                tagsElement.setAttribute('title', tagsText);
               } else {
                 tagsElement.textContent = '—';
                 tagsElement.style.color = '#666';
+                tagsElement.removeAttribute('title');
               }
             }).catch(err => console.error('Error loading tags:', err));
-            return;
           } else {
             tagsDisplay = '—';
           }
           tagsElement.textContent = tagsDisplay;
           tagsElement.style.color = tagsDisplay && tagsDisplay !== '—' ? '#aaa' : '#666';
+          if (tagsDisplay && tagsDisplay !== '—') {
+            tagsElement.setAttribute('title', tagsDisplay);
+          } else if (!(model.id && (!model.tags || model.tags.length === 0))) {
+            tagsElement.removeAttribute('title');
+          }
           console.log('updateModelElement: Updated tags in list view (fallback) to', tagsDisplay);
         }
       }
@@ -2276,9 +2430,11 @@ async function showModelDetails(filePath) {
     const modelNameInput = document.getElementById('model-name');
     if (modelNameInput) {
       modelNameInput.value = '';
-      // Use setTimeout to ensure the value is set after clearing
+      // Defer set so layout settles — must not run after filter clear / new selection (stale TIE name bug)
+      const nameForThisLoad = storedValues['model-name'];
       setTimeout(() => {
-        modelNameInput.value = storedValues['model-name'];
+        if (currentModelDetailsAbort || currentModelDetailsPath !== filePath) return;
+        modelNameInput.value = nameForThisLoad;
       }, 0);
     }
     
@@ -2980,6 +3136,74 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
   }
 }
 
+/** After reordering the default thumbnail, sync the virtual grid cell (same approach as thumbnail-deleted IPC). */
+async function refreshGridModelAfterManageThumbnailsActiveChange(filePath) {
+  await new Promise((r) => setTimeout(r, 200));
+  try {
+    const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
+    const normalizedPath = normalizePathForComparison(filePath);
+
+    if (preservedDateAddedFilter) {
+      const updatedModel = await window.electron.getModel(filePath);
+      if (!updatedModel) return;
+      if (updatedModel.dateAdded) {
+        const modelDateAdded = new Date(updatedModel.dateAdded);
+        const filterDate = new Date(preservedDateAddedFilter);
+        if (modelDateAdded < filterDate) return;
+      }
+      window.dateAddedFilter = preservedDateAddedFilter;
+      window._lastDateAddedFilter = preservedDateAddedFilter;
+
+      for (const fileItem of document.querySelectorAll('.file-item')) {
+        const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
+        if (normalizePathForComparison(itemPath) !== normalizedPath) continue;
+        const container = document.querySelector('.file-grid');
+        if (container?.currentModels) {
+          const modelIndex = container.currentModels.findIndex(
+            (m) => normalizePathForComparison(m.filePath) === normalizedPath
+          );
+          if (modelIndex >= 0) container.currentModels[modelIndex] = { ...updatedModel };
+        }
+        fileItem.remove();
+        if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+        return;
+      }
+      return;
+    }
+
+    const updatedModel = await window.electron.getModel(filePath);
+    if (!updatedModel) return;
+
+    const container = document.querySelector('.file-grid');
+    for (const fileItem of document.querySelectorAll('.file-item')) {
+      const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
+      if (normalizePathForComparison(itemPath) !== normalizedPath) continue;
+      if (container?.currentModels) {
+        const modelIndex = container.currentModels.findIndex(
+          (m) => normalizePathForComparison(m.filePath) === normalizedPath
+        );
+        if (modelIndex >= 0) container.currentModels[modelIndex] = { ...updatedModel };
+      }
+      fileItem.remove();
+      if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+      return;
+    }
+
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
+    } else {
+      const sortSelect = document.getElementById('sort-select');
+      const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+      if (typeof renderFiles === 'function') await renderFiles(models);
+    }
+  } catch (err) {
+    console.error('Error refreshing grid after active thumbnail change:', err);
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
+    }
+  }
+}
+
 // Function to show manage thumbnails modal
 async function showManageThumbnailsModal(filePath) {
   const dialog = document.getElementById('manage-thumbnails-dialog');
@@ -2987,6 +3211,18 @@ async function showManageThumbnailsModal(filePath) {
   
   if (!dialog || !grid) {
     throw new Error('Manage thumbnails dialog elements not found');
+  }
+
+  if (!dialog._manageThumbnailsCloseListenerAttached) {
+    dialog._manageThumbnailsCloseListenerAttached = true;
+    dialog.addEventListener('close', () => {
+      const fp = dialog.dataset.pendingManageThumbnailsRefreshPath;
+      if (!fp) return;
+      delete dialog.dataset.pendingManageThumbnailsRefreshPath;
+      refreshGridModelAfterManageThumbnailsActiveChange(fp).catch((e) =>
+        console.error('Manage thumbnails close refresh:', e)
+      );
+    });
   }
   
   try {
@@ -3044,14 +3280,10 @@ async function showManageThumbnailsModal(filePath) {
         e.stopPropagation();
         try {
           await window.electron.setDefaultThumbnail(filePath, index);
-          
+          dialog.dataset.pendingManageThumbnailsRefreshPath = filePath;
+
           // Refresh the modal to show updated state
           await showManageThumbnailsModal(filePath);
-          
-          // Refresh the grid to show updated thumbnail
-          if (window.refreshGrid) {
-            window.refreshGrid();
-          }
         } catch (error) {
           console.error('Error setting active thumbnail:', error);
           alert('Error setting active thumbnail: ' + error.message);
@@ -3072,11 +3304,6 @@ async function showManageThumbnailsModal(filePath) {
           
           // Refresh the modal to show updated thumbnails
           await showManageThumbnailsModal(filePath);
-          
-          // Refresh the grid to show updated thumbnail
-          if (window.refreshGrid) {
-            window.refreshGrid();
-          }
         } catch (error) {
           console.error('Error deleting thumbnail:', error);
           alert('Error deleting thumbnail: ' + error.message);
@@ -3093,10 +3320,8 @@ async function showManageThumbnailsModal(filePath) {
         if (index !== 0) {
           try {
             await window.electron.setDefaultThumbnail(filePath, index);
+            dialog.dataset.pendingManageThumbnailsRefreshPath = filePath;
             await showManageThumbnailsModal(filePath);
-            if (window.refreshGrid) {
-              window.refreshGrid();
-            }
           } catch (error) {
             console.error('Error setting active thumbnail:', error);
             alert('Error setting active thumbnail: ' + error.message);
@@ -3881,6 +4106,67 @@ async function loadAndShowAIConfig() {
   }
 }
 
+// Load File Type settings from DB then show dialog (same pattern as loadAndShowAIConfig; required for Docker/server menu)
+async function loadAndShowFileTypeSettings() {
+  const dialog = document.getElementById('file-type-settings-dialog');
+  if (!dialog) {
+    console.error('file-type-settings-dialog element not found.');
+    return;
+  }
+  if (window.electron?.whenConnected) {
+    try {
+      await window.electron.whenConnected();
+    } catch (e) {
+      console.warn('[File Type] WebSocket wait:', e);
+    }
+  }
+  try {
+    const enableZipArchives = await window.electron.getSetting('enableZipArchives');
+    const checkbox = document.getElementById('enable-zip-archives');
+    if (checkbox) {
+      checkbox.checked = enableZipArchives === '1';
+    }
+
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    try {
+      const scanTypesRaw = await window.electron.getSetting('scanAdditionalFileTypes');
+      const scanTypes = (scanTypesRaw && typeof scanTypesRaw === 'string') ? JSON.parse(scanTypesRaw) : [];
+      const scanSet = new Set(Array.isArray(scanTypes) ? scanTypes : []);
+      ADDITIONAL_SCAN_TYPE_IDS.forEach(id => {
+        const el = document.getElementById('scan-type-' + id);
+        if (el) el.checked = scanSet.has(id);
+      });
+    } catch (e) { /* ignore */ }
+
+    const enable3MFDesigner = await window.electron.getSetting('enable3MFDesigner');
+    const enable3MFParentModel = await window.electron.getSetting('enable3MFParentModel');
+    const enable3MFLicense = await window.electron.getSetting('enable3MFLicense');
+    const enable3MFNotes = await window.electron.getSetting('enable3MFNotes');
+
+    const designerCheckbox = document.getElementById('enable-3mf-designer');
+    const parentModelCheckbox = document.getElementById('enable-3mf-parent-model');
+    const licenseCheckbox = document.getElementById('enable-3mf-license');
+    const notesCheckbox = document.getElementById('enable-3mf-notes');
+
+    if (designerCheckbox) {
+      designerCheckbox.checked = enable3MFDesigner === '1' || enable3MFDesigner === null;
+    }
+    if (parentModelCheckbox) {
+      parentModelCheckbox.checked = enable3MFParentModel === '1' || enable3MFParentModel === null;
+    }
+    if (licenseCheckbox) {
+      licenseCheckbox.checked = enable3MFLicense === '1' || enable3MFLicense === null;
+    }
+    if (notesCheckbox) {
+      notesCheckbox.checked = enable3MFNotes === '1' || enable3MFNotes === null;
+    }
+  } catch (err) {
+    console.error('Error loading file type settings:', err);
+  }
+
+  dialog.showModal();
+}
+
 // Function to create server mode menu bar (async so we can hide Browser Extension in server mode)
 async function createServerMenuBar() {
   const serverMode = await window.electron.isServerMode().catch(() => false);
@@ -4010,13 +4296,8 @@ async function createServerMenuBar() {
     { label: 'AI Config', action: async () => {
       await loadAndShowAIConfig();
     }},
-    { label: 'File Type', action: () => {
-      const dialog = document.getElementById('file-type-settings-dialog');
-      if (dialog) {
-        dialog.showModal();
-      } else {
-        window.electron.send('open-file-type-settings');
-      }
+    { label: 'File Type', action: async () => {
+      await loadAndShowFileTypeSettings();
     }},
     { label: 'Performance', action: () => {
       const dialog = document.getElementById('performance-settings-dialog');
@@ -4377,38 +4658,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   const loadingOverlay = document.getElementById('loading-overlay');
   if (loadingOverlay) loadingOverlay.style.display = 'none';
 
-  // Docker/Server: yield for first paint, then load data (reduces perceived startup lag)
+  // Docker/Server: yield for first paint, then load data (reduces perceived startup lag).
+  // Do NOT call getAllModels here: the same handler later runs performCombinedSearch(), which
+  // loads the library in bounded chunks (see search.js). Loading tens of thousands of rows here
+  // duplicated IPC work and blocked the main thread for tens of seconds before that path ran.
   requestAnimationFrame(async () => {
     const savedDirectoryPath = await window.electron.loadDirectory();
     const shouldLoadModels = serverMode || savedDirectoryPath;
 
     if (shouldLoadModels) {
-      try {
-        console.log('[DEBUG] Loading initial models from database...');
-        const models = await window.electron.getAllModels('date-desc', 0);
-        console.log('[DEBUG] Retrieved', models ? models.length : 0, 'models');
-
-        if (models && models.length > 0) {
-          fileGrid.classList.remove('hidden');
-          await renderFiles(models);
-          const viewLibMsg = document.getElementById("view-library-message");
-          if (viewLibMsg) {
-            viewLibMsg.style.display = "block";
-            viewLibMsg.textContent = `Showing All ${models.length} Models`;
-          }
-        } else {
-          console.log('[DEBUG] No models found, showing welcome dialog');
-          if (welcomeDialog) {
-            welcomeDialog.showModal();
-          }
-          const viewLibMsg = document.getElementById("view-library-message");
-          if (viewLibMsg) {
-            viewLibMsg.style.display = "none";
-          }
-        }
-      } catch (error) {
-        console.error('Error loading models:', error);
-      }
+      fileGrid.classList.remove('hidden');
     } else {
       console.log('[DEBUG] No directory path set and not in server mode, showing welcome');
       if (welcomeDialog) {
@@ -6962,19 +7221,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     selectedModels.clear();
     document.querySelectorAll('.file-item.selected').forEach(item => item.classList.remove('selected'));
-    // Prefer direct refetch so grid actually updates in Docker/server
-    if (preservedDateAddedFilter) {
-      try {
-        const filteredModels = await window.electron.getModelsFiltered({
-          sortOption: document.getElementById('sort-select')?.value || 'date-desc',
-          dateAdded: preservedDateAddedFilter
-        });
-        if (typeof renderFiles === 'function') await renderFiles(filteredModels);
-      } catch (e) {
-        if (typeof window.performCombinedSearch === 'function') await window.performCombinedSearch();
-      }
-    } else {
-      await forceGridRefresh();
+
+    // Match search.js: any active filter must reload via performCombinedSearch — forceGridRefresh uses
+    // getAllModels() and would drop search/tag/etc. (e.g. after "Remove from Library" while filtered).
+    const designer = document.getElementById('designer-select')?.value || '';
+    const license = document.getElementById('license-select')?.value || '';
+    const parentModel = document.getElementById('parent-select')?.value || '';
+    const printStatus = document.getElementById('printed-select')?.value || 'all';
+    const tagFilter = document.getElementById('tag-filter')?.value || '';
+    const fileType = document.getElementById('filetype-select')?.value || '';
+    const searchTerm = (document.getElementById('search-filter-input')?.value || '').trim();
+    const hasActiveFilters = Boolean(
+      designer || license || parentModel || printStatus !== 'all' ||
+      tagFilter || fileType || searchTerm || window.currentDirectoryFilter || window.dateAddedFilter
+    );
+
+    if (typeof window.performCombinedSearch === 'function' && hasActiveFilters) {
+      await window.performCombinedSearch();
+    } else if (typeof window.forceGridRefresh === 'function') {
+      await window.forceGridRefresh();
+    } else if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
     }
   });
 
@@ -7006,7 +7273,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       await loadTags();
       
       // Refresh the model grid to update any models that had these tags
-      await refreshGrid();
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      } else if (typeof window.forceGridRefresh === 'function') {
+        await window.forceGridRefresh();
+      }
     } catch (error) {
       console.error('Error deleting tags:', error);
       await window.electron.showMessage('Error', 'Failed to delete tags: ' + error.message);
@@ -7267,19 +7538,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Add performance settings event listeners
+  // Add performance settings event listeners (handler registered at top with _openPerformanceSettingsDialog)
   document.addEventListener('DOMContentLoaded', async () => {
-    // Initialize settings
     await initializeSettings();
-    
-    // Add performance settings dialog handlers
-    window._electronRealEventHandlers['open-performance-settings'] = function() {
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        initializePerformanceSettings();
-        dialog.showModal();
-      }
-    };
+
     if (window._electronPendingEvents['open-performance-settings']) {
       window._electronPendingEvents['open-performance-settings'].forEach((args) => {
         window._electronRealEventHandlers['open-performance-settings'].apply(null, args);
@@ -8287,6 +8549,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     delete window._electronPendingEvents['open-ai-config'];
   }
 
+  window._electronRealEventHandlers['open-file-type-settings'] = async function() {
+    await loadAndShowFileTypeSettings();
+  };
+  if (window._electronPendingEvents['open-file-type-settings']) {
+    window._electronPendingEvents['open-file-type-settings'].forEach((args) => {
+      window._electronRealEventHandlers['open-file-type-settings'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-file-type-settings'];
+  }
+
   document.getElementById('test-ai-config')?.addEventListener('click', async (event) => {
     event.preventDefault();
     if (typeof window.testAIConfigFromDialog === 'function') {
@@ -8473,59 +8745,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Populate file type filter once when sidebar is ready (only enabled types)
   setTimeout(() => { if (typeof populateFileTypeFilter === 'function') populateFileTypeFilter(); }, 500);
 
-  // File Type Settings dialog handlers
-  window.electron.on('open-file-type-settings', async () => {
-    const dialog = document.getElementById('file-type-settings-dialog');
-    if (!dialog) {
-      console.error('file-type-settings-dialog element not found.');
-      return;
-    }
-    
-    // Load current settings
-    const enableZipArchives = await window.electron.getSetting('enableZipArchives');
-    const checkbox = document.getElementById('enable-zip-archives');
-    if (checkbox) {
-      checkbox.checked = enableZipArchives === '1';
-    }
-    
-    // Load additional file types to scan (JSON array of catalog ids)
-    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
-    try {
-      const scanTypesRaw = await window.electron.getSetting('scanAdditionalFileTypes');
-      const scanTypes = (scanTypesRaw && typeof scanTypesRaw === 'string') ? JSON.parse(scanTypesRaw) : [];
-      const scanSet = new Set(Array.isArray(scanTypes) ? scanTypes : []);
-      ADDITIONAL_SCAN_TYPE_IDS.forEach(id => {
-        const el = document.getElementById('scan-type-' + id);
-        if (el) el.checked = scanSet.has(id);
-      });
-    } catch (e) { /* ignore */ }
-    
-    // Load 3MF metadata settings (default to '1' if not set)
-    const enable3MFDesigner = await window.electron.getSetting('enable3MFDesigner');
-    const enable3MFParentModel = await window.electron.getSetting('enable3MFParentModel');
-    const enable3MFLicense = await window.electron.getSetting('enable3MFLicense');
-    const enable3MFNotes = await window.electron.getSetting('enable3MFNotes');
-    
-    const designerCheckbox = document.getElementById('enable-3mf-designer');
-    const parentModelCheckbox = document.getElementById('enable-3mf-parent-model');
-    const licenseCheckbox = document.getElementById('enable-3mf-license');
-    const notesCheckbox = document.getElementById('enable-3mf-notes');
-    
-    if (designerCheckbox) {
-      designerCheckbox.checked = enable3MFDesigner === '1' || enable3MFDesigner === null;
-    }
-    if (parentModelCheckbox) {
-      parentModelCheckbox.checked = enable3MFParentModel === '1' || enable3MFParentModel === null;
-    }
-    if (licenseCheckbox) {
-      licenseCheckbox.checked = enable3MFLicense === '1' || enable3MFLicense === null;
-    }
-    if (notesCheckbox) {
-      notesCheckbox.checked = enable3MFNotes === '1' || enable3MFNotes === null;
-    }
-    
-    dialog.showModal();
-  });
+  // File Type Settings: open-file-type-settings is handled via earlyEventChannels + _electronRealEventHandlers (loadAndShowFileTypeSettings)
 
   async function saveFileTypeSettingsFromDialog() {
     const dialogEl = document.getElementById('file-type-settings-dialog');
@@ -8669,6 +8889,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   let expectedBatchCount = 0;
   let reviewDialogOpen = false;
   let rateLimitDialogShown = false; // Track if rate limit dialog has been shown during current batch
+  /** Bumps on each showTagPreviewDialog call so stale getSetting() callbacks cannot append duplicate UI */
+  let tagPreviewDialogRenderGeneration = 0;
 
   // Helper function to normalize file paths for comparison (Docker/server may use leading slash or not)
   function normalizeFilePath(path) {
@@ -8864,20 +9086,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           errorMessage: errorMessage || null
         };
         
-        // Update or set pending data
-        if (pendingTagData.length > 0 && pendingTagData[0].filePath === filePath) {
-          pendingTagData[0] = tagData;
-        } else {
-          pendingTagData = [tagData];
-        }
+        // Same merge as batch: normalized path dedupe (strict filePath compare missed Docker/UNC variants)
+        updatePendingTagData(filePath, tagData);
         
         // Update the dialog if it's open, otherwise show it
         if (reviewDialogOpen) {
           updateTagPreviewDialog();
         } else {
-          // Deduplicate before showing
-          const uniquePendingData = deduplicateModelData(pendingTagData);
-          showTagPreviewDialog(uniquePendingData);
+          showTagPreviewDialog(pendingTagData);
         }
         
         // Show message if no tags were generated (but don't block)
@@ -9092,6 +9308,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    const renderGeneration = ++tagPreviewDialogRenderGeneration;
+
     // Check if dialog is open BEFORE we use it (fix race condition)
     const isDialogOpen = dialog.open || false;
     reviewDialogOpen = isDialogOpen;
@@ -9189,7 +9407,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Get merge strategy from settings
     window.electron.getSetting('aiTagMergeStrategy').then((strategy) => {
+      if (renderGeneration !== tagPreviewDialogRenderGeneration) {
+        return;
+      }
+
       const mergeStrategy = strategy || 'merge';
+
+      // Clear again here: overlapping showTagPreviewDialog calls only cleared synchronously earlier;
+      // without this, each resolved callback would append another full model list.
+      container.innerHTML = '';
 
       // Final deduplication check before rendering - use a Set to track rendered filePaths
       const renderedPaths = new Set();
@@ -10644,19 +10870,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
           }
           
-          // 1. Try to get embedded thumbnail for 3MF
+          // 1. Try to get embedded images for 3MF (all packed into DB for Manage Thumbnails)
+          let saved3mfEmbedsViaBatch = false;
           if (model.filePath.toLowerCase().endsWith('.3mf')) {
             console.log(`[DEBUG] generateThumbnailsForModels: Attempting to extract embedded thumbnail for ${model.filePath}`);
             try {
               const embeddedImages = await extract3MFThumbnail(model.filePath);
               if (embeddedImages && embeddedImages.length > 0) {
-                const firstImage = embeddedImages[0];
-                if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
-                  thumbnail = firstImage;
-                  console.log(`[DEBUG] generateThumbnailsForModels: SUCCESS - Using embedded thumbnail for ${model.filePath}`);
-                  console.log(`[DEBUG] generateThumbnailsForModels: Image type: ${firstImage.substring(5, firstImage.indexOf(';'))}`);
+                const validImages = embeddedImages.filter(
+                  (im) => typeof im === 'string' && im.startsWith('data:image')
+                );
+                if (validImages.length > 0) {
+                  thumbnail = validImages[0];
+                  await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  saved3mfEmbedsViaBatch = true;
+                  console.log(
+                    `[DEBUG] generateThumbnailsForModels: SUCCESS - Saved ${validImages.length} embedded image(s) for ${model.filePath}`
+                  );
                 } else {
-                  console.log(`[DEBUG] generateThumbnailsForModels: Invalid image format for ${model.filePath}. First image type: ${typeof firstImage}`);
+                  console.log(`[DEBUG] generateThumbnailsForModels: Invalid image format for ${model.filePath}`);
                 }
               } else {
                 console.log(`[DEBUG] generateThumbnailsForModels: No embedded thumbnail found for ${model.filePath}. Falling back to 3D rendering.`);
@@ -10681,8 +10913,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             thumbnail = '3d.png';
           }
 
-          // 4. Save whatever thumbnail we ended up with
-          await window.electron.saveThumbnail(model.filePath, thumbnail);
+          // 4. Save whatever thumbnail we ended up with (3MF multi-image already persisted in step 1)
+          if (!saved3mfEmbedsViaBatch) {
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+          }
           
           // 5. Calculate and save hash during thumbnail generation (file is already being read)
           if (!model.hash || model.hash === '') {
@@ -11316,7 +11550,13 @@ function fitCameraToObject(camera, object, scene, renderer) {
   // Position camera to fit object
   const maxDim = Math.max(size.x, size.y, size.z);
   const fov = camera.fov * (Math.PI / 180);
-  let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.5;
+  const tanHalfFov = Math.tan(fov / 2);
+  let cameraZ =
+    maxDim > 0 && tanHalfFov > 0
+      ? Math.abs(maxDim / 2 / tanHalfFov) * 1.5
+      : 5;
+  if (!Number.isFinite(cameraZ) || cameraZ <= 0) cameraZ = 5;
+  if (!Number.isFinite(center.x)) center.set(0, 0, 0);
 
   // Update camera position to view from front-top instead of bottom
   camera.position.set(cameraZ, cameraZ, cameraZ);
@@ -11646,7 +11886,8 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
                     container: document.createElement('div'), // Dummy container
                     existingThumbnail: null,
                     resolve,
-                    reject
+                    reject,
+                    thumbPriority: THUMB_PRIORITY_BACKGROUND
                   });
                   processRenderQueue();
                 });
@@ -11918,8 +12159,14 @@ async function refreshModelDisplay() {
 
 // ==================== Modified displayModels() to use the virtual grid ====================
 async function displayModels(files) {
-  // Instead of appending items in batches, we now use the virtual grid to render them.
+  // Keep behavior aligned with renderFiles (handleFilterChange uses this path, not renderFiles)
+  if (shouldSyncSelectionWithFilteredList()) {
+    syncSelectionWithFilteredModels(files);
+  }
   renderVirtualGrid(files);
+  if (shouldSyncSelectionWithFilteredList()) {
+    syncSelectionWithFilteredModels(files);
+  }
   await updateModelCounts(files.length);
 }
 
@@ -11976,8 +12223,19 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
     console.log('Filtered from', originalCount, 'to', files.length, 'models');
   }
 
+  // search.js replaces filter controls and only calls performCombinedSearch — selection was not cleared.
+  // Drop selection and details when the current model(s) are not in the filtered result (skip progressive full-library loads).
+  if (shouldSyncSelectionWithFilteredList()) {
+    syncSelectionWithFilteredModels(files);
+  }
+
   // Use the new virtual grid implementation for better performance
   renderVirtualGrid(files);
+
+  // Run again after the grid exists: path/name resolution and DOM can differ; catches stale selection UI
+  if (shouldSyncSelectionWithFilteredList()) {
+    syncSelectionWithFilteredModels(files);
+  }
 
   // Update counts
   await updateModelCounts(files.length);
@@ -12021,32 +12279,7 @@ async function waitForGetCombinedFilteredModels(maxWait = 5000) {
 
 async function handleFilterChange() {
   try {
-    // Clear previous selections explicitly
-    selectedModels.clear();
-
-    // Clear visual selection indicators
-    document.querySelectorAll('.file-item').forEach(item => {
-      item.classList.remove('selected');
-    });
-
-    // Hide multi-edit panel if it's open
-    const multiEditPanel = document.getElementById('multi-edit-panel');
-    if (multiEditPanel && !multiEditPanel.classList.contains('hidden')) {
-      multiEditPanel.classList.add('hidden');
-      const detailsPanel = document.getElementById('model-details');
-      if (detailsPanel) {
-        detailsPanel.classList.remove('hidden');
-      }
-      const editModeToggle = document.getElementById('edit-mode-toggle');
-      if (editModeToggle) {
-        editModeToggle.textContent = 'Multi-Edit Mode';
-        editModeToggle.classList.remove('active');
-      }
-      isMultiSelectMode = false;
-    }
-
-    // Update the selected count display
-    updateSelectedCount();
+    resetFilterSelectionAndDetails();
 
     // Get and display filtered models
     // Wait for getCombinedFilteredModels to be available (handles module loading race condition)
@@ -12233,18 +12466,18 @@ async function renderFile(file, container, skipThumbnail = false) {
       try {
         const images = await window.electron.get3MFImages(file.filePath);
         if (images && images.length > 0) {
-          const firstImage = images[0]; // Use first image, not the array
-          console.log(`[DEBUG] renderFile: Using embedded image from 3MF: ${file.filePath}`);
+          const firstImage = images[0];
+          console.log(`[DEBUG] renderFile: Using ${images.length} embedded image(s) from 3MF: ${file.filePath}`);
           const img = document.createElement('img');
           img.src = firstImage;
           img.className = 'model-thumbnail';
           thumbnailContainer.innerHTML = '';
           thumbnailContainer.appendChild(img);
           thumbnailContainer.classList.remove('loading');
-          
-          await window.electron.saveThumbnail(file.filePath, firstImage);
+
+          await window.electron.addMultipleThumbnails(file.filePath, images);
           file.thumbnail = firstImage;
-          
+
           return fileElement;
         } else {
           console.log(`[DEBUG] renderFile: No embedded images found in 3MF: ${file.filePath}`);
@@ -12261,7 +12494,8 @@ async function renderFile(file, container, skipThumbnail = false) {
           container: thumbnailContainer,
           existingThumbnail: null,
           resolve,
-          reject
+          reject,
+          thumbPriority: THUMB_PRIORITY_BACKGROUND
         });
         processRenderQueue();
       });
@@ -12298,16 +12532,17 @@ async function renderFile(file, container, skipThumbnail = false) {
 }
 
 async function processRenderQueue() {
-  if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= MAX_CONCURRENT_RENDERS) {
+  if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= effectiveMaxConcurrentRenders()) {
     return;
   }
 
   isProcessingQueue = true;
 
   try {
-    // Start up to MAX_CONCURRENT_RENDERS tasks in parallel (don't await inside loop)
-    while (renderQueue.length > 0 && activeRenders < MAX_CONCURRENT_RENDERS) {
-      const task = renderQueue.shift();
+    // Start up to effectiveMaxConcurrentRenders() tasks in parallel (don't await inside loop)
+    while (renderQueue.length > 0 && activeRenders < effectiveMaxConcurrentRenders()) {
+      const task = dequeueNextRenderTask();
+      if (!task) break;
       activeRenders++;
 
       (async () => {
@@ -12324,7 +12559,8 @@ async function processRenderQueue() {
           setTimeout(() => renderQueue.push(task), 2000);
         } finally {
           activeRenders--;
-          await new Promise(resolve => setTimeout(resolve, RENDER_DELAY));
+          const pauseMs = isLowPriorityThumbnailTask(task) ? RENDER_DELAY_BACKGROUND : RENDER_DELAY;
+          await new Promise(resolve => setTimeout(resolve, pauseMs));
           if (renderQueue.length > 0) {
             setTimeout(processRenderQueue, 0);
           }
@@ -12334,7 +12570,8 @@ async function processRenderQueue() {
   } finally {
     isProcessingQueue = false;
     if (renderQueue.length > 0) {
-      setTimeout(processRenderQueue, 100);
+      const backlogMs = renderQueueHasOnlyLowPriorityWork() ? 350 : 100;
+      setTimeout(processRenderQueue, backlogMs);
     }
   }
 }
@@ -12367,6 +12604,10 @@ function getSharedRenderer() {
       powerPreference: 'low-power',
       preserveDrawingBuffer: true // Add this for better context management
     });
+    // Some WebGL stacks return null from getProgramInfoLog/getShaderInfoLog; Three.js calls .trim() and throws.
+    if (sharedRenderer.debug) {
+      sharedRenderer.debug.checkShaderErrors = false;
+    }
 
     contextUseCount = 0;
 
@@ -12726,6 +12967,128 @@ function isInSelectedModels(filePath) {
     }
   }
   return false;
+}
+
+/** Match search.js: full-library progressive load returns partial rows — do not clear selection in that case. */
+function shouldSyncSelectionWithFilteredList() {
+  const designer = document.getElementById('designer-select')?.value || '';
+  const license = document.getElementById('license-select')?.value || '';
+  const parentModel = document.getElementById('parent-select')?.value || '';
+  const printStatus = document.getElementById('printed-select')?.value || 'all';
+  const tagFilter = document.getElementById('tag-filter')?.value || '';
+  const fileType = document.getElementById('filetype-select')?.value || '';
+  const searchTerm = (document.getElementById('search-filter-input')?.value || '').trim();
+  const noFiltersActive = !designer && !license && !parentModel && printStatus === 'all' &&
+    !tagFilter && !fileType && !searchTerm && !window.currentDirectoryFilter && !window.dateAddedFilter;
+  const useProgressiveFullLibrary = noFiltersActive && !tagFilter;
+  return !useProgressiveFullLibrary;
+}
+
+function clearModelDetailsSidebar() {
+  currentModelDetailsPath = null;
+  currentModelDetailsAbort = true;
+  const pathTreeContainer = document.getElementById('path-tree-container');
+  if (pathTreeContainer) {
+    pathTreeContainer.innerHTML = '';
+    pathTreeContainer.removeAttribute('data-file-path');
+  }
+  const mn = document.getElementById('model-name');
+  if (mn) mn.value = '';
+  const md = document.getElementById('model-designer');
+  if (md) md.value = '';
+  const ms = document.getElementById('model-source');
+  if (ms) ms.value = '';
+  const mnotes = document.getElementById('model-notes');
+  if (mnotes) mnotes.value = '';
+  const mp = document.getElementById('model-printed');
+  if (mp) mp.checked = false;
+  const mparent = document.getElementById('model-parent');
+  if (mparent) mparent.value = '';
+  const mlic = document.getElementById('model-license');
+  if (mlic) mlic.value = '';
+  const mtags = document.getElementById('model-tags');
+  if (mtags) mtags.innerHTML = '';
+  previousSelectionHash = '';
+}
+
+/**
+ * Run when filter/search inputs change the result set — synchronously, before any await.
+ * search.js cannot access selectedModels; post-render sync alone loses races to showModelDetails().
+ */
+function resetFilterSelectionAndDetails() {
+  currentModelDetailsAbort = true;
+  selectedModels.clear();
+  document.querySelectorAll('.file-item').forEach((item) => item.classList.remove('selected'));
+
+  const multiEditPanel = document.getElementById('multi-edit-panel');
+  if (multiEditPanel && !multiEditPanel.classList.contains('hidden')) {
+    multiEditPanel.classList.add('hidden');
+    const detailsPanel = document.getElementById('model-details');
+    if (detailsPanel) detailsPanel.classList.remove('hidden');
+    const editModeToggle = document.getElementById('edit-mode-toggle');
+    if (editModeToggle) {
+      editModeToggle.textContent = 'Multi-Edit Mode';
+      editModeToggle.classList.remove('active');
+    }
+    isMultiSelectMode = false;
+  }
+
+  clearModelDetailsSidebar();
+  updateSelectedCount();
+}
+
+/** True if sidebar + selection state is consistent with the current filtered grid rows. */
+function isSidebarShowingModelInFilteredList(files, filteredSet) {
+  const list = Array.isArray(files) ? files : [];
+  const paths = [
+    currentModelDetailsPath,
+    document.getElementById('path-tree-container')?.getAttribute('data-file-path')
+  ].filter(Boolean);
+  const mn = document.getElementById('model-name')?.value?.trim();
+  const hasSidebarContent = paths.length > 0 || !!mn || selectedModels.size > 0;
+  if (!hasSidebarContent) return true;
+  if (list.length === 0) return false;
+
+  const pathOrSelectionOk =
+    paths.some((p) => filteredSet.has(normalizePathForComparison(p))) ||
+    Array.from(selectedModels).some((p) =>
+      filteredSet.has(normalizePathForComparison(p))
+    );
+  if (pathOrSelectionOk) return true;
+
+  if (mn) {
+    return list.some(
+      (f) =>
+        f &&
+        f.fileName &&
+        (f.fileName === mn || mn === f.fileName || mn.endsWith(f.fileName))
+    );
+  }
+  return false;
+}
+
+function syncSelectionWithFilteredModels(files) {
+  const list = Array.isArray(files) ? files : [];
+  const filteredSet = new Set(
+    list.filter((f) => f && f.filePath).map((f) => normalizePathForComparison(f.filePath))
+  );
+
+  for (const path of Array.from(selectedModels)) {
+    if (!filteredSet.has(normalizePathForComparison(path))) {
+      selectedModels.delete(path);
+    }
+  }
+
+  if (isMultiSelectMode && selectedModels.size === 0) {
+    exitMultiEditMode();
+    return;
+  }
+
+  if (!isSidebarShowingModelInFilteredList(files, filteredSet)) {
+    clearModelDetailsSidebar();
+  }
+
+  updateSelectedCount();
 }
 
 // Sync DOM selection state with selectedModels
@@ -14685,23 +15048,25 @@ async function generateThumbnail(file) {
         try {
             const images = await extract3MFThumbnail(filePath);
             if (images && images.length > 0) {
-                const firstImage = images[0];
-                if (typeof firstImage === 'string' && firstImage.startsWith('data:image')) {
-                    console.log(`[DEBUG] generateThumbnail: SUCCESS - Using embedded thumbnail for ${filePath}`);
-                    // Save to database
-                    await window.electron.saveThumbnail(filePath, firstImage);
-                    
-                    // Calculate and save hash during thumbnail generation (file is already being read)
+                const validImages = images.filter(
+                  (im) => typeof im === 'string' && im.startsWith('data:image')
+                );
+                if (validImages.length > 0) {
+                    const firstImage = validImages[0];
+                    console.log(
+                      `[DEBUG] generateThumbnail: SUCCESS - Saving ${validImages.length} embedded image(s) for ${filePath}`
+                    );
+                    await window.electron.addMultipleThumbnails(filePath, validImages);
+
                     try {
                       await window.electron.calculateFileHash(filePath);
                     } catch (hashError) {
                       console.error(`Error calculating hash for ${filePath}:`, hashError);
-                      // Continue even if hash calculation fails
                     }
-                    
+
                     return firstImage;
                 } else {
-                    console.log(`[DEBUG] generateThumbnail: Invalid image format. First image type: ${typeof firstImage}`);
+                    console.log(`[DEBUG] generateThumbnail: Invalid image format for ${filePath}`);
                 }
             } else {
                 console.log(`[DEBUG] generateThumbnail: No embedded images found for ${filePath}`);
@@ -16503,14 +16868,140 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ==================== NEW CODE: Virtual Grid Implementation ====================
 
+/**
+ * Grid queries omit the full `thumbnail` blob (only hasThumbnail is sent), so multi-image
+ * models are discovered asynchronously via getAllThumbnails. This upgrades a detailed
+ * card from a plain image to the left/right carousel + count badge.
+ */
+function upgradeGridItemToThumbnailCarousel(thumbnailContainer, model, validThumbnails, thumbSize, parseThumbnails) {
+  const fileItem = thumbnailContainer.closest('.file-item');
+  const isCarouselView =
+    fileItem &&
+    (fileItem.classList.contains('file-item-detailed') || fileItem.classList.contains('file-item-preview'));
+  if (!isCarouselView) return;
+  if (!validThumbnails || validThumbnails.length < 2) return;
+  if (fileItem.querySelector('.thumbnail-nav-left')) return;
+
+  const parent = thumbnailContainer.parentNode;
+  if (!parent) return;
+
+  const thumbnailWrapper = document.createElement('div');
+  thumbnailWrapper.className = 'thumbnail-wrapper';
+  thumbnailWrapper.style.position = 'relative';
+  thumbnailWrapper.style.width = thumbSize.width;
+  thumbnailWrapper.style.height = thumbSize.height;
+  thumbnailWrapper.dataset.thumbnails = JSON.stringify(validThumbnails);
+  thumbnailWrapper.dataset.currentIndex = '0';
+  thumbnailWrapper.dataset.filePath = model.filePath;
+
+  const leftNav = document.createElement('div');
+  leftNav.className = 'thumbnail-nav-left';
+  leftNav.style.cssText = 'position:absolute;left:0;top:0;width:50%;height:100%;cursor:pointer;z-index:10;';
+  leftNav.title = 'Previous image';
+
+  const rightNav = document.createElement('div');
+  rightNav.className = 'thumbnail-nav-right';
+  rightNav.style.cssText = 'position:absolute;right:0;top:0;width:50%;height:100%;cursor:pointer;z-index:10;';
+  rightNav.title = 'Next image';
+
+  const navigateThumbnail = async (direction) => {
+    const wrapper = thumbnailWrapper;
+    let thumbnails = JSON.parse(wrapper.dataset.thumbnails);
+    let currentIndex = parseInt(wrapper.dataset.currentIndex, 10);
+    if (isNaN(currentIndex)) {
+      currentIndex = 0;
+      wrapper.dataset.currentIndex = '0';
+    }
+
+    const validTs = thumbnails.filter(
+      (t) => t && typeof t === 'string' && t.length > 0 && t !== '3d.png'
+    );
+    if (validTs.length !== thumbnails.length) {
+      thumbnails = validTs;
+      wrapper.dataset.thumbnails = JSON.stringify(thumbnails);
+    }
+    if (validTs.length === 0) return;
+    if (currentIndex >= validTs.length) currentIndex = 0;
+
+    if (direction === 'prev') {
+      currentIndex = (currentIndex - 1 + validTs.length) % validTs.length;
+    } else {
+      currentIndex = (currentIndex + 1) % validTs.length;
+    }
+    wrapper.dataset.currentIndex = String(currentIndex);
+
+    if (wrapper._updateBadge) wrapper._updateBadge();
+    const navImg = wrapper.querySelector('.thumbnail-container img');
+    if (navImg) {
+      navImg.src = validTs[currentIndex];
+      if (wrapper._saveTimeout) clearTimeout(wrapper._saveTimeout);
+      wrapper._saveTimeout = setTimeout(async () => {
+        try {
+          const idxToSave = parseInt(wrapper.dataset.currentIndex, 10) || 0;
+          const thumbs = JSON.parse(wrapper.dataset.thumbnails);
+          if (thumbs && thumbs.length > idxToSave && idxToSave >= 0) {
+            await window.electron.setDefaultThumbnail(model.filePath, idxToSave);
+            const updatedModel = await window.electron.getModel(model.filePath);
+            if (updatedModel && updatedModel.thumbnail) {
+              model.thumbnail = updatedModel.thumbnail;
+              const reordered = parseThumbnails(updatedModel.thumbnail);
+              wrapper.dataset.thumbnails = JSON.stringify(reordered);
+              wrapper.dataset.currentIndex = '0';
+              if (wrapper._updateBadge) wrapper._updateBadge();
+              const imgEl = wrapper.querySelector('.thumbnail-container img');
+              if (imgEl && reordered[0]) imgEl.src = reordered[0];
+            }
+          }
+        } catch (e) {
+          console.error('Error saving default thumbnail:', e);
+        }
+      }, 2000);
+    }
+  };
+
+  leftNav.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigateThumbnail('prev');
+  });
+  rightNav.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigateThumbnail('next');
+  });
+
+  const badge = document.createElement('div');
+  badge.className = 'thumbnail-count-badge';
+  const updateBadgeText = () => {
+    const currentIdx = parseInt(thumbnailWrapper.dataset.currentIndex, 10) || 0;
+    const currentThumbs = JSON.parse(
+      thumbnailWrapper.dataset.thumbnails || JSON.stringify(validThumbnails)
+    );
+    const total = currentThumbs.length;
+    badge.textContent = `${currentIdx + 1}/${total}`;
+    badge.title = `Image ${currentIdx + 1} of ${total} - Click left/right to navigate`;
+  };
+  updateBadgeText();
+  badge.style.cssText =
+    'position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.7);color:#fff;padding:4px 8px;border-radius:12px;font-size:12px;font-weight:bold;z-index:11;pointer-events:none;';
+  thumbnailWrapper._updateBadge = updateBadgeText;
+
+  parent.insertBefore(thumbnailWrapper, thumbnailContainer);
+  thumbnailWrapper.appendChild(leftNav);
+  thumbnailWrapper.appendChild(rightNav);
+  thumbnailWrapper.appendChild(badge);
+  thumbnailWrapper.appendChild(thumbnailContainer);
+
+  const imgEl = thumbnailContainer.querySelector('img');
+  if (imgEl && validThumbnails[0]) imgEl.src = validThumbnails[0];
+}
+
 // Helper function to create a DOM element for a model item
-function createModelItem(model, viewMode = null) {
+function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_BACKGROUND) {
   const view = viewMode || currentGridView;
   const item = document.createElement('div');
   item.className = `file-item file-item-${view}`;
   item.dataset.filepath = model.filePath;
 
-  if (selectedModels.has(model.filePath)) {
+  if (isInSelectedModels(model.filePath)) {
     item.classList.add('selected');
   }
 
@@ -16588,24 +17079,33 @@ function createModelItem(model, viewMode = null) {
   img.src = currentThumbnail || '3d.png';
   thumbnailContainer.appendChild(img);
 
-  // For detailed view, if we don't have multiple thumbnails in the model object,
-  // try to fetch from database asynchronously (but don't block rendering)
+  // When grid data omits thumbnail blobs, fetch full thumbnail list async (detailed + preview).
   if (model.filePath) {
-    if (view === 'detailed') {
+    if (view === 'detailed' || view === 'preview') {
       window.electron.getAllThumbnails(model.filePath).then(allThumbs => {
-        if (allThumbs && allThumbs.length > 0) {
-          if (allThumbs.length > 1) {
-            // It has multiple thumbnails, we may need to reload this item
-            hasMultipleThumbnails = true;
-          }
-          if (img.src.includes('3d.png') && allThumbs[0] !== '3d.png') {
-            img.src = allThumbs[0];
-          }
+        if (!allThumbs || allThumbs.length === 0) return;
+        const validFetched = allThumbs.filter(
+          (t) => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')
+        );
+        if (validFetched.length === 0) return;
+
+        if (img.src.includes('3d.png') || !currentThumbnail) {
+          img.src = validFetched[0];
+        }
+
+        if (validFetched.length > 1 && thumbnailContainer.isConnected) {
+          upgradeGridItemToThumbnailCarousel(
+            thumbnailContainer,
+            model,
+            validFetched,
+            thumbSize,
+            parseThumbnails
+          );
         }
       }).catch(e => {
         // Silently fail - not critical
       });
-    } else if (!currentThumbnail && hasThumbnailFlag) {
+    } else if (view === 'list' && !currentThumbnail && hasThumbnailFlag) {
       window.electron.getThumbnail(model.filePath).then(thumb => {
         if (thumb && thumb !== '3d.png') {
           img.src = thumb;
@@ -16616,11 +17116,9 @@ function createModelItem(model, viewMode = null) {
     }
   }
 
-  // In detailed view with multiple thumbnails, wrap in navigation container
+  // In detailed or preview view with multiple thumbnails, wrap in navigation container
   let thumbnailWrapper = thumbnailContainer;
-  // NOTE: navigation will not initialize on first lazy load if hasMultipleThumbnails isn't updated in time.
-  // Reloading the list works.
-  if (view === 'detailed' && hasMultipleThumbnails) {
+  if ((view === 'detailed' || view === 'preview') && hasMultipleThumbnails) {
     thumbnailWrapper = document.createElement('div');
     thumbnailWrapper.className = 'thumbnail-wrapper';
     thumbnailWrapper.style.position = 'relative';
@@ -16812,6 +17310,7 @@ function createModelItem(model, viewMode = null) {
       renderQueue.push({
         filePath: model.filePath,
         container: thumbnailContainer,
+        thumbPriority,
         resolve: async (thumbnail) => {
           // Remove from pending set first
           pendingThumbnails.delete(model.filePath);
@@ -17829,6 +18328,27 @@ function analyzeModelFields(models) {
   return fieldAnalysis;
 }
 
+/** Merge field-visibility flags (progressive load: only analyze appended tail). */
+function mergeModelFieldAnalysis(base, delta) {
+  return {
+    hasDesigner: base.hasDesigner || delta.hasDesigner,
+    hasSource: base.hasSource || delta.hasSource,
+    hasParentModel: base.hasParentModel || delta.hasParentModel,
+    hasLicense: base.hasLicense || delta.hasLicense,
+    hasTags: base.hasTags || delta.hasTags
+  };
+}
+
+/** True when `next` is `prev` with extra rows appended in the same order (progressive library load). */
+function isProgressiveModelListExtension(prevModels, nextModels) {
+  if (!prevModels.length || nextModels.length <= prevModels.length) return false;
+  const key = (m) => (m.id != null && m.id !== '') ? m.id : m.filePath;
+  for (let i = 0; i < prevModels.length; i++) {
+    if (key(prevModels[i]) !== key(nextModels[i])) return false;
+  }
+  return true;
+}
+
 // Virtual grid function—renders only items visible in the scroll window.
 function renderVirtualGrid(models) {
   const container = document.querySelector('.file-grid');
@@ -17842,23 +18362,42 @@ function renderVirtualGrid(models) {
   }
   container.isRendering = true;
   
-  // Analyze which fields have data across all models
-  window.modelFieldAnalysis = analyzeModelFields(models);
-
-  // Store current models for comparison
   const currentModels = container.currentModels || [];
-  // Check if the set of models changed (using sorted IDs)
-  const currentModelIds = currentModels.map(m => m.id || m.filePath).sort();
-  const newModelIds = models.map(m => m.id || m.filePath).sort();
-  const modelsSetChanged = JSON.stringify(currentModelIds) !== JSON.stringify(newModelIds);
-  
-  // Check if the order of models changed (using unsorted IDs in sequence)
-  const currentModelIdsOrdered = currentModels.map(m => m.id || m.filePath);
-  const newModelIdsOrdered = models.map(m => m.id || m.filePath);
-  const orderChanged = JSON.stringify(currentModelIdsOrdered) !== JSON.stringify(newModelIdsOrdered);
-  
-  // Models changed if either the set changed or the order changed
-  const modelsChanged = modelsSetChanged || orderChanged;
+  // Detect append-only updates BEFORE sorting/stringifying all IDs (was O(n log n) per chunk → multi-second freezes).
+  const progressiveAppend =
+    currentModels.length > 0 &&
+    models.length > currentModels.length &&
+    isProgressiveModelListExtension(currentModels, models);
+
+  if (progressiveAppend) {
+    const prevAnalysis = window.modelFieldAnalysis || analyzeModelFields(currentModels);
+    if (prevAnalysis.hasDesigner && prevAnalysis.hasSource && prevAnalysis.hasParentModel &&
+        prevAnalysis.hasLicense && prevAnalysis.hasTags) {
+      window.modelFieldAnalysis = prevAnalysis;
+    } else {
+      const tail = models.slice(currentModels.length);
+      window.modelFieldAnalysis = mergeModelFieldAnalysis(prevAnalysis, analyzeModelFields(tail));
+    }
+  } else {
+    window.modelFieldAnalysis = analyzeModelFields(models);
+  }
+
+  let modelsSetChanged;
+  let orderChanged;
+  if (progressiveAppend) {
+    modelsSetChanged = false;
+    orderChanged = false;
+  } else {
+    const currentModelIds = currentModels.map(m => m.id || m.filePath).sort();
+    const newModelIds = models.map(m => m.id || m.filePath).sort();
+    modelsSetChanged = JSON.stringify(currentModelIds) !== JSON.stringify(newModelIds);
+    const currentModelIdsOrdered = currentModels.map(m => m.id || m.filePath);
+    const newModelIdsOrdered = models.map(m => m.id || m.filePath);
+    orderChanged = JSON.stringify(currentModelIdsOrdered) !== JSON.stringify(newModelIdsOrdered);
+  }
+
+  // Models changed if either the set changed or the order changed (unless only appending to the list)
+  const modelsChanged = (modelsSetChanged || orderChanged) && !progressiveAppend;
   
   // Only clear if models actually changed
   if (modelsChanged) {
@@ -17875,8 +18414,6 @@ function renderVirtualGrid(models) {
         header.updateSortIndicators();
       }
     }
-  } else {
-    console.log('renderVirtualGrid: Models did not change, skipping re-render.');
   }
   container.currentModels = models;
   
@@ -18189,14 +18726,22 @@ function renderVirtualGrid(models) {
               }
             }
 
-            // Create new item
-            const item = createModelItem(model, currentGridView);
+            // Create new item — prioritize thumbnails for cells in/near the viewport
+            let topPosition;
+            topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
+            const listHeaderOffset = currentGridView === 'list' ? 40 : 0;
+            const itemContentY = listHeaderOffset + topPosition;
+            const thumbPriority = computeThumbPriorityForScroll(
+              scrollTop,
+              containerHeight,
+              itemContentY,
+              itemHeight,
+              col
+            );
+            const item = createModelItem(model, currentGridView, thumbPriority);
             item.dataset.index = index;
             item.style.position = 'absolute';
-            // Calculate top position
-            let topPosition;
             // Note: Header offset is handled by virtualContent top position for list view
-            topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
             
             item.style.top = topPosition + 'px';
             if (currentGridView === 'list') {
@@ -18222,6 +18767,8 @@ function renderVirtualGrid(models) {
       } finally {
         isRendering = false;
         renderTimeout = null;
+        refreshThumbnailQueuePriorities();
+        processRenderQueue();
       }
     });
 
@@ -18290,3 +18837,6 @@ document.getElementById('multi-source')?.addEventListener('input', debounce(asyn
 
 window.renderFiles = renderFiles;
 window.displayModels = displayModels;
+window.syncSelectionWithFilteredModels = syncSelectionWithFilteredModels;
+window.resetFilterSelectionAndDetails = resetFilterSelectionAndDetails;
+window.clearModelDetailsSidebar = clearModelDetailsSidebar;
