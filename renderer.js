@@ -1797,7 +1797,7 @@ async function updateModelElement(filePath) {
         }
         const tagsValueSpan = tagsItem.querySelector('.metadata-value.tags-info');
         if (tagsValueSpan) {
-          tagsValueSpan.textContent = text;
+          fillTagsWithFilterLinks(tagsValueSpan, names);
           tagsValueSpan.setAttribute('title', text);
           tagsValueSpan.style.color = '#ccc';
         }
@@ -1882,15 +1882,19 @@ async function updateModelElement(filePath) {
       if (tagsColumn) {
         const tagsElement = tagsColumn.querySelector('.tags-info');
         if (tagsElement) {
-          let tagsDisplay = '';
           if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
             const tagNames = model.tags.map(t =>
               typeof t === 'string' ? t : (t && (t.name || t)) || ''
             ).filter(Boolean);
             tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-            tagsDisplay = tagNames.join(', ');
+            const tagsDisplay = tagNames.join(', ');
+            fillTagsWithFilterLinks(tagsElement, tagNames);
+            tagsElement.style.color = '#aaa';
+            tagsElement.setAttribute('title', tagsDisplay);
           } else if (model.id) {
-            tagsDisplay = '—';
+            tagsElement.textContent = '—';
+            tagsElement.style.color = '#666';
+            tagsElement.removeAttribute('title');
             window.electron.getModelTags(model.id).then(tags => {
               if (tags && tags.length > 0) {
                 const tagNames = tags.map(t =>
@@ -1898,7 +1902,7 @@ async function updateModelElement(filePath) {
                 ).filter(Boolean);
                 tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
                 const tagsText = tagNames.join(', ');
-                tagsElement.textContent = tagsText;
+                fillTagsWithFilterLinks(tagsElement, tagNames);
                 tagsElement.style.color = '#aaa';
                 tagsElement.setAttribute('title', tagsText);
               } else {
@@ -1908,16 +1912,11 @@ async function updateModelElement(filePath) {
               }
             }).catch(err => console.error('Error loading tags:', err));
           } else {
-            tagsDisplay = '—';
-          }
-          tagsElement.textContent = tagsDisplay;
-          tagsElement.style.color = tagsDisplay && tagsDisplay !== '—' ? '#aaa' : '#666';
-          if (tagsDisplay && tagsDisplay !== '—') {
-            tagsElement.setAttribute('title', tagsDisplay);
-          } else if (!(model.id && (!model.tags || model.tags.length === 0))) {
+            tagsElement.textContent = '—';
+            tagsElement.style.color = '#666';
             tagsElement.removeAttribute('title');
           }
-          console.log('updateModelElement: Updated tags in list view to', tagsDisplay);
+          console.log('updateModelElement: Updated tags in list view');
         } else {
           console.warn('updateModelElement: .tags-info not found inside .tags-info-column');
         }
@@ -1925,15 +1924,19 @@ async function updateModelElement(filePath) {
         // Fallback: try direct query in case structure is different
         const tagsElement = fileInfo.querySelector('.tags-info');
         if (tagsElement) {
-          let tagsDisplay = '';
           if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
             const tagNames = model.tags.map(t =>
               typeof t === 'string' ? t : (t && (t.name || t)) || ''
             ).filter(Boolean);
             tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-            tagsDisplay = tagNames.join(', ');
+            const tagsDisplay = tagNames.join(', ');
+            fillTagsWithFilterLinks(tagsElement, tagNames);
+            tagsElement.style.color = '#aaa';
+            tagsElement.setAttribute('title', tagsDisplay);
           } else if (model.id) {
-            tagsDisplay = '—';
+            tagsElement.textContent = '—';
+            tagsElement.style.color = '#666';
+            tagsElement.removeAttribute('title');
             window.electron.getModelTags(model.id).then(tags => {
               if (tags && tags.length > 0) {
                 const tagNames = tags.map(t =>
@@ -1941,7 +1944,7 @@ async function updateModelElement(filePath) {
                 ).filter(Boolean);
                 tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
                 const tagsText = tagNames.join(', ');
-                tagsElement.textContent = tagsText;
+                fillTagsWithFilterLinks(tagsElement, tagNames);
                 tagsElement.style.color = '#aaa';
                 tagsElement.setAttribute('title', tagsText);
               } else {
@@ -1951,16 +1954,11 @@ async function updateModelElement(filePath) {
               }
             }).catch(err => console.error('Error loading tags:', err));
           } else {
-            tagsDisplay = '—';
-          }
-          tagsElement.textContent = tagsDisplay;
-          tagsElement.style.color = tagsDisplay && tagsDisplay !== '—' ? '#aaa' : '#666';
-          if (tagsDisplay && tagsDisplay !== '—') {
-            tagsElement.setAttribute('title', tagsDisplay);
-          } else if (!(model.id && (!model.tags || model.tags.length === 0))) {
+            tagsElement.textContent = '—';
+            tagsElement.style.color = '#666';
             tagsElement.removeAttribute('title');
           }
-          console.log('updateModelElement: Updated tags in list view (fallback) to', tagsDisplay);
+          console.log('updateModelElement: Updated tags in list view (fallback)');
         }
       }
     }
@@ -11643,6 +11641,10 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
   // Add event listener to stop button
   stopButton.addEventListener('click', handleStopClick);
 
+  // When a background scan finds new models, we show the same "New Models" dialog as a foreground scan;
+  // then skip the duplicate performCombinedSearch in finally (see skipBackgroundFinallyRefresh).
+  let skipBackgroundFinallyRefresh = false;
+
   try {
     if (background) {
       window.disableGridRefresh = true;
@@ -11945,9 +11947,8 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       }
     }
     
-    // Update additional UI components only if not in background mode
+    // Foreground scans: reset filter UI and counts. Background scans (Docker STL Home polling, etc.) skip this.
     if (!background) {
-
       document.getElementById('designer-select').value = '';
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
@@ -11955,74 +11956,59 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
 
       const totalInDb = await window.electron.getTotalModelCount();
       await updateModelCounts(totalInDb);
-      
-      // Show dialog if new files were found
-      if (newFilesCount > 0) {
-        const result = await window.electron.showMessageBox({
-          type: 'question',
-          buttons: ['Yes', 'No'],
-          defaultId: 0,
-          title: 'New Models Found',
-          message: `${newFilesCount} new model(s) found, would you like to see them?`
-        });
-        
-        if (result.response === 0) {
-          // User clicked "Yes" - apply dateAdded filter to show only newly added models
-          // Set the dateAdded filter FIRST before clearing inputs to prevent event listeners from firing
+    }
+
+    // "New Models Found" prompt: run for any scan that reported new inserts (including background/server STL Home).
+    if (newFilesCount > 0) {
+      if (background) {
+        window.disableGridRefresh = false;
+      }
+      const result = await window.electron.showMessageBox({
+        type: 'question',
+        buttons: ['Yes', 'No'],
+        defaultId: 0,
+        title: 'New Models Found',
+        message: `${newFilesCount} new model(s) found, would you like to see them?`
+      });
+
+      if (background) {
+        skipBackgroundFinallyRefresh = true;
+      }
+
+      if (result.response === 0) {
+        // User clicked "Yes" - apply dateAdded filter to show only newly added models
+        window.dateAddedFilter = scanStartTime;
+        window._lastDateAddedFilter = scanStartTime;
+        console.log('Setting dateAddedFilter to:', scanStartTime);
+
+        window._suppressFilterEvents = true;
+        document.getElementById('designer-select').value = '';
+        document.getElementById('parent-select').value = '';
+        document.getElementById('printed-select').value = 'all';
+        document.getElementById('tag-filter').value = '';
+        document.getElementById('filetype-select').value = '';
+        document.getElementById('search-filter-input').value = '';
+        window.currentDirectoryFilter = null;
+        window._suppressFilterEvents = false;
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        if (!window.dateAddedFilter) {
+          console.warn('dateAddedFilter was cleared, resetting it');
           window.dateAddedFilter = scanStartTime;
-          window._lastDateAddedFilter = scanStartTime; // Backup copy
-          console.log('Setting dateAddedFilter to:', scanStartTime);
-          
-          // Clear all other filters (this will trigger change events, but dateAddedFilter is already set)
-          // Use a flag to prevent the change events from clearing dateAddedFilter
-          window._suppressFilterEvents = true;
-          document.getElementById('designer-select').value = '';
-          document.getElementById('parent-select').value = '';
-          document.getElementById('printed-select').value = 'all';
-          document.getElementById('tag-filter').value = '';
-          document.getElementById('filetype-select').value = '';
-          document.getElementById('search-filter-input').value = '';
-          window.currentDirectoryFilter = null;
-          window._suppressFilterEvents = false;
-          
-          // Small delay to ensure all event handlers have processed
-          await new Promise(resolve => setTimeout(resolve, 100));
-          
-          // Verify dateAddedFilter is still set
-          if (!window.dateAddedFilter) {
-            console.warn('dateAddedFilter was cleared, resetting it');
-            window.dateAddedFilter = scanStartTime;
-            window._lastDateAddedFilter = scanStartTime;
-          }
-          
-          // Re-render models with the dateAdded filter applied
-          if (typeof window.performCombinedSearch === 'function') {
-            await window.performCombinedSearch();
-          } else {
-            // Fallback to renderFiles if performCombinedSearch is not available
-            const filteredModels = await window.electron.getModelsFiltered({
-              dateAdded: scanStartTime
-            });
-            await renderFiles(filteredModels);
-          }
+          window._lastDateAddedFilter = scanStartTime;
+        }
+
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
         } else {
-          // User clicked "No" - clear dateAdded filter and refresh normally
-          window.dateAddedFilter = null;
-          if (typeof window.performCombinedSearch === 'function') {
-            await window.performCombinedSearch();
-          } else {
-            const sortSelect = document.getElementById('sort-select');
-            const fallbackModels = await window.electron.getAllModels(
-              sortSelect ? sortSelect.value : 'date-desc',
-              0
-            );
-            await renderFiles(fallbackModels);
-          }
+          const filteredModels = await window.electron.getModelsFiltered({
+            dateAdded: scanStartTime
+          });
+          await renderFiles(filteredModels);
         }
       } else {
-        // No new files, just refresh normally
-        // Re-render models after scanning completes
-        // Use performCombinedSearch to ensure filters are properly applied
+        window.dateAddedFilter = null;
         if (typeof window.performCombinedSearch === 'function') {
           await window.performCombinedSearch();
         } else {
@@ -12033,6 +12019,17 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
           );
           await renderFiles(fallbackModels);
         }
+      }
+    } else if (!background) {
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      } else {
+        const sortSelect = document.getElementById('sort-select');
+        const fallbackModels = await window.electron.getAllModels(
+          sortSelect ? sortSelect.value : 'date-desc',
+          0
+        );
+        await renderFiles(fallbackModels);
       }
     }
   } catch (error) {
@@ -12055,13 +12052,17 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
     } else {
       window.disableGridRefresh = false;
       console.log('Background scan complete: grid refresh re-enabled');
-      // Refresh the grid so models show without requiring a page reload (docker/server mode)
-      if (typeof window.performCombinedSearch === 'function') {
-        window.performCombinedSearch().catch(err => console.error('Background scan post-refresh:', err));
+      if (skipBackgroundFinallyRefresh) {
+        console.log('Background scan: grid already refreshed after New Models dialog');
       } else {
-        window.electron.getAllModels().then((models) => {
-          if (typeof window.renderFiles === 'function') window.renderFiles(models);
-        }).catch(err => console.error('Background scan post-refresh:', err));
+        // Refresh the grid so models show without requiring a page reload (docker/server mode)
+        if (typeof window.performCombinedSearch === 'function') {
+          window.performCombinedSearch().catch(err => console.error('Background scan post-refresh:', err));
+        } else {
+          window.electron.getAllModels().then((models) => {
+            if (typeof window.renderFiles === 'function') window.renderFiles(models);
+          }).catch(err => console.error('Background scan post-refresh:', err));
+        }
       }
     }
   }
@@ -14013,6 +14014,65 @@ async function loadModelTags(modelIdOrPath) {
   } catch (error) {
     console.error('Error loading model tags:', error);
   }
+}
+
+/** Set tag filter dropdown and refresh the grid (same path as Filter menu; works with getModelsFiltered in Electron and server bridge). */
+async function applyTagFilterFromModelClick(tagName) {
+  const trimmed = (tagName && String(tagName).trim()) || '';
+  if (!trimmed) return;
+  if (window.dateAddedFilter) {
+    window.dateAddedFilter = null;
+    window._lastDateAddedFilter = null;
+  }
+  window.viewingEntireLibrary = false;
+  if (typeof window.resetFilterSelectionAndDetails === 'function') {
+    window.resetFilterSelectionAndDetails();
+  }
+  const tagSelect = document.getElementById('tag-filter');
+  if (!tagSelect) return;
+  const hasOption = Array.from(tagSelect.options).some((o) => o.value === trimmed);
+  if (!hasOption) {
+    const opt = document.createElement('option');
+    opt.value = trimmed;
+    opt.textContent = trimmed;
+    tagSelect.appendChild(opt);
+  }
+  tagSelect.value = trimmed;
+  if (typeof window.performCombinedSearch === 'function') {
+    await window.performCombinedSearch();
+  }
+}
+
+/** Render tag names as clickable spans that apply the tag filter (use in model list/detailed views). */
+function fillTagsWithFilterLinks(tagsValueSpan, names) {
+  if (!tagsValueSpan) return;
+  const sorted = (Array.isArray(names) ? names : [])
+    .map((n) => {
+      if (typeof n === 'string') return n.trim();
+      return String((n && (n.name || n)) || '').trim();
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  if (sorted.length === 0) {
+    tagsValueSpan.textContent = '';
+    return;
+  }
+  tagsValueSpan.innerHTML = '';
+  sorted.forEach((name, i) => {
+    const link = document.createElement('span');
+    link.className = 'tag-filter-link';
+    link.textContent = name;
+    link.setAttribute('title', `Filter by tag: ${name}`);
+    link.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await applyTagFilterFromModelClick(name);
+    });
+    tagsValueSpan.appendChild(link);
+    if (i < sorted.length - 1) {
+      tagsValueSpan.appendChild(document.createTextNode(', '));
+    }
+  });
 }
 
 // Add this function to populate the tag filter dropdown
@@ -17755,38 +17815,38 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     
     // Get tags from model
     let tagsDisplay = '';
+    let tagNamesList = [];
     if (model.tags && Array.isArray(model.tags) && model.tags.length > 0) {
-      const tagNames = model.tags.map(t => t.name || t);
-      tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
-      tagsDisplay = tagNames.join(', ');
+      tagNamesList = model.tags.map(t => (typeof t === 'string' ? t : (t.name || t))).filter(Boolean);
+      tagNamesList.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
+      tagsDisplay = tagNamesList.join(', ');
     } else if (model.id) {
       // Load tags asynchronously if not present
       window.electron.getModelTags(model.id).then(tags => {
+        const tagsSpan = tagsColumn.querySelector('.tags-info');
+        if (!tagsSpan) return;
         if (tags && tags.length > 0) {
-          const tagNames = tags.map(t => t.name || t);
+          const tagNames = tags.map(t => (typeof t === 'string' ? t : (t.name || t))).filter(Boolean);
           tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
           const tagsText = tagNames.join(', ');
-          const tagsSpan = tagsColumn.querySelector('.tags-info');
-          if (tagsSpan) {
-            tagsSpan.textContent = tagsText;
-            tagsSpan.setAttribute('title', tagsText); // Show full tag list on hover
-            tagsSpan.style.color = '#aaa';
-          }
+          fillTagsWithFilterLinks(tagsSpan, tagNames);
+          tagsSpan.setAttribute('title', tagsText); // Show full tag list on hover
+          tagsSpan.style.color = '#aaa';
         } else {
-          const tagsSpan = tagsColumn.querySelector('.tags-info');
-          if (tagsSpan) {
-            tagsSpan.textContent = '—';
-            tagsSpan.style.color = '#666';
-          }
+          tagsSpan.textContent = '—';
+          tagsSpan.style.color = '#666';
+          tagsSpan.removeAttribute('title');
         }
       }).catch(err => console.error('Error loading tags:', err));
     }
     
     const tagsSpan = document.createElement('span');
     tagsSpan.className = 'tags-info';
-    tagsSpan.textContent = tagsDisplay || '—';
     if (tagsDisplay) {
+      fillTagsWithFilterLinks(tagsSpan, tagNamesList);
       tagsSpan.setAttribute('title', tagsDisplay); // Show full tag list on hover
+    } else {
+      tagsSpan.textContent = '—';
     }
     tagsSpan.style.fontSize = '12px';
     tagsSpan.style.color = tagsDisplay ? '#aaa' : '#666';
@@ -18192,11 +18252,20 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     
     if (tagsDisplay) {
       // Tags already available, display them immediately
+      const tagNamesForDisplay = model.tags
+        .map(t => (typeof t === 'string' ? t : (t && (t.name || t)) || ''))
+        .filter(Boolean);
+      tagNamesForDisplay.sort((a, b) => a.localeCompare(b));
       tagsItem.innerHTML = `
         <span class="metadata-icon">🏷️</span>
-        <span class="metadata-value tags-info" style="color: #ccc" title="${tagsDisplay}">${tagsDisplay}</span>
+        <span class="metadata-value tags-info" style="color: #ccc" title=""></span>
       `;
       metadataContainer.appendChild(tagsItem);
+      const tagsValueSpanSync = tagsItem.querySelector('.tags-info');
+      if (tagsValueSpanSync) {
+        fillTagsWithFilterLinks(tagsValueSpanSync, tagNamesForDisplay);
+        tagsValueSpanSync.setAttribute('title', tagsDisplay);
+      }
     } else {
       // Create item and load tags asynchronously
       tagsItem.innerHTML = `
@@ -18217,12 +18286,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
               modelId = fullModel.id;
               // Also check if tags are already in the full model
               if (fullModel.tags && Array.isArray(fullModel.tags) && fullModel.tags.length > 0) {
-                const tagNames = fullModel.tags.map(t => (typeof t === 'string' ? t : (t.name || t)));
+                const tagNames = fullModel.tags.map(t => (typeof t === 'string' ? t : (t.name || t))).filter(Boolean);
                 tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
                 const tagsText = tagNames.join(', ');
                 const tagsValueSpan = tagsItem.querySelector('.tags-info');
                 if (tagsValueSpan) {
-                  tagsValueSpan.textContent = tagsText;
+                  fillTagsWithFilterLinks(tagsValueSpan, tagNames);
                   tagsValueSpan.setAttribute('title', tagsText); // Show full tag list on hover
                   tagsValueSpan.style.color = '#ccc';
                 }
@@ -18235,12 +18304,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
           if (modelId) {
             const tags = await window.electron.getModelTags(modelId);
             if (tags && tags.length > 0) {
-              const tagNames = tags.map(t => (typeof t === 'string' ? t : (t.name || t)));
+              const tagNames = tags.map(t => (typeof t === 'string' ? t : (t.name || t))).filter(Boolean);
               tagNames.sort((a, b) => a.localeCompare(b)); // Sort tags alphabetically
               const tagsText = tagNames.join(', ');
               const tagsValueSpan = tagsItem.querySelector('.tags-info');
               if (tagsValueSpan) {
-                tagsValueSpan.textContent = tagsText;
+                fillTagsWithFilterLinks(tagsValueSpan, tagNames);
                 tagsValueSpan.setAttribute('title', tagsText); // Show full tag list on hover
                 tagsValueSpan.style.color = '#ccc';
               }

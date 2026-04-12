@@ -1438,6 +1438,17 @@ main {
   color: #4a9eff;
 }
 
+/* Clickable tag names in model grid (list + detailed) — filter by tag */
+.tag-filter-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.35);
+}
+.tag-filter-link:hover {
+  color: #7eb8ff;
+  text-decoration-color: rgba(126, 184, 255, 0.8);
+}
+
 .file-item {
   width: 100%;
   max-width: 100%;

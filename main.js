@@ -3443,7 +3443,7 @@ ipcMain.handle('get-parent-models', async () => {
   }
 });
 
-ipcMain.handle('get-all-tags', async () => {
+async function getAllTagsHandler() {
   try {
     return db.prepare(`
       SELECT 
@@ -3460,9 +3460,11 @@ ipcMain.handle('get-all-tags', async () => {
     console.error('Error getting tags:', error);
     throw error;
   }
-});
+}
+ipcMain.handle('get-all-tags', getAllTagsHandler);
+ipcHandlerRegistry.set('get-all-tags', getAllTagsHandler);
 
-ipcMain.handle('save-tag', async (event, tagName) => {
+async function saveTagHandler(event, tagName) {
   try {
     db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(tagName);
     return db.prepare('SELECT id, name FROM tags WHERE name = ?').get(tagName);
@@ -3470,7 +3472,9 @@ ipcMain.handle('save-tag', async (event, tagName) => {
     console.error('Error saving tag:', error);
     throw error;
   }
-});
+}
+ipcMain.handle('save-tag', saveTagHandler);
+ipcHandlerRegistry.set('save-tag', saveTagHandler);
 
 // Add error handling to the getSetting handler
 ipcMain.handle('get-additional-file-types-catalog', async () => {
@@ -4538,7 +4542,7 @@ ipcMain.handle('fetch-thangs-page', async (event, url) => {
   }
 });
 
-ipcMain.handle('delete-tag', async (event, tagId) => {
+async function deleteTagHandler(event, tagId) {
   try {
     return db.transaction(() => {
       // First delete from model_tags (child table)
@@ -4553,9 +4557,11 @@ ipcMain.handle('delete-tag', async (event, tagId) => {
     console.error('Error deleting tag:', error);
     throw error;
   }
-});
+}
+ipcMain.handle('delete-tag', deleteTagHandler);
+ipcHandlerRegistry.set('delete-tag', deleteTagHandler);
 
-ipcMain.handle('get-tag-model-count', async (event, tagId) => {
+async function getTagModelCountHandler(event, tagId) {
   return new Promise((resolve, reject) => {
     const row = db.prepare('SELECT COUNT(*) as count FROM model_tags WHERE tag_id = ?').get(tagId);
     if (row) {
@@ -4564,7 +4570,9 @@ ipcMain.handle('get-tag-model-count', async (event, tagId) => {
       reject(new Error('Tag not found'));
     }
   });
-});
+}
+ipcMain.handle('get-tag-model-count', getTagModelCountHandler);
+ipcHandlerRegistry.set('get-tag-model-count', getTagModelCountHandler);
 
 ipcMain.handle('get-all-metadata', async () => {
   try {
@@ -6282,7 +6290,7 @@ async function deleteFile(filePath) {
 }
 
 // Update the handler name to match the convention
-ipcMain.handle('get-model-tags', async (event, modelId) => {
+async function getModelTagsHandler(event, modelId) {
   try {
     return db.prepare(`
       SELECT t.* 
@@ -6294,7 +6302,9 @@ ipcMain.handle('get-model-tags', async (event, modelId) => {
     console.error('Error getting model tags:', error);
     throw error;
   }
-});
+}
+ipcMain.handle('get-model-tags', getModelTagsHandler);
+ipcHandlerRegistry.set('get-model-tags', getModelTagsHandler);
 
 // Add these handlers
 ipcMain.handle('quitApp', () => {

@@ -1,9 +1,11 @@
-# Push Printventory to GitHub (TechJeeper/Printventory, main)
+# Push Printventory to GitHub (techjeeper/printventory) — main or beta branch.
 # Token must be set via environment: $env:GITHUB_TOKEN = "your_token"
 # NEVER commit or store the token in this script or in the repo.
 
 param(
-    [switch]$Release,   # If set, create/update a release and upload dist assets
+    [ValidateSet("main", "beta")]
+    [string]$Branch = "main",
+    [switch]$Release,   # If set, create/update a release and upload dist assets (use with -Branch main)
     [string]$RemoteName = "origin"
 )
 
@@ -12,7 +14,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 Set-Location $rootDir
 
-$repo = "TechJeeper/Printventory"
+$repo = "techjeeper/printventory"
 $repoUrl = "https://github.com/$repo.git"
 
 # Token from environment only
@@ -34,10 +36,12 @@ if (-not (Test-Path ".git")) {
     git commit -m "Initial commit - Printventory"
     Write-Host "Initial commit created." -ForegroundColor Green
 } else {
-    # Ensure current branch is main (create if missing)
-    $currentBranch = git rev-parse --abbrev-ref HEAD 2>$null
-    if ($currentBranch -ne "main") {
-        git branch -M main 2>$null
+    # Keep local branch name "main" for consistency when targeting main
+    if ($Branch -eq "main") {
+        $currentBranch = git rev-parse --abbrev-ref HEAD 2>$null
+        if ($currentBranch -ne "main") {
+            git branch -M main 2>$null
+        }
     }
 }
 
@@ -57,17 +61,17 @@ if ($status) {
 }
 
 $pushUrl = "https://${token}@github.com/$repo.git"
-Write-Host "Pushing to $repo (main)..." -ForegroundColor Cyan
-cmd /c "git push `"$pushUrl`" HEAD:main 2>&1"
+Write-Host "Pushing to $repo ($Branch)..." -ForegroundColor Cyan
+cmd /c "git push `"$pushUrl`" HEAD:$Branch 2>&1"
 $pushExit = $LASTEXITCODE
 if ($pushExit -ne 0) {
     Write-Host "Remote has commits you don't have. Pulling and merging, then pushing again..." -ForegroundColor Yellow
-    cmd /c "git pull `"$pushUrl`" main --no-edit --allow-unrelated-histories 2>&1"
+    cmd /c "git pull `"$pushUrl`" $Branch --no-edit --allow-unrelated-histories 2>&1"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Pull failed (exit code $LASTEXITCODE)." -ForegroundColor Red
         exit $LASTEXITCODE
     }
-    cmd /c "git push `"$pushUrl`" HEAD:main 2>&1"
+    cmd /c "git push `"$pushUrl`" HEAD:$Branch 2>&1"
     $pushExit = $LASTEXITCODE
 }
 if ($pushExit -ne 0) {
@@ -76,7 +80,11 @@ if ($pushExit -ne 0) {
     exit $pushExit
 }
 
-Write-Host "Push to main succeeded." -ForegroundColor Green
+Write-Host "Push to $Branch succeeded." -ForegroundColor Green
+
+if ($Release -and $Branch -ne "main") {
+    Write-Host "Warning: -Release is intended for main; continuing with release steps anyway." -ForegroundColor Yellow
+}
 
 if (-not $Release) {
     Write-Host "To create a release and upload assets, run with -Release" -ForegroundColor Gray
