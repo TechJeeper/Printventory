@@ -1101,6 +1101,25 @@ async function loadModel(filePath, options = {}) {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
 
+    // STL: read bytes the same way as 3D preview (readModelFile) and hand them to the worker.
+    // Thumbnails used to rely only on fetch(HTTP) / file URL in the worker; in Docker/server mode
+    // that path can fail for some paths where direct fs read and preview still work.
+    let stlArrayBuffer = null;
+    if (fileExtension === 'stl' && window.electron && typeof window.electron.readModelFile === 'function') {
+      try {
+        const raw = await window.electron.readModelFile(filePath);
+        if (raw) {
+          stlArrayBuffer = raw instanceof ArrayBuffer
+            ? raw
+            : raw.buffer
+              ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)
+            : null;
+        }
+      } catch (e) {
+        console.warn('loadModel: readModelFile for STL failed, worker will use URL:', e);
+      }
+    }
+
     return new Promise((resolve, reject) => {
       const worker = new Worker('parse-worker.js');
       const jobId = Date.now().toString() + Math.random().toString();
@@ -1180,11 +1199,18 @@ async function loadModel(filePath, options = {}) {
         reject(error);
       };
 
-      worker.postMessage({
+      const payload = {
         id: jobId,
         fileExtension,
-        url: encodedFilePath
-      });
+        url: encodedFilePath,
+        arrayBuffer: stlArrayBuffer || undefined
+      };
+      const transfer = stlArrayBuffer && stlArrayBuffer instanceof ArrayBuffer ? [stlArrayBuffer] : undefined;
+      if (transfer) {
+        worker.postMessage(payload, transfer);
+      } else {
+        worker.postMessage(payload);
+      }
     });
   } catch (error) {
     console.error('loadModel error:', error);

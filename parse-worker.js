@@ -13,7 +13,7 @@ importScripts('vendor/3MFLoader.js');
 importScripts('vendor/OBJLoader.js');
 
 self.onmessage = async function(e) {
-  const { fileExtension, url, id } = e.data;
+  const { fileExtension, url, id, arrayBuffer: stlFromMain } = e.data;
 
   try {
     let loader;
@@ -22,10 +22,15 @@ self.onmessage = async function(e) {
 
       const MAX_STL_TRIANGLES = 10000000; // 10M triangles (~500MB)
 
-      // Fetch and validate binary header
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const buffer = await res.arrayBuffer();
+      // Prefer buffer from main (same as preview / fs.read) — matches Docker/server and avoids fetch/file URL issues
+      let buffer;
+      if (stlFromMain instanceof ArrayBuffer) {
+        buffer = stlFromMain;
+      } else {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        buffer = await res.arrayBuffer();
+      }
 
       if (buffer.byteLength < 84) {
         throw new Error('STL file too small to be valid');
