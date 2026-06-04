@@ -4323,10 +4323,9 @@ async function createServerMenuBar() {
     { label: 'File Type', action: async () => {
       await loadAndShowFileTypeSettings();
     }},
-    { label: 'Performance', action: () => {
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        dialog.showModal();
+    { label: 'Performance', action: async () => {
+      if (typeof window._openPerformanceSettingsDialog === 'function') {
+        await window._openPerformanceSettingsDialog();
       } else {
         window.electron.send('open-performance-settings');
       }
