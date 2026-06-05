@@ -53,5 +53,11 @@ echo "NPM version: $(npm --version)"
 # Run Electron in the foreground to see output and keep container alive
 # Add --no-sandbox flag to allow running as root in Docker
 # The --server flag is passed via CMD in Dockerfile
-exec npx electron . --no-sandbox --server
+exec npx electron . \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-gpu-compositing \
+  --disable-software-rasterizer \
+  --disable-dev-shm-usage \
+  --server
 

@@ -9,6 +9,16 @@ const { spawnSync } = require('child_process');
 const projectRoot = path.join(__dirname, '..');
 const distDir = path.join(projectRoot, 'dist');
 
+if (process.platform === 'win32') {
+  const cacheResult = spawnSync(process.execPath, [path.join(__dirname, 'ensure-win-codesign-cache.js')], {
+    cwd: projectRoot,
+    stdio: 'inherit',
+  });
+  if (cacheResult.status !== 0) {
+    process.exit(cacheResult.status ?? 1);
+  }
+}
+
 function tryRemoveQuiet(p) {
   if (!fs.existsSync(p)) return;
   try {

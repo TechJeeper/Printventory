@@ -94,10 +94,10 @@ RUN npm config set proxy null && \
     npm cache clean --force
 
 # Copy application files
-COPY main.js preload.js renderer.js index.html styles.css ./
+COPY main.js preload.js renderer.js index.html styles.css preview-wall.css ./
 COPY server-bridge.js scan-worker.js parse-worker.js ./
 COPY preview-3mf-worker-node.js threemf-loader-simple.js ./
-COPY preview.js aitagging.js slicer.js guide.js search.js ./
+COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js ./
 COPY vendor/ ./vendor/
 COPY favicon.ico ./
 COPY *.png *.jpg *.bmp ./

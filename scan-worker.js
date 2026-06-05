@@ -355,10 +355,11 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
 
   async function scanZipFile(zipPath, maxFileSize, extSet = new Set(['.stl', '.3mf'])) {
     const files = [];
+  let zip = null;
     try {
-      // Ensure StreamZip is loaded
+    // Ensure StreamZip is loaded
       const StreamZipClass = loadStreamZip();
-      const zip = new StreamZipClass.async({ file: zipPath });
+    zip = new StreamZipClass.async({ file: zipPath });
     const entries = await zip.entries();
     
     for (const entry of Object.values(entries)) {
@@ -385,9 +386,20 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
       }
     }
     
-    await zip.close();
   } catch (error) {
-    console.error(`Error scanning ZIP file ${zipPath}:`, error);
+    const errorMessage = error && error.message ? error.message : String(error);
+    if (/invalid entry header|not a zip|end of central directory/i.test(errorMessage)) {
+      // Invalid archives should be skipped without noisy stack traces.
+      console.warn(`Skipping invalid ZIP archive ${zipPath}: ${errorMessage}`);
+    } else {
+      console.error(`Error scanning ZIP file ${zipPath}:`, error);
+    }
+  } finally {
+    if (zip) {
+      try {
+        await zip.close();
+      } catch {}
+    }
   }
   
   return files;

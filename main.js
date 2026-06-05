@@ -9,7 +9,14 @@ const { Worker } = require('worker_threads');
 const preview3mfWorkers = new Map();
 const preview3mfCache = new Map();
 const PREVIEW_3MF_CACHE_LIMIT = 5;
-const PREVIEW_3MF_POOL_SIZE = 10;
+const PREVIEW_3MF_POOL_SIZE = Math.max(
+  1,
+  Math.min(4, Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_POOL_SIZE || '2', 10) || 2)
+);
+const PREVIEW_3MF_MAX_FILE_SIZE_MB = Math.max(
+  10,
+  Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB || '200', 10) || 200
+);
 const preview3mfWorkerPool = [];
 
 function getPreview3mfCacheDir() {
@@ -71,6 +78,7 @@ const ADDITIONAL_FILE_TYPES_CATALOG = [
   { id: 'f3z', label: 'F3Z (.f3z)', extensions: ['.f3z'] },
   { id: 'gcode', label: 'G-code (.gcode)', extensions: ['.gcode'] },
   { id: 'igs', label: 'IGES (.igs/.iges)', extensions: ['.igs', '.iges'] },
+  { id: 'lys', label: 'LYS/LYT (.lys/.lyt)', extensions: ['.lys', '.lyt'] },
   { id: 'obj', label: 'OBJ (.obj)', extensions: ['.obj'] },
   { id: 'ply', label: 'PLY (.ply)', extensions: ['.ply'] },
   { id: 'step', label: 'STEP (.step/.stp)', extensions: ['.step', '.stp'] },
@@ -712,7 +720,9 @@ ${bridgeCode}
         '.f3z': 'application/octet-stream',
         '.gcode': 'application/octet-stream',
         '.igs': 'application/octet-stream',
-        '.iges': 'application/octet-stream'
+        '.iges': 'application/octet-stream',
+        '.lys': 'application/octet-stream',
+        '.lyt': 'application/octet-stream'
       };
       
       if (mimeTypes[ext]) {
@@ -832,7 +842,9 @@ ${bridgeCode}
         '.f3z': 'application/octet-stream',
         '.gcode': 'application/octet-stream',
         '.igs': 'application/octet-stream',
-        '.iges': 'application/octet-stream'
+        '.iges': 'application/octet-stream',
+        '.lys': 'application/octet-stream',
+        '.lyt': 'application/octet-stream'
       };
       
       if (mimeTypes[ext]) {
@@ -1619,7 +1631,8 @@ function initializeDatabase() {
           size INTEGER,
           license TEXT,
           modifiedDate DATETIME,
-          dateAdded DATETIME
+          dateAdded DATETIME,
+          isNew INTEGER DEFAULT 1
       )`).run();
 
       // Create tags table
@@ -1677,9 +1690,11 @@ function initializeDatabase() {
     // Migrate existing database: add dateAdded column if it doesn't exist
     // This must run before creating indexes on dateAdded
     migrateDateAddedColumn();
+    migrateIsNewColumn();
     
     // Create index for dateAdded after migration (in case it was just added)
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_dateadded ON models(dateAdded)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_models_isnew ON models(isNew)').run();
     
     // Clean up any database objects that reference models_old (from old migrations)
     cleanupModelsOldReferences();
@@ -1735,6 +1750,27 @@ function migrateDateAddedColumn() {
     return true;
   } catch (error) {
     console.error('Error migrating dateAdded column:', error);
+    return false;
+  }
+}
+
+/** Add isNew column for "new until edited" badge; existing rows are not new. */
+function migrateIsNewColumn() {
+  try {
+    console.log('Checking for isNew column migration...');
+    const tableInfo = db.prepare('PRAGMA table_info(models)').all();
+    const hasIsNew = tableInfo.some(col => col.name === 'isNew');
+    if (!hasIsNew) {
+      console.log('isNew column not found. Adding it...');
+      db.prepare('ALTER TABLE models ADD COLUMN isNew INTEGER DEFAULT 1').run();
+      db.prepare('UPDATE models SET isNew = 0').run();
+      console.log('isNew column added; existing models marked as not new');
+    } else {
+      console.log('isNew column already exists');
+    }
+    return true;
+  } catch (error) {
+    console.error('Error migrating isNew column:', error);
     return false;
   }
 }
@@ -2470,6 +2506,12 @@ function normalizePath(filepath) {
   return filepath.replace(/\\/g, '/');
 }
 
+// Match library paths against a scanned directory prefix. Stored paths often use '\' on Windows while
+// scan roots are normalized with forward slashes; naive LIKE would fail to pair them.
+function directoryScanPrefixSqlParam(scanDirectoryPath) {
+  return normalizePath(scanDirectoryPath).replace(/\/$/, '').toLowerCase() + '%';
+}
+
 // Apply path-based metadata for STL Home scan: segments from root (From Root) or from model up (From Model).
 // Only sets designer/parentModel when current value is empty. Uses pathMetadataStlHomeEnabled, pathMetadataStlHomeDirection,
 // pathMetadataUseDesigner, pathMetadataUseParentModel, pathMetadataDesignerIndex, pathMetadataParentModelIndex.
@@ -2543,14 +2585,13 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
   try {
     // OPTIMIZATION: Only query models in the scanned directory using SQL instead of loading all models
     // This dramatically reduces memory usage and improves performance, especially for large databases
-    const normalizedScanPath = normalizePath(scanDirectoryPath).replace(/\/$/, '');
-    const scanPathPattern = normalizedScanPath + '%';
-    
-    // Query only models that are in the scanned directory
-    // Use LIKE for path matching (case-insensitive on Windows)
-    const modelsInDirectory = process.platform === 'win32'
-      ? db.prepare('SELECT filePath, id FROM models WHERE LOWER(filePath) LIKE LOWER(?)').all(scanPathPattern)
-      : db.prepare('SELECT filePath, id FROM models WHERE filePath LIKE ?').all(scanPathPattern);
+    const prefixParam = directoryScanPrefixSqlParam(scanDirectoryPath);
+
+    // Query only models under this directory: unify '\' and '/' so LIKE sees the same prefix as scanDirectoryPath.
+    const modelsInDirectory = db.prepare(`
+      SELECT filePath, id FROM models
+      WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+    `).all(prefixParam);
     
     if (modelsInDirectory.length === 0) {
       return 0; // No models in this directory, nothing to check
@@ -2663,7 +2704,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
           message: `The scan found ${filesToDelete.length} file${filesToDelete.length === 1 ? '' : 's'} in the library that no longer exist on disk.`,
           detail: `These files will be removed from the library (files are not deleted from disk):\n\n${fileList}${moreFiles}\n\nDo you want to proceed?`,
           buttons: ['Remove from Library', 'Skip'],
-          defaultId: 1,
+          defaultId: 0,
           cancelId: 1,
         });
 
@@ -2816,8 +2857,8 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
             
             const insertNew = db.prepare(`
               INSERT INTO models (
-                filePath, fileName, hash, size, modifiedDate, dateAdded
-              ) VALUES (?, ?, ?, ?, ?, ?)
+                filePath, fileName, hash, size, modifiedDate, dateAdded, isNew
+              ) VALUES (?, ?, ?, ?, ?, ?, 1)
             `);
 
             // Track count of newly inserted files
@@ -3132,7 +3173,7 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
         break;
     }
 
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
 
     let models;
     if (limit === 0) {
@@ -3150,6 +3191,334 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
 ipcMain.handle('get-all-models', getAllModelsHandler);
 ipcHandlerRegistry.set('get-all-models', getAllModelsHandler);
 
+/** Normalize filter payload: single string or array of strings */
+function normalizeFilterValueList(primaryArr, legacyStr) {
+  const out = [];
+  if (Array.isArray(primaryArr)) {
+    for (const x of primaryArr) {
+      if (x != null && String(x).trim() !== '') out.push(String(x).trim());
+    }
+  }
+  if (out.length === 0 && legacyStr != null && String(legacyStr).trim() !== '') {
+    out.push(String(legacyStr).trim());
+  }
+  return out;
+}
+
+function normalizeTagNameList(filters) {
+  if (Array.isArray(filters.tags) && filters.tags.length) {
+    return filters.tags.map((t) => String(t).trim()).filter(Boolean);
+  }
+  if (filters.tag) return [String(filters.tag).trim()].filter(Boolean);
+  return [];
+}
+
+/** One positive LIKE/EXISTS fragment for a search clause */
+function pushSearchClauseFragment(field, rawValue, params) {
+  const term = `%${String(rawValue).toLowerCase()}%`;
+  switch (field) {
+    case 'fileName':
+      params.push(term);
+      return 'LOWER(COALESCE(fileName, \'\')) LIKE ?';
+    case 'designer':
+      params.push(term);
+      return 'LOWER(COALESCE(designer, \'\')) LIKE ?';
+    case 'parentModel':
+      params.push(term);
+      return 'LOWER(COALESCE(parentModel, \'\')) LIKE ?';
+    case 'notes':
+      params.push(term);
+      return 'LOWER(COALESCE(notes, \'\')) LIKE ?';
+    case 'filePath':
+      params.push(term);
+      return 'LOWER(COALESCE(filePath, \'\')) LIKE ?';
+    case 'source':
+      params.push(term);
+      return 'LOWER(COALESCE(source, \'\')) LIKE ?';
+    case 'license':
+      params.push(term);
+      return 'LOWER(COALESCE(license, \'\')) LIKE ?';
+    case 'tag':
+      params.push(term);
+      return 'EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)';
+    default:
+      params.push(term, term, term, term, term, term, term, term);
+      return `(
+          LOWER(COALESCE(fileName, \'\')) LIKE ? OR 
+          LOWER(COALESCE(designer, \'\')) LIKE ? OR 
+          LOWER(COALESCE(parentModel, \'\')) LIKE ? OR 
+          LOWER(COALESCE(notes, \'\')) LIKE ? OR
+          LOWER(COALESCE(filePath, \'\')) LIKE ? OR
+          LOWER(COALESCE(source, \'\')) LIKE ? OR
+          LOWER(COALESCE(license, \'\')) LIKE ? OR
+          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
+        )`;
+  }
+}
+
+function sanitizeSearchTokensForCompile(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const out = [];
+  for (const x of raw) {
+    if (!x || typeof x !== 'object') continue;
+    if (x.t === 'clause') {
+      const val = String(x.value || '').trim();
+      if (!val) continue;
+      const field = String(x.field || 'all').trim() || 'all';
+      out.push({ t: 'clause', field, value: val });
+    } else if (x.t === 'op' && (x.op === 'AND' || x.op === 'OR')) {
+      out.push({ t: 'op', op: x.op });
+    } else if (x.t === 'not') {
+      out.push({ t: 'not' });
+    } else if (x.t === 'filter') {
+      const kind = String(x.kind || '').trim();
+      if (!kind || !['designer', 'license', 'parentModel', 'tag', 'fileType', 'printed', 'isNew'].includes(kind)) continue;
+      const valRaw = String(x.value != null ? x.value : '').trim();
+      if (kind === 'printed') {
+        if (valRaw !== 'printed' && valRaw !== 'not-printed') continue;
+        out.push({ t: 'filter', kind, value: valRaw });
+      } else if (kind === 'isNew') {
+        if (valRaw !== 'new' && valRaw !== 'not-new') continue;
+        out.push({ t: 'filter', kind, value: valRaw });
+      } else if (!valRaw) {
+        continue;
+      } else {
+        const ftNorm = kind === 'fileType' && valRaw.toLowerCase() === 'zip' ? 'zip' : valRaw;
+        out.push({ t: 'filter', kind, value: ftNorm });
+      }
+    } else if (x.t === 'filterMulti') {
+      const kind = String(x.kind || '').trim();
+      if (!kind || !['designer', 'license', 'parentModel', 'tag'].includes(kind)) continue;
+      const vals = Array.isArray(x.values) ? x.values.map((v) => String(v).trim()).filter(Boolean) : [];
+      if (vals.length === 0) continue;
+      const combine = String(x.combine || 'OR').toUpperCase() === 'AND' ? 'AND' : 'OR';
+      out.push({ t: 'filterMulti', kind, values: vals, combine });
+    }
+  }
+  for (let i = 1; i < out.length; i++) {
+    const a = out[i - 1];
+    const b = out[i];
+    if (a.t === 'op' && b.t === 'op' && a.op === b.op) {
+      out.splice(i, 1);
+      i--;
+    }
+  }
+  while (out.length && (out[out.length - 1].t === 'op' || out[out.length - 1].t === 'not')) {
+    out.pop();
+  }
+  return out;
+}
+
+/** SQL fragment for a sidebar filter serialized into searchTokens ({ t: filter | filterMulti }). */
+function compileSidebarFilterClauseToSQL(tok, filters, params) {
+  if (tok.t === 'filterMulti') {
+    const combine = tok.combine === 'AND' ? 'AND' : 'OR';
+    if (tok.kind === 'designer') {
+      const cond = [];
+      pushEqualityListCondition(cond, params, 'designer', tok.values.slice(), combine, !!filters.designerInverted, true);
+      return cond[0] || '1';
+    }
+    if (tok.kind === 'license') {
+      const cond = [];
+      pushEqualityListCondition(cond, params, 'license', tok.values.slice(), combine, !!filters.licenseInverted, false);
+      return cond[0] || '1';
+    }
+    if (tok.kind === 'parentModel') {
+      const cond = [];
+      pushEqualityListCondition(cond, params, 'parentModel', tok.values.slice(), combine, !!filters.parentModelInverted, false);
+      return cond[0] || '1';
+    }
+    if (tok.kind === 'tag') {
+      const names = tok.values.slice();
+      const f = {
+        tags: names,
+        tagCombine: combine,
+        tagInverted: !!filters.tagInverted,
+      };
+      const cond = [];
+      pushTagListSQL(cond, params, f);
+      return cond[0] || '1';
+    }
+    return null;
+  }
+  if (tok.t !== 'filter') return null;
+  if (tok.kind === 'designer' || tok.kind === 'license' || tok.kind === 'parentModel') {
+    const cond = [];
+    const col = tok.kind === 'designer' ? 'designer' : tok.kind === 'license' ? 'license' : 'parentModel';
+    const inverted = !!(tok.kind === 'designer' ? filters.designerInverted : tok.kind === 'license' ? filters.licenseInverted : filters.parentModelInverted);
+    const useLowerTrim = tok.kind === 'designer';
+    pushEqualityListCondition(cond, params, col, [tok.value], 'OR', inverted, useLowerTrim);
+    return cond[0] || '1';
+  }
+  if (tok.kind === 'tag') {
+    const f = { tags: [tok.value], tagCombine: 'OR', tagInverted: !!filters.tagInverted };
+    const cond = [];
+    pushTagListSQL(cond, params, f);
+    return cond[0] || '1';
+  }
+  if (tok.kind === 'fileType') {
+    const ftVal = tok.value;
+    if (!ftVal) return null;
+    if (ftVal.toLowerCase() === 'zip') {
+      params.push('%::%');
+      return '(filePath LIKE ?)';
+    }
+    const exts = getExtensionsForFileTypeFilter(ftVal);
+    if (!exts || exts.length === 0) {
+      params.push(`%.${String(ftVal).toLowerCase()}`);
+      return '(LOWER(fileName) LIKE ?)';
+    }
+    if (exts.length === 1) {
+      params.push(`%${exts[0]}`);
+      return '(LOWER(fileName) LIKE ?)';
+    }
+    const ph = exts.map(() => 'LOWER(fileName) LIKE ?').join(' OR ');
+    params.push(...exts.map(ext => `%${ext}`));
+    return `(${ph})`;
+  }
+  if (tok.kind === 'printed') {
+    if (tok.value === 'printed') return '(printed = 1)';
+    if (tok.value === 'not-printed') return '(printed = 0 OR printed IS NULL)';
+    return null;
+  }
+  if (tok.kind === 'isNew') {
+    if (tok.value === 'new') return '(isNew = 1)';
+    if (tok.value === 'not-new') return '(isNew = 0 OR isNew IS NULL)';
+    return null;
+  }
+  return null;
+}
+
+function parseSearchPrimary(tokens, i, params, filters) {
+  if (i >= tokens.length) {
+    throw new Error('search expression incomplete');
+  }
+  const tok = tokens[i];
+  if (tok.t === 'clause') {
+    const frag = pushSearchClauseFragment(tok.field || 'all', tok.value, params);
+    return [`(${frag})`, i + 1];
+  }
+  if (tok.t === 'filter' || tok.t === 'filterMulti') {
+    const inner = compileSidebarFilterClauseToSQL(tok, filters, params);
+    if (!inner) throw new Error('search expression invalid filter');
+    return [`(${inner})`, i + 1];
+  }
+  throw new Error('search expression expected term');
+}
+
+function parseSearchUnary(tokens, i, params, filters) {
+  let negate = false;
+  let j = i;
+  while (j < tokens.length && tokens[j].t === 'not') {
+    negate = !negate;
+    j++;
+  }
+  const [inner, k] = parseSearchPrimary(tokens, j, params, filters);
+  if (negate) {
+    return [`NOT (${inner})`, k];
+  }
+  return [inner, k];
+}
+
+function parseSearchAnd(tokens, i, params, filters) {
+  let [left, j] = parseSearchUnary(tokens, i, params, filters);
+  while (j < tokens.length && tokens[j].t === 'op' && tokens[j].op === 'AND') {
+    j++;
+    const [right, k] = parseSearchUnary(tokens, j, params, filters);
+    left = `(${left}) AND (${right})`;
+    j = k;
+  }
+  return [left, j];
+}
+
+function parseSearchOr(tokens, i, params, filters) {
+  let [left, j] = parseSearchAnd(tokens, i, params, filters);
+  while (j < tokens.length && tokens[j].t === 'op' && tokens[j].op === 'OR') {
+    j++;
+    const [right, k] = parseSearchAnd(tokens, j, params, filters);
+    left = `(${left}) OR (${right})`;
+    j = k;
+  }
+  return [left, j];
+}
+
+function compileSearchTokensToSQL(tokens, params, filters) {
+  const t = sanitizeSearchTokensForCompile(tokens);
+  if (t.length === 0) return null;
+  try {
+    const [sql, end] = parseSearchOr(t, 0, params, filters);
+    if (end !== t.length) return null;
+    return sql;
+  } catch (e) {
+    console.warn('compileSearchTokensToSQL failed:', e.message);
+    return null;
+  }
+}
+
+/** Multi-value designer / parentModel / license (matches legacy single-value SQL for invert + NULL). */
+function pushEqualityListCondition(conditions, params, column, values, combineOp, inverted, useLowerTrim) {
+  if (!values.length) return;
+  const posJoin = combineOp === 'AND' ? ' AND ' : ' OR ';
+  if (!inverted) {
+    const posParts = [];
+    for (const v of values) {
+      if (v === '__none__') {
+        posParts.push(`(${column} IS NULL OR ${column} = '')`);
+      } else if (useLowerTrim) {
+        params.push(v);
+        posParts.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`);
+      } else {
+        params.push(v);
+        posParts.push(`${column} = ?`);
+      }
+    }
+    conditions.push(posParts.length === 1 ? posParts[0] : `(${posParts.join(posJoin)})`);
+    return;
+  }
+  const negJoin = combineOp === 'OR' ? ' AND ' : ' OR ';
+  const negParts = [];
+  for (const v of values) {
+    if (v === '__none__') {
+      negParts.push(`(${column} IS NOT NULL AND ${column} != '')`);
+    } else if (useLowerTrim) {
+      params.push(v);
+      negParts.push(`(${column} IS NULL OR ${column} = '' OR LOWER(TRIM(${column})) != LOWER(TRIM(?)))`);
+    } else {
+      params.push(v);
+      negParts.push(`(${column} IS NULL OR ${column} = '' OR ${column} != ?)`);
+    }
+  }
+  conditions.push(negParts.length === 1 ? negParts[0] : `(${negParts.join(negJoin)})`);
+}
+
+function pushTagListSQL(conditions, params, filters) {
+  const tagNames = normalizeTagNameList(filters);
+  if (!tagNames.length) return false;
+  const combine = filters.tagCombine === 'AND' ? 'AND' : 'OR';
+  const inverted = !!filters.tagInverted;
+  let inner;
+  if (combine === 'OR') {
+    const ph = tagNames.map(() => '?').join(', ');
+    inner = `EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND t.name IN (${ph}))`;
+    params.push(...tagNames);
+  } else {
+    const existsParts = [];
+    for (const tn of tagNames) {
+      params.push(tn);
+      existsParts.push(
+        'EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND t.name = ?)'
+      );
+    }
+    inner = `(${existsParts.join(' AND ')})`;
+  }
+  if (inverted) {
+    conditions.push(`NOT (${inner})`);
+  } else {
+    conditions.push(inner);
+  }
+  return true;
+}
+
 const getModelsFilteredHandler = async (event, filters) => {
   try {
     console.log('getModelsFiltered called with filters:', filters);
@@ -3159,67 +3528,46 @@ const getModelsFilteredHandler = async (event, filters) => {
     const conditions = [];
     const params = [];
     
-    // Designer filter
-    if (filters.designer) {
-      if (filters.designerInverted) {
-        // Inverted: show models where designer is NOT equal (include NULL/empty as non-matching)
-        if (filters.designer === '__none__') {
-          conditions.push("(designer IS NOT NULL AND designer != '')");
-        } else {
-          conditions.push("(designer IS NULL OR designer = '' OR LOWER(TRIM(designer)) != LOWER(TRIM(?)))");
-          params.push(filters.designer);
-        }
-      } else {
-        // Normal: show models where designer IS equal
-        if (filters.designer === '__none__') {
-          conditions.push("(designer IS NULL OR designer = '')");
-        } else {
-          conditions.push("LOWER(TRIM(designer)) = LOWER(TRIM(?))");
-          params.push(filters.designer);
-        }
-      }
+    // Designer filter (multi-value + legacy single)
+    const designers = normalizeFilterValueList(filters.designers, filters.designer);
+    if (designers.length) {
+      pushEqualityListCondition(
+        conditions,
+        params,
+        'designer',
+        designers,
+        filters.designerCombine === 'AND' ? 'AND' : 'OR',
+        !!filters.designerInverted,
+        true
+      );
     }
-    
+
     // License filter
-    if (filters.license) {
-      if (filters.licenseInverted) {
-        // Inverted: show models where license is NOT equal (include NULL/empty as non-matching)
-        if (filters.license === '__none__') {
-          conditions.push("(license IS NOT NULL AND license != '')");
-        } else {
-          conditions.push("(license IS NULL OR license = '' OR license != ?)");
-          params.push(filters.license);
-        }
-      } else {
-        // Normal: show models where license IS equal
-        if (filters.license === '__none__') {
-          conditions.push("(license IS NULL OR license = '')");
-        } else {
-          conditions.push("license = ?");
-          params.push(filters.license);
-        }
-      }
+    const licenses = normalizeFilterValueList(filters.licenses, filters.license);
+    if (licenses.length) {
+      pushEqualityListCondition(
+        conditions,
+        params,
+        'license',
+        licenses,
+        filters.licenseCombine === 'AND' ? 'AND' : 'OR',
+        !!filters.licenseInverted,
+        false
+      );
     }
-    
+
     // Parent model filter
-    if (filters.parentModel) {
-      if (filters.parentModelInverted) {
-        // Inverted: show models where parentModel is NOT equal (include NULL/empty as non-matching)
-        if (filters.parentModel === '__none__') {
-          conditions.push("(parentModel IS NOT NULL AND parentModel != '')");
-        } else {
-          conditions.push("(parentModel IS NULL OR parentModel = '' OR parentModel != ?)");
-          params.push(filters.parentModel);
-        }
-      } else {
-        // Normal: show models where parentModel IS equal
-        if (filters.parentModel === '__none__') {
-          conditions.push("(parentModel IS NULL OR parentModel = '')");
-        } else {
-          conditions.push("parentModel = ?");
-          params.push(filters.parentModel);
-        }
-      }
+    const parentModels = normalizeFilterValueList(filters.parentModels, filters.parentModel);
+    if (parentModels.length) {
+      pushEqualityListCondition(
+        conditions,
+        params,
+        'parentModel',
+        parentModels,
+        filters.parentModelCombine === 'AND' ? 'AND' : 'OR',
+        !!filters.parentModelInverted,
+        false
+      );
     }
     
     // Print status filter
@@ -3227,7 +3575,24 @@ const getModelsFilteredHandler = async (event, filters) => {
       if (filters.printed === 'printed') {
         conditions.push("printed = 1");
       } else if (filters.printed === 'not-printed') {
-        conditions.push("printed = 0");
+        conditions.push("(printed = 0 OR printed IS NULL)");
+      }
+    }
+
+    const normalizedIsNew =
+      typeof filters.isNew === 'string' ? filters.isNew.trim().toLowerCase() : filters.isNew;
+    if (
+      normalizedIsNew !== undefined &&
+      normalizedIsNew !== null &&
+      normalizedIsNew !== '' &&
+      normalizedIsNew !== 'all' &&
+      normalizedIsNew !== 'undefined' &&
+      normalizedIsNew !== 'null'
+    ) {
+      if (normalizedIsNew === 'new') {
+        conditions.push("isNew = 1");
+      } else if (normalizedIsNew === 'not-new') {
+        conditions.push("(isNew = 0 OR isNew IS NULL)");
       }
     }
     
@@ -3281,11 +3646,36 @@ const getModelsFilteredHandler = async (event, filters) => {
       params.push(directoryPathForward, directoryPathBackslash);
     }
     
-    // Search term filter (searches name, directory, metadata, tags, notes)
-    if (filters.search) {
+    // Search: token expression (AND/OR/NOT), legacy clauses, or single string
+    if (Array.isArray(filters.searchTokens) && filters.searchTokens.length) {
+      const combined = compileSearchTokensToSQL(filters.searchTokens, params, filters);
+      if (combined) {
+        if (filters.searchInverted) {
+          conditions.push(`NOT (${combined})`);
+        } else {
+          conditions.push(`(${combined})`);
+        }
+      }
+    } else if (Array.isArray(filters.searchClauses) && filters.searchClauses.length) {
+      const op = filters.searchClauseOp === 'OR' ? ' OR ' : ' AND ';
+      const parts = [];
+      for (const c of filters.searchClauses) {
+        const val = c && String(c.value || '').trim();
+        if (!val) continue;
+        const frag = pushSearchClauseFragment(c.field || 'all', val, params);
+        parts.push(`(${frag})`);
+      }
+      if (parts.length) {
+        const combined = parts.join(op);
+        if (filters.searchInverted) {
+          conditions.push(`NOT (${combined})`);
+        } else {
+          conditions.push(`(${combined})`);
+        }
+      }
+    } else if (filters.search) {
       const searchTerm = `%${filters.search.toLowerCase()}%`;
       if (filters.searchInverted) {
-        // Inverted: none of the fields should contain the term (NULL/empty count as non-matching)
         conditions.push(`(
           LOWER(COALESCE(fileName, '')) NOT LIKE ? AND 
           LOWER(COALESCE(designer, '')) NOT LIKE ? AND 
@@ -3297,7 +3687,6 @@ const getModelsFilteredHandler = async (event, filters) => {
           NOT EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
         )`);
       } else {
-        // Normal: any of the fields or tags may contain the term
         conditions.push(`(
           LOWER(COALESCE(fileName, '')) LIKE ? OR 
           LOWER(COALESCE(designer, '')) LIKE ? OR 
@@ -3311,7 +3700,9 @@ const getModelsFilteredHandler = async (event, filters) => {
       }
       params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
-    
+
+    pushTagListSQL(conditions, params, filters);
+
     // Date Added filter (filter by dateAdded >= specified date)
     if (filters.dateAdded) {
       conditions.push("dateAdded >= ?");
@@ -3381,7 +3772,7 @@ const getModelsFilteredHandler = async (event, filters) => {
         break;
     }
     
-    const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
 
     // Execute query (optional limit/offset for progressive load when clearing filters in Server/Docker)
     // SQLite requires LIMIT when using OFFSET; use a large limit when only offset is set
@@ -3397,32 +3788,8 @@ const getModelsFilteredHandler = async (event, filters) => {
     console.log('Executing query:', query);
     console.log('With params:', params);
     
-    let models = db.prepare(query).all(...params);
-    
-    // Tag filter (needs to be done after query since it requires joining with model_tags)
-    if (filters.tag) {
-      const tagFilteredModels = [];
-      const isInverted = filters.tagInverted || false;
-      
-      for (const model of models) {
-        const modelTags = db.prepare(`
-          SELECT t.name 
-          FROM tags t
-          INNER JOIN model_tags mt ON t.id = mt.tag_id
-          WHERE mt.model_id = ?
-        `).all(model.id);
-        
-        const hasTag = modelTags.some(tag => tag.name === filters.tag);
-        
-        // If not inverted, include models that have the tag
-        // If inverted, include models that don't have the tag
-        if (isInverted ? !hasTag : hasTag) {
-          tagFilteredModels.push(model);
-        }
-      }
-      models = tagFilteredModels;
-    }
-    
+    const models = db.prepare(query).all(...params);
+
     console.log(`Returning ${models.length} filtered models`);
     return models;
   } catch (error) {
@@ -5713,8 +6080,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                   const dateAdded = new Date().toISOString();
                   
                   db.prepare(`
-                    INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded, isNew)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                   `).run(
                     filePath,
                     finalFileName,
@@ -5878,50 +6245,51 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     });
   }
 
-  // Add "Manage Thumbnails" option for single file selection only
-  if (filePaths.length === 1) {
-    menuItems.push({
-      label: 'Manage Thumbnails',
-      click: async () => {
-        try {
-          // Check if model has at least one thumbnail
-          const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
-          const thumbnails = model?.thumbnail ? parseThumbnails(model.thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')) : [];
-          
-          if (thumbnails.length === 0) {
-            const win = BrowserWindow.fromWebContents(event.sender);
-            if (win) {
-              await dialog.showMessageBox(win, {
-                type: 'info',
-                title: 'No Thumbnails',
-                message: 'This model has no thumbnails to manage.',
-                detail: 'Please add an image first using "Add Image".'
-              });
-            }
-            return;
-          }
-          
-          // Send event to renderer to show manage thumbnails modal
-          if (isServerMode && global.broadcastEvent) {
-            global.broadcastEvent('manage-thumbnails-request', filePaths[0]);
-          } else {
-            event.sender.send('manage-thumbnails-request', filePaths[0]);
-          }
-        } catch (error) {
-          console.error('Error opening manage thumbnails:', error);
+  // Keep "Manage Thumbnails" visible in all modes for menu consistency.
+  // It is only actionable for a single selected model.
+  menuItems.push({
+    label: 'Manage Thumbnails',
+    enabled: filePaths.length === 1,
+    click: async () => {
+      if (filePaths.length !== 1) return;
+      try {
+        // Check if model has at least one thumbnail
+        const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
+        const thumbnails = model?.thumbnail ? parseThumbnails(model.thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')) : [];
+        
+        if (thumbnails.length === 0) {
           const win = BrowserWindow.fromWebContents(event.sender);
           if (win) {
-            dialog.showMessageBox(win, {
-              type: 'error',
-              title: 'Error',
-              message: 'Could not open thumbnail manager',
-              detail: error.message
+            await dialog.showMessageBox(win, {
+              type: 'info',
+              title: 'No Thumbnails',
+              message: 'This model has no thumbnails to manage.',
+              detail: 'Please add an image first using "Add Image".'
             });
           }
+          return;
+        }
+        
+        // Send event to renderer to show manage thumbnails modal
+        if (isServerMode && global.broadcastEvent) {
+          global.broadcastEvent('manage-thumbnails-request', filePaths[0]);
+        } else {
+          event.sender.send('manage-thumbnails-request', filePaths[0]);
+        }
+      } catch (error) {
+        console.error('Error opening manage thumbnails:', error);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        if (win) {
+          dialog.showMessageBox(win, {
+            type: 'error',
+            title: 'Error',
+            message: 'Could not open thumbnail manager',
+            detail: error.message
+          });
         }
       }
-    });
-  }
+    }
+  });
 
   // Add separator before file operations
   menuItems.push({ type: 'separator' });
@@ -6832,8 +7200,8 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
             const dateAdded = new Date().toISOString();
             
             db.prepare(`
-              INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
+              INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded, isNew)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             `).run(
               dbFilePath,
               finalFileName,
@@ -7156,6 +7524,15 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
     console.error('Error statting 3MF preview file:', error);
   }
 
+  if (fileStat && fileStat.size > PREVIEW_3MF_MAX_FILE_SIZE_MB * 1024 * 1024) {
+    if (shouldCleanup && actualFilePath !== filePath) {
+      try { await fs.promises.unlink(actualFilePath); } catch {}
+    }
+    throw new Error(
+      `3MF preview skipped: file is too large (${Math.round(fileStat.size / 1024 / 1024)}MB > ${PREVIEW_3MF_MAX_FILE_SIZE_MB}MB)`
+    );
+  }
+
   const cacheKey = fileStat ? `${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
   const cacheDir = getPreview3mfCacheDir();
   const cacheHash = cacheKey ? crypto.createHash('sha256').update(cacheKey).digest('hex') : null;
@@ -7188,7 +7565,9 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
       }
       return parsed;
     } catch (error) {
-      console.error('Error reading 3MF preview cache:', error);
+      if (error && error.code !== 'ENOENT') {
+        console.error('Error reading 3MF preview cache:', error);
+      }
     }
   }
 
@@ -7367,8 +7746,8 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
             const dateAdded = new Date().toISOString();
             
             db.prepare(`
-              INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
+              INSERT INTO models (filePath, fileName, designer, parentModel, notes, license, dateAdded, isNew)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             `).run(
               filePath,
               finalFileName,
@@ -7887,8 +8266,8 @@ ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls)
       // Create model entry
       const dateAdded = new Date().toISOString();
       db.prepare(`
-        INSERT INTO models (filePath, fileName, thumbnail, dateAdded)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO models (filePath, fileName, thumbnail, dateAdded, isNew)
+        VALUES (?, ?, ?, ?, 1)
       `).run(filePath, fileName, '', dateAdded);
       // Re-fetch the model
       model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
@@ -8468,8 +8847,11 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
-    const models = db.prepare(`SELECT ${selectCols} FROM models WHERE filePath LIKE ?`).all(`${directoryPath}%`);
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const models = db.prepare(`
+      SELECT ${selectCols} FROM models
+      WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+    `).all(directoryScanPrefixSqlParam(directoryPath));
     return models;
   } catch (error) {
     console.error('Error fetching models by directory:', error);
@@ -8481,7 +8863,7 @@ ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
 ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) => {
   try {
     const offset = (page - 1) * pageSize;
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
     const models = db.prepare(
       `SELECT ${selectCols} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);
@@ -8884,8 +9266,8 @@ async function saveModelBatch(modelDataBatch) {
     const transaction = db.transaction(() => {
       const stmt = db.prepare(`
         INSERT OR IGNORE INTO models 
-        (filePath, fileName, hash, size, modifiedDate, dateAdded) 
-        VALUES (?, ?, ?, ?, ?, ?)
+        (filePath, fileName, hash, size, modifiedDate, dateAdded, isNew) 
+        VALUES (?, ?, ?, ?, ?, ?, 1)
       `);
       
       for (const modelData of modelDataBatch) {
@@ -8933,7 +9315,8 @@ async function updateModelsBatch(modelDataBatch) {
           notes = ?,
           printed = ?,
           parentModel = ?,
-          license = ?
+          license = ?,
+          isNew = 0
         WHERE filePath = ?
       `);
 
@@ -9176,7 +9559,8 @@ async function saveModel(modelData) {
             notes = ?,
             printed = ?,
             parentModel = ?,
-            license = ?
+            license = ?,
+            isNew = 0
           WHERE id = ?
         `);
         
@@ -9199,8 +9583,8 @@ async function saveModel(modelData) {
         const dateAdded = new Date().toISOString();
         const insertStmt = db.prepare(`
           INSERT INTO models (
-            filePath, fileName, designer, source, notes, printed, parentModel, license, dateAdded
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            filePath, fileName, designer, source, notes, printed, parentModel, license, dateAdded, isNew
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         `);
         
         const result = insertStmt.run(

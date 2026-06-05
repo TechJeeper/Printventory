@@ -37,6 +37,7 @@ $rootFiles = @(
     "renderer.js",
     "index.html",
     "styles.css",
+    "preview-wall.css",
     "server-bridge.js",
     "scan-worker.js",
     "parse-worker.js",
@@ -44,6 +45,7 @@ $rootFiles = @(
     "slicer.js",
     "guide.js",
     "preview.js",
+    "query-builder.js",
     "preview-3mf-worker-node.js",
     "threemf-loader-simple.js",
     "search.js",
@@ -108,9 +110,19 @@ Output: dist/*.dmg (universal)
 "@
 Set-Content -Path (Join-Path $stagingPath "README-MACOS-BUILD.txt") -Value $readme
 
-# Create zip
+# Create zip (tar produces forward-slash paths; Compress-Archive breaks macOS unzip)
 Write-Host "Creating zip: $zipPath"
-Compress-Archive -Path $stagingPath -DestinationPath $zipPath -Force
+if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
+    Write-Error "tar is required for macOS-compatible zips. Use Windows 10+ or install bsdtar."
+}
+Push-Location $distDir
+try {
+    if (Test-Path (Split-Path -Leaf $zipPath)) { Remove-Item (Split-Path -Leaf $zipPath) -Force }
+    & tar -a -c -f (Split-Path -Leaf $zipPath) $stagingName
+    if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
+} finally {
+    Pop-Location
+}
 
 # Remove staging dir
 Remove-Item $stagingPath -Recurse -Force

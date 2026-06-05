@@ -1,0 +1,476 @@
+/* Dense "wall" layout for Preview view — keep separate from styles.css (see plan). */
+
+/* S/M/L tile control: only when Preview is active (JS adds .preview-view-active + hidden). */
+.grid-view-selector:not(.preview-view-active) .preview-size-switcher {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.preview-size-switcher[hidden] {
+  display: none !important;
+}
+
+.file-grid.preview-wall {
+  --preview-tile: 180px;
+  padding: 8px 0 16px;
+  margin-left: 370px;
+  width: calc(100% - 390px);
+  max-width: calc(100vw - 390px);
+  background-image: none;
+  background-color: transparent;
+  gap: 0;
+  row-gap: 0;
+}
+
+/* Toolbar: S / M / L tile size (placed after List in index.html; spacing via .grid-view-selector gap) */
+.preview-size-switcher {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 2px;
+  margin-left: 0;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  vertical-align: middle;
+}
+
+.preview-size-switcher button {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.75);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.preview-size-switcher button:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.preview-size-switcher button.active {
+  color: #0a0a0a;
+  background: var(--primary-accent, #00d4ff);
+}
+
+/* Neutralize legacy .file-item-preview card chrome */
+.file-item.file-item-preview.preview-tile {
+  width: var(--preview-tile, 180px) !important;
+  height: var(--preview-tile, 180px) !important;
+  min-height: var(--preview-tile, 180px) !important;
+  max-height: var(--preview-tile, 180px) !important;
+  padding: 0 !important;
+  margin: 0;
+  border-radius: 4px !important;
+  background: #1a1a1a !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, z-index 0s;
+}
+
+.file-item.file-item-preview.preview-tile:hover {
+  transform: scale(1.02);
+  z-index: 3;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  border-color: transparent !important;
+}
+
+.file-item.file-item-preview.preview-tile.selected {
+  outline: 2px solid var(--primary-accent, #00d4ff);
+  outline-offset: 0;
+  z-index: 2;
+}
+
+/* Keep grouped-child highlighting visible in Preview wall despite neutralized tile chrome. */
+.file-grid.preview-wall .file-item.file-item-preview.preview-tile.parent-model-group-child {
+  border: 1px solid rgba(0, 212, 255, 0.72) !important;
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.22), 0 8px 20px rgba(0, 0, 0, 0.45) !important;
+  background: linear-gradient(180deg, rgba(10, 34, 44, 0.95) 0%, rgba(10, 14, 24, 0.98) 100%) !important;
+}
+
+.file-grid.preview-wall .file-item.file-item-preview.preview-tile.parent-model-group-child:hover {
+  border-color: rgba(0, 212, 255, 0.9) !important;
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.3), 0 12px 28px rgba(0, 212, 255, 0.2), 0 8px 20px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* Thumbnail fills tile — beat .file-grid .thumbnail-container { object-fit: contain } + flex centering */
+.file-grid.preview-wall .preview-tile .thumbnail-wrapper,
+.file-grid.preview-wall .preview-tile .thumbnail-container {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0 !important;
+  border-radius: 4px;
+  box-shadow: none !important;
+  display: block !important;
+  justify-content: initial !important;
+  align-items: initial !important;
+  aspect-ratio: auto !important;
+}
+
+.file-grid.preview-wall .preview-tile .thumbnail-container {
+  position: relative;
+  overflow: hidden;
+}
+
+.preview-tile .thumbnail-container:hover {
+  outline: none;
+  transform: none;
+  box-shadow: none;
+}
+
+.file-grid.preview-wall .preview-tile .thumbnail-container img {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: cover !important;
+  object-position: center;
+  display: block;
+}
+
+/* Menu button: compact corner */
+.preview-tile .thumbnail-menu-button {
+  left: auto;
+  right: 4px;
+  bottom: 4px;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 10px;
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 15;
+}
+
+.preview-tile:hover .thumbnail-menu-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Carousel nav stays usable */
+.preview-tile .thumbnail-nav-left,
+.preview-tile .thumbnail-nav-right {
+  z-index: 12;
+}
+
+.preview-tile .thumbnail-count-badge {
+  bottom: 4px !important;
+  right: 4px !important;
+  font-size: 10px !important;
+  padding: 2px 6px !important;
+}
+
+/*
+ * Corner badges — must beat .file-grid .print-status { top/left } and .file-grid .archive-status { top/right }.
+ * Layout: New top-left, Printed top-right, Archive bottom-left (away from 1/N badge bottom-right).
+ */
+.file-grid.preview-wall .file-item.preview-tile > .print-status {
+  position: absolute !important;
+  top: 4px !important;
+  right: 4px !important;
+  left: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  z-index: 14;
+  margin: 0 !important;
+  max-width: min(48%, calc(100% - 56px));
+  padding: 2px 5px;
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1.2;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.file-grid.preview-wall .file-item.preview-tile > .archive-status {
+  position: absolute !important;
+  bottom: 4px !important;
+  left: 4px !important;
+  top: auto !important;
+  right: auto !important;
+  transform: none !important;
+  z-index: 14;
+  margin: 0;
+  padding: 2px 5px;
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1.2;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+/* Beat .file-grid .thumbnail-container > .new-status (mid-right) and .file-item-preview rules */
+.file-grid.preview-wall .file-item.preview-tile .thumbnail-container > .new-status {
+  position: absolute !important;
+  top: 4px !important;
+  left: 4px !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  z-index: 15;
+  padding: 2px 5px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1.2;
+  border-radius: 4px;
+  max-width: min(46%, calc(100% - 8px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Selection check (bottom-right to avoid overlap with "New") */
+.preview-tile-check {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--primary-accent, #00d4ff);
+  border: 2px solid rgba(0, 0, 0, 0.5);
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.preview-tile.selected .preview-tile-check {
+  opacity: 1;
+}
+
+.preview-tile-check::after {
+  content: "";
+  width: 5px;
+  height: 9px;
+  border: solid #0a0a0a;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+/* When carousel badge is bottom-right, offset check slightly */
+.preview-tile.selected:has(.thumbnail-count-badge) .preview-tile-check {
+  bottom: 28px;
+}
+
+/* Hover overlay */
+.preview-tile-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  min-height: 42%;
+  padding: 10px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.45) 55%, transparent 100%);
+  z-index: 13;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+
+.preview-tile:hover .preview-tile-overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.preview-tile-name {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.preview-tile-name.zip-file {
+  color: #4ade80;
+}
+
+.preview-tile-open-btn {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #0a0a0a;
+  background: var(--primary-accent, #00d4ff);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.preview-tile-open-btn:hover {
+  filter: brightness(1.08);
+}
+
+/* Parent model group — wall layout: full-width image on top, compact text strip below (no side-by-side squeeze) */
+.file-grid.preview-wall .parent-model-group.file-item-preview {
+  width: var(--preview-tile, 180px) !important;
+  height: var(--preview-tile, 180px) !important;
+  min-height: var(--preview-tile, 180px) !important;
+  max-height: var(--preview-tile, 180px) !important;
+  padding: 0 !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+  gap: 0 !important;
+  border-radius: 4px !important;
+  transform: none !important;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(20, 25, 40, 0.95) 0%, rgba(10, 12, 22, 0.98) 100%) !important;
+  border: 1px solid rgba(0, 212, 255, 0.2) !important;
+}
+
+.file-grid.preview-wall .parent-model-group-preview {
+  border-radius: 4px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* Thumbnail uses most of the tile; group icon TL, count BR — no corner conflict */
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-thumbnail {
+  position: relative;
+  width: 100% !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: calc(var(--preview-tile, 180px) * 0.58) !important;
+  max-height: calc(var(--preview-tile, 180px) * 0.62) !important;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  background: var(--model-background-color, #0a0d1a) !important;
+  display: block !important;
+  overflow: hidden;
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-thumbnail img {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: cover !important;
+  object-position: center;
+  display: block;
+}
+
+/* Smaller stack icon so it does not crowd the image */
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-corner-badge {
+  top: 5px !important;
+  left: 5px !important;
+  width: 26px !important;
+  height: 22px !important;
+  border-radius: 6px !important;
+  z-index: 12;
+  transform: scale(0.92);
+  transform-origin: top left;
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-corner-badge span {
+  transform: scale(0.85);
+  transform-origin: center;
+}
+
+/* Multi-thumb 1/N badge: compact, stays in image corner */
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-thumbnail .thumbnail-count-badge {
+  bottom: 5px !important;
+  right: 5px !important;
+  left: auto !important;
+  top: auto !important;
+  padding: 2px 6px !important;
+  font-size: 9px !important;
+  font-weight: 700 !important;
+  border-radius: 8px !important;
+  z-index: 13;
+  line-height: 1.2 !important;
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-details {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 100% !important;
+  padding: 6px 7px 7px;
+  text-align: left;
+  align-items: stretch !important;
+  justify-content: center;
+  gap: 3px !important;
+  background: rgba(0, 0, 0, 0.5);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-title-row {
+  justify-content: flex-start !important;
+  width: 100% !important;
+  gap: 4px !important;
+  min-height: 0;
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-chevron {
+  width: 12px !important;
+  font-size: 11px !important;
+  flex-shrink: 0;
+  opacity: 0.9;
+  margin-top: 1px;
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-title {
+  max-width: 100% !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  line-height: 1.25 !important;
+  white-space: normal !important;
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: left;
+  word-break: break-word;
+}
+
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-meta {
+  font-size: 9px !important;
+  line-height: 1.2 !important;
+  color: rgba(255, 255, 255, 0.7) !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}

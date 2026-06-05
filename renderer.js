@@ -1,5 +1,11 @@
 // Add this at the very top of the file
 const DEBUG = true; // Enable debugging temporarily
+/** Parse max file size (MB) from Performance settings input; requires integer >= 1. */
+function parseMaxFileSizeMBInput(raw) {
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n) || n < 1) return null;
+  return n;
+}
 console.log('[Renderer] script loaded');
 window.addEventListener('DOMContentLoaded', () => {
   console.log('[Renderer] DOMContentLoaded fired');
@@ -145,7 +151,7 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
       if (previousRaw) previousIds = JSON.parse(previousRaw);
     } catch (e) { /* ignore */ }
 
-    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'x3d'];
     const selectedScanTypes = [];
     for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
       const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
@@ -223,10 +229,12 @@ window.confirmPurgeModelsFromDialog = async function confirmPurgeModelsFromDialo
       const designerSelect = document.getElementById('designer-select');
       const parentSelect = document.getElementById('parent-select');
       const printedSelect = document.getElementById('printed-select');
+      const newSelect = document.getElementById('new-select');
       const tagFilter = document.getElementById('tag-filter');
       if (designerSelect) designerSelect.value = '';
       if (parentSelect) parentSelect.value = '';
       if (printedSelect) printedSelect.value = 'all';
+      if (newSelect) newSelect.value = 'all';
       if (tagFilter) tagFilter.value = '';
     }
   } catch (err) {
@@ -388,35 +396,21 @@ window.saveAIConfigFromDialog = async function saveAIConfigFromDialog() {
   }
 };
 
-// Performance Save: full dialog fields (early for Docker/server)
+// Performance Save (early for Docker/server)
 window.savePerformanceSettingsFromDialog = async function savePerformanceSettingsFromDialog() {
   if (!window.electron?.saveSetting) return;
-  const batchSizeEl = document.getElementById('batch-size');
-  const concurrentEl = document.getElementById('concurrent-renders');
   const maxFileSizeEl = document.getElementById('max-file-size');
-  const thumbnailBatchEl = document.getElementById('thumbnail-batch-size');
-  const renderDelayEl = document.getElementById('render-delay');
-  const newBatchSize = batchSizeEl ? parseInt(batchSizeEl.value, 10) : NaN;
-  const newConcurrentRenders = concurrentEl ? parseInt(concurrentEl.value, 10) : NaN;
-  const newMaxFileSize = maxFileSizeEl ? parseInt(maxFileSizeEl.value, 10) : NaN;
-  const newThumbnailBatchSize = thumbnailBatchEl ? parseInt(thumbnailBatchEl.value, 10) : NaN;
-  const newRenderDelay = renderDelayEl ? parseInt(renderDelayEl.value, 10) : NaN;
+  if (!maxFileSizeEl) {
+    if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Could not find max file size input');
+    return;
+  }
+  const newMaxFileSize = parseMaxFileSizeMBInput(maxFileSizeEl.value);
   try {
-    if (!isNaN(newBatchSize) && newBatchSize >= 1 && newBatchSize <= 100) {
-      await window.electron.saveSetting('batchSize', String(newBatchSize));
+    if (newMaxFileSize == null) {
+      throw new Error('Invalid max file size. Must be at least 1 MB.');
     }
-    if (!isNaN(newConcurrentRenders) && newConcurrentRenders >= 1 && newConcurrentRenders <= 10) {
-      await window.electron.saveSetting('maxConcurrentRenders', String(newConcurrentRenders));
-    }
-    if (!isNaN(newMaxFileSize) && newMaxFileSize >= 1 && newMaxFileSize <= 1000) {
-      await window.electron.saveSetting('maxFileSizeMB', String(newMaxFileSize));
-    }
-    if (!isNaN(newThumbnailBatchSize) && newThumbnailBatchSize >= 5 && newThumbnailBatchSize <= 20) {
-      await window.electron.saveSetting('thumbnailBatchSize', String(newThumbnailBatchSize));
-    }
-    if (!isNaN(newRenderDelay) && newRenderDelay >= 0 && newRenderDelay <= 100) {
-      await window.electron.saveSetting('renderDelay', String(newRenderDelay));
-    }
+    await window.electron.saveSetting('maxFileSizeMB', String(newMaxFileSize));
+    MAX_FILE_SIZE_MB = newMaxFileSize;
     const dialog = document.getElementById('performance-settings-dialog');
     if (dialog && typeof dialog.close === 'function') dialog.close();
     if (window.electron.showMessage) await window.electron.showMessage('Success', 'Performance settings saved successfully');
@@ -605,6 +599,44 @@ let allFilteredModels = []; // Store all filtered models (references only)
 let visibleModels = []; // Store currently visible models (full data)
 let currentGridView = 'detailed'; // Current grid view mode: 'list', 'preview', 'detailed'
 
+/** Preview wall tile size: small / medium / large (persisted as previewTileSize). */
+let currentPreviewTileSize = 'm';
+const PREVIEW_TILE_PX = { s: 140, m: 180, l: 240 };
+const PREVIEW_COLUMNS = { s: 10, m: 6, l: 4 };
+
+/**
+ * Fixed preview columns per size; tile dimension scales to fill row width.
+ * S → 10 columns; M → 6 columns; L → 4 columns.
+ */
+function computePreviewTilePxFromWidth(availableWidth, horizontalGap = 2) {
+  const g = horizontalGap;
+  const aw = Math.max(0, availableWidth);
+  const cols = PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
+  if (cols <= 0) return PREVIEW_TILE_PX.m;
+
+  // Use fixed column count and scale tile so the row fills available width.
+  const computed = Math.floor((aw - (cols - 1) * g) / cols);
+  return Math.max(1, computed);
+}
+
+function getPreviewTileSizePx() {
+  const grid = document.querySelector('.file-grid');
+  if (
+    currentGridView === 'preview' &&
+    grid &&
+    typeof grid._previewTilePx === 'number' &&
+    grid._previewTilePx > 0
+  ) {
+    return grid._previewTilePx;
+  }
+  return PREVIEW_TILE_PX[currentPreviewTileSize] || PREVIEW_TILE_PX.m;
+}
+
+function getPreviewTileDims() {
+  const tile = getPreviewTileSizePx();
+  return { width: tile, height: tile, itemWidth: tile };
+}
+
 // Per-folder view preference (when "View Entire Library" is off): remember list/preview/detailed per scanned root
 async function getPerFolderViewPrefs() {
   try {
@@ -649,6 +681,7 @@ async function applyViewForCurrentFolder() {
   viewButtons.forEach(button => {
     if (button.dataset.view === currentGridView) button.classList.add('active');
   });
+  updateListViewColumnsToolbarButton();
 }
 
 window.savePerFolderView = savePerFolderView;
@@ -873,13 +906,13 @@ function getModelColor() {
 }
 
 // Extensions that are valid for library (scan/add). Used for isValidFile.
-const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.obj', '.ply', '.step', '.stp', '.svg', '.x3d']);
+const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.lys', '.lyt', '.obj', '.ply', '.step', '.stp', '.svg', '.x3d']);
 
 // Map file extension (with or without dot) to label for typed placeholder
 const EXTENSION_TO_PLACEHOLDER_LABEL = {
   '3ds': '3DS', 'amf': 'AMF', 'blender': 'Blender', 'dae': 'DAE', 'dxf': 'DXF', 'dwg': 'DWG',
   'fbx': 'FBX', 'f3d': 'F3D', 'f3z': 'F3Z', 'gcode': 'G-code', 'igs': 'IGES', 'iges': 'IGES',
-  'obj': 'OBJ', 'ply': 'PLY', 'step': 'STEP', 'stp': 'STEP', 'svg': 'SVG', 'x3d': 'X3D'
+  'lys': 'LYS', 'lyt': 'LYT', 'obj': 'OBJ', 'ply': 'PLY', 'step': 'STEP', 'stp': 'STEP', 'svg': 'SVG', 'x3d': 'X3D'
 };
 
 function generateTypedPlaceholder(extension) {
@@ -1290,6 +1323,86 @@ function normalizePathForComparison(path) {
   return normalized;
 }
 
+/** Stable identity for grid rows: same file path = one row (handles duplicate DB ids). */
+function getGridModelDedupeKey(model) {
+  if (!model) return '';
+  const pathNorm = normalizePathForComparison(model.filePath || '');
+  if (pathNorm) return `p:${pathNorm}`;
+  if (model.id != null && model.id !== '') return `id:${model.id}`;
+  return '';
+}
+
+/** One row per filesystem / zip entry — duplicate DB rows share the same normalized path. */
+function dedupeModelsForVirtualGrid(models) {
+  if (!models || models.length < 2) return models || [];
+  const seen = new Map();
+  const out = [];
+  for (const model of models) {
+    if (!model) continue;
+    const key = getGridModelDedupeKey(model);
+    if (!key) {
+      out.push(model);
+      continue;
+    }
+    if (!seen.has(key)) {
+      seen.set(key, model);
+      out.push(model);
+      continue;
+    }
+    const keeper = seen.get(key);
+    const keepHasId = keeper && keeper.id != null && keeper.id !== '';
+    const candHasId = model.id != null && model.id !== '';
+    if (!keepHasId && candHasId) {
+      const idx = out.indexOf(keeper);
+      if (idx !== -1) out[idx] = model;
+      seen.set(key, model);
+    }
+  }
+  return out;
+}
+
+/** Drop expand state for parent groups that no longer have 2+ distinct files. */
+function pruneParentModelExpandedGroups(models) {
+  if (!parentModelExpandedGroups.size) return;
+  const pathSets = new Map();
+  for (const model of models || []) {
+    const label = getParentModelGroupLabel(model);
+    if (!label) continue;
+    const gk = `parent:${getParentModelGroupKey(label)}`;
+    const pathKey = normalizePathForComparison(model.filePath || '');
+    if (!pathKey) continue;
+    if (!pathSets.has(gk)) pathSets.set(gk, new Set());
+    pathSets.get(gk).add(pathKey);
+  }
+  for (const key of [...parentModelExpandedGroups]) {
+    const set = pathSets.get(key);
+    if (!set || set.size < 2) {
+      parentModelExpandedGroups.delete(key);
+    }
+  }
+}
+
+function pruneZipArchiveExpandedGroups(models) {
+  if (!zipArchiveExpandedGroups.size) return;
+  const pathSets = new Map();
+  for (const model of models || []) {
+    const parsed = parseZipPath(model?.filePath || '');
+    if (!parsed.isZipEntry || !parsed.zipPath) continue;
+    const gk = `zip:${normalizePathForComparison(parsed.zipPath)}`;
+    if (!gk || gk === 'zip:') continue;
+    const pathKey = normalizePathForComparison(model.filePath || '');
+    if (!pathKey) continue;
+    if (!pathSets.has(gk)) pathSets.set(gk, new Set());
+    pathSets.get(gk).add(pathKey);
+  }
+  for (const key of [...zipArchiveExpandedGroups]) {
+    const set = pathSets.get(key);
+    if (!set || set.size < 2) {
+      zipArchiveExpandedGroups.delete(key);
+    }
+  }
+}
+
 /** Merge fresh model into virtual grid's currentModels when paths match (normalized). */
 function mergeModelIntoGridCurrentModels(model) {
   const container = document.querySelector('.file-grid');
@@ -1347,6 +1460,7 @@ async function updateModelElement(filePath) {
     const license = document.getElementById('license-select')?.value || ''; 
     const parentModel = document.getElementById('parent-select')?.value || '';
     const printStatus = document.getElementById('printed-select')?.value || 'all';
+    const newStatus = document.getElementById('new-select')?.value || 'all';
     const fileType = document.getElementById('filetype-select')?.value || '';
     const searchTerm = document.getElementById('search-filter-input')?.value.trim() || '';
     
@@ -1382,6 +1496,12 @@ async function updateModelElement(filePath) {
       shouldBeVisible = model.printed;
     } else if (shouldBeVisible && printStatus === 'not-printed') {
       shouldBeVisible = !model.printed;
+    }
+
+    if (shouldBeVisible && newStatus === 'new') {
+      shouldBeVisible = !!(model.isNew === 1 || model.isNew === true);
+    } else if (shouldBeVisible && newStatus === 'not-new') {
+      shouldBeVisible = !(model.isNew === 1 || model.isNew === true);
     }
     
     // Check file type filter
@@ -1440,6 +1560,23 @@ async function updateModelElement(filePath) {
       debugLog('updateModelElement: no visible .file-item for path (expected for off-screen/filtered):', filePath);
       return;
     }
+
+    existingElement.querySelector(':scope > .new-status')?.remove();
+
+    const thumbHost =
+      existingElement.querySelector('.thumbnail-wrapper .thumbnail-container') ||
+      existingElement.querySelector('.thumbnail-container');
+    const modelIsNew = model.isNew === 1 || model.isNew === true;
+    let newBadge = thumbHost ? thumbHost.querySelector(':scope > .new-status') : null;
+    if (modelIsNew && thumbHost && !newBadge) {
+      newBadge = document.createElement('div');
+      newBadge.className = 'new-status';
+      newBadge.textContent = 'New';
+      newBadge.title = 'New model — clears once you edit it';
+      thumbHost.appendChild(newBadge);
+    } else if (!modelIsNew && newBadge) {
+      newBadge.remove();
+    }
     
     // Check if we're in detailed view
     const isDetailedView = existingElement.classList.contains('file-item-detailed');
@@ -1494,25 +1631,26 @@ async function updateModelElement(filePath) {
       existingElement.style.display = '';
     }
 
-    // Update model details
+    // Update model details (list/detailed use .file-name; preview wall uses .preview-tile-name)
+    let displayFileName = model.fileName;
+    if (!displayFileName && model.filePath) {
+      if (model.filePath.includes('::')) {
+        const entryPath = model.filePath.split('::')[1];
+        displayFileName = entryPath.split(/[/\\]/).pop() || 'Unknown';
+      } else {
+        displayFileName = model.filePath.split(/[/\\]/).pop() || 'Unknown';
+      }
+    }
+    if (!displayFileName) {
+      displayFileName = 'Unknown';
+    }
     const nameElement = existingElement.querySelector('.file-name');
     if (nameElement) {
-      // Extract file name from path if fileName is not available
-      let displayFileName = model.fileName;
-      if (!displayFileName && model.filePath) {
-        if (model.filePath.includes('::')) {
-          // Zip entry: extract filename from entry path
-          const entryPath = model.filePath.split('::')[1];
-          displayFileName = entryPath.split(/[/\\]/).pop() || 'Unknown';
-        } else {
-          // Regular file: extract filename from path
-          displayFileName = model.filePath.split(/[/\\]/).pop() || 'Unknown';
-        }
-      }
-      if (!displayFileName) {
-        displayFileName = 'Unknown';
-      }
       nameElement.textContent = displayFileName;
+    }
+    const previewTileNameEl = existingElement.querySelector('.preview-tile-name');
+    if (previewTileNameEl) {
+      previewTileNameEl.textContent = displayFileName;
     }
 
     // Update print status - make sure to match the class/structure used in renderFile
@@ -3236,6 +3374,10 @@ async function showManageThumbnailsModal(filePath) {
   if (!dialog || !grid) {
     throw new Error('Manage thumbnails dialog elements not found');
   }
+  const title = dialog.querySelector('h3');
+  const desc = dialog.querySelector('.form-group p');
+  if (title) title.textContent = 'Manage Thumbnails';
+  if (desc) desc.textContent = 'Select a thumbnail to set it as active, or delete thumbnails (the active thumbnail cannot be deleted).';
 
   if (!dialog._manageThumbnailsCloseListenerAttached) {
     dialog._manageThumbnailsCloseListenerAttached = true;
@@ -4151,7 +4293,7 @@ async function loadAndShowFileTypeSettings() {
       checkbox.checked = enableZipArchives === '1';
     }
 
-    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'x3d'];
     try {
       const scanTypesRaw = await window.electron.getSetting('scanAdditionalFileTypes');
       const scanTypes = (scanTypesRaw && typeof scanTypesRaw === 'string') ? JSON.parse(scanTypesRaw) : [];
@@ -4474,6 +4616,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const tosAccepted = await checkTermsOfService();
   if (!tosAccepted) return; // Don't continue if TOS was declined
 
+  await loadListViewColumnStateFromStore();
+
   // Docker/Server: parallelize initial round-trips to reduce startup lag
   const [serverMode, hasRunBeforeVal, savedView] = await Promise.all([
     window.electron.isServerMode().catch(() => false),
@@ -4528,6 +4672,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       currentGridView = savedView;
     }
   }
+
+  try {
+    const previewTileRaw = await window.electron.getSetting('previewTileSize');
+    if (previewTileRaw && ['s', 'm', 'l'].includes(previewTileRaw)) {
+      currentPreviewTileSize = previewTileRaw;
+    }
+  } catch (_) {
+    /* ignore */
+  }
   
   // Initialize view selector buttons
   const viewButtons = document.querySelectorAll('.view-button');
@@ -4567,6 +4720,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       viewButtons.forEach(btn => btn.classList.remove('active'));
       button.classList.add('active');
       currentGridView = view;
+      updateListViewColumnsToolbarButton();
       await window.electron.saveSetting('gridView', view);
       // When viewing a folder (not entire library), remember this view for this folder
       if (!window.viewingEntireLibrary && window.currentDirectoryFilter) {
@@ -4593,6 +4747,46 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   });
+
+  const listColsToolbarBtn = document.getElementById('list-view-columns-toolbar-btn');
+  if (listColsToolbarBtn) {
+    listColsToolbarBtn.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleListViewColumnsPopover(listColsToolbarBtn);
+    });
+  }
+
+  const previewSizeSwitcher = document.getElementById('preview-size-switcher');
+  if (previewSizeSwitcher) {
+    previewSizeSwitcher.querySelectorAll('[data-preview-size]').forEach((sizeBtn) => {
+      sizeBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const s = sizeBtn.dataset.previewSize;
+        if (!s || s === currentPreviewTileSize) return;
+        currentPreviewTileSize = s;
+        syncPreviewSizeSwitcherActive();
+        try {
+          await window.electron.saveSetting('previewTileSize', s);
+        } catch (err) {
+          console.warn('save previewTileSize:', err);
+        }
+        const grid = document.querySelector('.file-grid');
+        const cached = grid?.currentModels ? [...grid.currentModels] : null;
+        if (grid && cached && cached.length > 0) {
+          grid.innerHTML = '';
+          grid.currentModels = null;
+          grid.isRendering = false;
+          renderVirtualGrid(cached);
+        } else if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        }
+      });
+    });
+  }
+
+  updateListViewColumnsToolbarButton();
   
   // Save current thumbnails as default before page unload
   window.addEventListener('beforeunload', () => {
@@ -4759,25 +4953,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Detect which filter is active and invert it
     const searchTerm = document.getElementById('search-filter-input')?.value?.trim();
+    const searchClausesActive =
+      typeof window.queryBuilderHasActiveSearchClauses === 'function' &&
+      window.queryBuilderHasActiveSearchClauses();
     const designer = document.getElementById('designer-select')?.value;
     const license = document.getElementById('license-select')?.value;
     const parentModel = document.getElementById('parent-select')?.value;
     const tagFilter = document.getElementById('tag-filter')?.value;
-    
+    const tagChips = window.multiFilterChips?.tags?.length;
+
     // Determine which filter to invert (prioritize in order: search, tag, designer, license, parentModel)
-    if (searchTerm) {
+    if (searchTerm || searchClausesActive) {
       invertedFilters.search = !invertedFilters.search;
       console.log('Inverted search filter:', invertedFilters.search);
-    } else if (tagFilter) {
+    } else if (tagFilter || tagChips) {
       invertedFilters.tag = !invertedFilters.tag;
       console.log('Inverted tag filter:', invertedFilters.tag);
-    } else if (designer) {
+    } else if (designer || window.multiFilterChips?.designer?.length) {
       invertedFilters.designer = !invertedFilters.designer;
       console.log('Inverted designer filter:', invertedFilters.designer);
-    } else if (license) {
+    } else if (license || window.multiFilterChips?.license?.length) {
       invertedFilters.license = !invertedFilters.license;
       console.log('Inverted license filter:', invertedFilters.license);
-    } else if (parentModel) {
+    } else if (parentModel || window.multiFilterChips?.parentModel?.length) {
       invertedFilters.parentModel = !invertedFilters.parentModel;
       console.log('Inverted parentModel filter:', invertedFilters.parentModel);
     } else {
@@ -5327,6 +5525,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       'license-select',
       'parent-select',
       'printed-select',
+      'new-select',
       'tag-filter',
       'filetype-select'  // Add this line
     ];
@@ -5603,6 +5802,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('designer-select').value = '';
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
+      const newSelScan = document.getElementById('new-select');
+      if (newSelScan) newSelScan.value = 'all';
       document.getElementById('tag-filter').value = '';
 
       // Force grid to refetch and re-render so models show without reload (Docker/server - same as Scan STL Home / View Entire Library)
@@ -6227,6 +6428,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('license-select').value = '';
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
+      const newSelView = document.getElementById('new-select');
+      if (newSelView) newSelView.value = 'all';
       document.getElementById('tag-filter').value = '';
       document.getElementById('filetype-select').value = '';
       document.getElementById('search-filter-input').value = '';
@@ -6243,11 +6446,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Flag that we're viewing the entire library
       window.viewingEntireLibrary = true;
       
-      // Clear the filter indicator
-      const filterIndicator = document.getElementById('current-filter');
-      if (filterIndicator) {
-        filterIndicator.innerHTML = "";
-        filterIndicator.classList.remove('visible');
+      if (typeof window.resetCurrentFilterPanelShell === "function") {
+        window.resetCurrentFilterPanelShell();
+      } else {
+        const filterIndicator = document.getElementById("current-filter");
+        if (filterIndicator) {
+          filterIndicator.innerHTML = "";
+          filterIndicator.classList.remove("visible");
+        }
       }
       
       // Use the combined search function to retrieve and display models with all filters applied correctly
@@ -6919,6 +7125,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('designer-select').value = '';
         document.getElementById('parent-select').value = '';
         document.getElementById('printed-select').value = 'all';
+        const newSelPurge = document.getElementById('new-select');
+        if (newSelPurge) newSelPurge.value = 'all';
         document.getElementById('tag-filter').value = '';
       }
     } catch (error) {
@@ -7252,12 +7460,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     const license = document.getElementById('license-select')?.value || '';
     const parentModel = document.getElementById('parent-select')?.value || '';
     const printStatus = document.getElementById('printed-select')?.value || 'all';
+    const newStatus = document.getElementById('new-select')?.value || 'all';
     const tagFilter = document.getElementById('tag-filter')?.value || '';
     const fileType = document.getElementById('filetype-select')?.value || '';
     const searchTerm = (document.getElementById('search-filter-input')?.value || '').trim();
+    const qbClauses =
+      typeof window.queryBuilderHasActiveSearchClauses === 'function' &&
+      window.queryBuilderHasActiveSearchClauses();
+    const qbMulti =
+      typeof window.queryBuilderHasActiveMultiFilters === 'function' &&
+      window.queryBuilderHasActiveMultiFilters();
     const hasActiveFilters = Boolean(
       designer || license || parentModel || printStatus !== 'all' ||
-      tagFilter || fileType || searchTerm || window.currentDirectoryFilter || window.dateAddedFilter
+      newStatus !== 'all' ||
+      tagFilter || fileType || searchTerm || qbClauses || qbMulti ||
+      window.currentDirectoryFilter || window.dateAddedFilter
     );
 
     if (typeof window.performCombinedSearch === 'function' && hasActiveFilters) {
@@ -7512,9 +7729,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   </p>
   `;
 
-  // Add near the top where other constants are defined
-  let MAX_FILE_SIZE_MB = 50;
-
   // Add this function to initialize performance settings
   async function initializePerformanceSettings() {
     try {
@@ -7537,11 +7751,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         throw new Error('Could not find max file size input');
       }
 
-      const maxFileSize = parseInt(input.value);
+      const maxFileSize = parseMaxFileSizeMBInput(input.value);
       
       // Validate input
-      if (isNaN(maxFileSize) || maxFileSize < 1 || maxFileSize > 1000) {
-        throw new Error('Invalid max file size. Must be between 1 and 1000 MB.');
+      if (maxFileSize == null) {
+        throw new Error('Invalid max file size. Must be at least 1 MB.');
       }
 
       // Save to database
@@ -7573,27 +7787,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       delete window._electronPendingEvents['open-performance-settings'];
     }
 
-    // Remove the form submit handler and only use the save button
-    const saveButton = document.getElementById('save-performance-settings');
-    if (saveButton) {
-      saveButton.addEventListener('click', async () => {
-        if (typeof window.savePerformanceSettingsFromDialog === 'function') {
-          await window.savePerformanceSettingsFromDialog();
-        } else {
-          await savePerformanceSettings();
-        }
-      });
-    }
-
-    const cancelButton = document.getElementById('cancel-performance-settings');
-    if (cancelButton) {
-      cancelButton.addEventListener('click', () => {
-        const dialog = document.getElementById('performance-settings-dialog');
-        if (dialog) {
-          dialog.close();
-        }
-      });
-    }
+    // Save/cancel use onclick in index.html + savePerformanceSettingsFromDialog (avoid duplicate handlers)
   });
 
   // Add performance settings dialog handler
@@ -7603,7 +7797,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const newBatchSize = parseInt(document.getElementById('batch-size').value);
       const newConcurrentRenders = parseInt(document.getElementById('concurrent-renders').value);
-      const newMaxFileSize = parseInt(document.getElementById('max-file-size').value);
+      const newMaxFileSize = parseMaxFileSizeMBInput(document.getElementById('max-file-size').value);
       const newThumbnailBatchSize = parseInt(document.getElementById('thumbnail-batch-size').value);
       const newRenderDelay = parseInt(document.getElementById('render-delay').value);
 
@@ -7614,8 +7808,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (isNaN(newConcurrentRenders) || newConcurrentRenders < 1 || newConcurrentRenders > 10) {
         throw new Error('Invalid concurrent renders. Must be between 1 and 10.');
       }
-      if (isNaN(newMaxFileSize) || newMaxFileSize < 1 || newMaxFileSize > 1000) {
-        throw new Error('Invalid max file size. Must be between 1 and 1000 MB.');
+      if (newMaxFileSize == null) {
+        throw new Error('Invalid max file size. Must be at least 1 MB.');
       }
       if (isNaN(newThumbnailBatchSize) || newThumbnailBatchSize < 5 || newThumbnailBatchSize > 20) {
         throw new Error('Invalid thumbnail batch size. Must be between 5 and 20.');
@@ -7643,10 +7837,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error saving performance settings:', error);
       await window.electron.showMessage('Error', error.message);
     }
-  });
-
-  document.getElementById('cancel-performance-settings')?.addEventListener('click', () => {
-    document.getElementById('performance-settings-dialog').close();
   });
 
   // Update the file scanning function to use MAX_FILE_SIZE_MB
@@ -7678,47 +7868,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await initializeSettings();
     // Rest of your initialization code...
   });
-
-  // Performance settings handlers
-  const savePerformanceButton = document.getElementById('save-performance-settings');
-  if (savePerformanceButton) {
-    savePerformanceButton.addEventListener('click', async () => {
-      if (typeof window.savePerformanceSettingsFromDialog === 'function') {
-        await window.savePerformanceSettingsFromDialog();
-        return;
-      }
-      const input = document.getElementById('max-file-size');
-      if (!input) {
-        await window.electron.showMessage('Error', 'Could not find max file size input');
-        return;
-      }
-      const maxFileSize = parseInt(input.value, 10);
-      if (isNaN(maxFileSize) || maxFileSize < 1 || maxFileSize > 1000) {
-        await window.electron.showMessage('Error', 'Invalid max file size. Must be between 1 and 1000 MB.');
-        return;
-      }
-      try {
-        await window.electron.saveSetting('maxFileSizeMB', maxFileSize.toString());
-        MAX_FILE_SIZE_MB = maxFileSize;
-        const dialog = document.getElementById('performance-settings-dialog');
-        if (dialog) dialog.close();
-        await window.electron.showMessage('Success', 'Performance settings saved successfully');
-      } catch (error) {
-        console.error('Error saving performance settings:', error);
-        await window.electron.showMessage('Error', error.message);
-      }
-    });
-  }
-
-  const cancelPerformanceButton = document.getElementById('cancel-performance-settings');
-  if (cancelPerformanceButton) {
-    cancelPerformanceButton.addEventListener('click', () => {
-      const dialog = document.getElementById('performance-settings-dialog');
-      if (dialog) {
-        dialog.close();
-      }
-    });
-  }
 
   // ... rest of the existing code ...
 
@@ -8168,10 +8317,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function clearDirectoryFilter() {
     try {
       // Get the filter indicator element and clear its content and visual state
-      const filterIndicator = document.getElementById('current-filter');
-      if (filterIndicator) {
-        filterIndicator.innerHTML = '';
-        filterIndicator.classList.remove('visible');
+      if (typeof window.resetCurrentFilterPanelShell === "function") {
+        window.resetCurrentFilterPanelShell();
+      } else {
+        const filterIndicator = document.getElementById("current-filter");
+        if (filterIndicator) {
+          filterIndicator.innerHTML = "";
+          filterIndicator.classList.remove("visible");
+        }
       }
       // Retrieve and display all models
       const models = await window.electron.getAllModels();
@@ -8418,17 +8571,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('license-select').value = '';
         document.getElementById('parent-select').value = '';
         document.getElementById('printed-select').value = 'all';
+        const newSelVl = document.getElementById('new-select');
+        if (newSelVl) newSelVl.value = 'all';
         document.getElementById('tag-filter').value = '';
         document.getElementById('filetype-select').value = '';
         document.getElementById('search-filter-input').value = '';
+        if (typeof window.queryBuilderClearAllMultiChips === 'function') {
+          window.queryBuilderClearAllMultiChips();
+        }
+        if (typeof window.clearSearchClauseList === 'function') {
+          window.clearSearchClauseList();
+        }
         window.currentDirectoryFilter = "";
         window.dateAddedFilter = null;
         window._lastDateAddedFilter = null;
         const viewLibMsg = document.getElementById("view-library-message");
         if (viewLibMsg) viewLibMsg.style.display = "none";
         window.viewingEntireLibrary = true;
-        const filterIndicator = document.getElementById('current-filter');
-        if (filterIndicator) { filterIndicator.innerHTML = ""; filterIndicator.classList.remove('visible'); }
+        if (typeof window.resetCurrentFilterPanelShell === "function") {
+          window.resetCurrentFilterPanelShell();
+        } else {
+          const filterIndicator = document.getElementById("current-filter");
+          if (filterIndicator) {
+            filterIndicator.innerHTML = "";
+            filterIndicator.classList.remove("visible");
+          }
+        }
         // Force refetch and re-render so grid updates in Docker/server
         if (typeof window.forceGridRefresh === 'function') {
           await window.forceGridRefresh();
@@ -8446,7 +8614,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Add event listeners on filter and search elements so that the "view-library-message" is removed when a filter or search is active.
-  ["designer-select", "license-select", "parent-select", "printed-select", "tag-filter", "filetype-select", "search-filter-input"].forEach(id => {
+  ["designer-select", "license-select", "parent-select", "printed-select", "new-select", "tag-filter", "filetype-select", "search-filter-input"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("change", () => {
@@ -8781,7 +8949,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (previousRaw) previousIds = JSON.parse(previousRaw);
       } catch (e) { /* ignore */ }
 
-      const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'obj', 'ply', 'step', 'svg', 'x3d'];
+      const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'x3d'];
       const selectedScanTypes = [];
       for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
         const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
@@ -8913,6 +9081,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   let expectedBatchCount = 0;
   let reviewDialogOpen = false;
   let rateLimitDialogShown = false; // Track if rate limit dialog has been shown during current batch
+  /** Set when the tag preview dialog closes; cleared when a new generate-tags run starts. Stops late IPC from reopening the dialog. */
+  let suppressTagPreviewReopen = false;
   /** Bumps on each showTagPreviewDialog call so stale getSetting() callbacks cannot append duplicate UI */
   let tagPreviewDialogRenderGeneration = 0;
 
@@ -9092,13 +9262,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Use helper function to update pendingTagData (ensures no duplicates)
         updatePendingTagData(filePath, tagData);
         
-        // Update the review dialog in real-time
+        // Update the review dialog in real-time (only while user still has it open)
         if (reviewDialogOpen) {
           updateTagPreviewDialog();
-        } else if (batchTagGenerationInProgress) {
-          // Show the dialog when first model arrives
-          // pendingTagData is already deduplicated by updatePendingTagData
-          showTagPreviewDialog(pendingTagData);
         }
       } else {
         // Single model operation - update existing dialog or show if not open
@@ -9113,10 +9279,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Same merge as batch: normalized path dedupe (strict filePath compare missed Docker/UNC variants)
         updatePendingTagData(filePath, tagData);
         
-        // Update the dialog if it's open, otherwise show it
+        // Update the dialog if it's open, otherwise show it (unless user closed this run)
         if (reviewDialogOpen) {
           updateTagPreviewDialog();
-        } else {
+        } else if (!suppressTagPreviewReopen) {
           showTagPreviewDialog(pendingTagData);
         }
         
@@ -9143,6 +9309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       expectedBatchCount = 1;
       pendingTagData = [modelData];
       reviewDialogOpen = false; // Reset dialog state
+      suppressTagPreviewReopen = false;
       rateLimitDialogShown = false; // Reset rate limit dialog flag
       // Deduplicate before showing (should be single item, but be safe)
       const uniquePendingData = deduplicateModelData(pendingTagData);
@@ -9197,6 +9364,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       expectedBatchCount = count;
       pendingTagData = [];
       reviewDialogOpen = false;
+      suppressTagPreviewReopen = false;
       rateLimitDialogShown = false; // Reset rate limit dialog flag for new batch
       
       // Ensure dialog opens immediately, even before loading models
@@ -9432,6 +9600,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Get merge strategy from settings
     window.electron.getSetting('aiTagMergeStrategy').then((strategy) => {
       if (renderGeneration !== tagPreviewDialogRenderGeneration) {
+        return;
+      }
+      if (!dialog.open) {
         return;
       }
 
@@ -9812,11 +9983,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
-      // Dialog is already opened earlier, just ensure it's still open
-      if (!dialog.open) {
-        dialog.showModal();
-        reviewDialogOpen = true;
-      }
     });
   }
 
@@ -10126,11 +10292,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  document.getElementById('tag-preview-cancel')?.addEventListener('click', () => {
-    document.getElementById('tag-preview-dialog').close();
+  document.getElementById('tag-preview-dialog')?.addEventListener('close', () => {
+    suppressTagPreviewReopen = true;
+    reviewDialogOpen = false;
     pendingTagData = [];
     batchTagGenerationInProgress = false;
-    reviewDialogOpen = false;
+    rateLimitDialogShown = false;
+  });
+
+  document.getElementById('tag-preview-cancel')?.addEventListener('click', () => {
+    document.getElementById('tag-preview-dialog')?.close();
   });
   
   // Add handlers for progress dialog
@@ -11043,6 +11214,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('license-select').value = '';
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
+      const newSelVl2 = document.getElementById('new-select');
+      if (newSelVl2) newSelVl2.value = 'all';
       document.getElementById('tag-filter').value = '';
       document.getElementById('filetype-select').value = '';
       document.getElementById('search-filter-input').value = '';
@@ -11050,8 +11223,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       const viewLibMsg = document.getElementById("view-library-message");
       if (viewLibMsg) viewLibMsg.style.display = "none";
       window.viewingEntireLibrary = true;
-      const filterIndicator = document.getElementById('current-filter');
-      if (filterIndicator) { filterIndicator.innerHTML = ""; filterIndicator.classList.remove('visible'); }
+      if (typeof window.resetCurrentFilterPanelShell === "function") {
+        window.resetCurrentFilterPanelShell();
+      } else {
+        const filterIndicator = document.getElementById("current-filter");
+        if (filterIndicator) {
+          filterIndicator.innerHTML = "";
+          filterIndicator.classList.remove("visible");
+        }
+      }
       if (typeof window.forceGridRefresh === 'function') {
         await window.forceGridRefresh();
       } else if (typeof window.performCombinedSearch === 'function') {
@@ -11345,18 +11525,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-
-  // Update the filter indicator
-  function updateFilterIndicator(count) {
-    const filterIndicator = document.getElementById('current-filter');
-    if (filterIndicator) {
-      if (count === 0) {
-        filterIndicator.innerHTML = `<div class="no-results">No models match your filters</div>`;
-      } else {
-        filterIndicator.innerHTML = `<div class="filter-count">Showing ${count} models</div>`;
-      }
-    }
-  }
 
   document.getElementById('select-all-button')?.addEventListener('click', async () => {
     // Clear existing selections first
@@ -11978,6 +12146,8 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       document.getElementById('designer-select').value = '';
       document.getElementById('parent-select').value = '';
       document.getElementById('printed-select').value = 'all';
+      const newSelFg = document.getElementById('new-select');
+      if (newSelFg) newSelFg.value = 'all';
       document.getElementById('tag-filter').value = '';
 
       const totalInDb = await window.electron.getTotalModelCount();
@@ -12011,6 +12181,8 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         document.getElementById('designer-select').value = '';
         document.getElementById('parent-select').value = '';
         document.getElementById('printed-select').value = 'all';
+        const newSelNm = document.getElementById('new-select');
+        if (newSelNm) newSelNm.value = 'all';
         document.getElementById('tag-filter').value = '';
         document.getElementById('filetype-select').value = '';
         document.getElementById('search-filter-input').value = '';
@@ -12102,6 +12274,7 @@ async function refreshModelDisplay() {
     const license = document.getElementById('license-select').value;
     const parentModel = document.getElementById('parent-select').value;
     const printStatus = document.getElementById('printed-select').value;
+    const newStatus = document.getElementById('new-select')?.value || 'all';
     const tagFilter = document.getElementById('tag-filter').value;
     const sortOption = document.getElementById('sort-select').value;
     const fileType = document.getElementById('filetype-select').value; // Add this line
@@ -12116,6 +12289,8 @@ async function refreshModelDisplay() {
     document.getElementById('license-select').value = license;
     document.getElementById('parent-select').value = parentModel;
     document.getElementById('printed-select').value = printStatus;
+    const newSelRestore = document.getElementById('new-select');
+    if (newSelRestore) newSelRestore.value = newStatus;
     document.getElementById('tag-filter').value = tagFilter;
     document.getElementById('filetype-select').value = fileType; // Add this line
 
@@ -12166,6 +12341,11 @@ async function refreshModelDisplay() {
     } else if (printStatus === 'not-printed') {
       models = models.filter(model => !model.printed);
     }
+    if (newStatus === 'new') {
+      models = models.filter(model => model.isNew === 1 || model.isNew === true);
+    } else if (newStatus === 'not-new') {
+      models = models.filter(model => !(model.isNew === 1 || model.isNew === true));
+    }
     if (tagFilter) {
       models = await Promise.all(models.map(async (model) => {
         const modelTags = await window.electron.getModelTags(model.id);
@@ -12190,11 +12370,12 @@ async function displayModels(files) {
   if (shouldSyncSelectionWithFilteredList()) {
     syncSelectionWithFilteredModels(files);
   }
-  renderVirtualGrid(files);
+  const gridFiles = dedupeModelsForVirtualGrid(files || []);
+  renderVirtualGrid(gridFiles);
   if (shouldSyncSelectionWithFilteredList()) {
     syncSelectionWithFilteredModels(files);
   }
-  await updateModelCounts(files.length);
+  await updateModelCounts(gridFiles.length);
 }
 
 
@@ -12205,6 +12386,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'license-select',
     'parent-select',
     'printed-select',
+    'new-select',
     'tag-filter',
     // Note: sort-select is handled by search.js via initializeCombinedSearch()
     'filetype-select'  // Add this line
@@ -12257,7 +12439,8 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
   }
 
   // Use the new virtual grid implementation for better performance
-  renderVirtualGrid(files);
+  const gridFiles = dedupeModelsForVirtualGrid(files || []);
+  renderVirtualGrid(gridFiles);
 
   // Run again after the grid exists: path/name resolution and DOM can differ; catches stale selection UI
   if (shouldSyncSelectionWithFilteredList()) {
@@ -12265,7 +12448,7 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
   }
 
   // Update counts
-  await updateModelCounts(files.length);
+  await updateModelCounts(gridFiles.length);
 
   // Handle thumbnail generation for visible items?
   // renderVirtualGrid handles creating items, but thumbnail generation might need to be triggered
@@ -13002,12 +13185,21 @@ function shouldSyncSelectionWithFilteredList() {
   const license = document.getElementById('license-select')?.value || '';
   const parentModel = document.getElementById('parent-select')?.value || '';
   const printStatus = document.getElementById('printed-select')?.value || 'all';
+  const newStatus = document.getElementById('new-select')?.value || 'all';
   const tagFilter = document.getElementById('tag-filter')?.value || '';
   const fileType = document.getElementById('filetype-select')?.value || '';
   const searchTerm = (document.getElementById('search-filter-input')?.value || '').trim();
+  const qbClauses =
+    typeof window.queryBuilderHasActiveSearchClauses === 'function' &&
+    window.queryBuilderHasActiveSearchClauses();
+  const qbMulti =
+    typeof window.queryBuilderHasActiveMultiFilters === 'function' &&
+    window.queryBuilderHasActiveMultiFilters();
   const noFiltersActive = !designer && !license && !parentModel && printStatus === 'all' &&
-    !tagFilter && !fileType && !searchTerm && !window.currentDirectoryFilter && !window.dateAddedFilter;
-  const useProgressiveFullLibrary = noFiltersActive && !tagFilter;
+    newStatus === 'all' &&
+    !tagFilter && !fileType && !searchTerm && !qbClauses && !qbMulti &&
+    !window.currentDirectoryFilter && !window.dateAddedFilter;
+  const useProgressiveFullLibrary = noFiltersActive;
   return !useProgressiveFullLibrary;
 }
 
@@ -14063,7 +14255,12 @@ async function applyTagFilterFromModelClick(tagName) {
     opt.textContent = trimmed;
     tagSelect.appendChild(opt);
   }
-  tagSelect.value = trimmed;
+  tagSelect.value = '';
+  if (typeof window.setTagMultiFilter === 'function') {
+    window.setTagMultiFilter([trimmed]);
+  } else {
+    tagSelect.value = trimmed;
+  }
   if (typeof window.performCombinedSearch === 'function') {
     await window.performCombinedSearch();
   }
@@ -14422,6 +14619,247 @@ function createSVGIcon(svgString, size = 16) {
   return iconContainer;
 }
 
+/** List view: column visibility + widths (persisted via listViewColumnLayout) */
+const LIST_VIEW_COLUMN_DEFS = [
+  { id: 'name', label: 'Name', defaultWidth: 140, min: 80, max: 800 },
+  { id: 'size', label: 'Size', defaultWidth: 75, min: 50, max: 200 },
+  { id: 'dateadded', label: 'Date Added', defaultWidth: 110, min: 90, max: 240 },
+  { id: 'directory', label: 'Parent Directory', defaultWidth: 130, min: 80, max: 500 },
+  { id: 'designer', label: 'Designer', defaultWidth: 120, min: 60, max: 400 },
+  { id: 'parentmodel', label: 'Parent Model', defaultWidth: 120, min: 60, max: 400 },
+  { id: 'printed', label: 'Printed', defaultWidth: 100, min: 70, max: 200 },
+  { id: 'tags', label: 'Tags', defaultWidth: 180, min: 80, max: 600 },
+  { id: 'archive', label: 'Archive', defaultWidth: 100, min: 70, max: 200 }
+];
+
+let listViewColumnState = null;
+let listViewColumnsPopoverEl = null;
+
+function getDefaultListViewColumnState() {
+  const visibility = {};
+  const widths = {};
+  for (const col of LIST_VIEW_COLUMN_DEFS) {
+    visibility[col.id] = true;
+    widths[col.id] = col.defaultWidth;
+  }
+  return { visibility, widths };
+}
+
+function mergeListViewColumnState(saved) {
+  const base = getDefaultListViewColumnState();
+  if (!saved || typeof saved !== 'object') return base;
+  if (saved.visibility && typeof saved.visibility === 'object') {
+    for (const col of LIST_VIEW_COLUMN_DEFS) {
+      if (typeof saved.visibility[col.id] === 'boolean') {
+        base.visibility[col.id] = saved.visibility[col.id];
+      }
+    }
+  }
+  if (saved.widths && typeof saved.widths === 'object') {
+    for (const col of LIST_VIEW_COLUMN_DEFS) {
+      const w = saved.widths[col.id];
+      if (typeof w === 'number' && Number.isFinite(w)) {
+        base.widths[col.id] = Math.round(Math.max(col.min, Math.min(col.max, w)));
+      }
+    }
+  }
+  return base;
+}
+
+function ensureListViewColumnState() {
+  if (!listViewColumnState) {
+    listViewColumnState = getDefaultListViewColumnState();
+  }
+  return listViewColumnState;
+}
+
+function listViewColDisplayMode(colId) {
+  return colId === 'name' ? '' : 'flex';
+}
+
+function applyListViewColumnToElement(el, colId) {
+  if (!el || !colId) return;
+  const state = ensureListViewColumnState();
+  const def = LIST_VIEW_COLUMN_DEFS.find(c => c.id === colId);
+  if (!def) return;
+  const visible = state.visibility[colId] !== false;
+  const w = state.widths[colId] ?? def.defaultWidth;
+  if (!visible) {
+    el.style.display = 'none';
+    return;
+  }
+  const mode = listViewColDisplayMode(colId);
+  if (mode) {
+    el.style.display = mode;
+  } else {
+    el.style.removeProperty('display');
+  }
+  el.style.flexShrink = '0';
+  el.style.width = `${w}px`;
+  el.style.minWidth = `${w}px`;
+  if (colId === 'tags') {
+    el.style.maxWidth = `${w}px`;
+  } else {
+    el.style.removeProperty('maxWidth');
+  }
+}
+
+function applyListViewColumnLayoutToSubtree(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-list-col]').forEach(el => {
+    applyListViewColumnToElement(el, el.getAttribute('data-list-col'));
+  });
+}
+
+function applyListViewColumnLayoutToGrid() {
+  const grid = document.querySelector('.file-grid');
+  if (!grid) return;
+  applyListViewColumnLayoutToSubtree(grid);
+}
+
+async function persistListViewColumnState() {
+  if (!window.electron?.saveSetting) return;
+  const state = ensureListViewColumnState();
+  try {
+    await window.electron.saveSetting(
+      'listViewColumnLayout',
+      JSON.stringify({ visibility: state.visibility, widths: state.widths })
+    );
+  } catch (err) {
+    console.error('Error saving list view column layout:', err);
+  }
+}
+
+async function loadListViewColumnStateFromStore() {
+  try {
+    if (!window.electron?.getSetting) {
+      listViewColumnState = getDefaultListViewColumnState();
+      return;
+    }
+    const raw = await window.electron.getSetting('listViewColumnLayout');
+    if (raw) {
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      listViewColumnState = mergeListViewColumnState(parsed);
+    } else {
+      listViewColumnState = getDefaultListViewColumnState();
+    }
+  } catch (e) {
+    console.warn('loadListViewColumnStateFromStore:', e);
+    listViewColumnState = getDefaultListViewColumnState();
+  }
+  applyListViewColumnLayoutToGrid();
+}
+
+function closeListViewColumnsPopover() {
+  if (listViewColumnsPopoverEl) {
+    listViewColumnsPopoverEl.remove();
+    listViewColumnsPopoverEl = null;
+  }
+}
+
+function syncPreviewSizeSwitcherActive() {
+  const wrap = document.getElementById('preview-size-switcher');
+  if (!wrap) return;
+  wrap.querySelectorAll('[data-preview-size]').forEach(b => {
+    b.classList.toggle('active', b.dataset.previewSize === currentPreviewTileSize);
+  });
+}
+
+function updateListViewColumnsToolbarButton() {
+  const btn = document.getElementById('list-view-columns-toolbar-btn');
+  if (btn) btn.hidden = currentGridView !== 'list';
+  const previewSwitcher = document.getElementById('preview-size-switcher');
+  if (previewSwitcher) {
+    const showPreviewSizer = currentGridView === 'preview';
+    previewSwitcher.hidden = !showPreviewSizer;
+    if (showPreviewSizer) {
+      previewSwitcher.style.display = '';
+    } else {
+      previewSwitcher.style.display = 'none';
+    }
+    previewSwitcher.setAttribute('aria-hidden', showPreviewSizer ? 'false' : 'true');
+    syncPreviewSizeSwitcherActive();
+  }
+  document.querySelector('.grid-view-selector')?.classList.toggle('preview-view-active', currentGridView === 'preview');
+}
+window.updateListViewColumnsToolbarButton = updateListViewColumnsToolbarButton;
+
+function toggleListViewColumnsPopover(anchorBtn) {
+  if (listViewColumnsPopoverEl) {
+    closeListViewColumnsPopover();
+    return;
+  }
+  ensureListViewColumnState();
+  const pop = document.createElement('div');
+  pop.className = 'list-view-columns-popover';
+  pop.setAttribute('role', 'menu');
+  LIST_VIEW_COLUMN_DEFS.forEach(col => {
+    const row = document.createElement('label');
+    row.className = 'list-view-columns-popover-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.colId = col.id;
+    cb.checked = listViewColumnState.visibility[col.id] !== false;
+    const span = document.createElement('span');
+    span.textContent = col.label;
+    row.appendChild(cb);
+    row.appendChild(span);
+    cb.addEventListener('change', () => {
+      listViewColumnState.visibility[col.id] = cb.checked;
+      applyListViewColumnLayoutToGrid();
+      persistListViewColumnState();
+    });
+    pop.appendChild(row);
+  });
+  const rect = anchorBtn.getBoundingClientRect();
+  pop.style.position = 'fixed';
+  pop.style.left = `${Math.min(rect.left, window.innerWidth - 260)}px`;
+  pop.style.top = `${rect.bottom + 6}px`;
+  pop.style.zIndex = '10050';
+  document.body.appendChild(pop);
+  listViewColumnsPopoverEl = pop;
+  requestAnimationFrame(() => {
+    const onDoc = (ev) => {
+      if (!listViewColumnsPopoverEl || listViewColumnsPopoverEl.contains(ev.target) || anchorBtn.contains(ev.target)) {
+        return;
+      }
+      closeListViewColumnsPopover();
+      document.removeEventListener('mousedown', onDoc, true);
+    };
+    document.addEventListener('mousedown', onDoc, true);
+  });
+}
+
+function attachListViewColumnResizeHandle(wrapEl, colId) {
+  const def = LIST_VIEW_COLUMN_DEFS.find(c => c.id === colId);
+  if (!def || !wrapEl) return;
+  const handle = document.createElement('div');
+  handle.className = 'list-view-col-resize-handle';
+  handle.title = 'Drag to resize';
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    ensureListViewColumnState();
+    const startX = e.clientX;
+    const startW = listViewColumnState.widths[colId] ?? def.defaultWidth;
+    function onMove(ev) {
+      const dx = ev.clientX - startX;
+      let nw = startW + dx;
+      nw = Math.max(def.min, Math.min(def.max, nw));
+      listViewColumnState.widths[colId] = Math.round(nw);
+      applyListViewColumnLayoutToGrid();
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      persistListViewColumnState();
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  wrapEl.appendChild(handle);
+}
+
 // Function to create list view header
 // Helper function to create a sortable header
 function createSortableHeader(label, sortKey, width, options = {}) {
@@ -14550,6 +14988,7 @@ function createSortableHeader(label, sortKey, width, options = {}) {
 }
 
 function createListViewHeader() {
+  ensureListViewColumnState();
   const header = document.createElement('div');
   header.className = 'list-view-header';
   header.style.display = 'flex';
@@ -14582,23 +15021,45 @@ function createListViewHeader() {
   headerInfo.style.minWidth = '0';
   
   // Name column header (sortable)
-  const nameHeader = createSortableHeader('Name', 'name', '140px');
-  headerInfo.appendChild(nameHeader);
+  const nameWrap = document.createElement('div');
+  nameWrap.className = 'list-view-col';
+  nameWrap.dataset.listCol = 'name';
+  nameWrap.style.position = 'relative';
+  const nameHeader = createSortableHeader('Name', 'name', '100%');
+  nameHeader.style.width = '100%';
+  nameWrap.appendChild(nameHeader);
+  attachListViewColumnResizeHandle(nameWrap, 'name');
+  headerInfo.appendChild(nameWrap);
   
   // Size column header (sortable)
-  const sizeHeader = createSortableHeader('Size', 'size', '75px', { textAlign: 'center' });
-  headerInfo.appendChild(sizeHeader);
+  const sizeWrap = document.createElement('div');
+  sizeWrap.className = 'list-view-col';
+  sizeWrap.dataset.listCol = 'size';
+  sizeWrap.style.position = 'relative';
+  const sizeHeader = createSortableHeader('Size', 'size', '100%', { textAlign: 'center' });
+  sizeHeader.style.width = '100%';
+  sizeWrap.appendChild(sizeHeader);
+  attachListViewColumnResizeHandle(sizeWrap, 'size');
+  headerInfo.appendChild(sizeWrap);
   
   // Date Added column header (sortable)
-  const dateAddedHeader = createSortableHeader('Date Added', 'dateadded', '110px', { textAlign: 'center' });
-  headerInfo.appendChild(dateAddedHeader);
+  const dateAddedWrap = document.createElement('div');
+  dateAddedWrap.className = 'list-view-col';
+  dateAddedWrap.dataset.listCol = 'dateadded';
+  dateAddedWrap.style.position = 'relative';
+  const dateAddedHeader = createSortableHeader('Date Added', 'dateadded', '100%', { textAlign: 'center' });
+  dateAddedHeader.style.width = '100%';
+  dateAddedWrap.appendChild(dateAddedHeader);
+  attachListViewColumnResizeHandle(dateAddedWrap, 'dateadded');
+  headerInfo.appendChild(dateAddedWrap);
   
   // Parent Directory column header (sortable - sorts by filePath)
   const directoryHeaderContainer = document.createElement('div');
+  directoryHeaderContainer.className = 'list-view-col';
+  directoryHeaderContainer.dataset.listCol = 'directory';
+  directoryHeaderContainer.style.position = 'relative';
   directoryHeaderContainer.style.display = 'flex';
   directoryHeaderContainer.style.alignItems = 'center';
-  directoryHeaderContainer.style.flexShrink = '0';
-  directoryHeaderContainer.style.width = '130px';
   directoryHeaderContainer.style.cursor = 'pointer';
   directoryHeaderContainer.style.userSelect = 'none';
   const folderIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/></svg>', 16);
@@ -14614,14 +15075,19 @@ function createListViewHeader() {
     }
   });
   directoryHeaderContainer.appendChild(directoryHeader);
+  attachListViewColumnResizeHandle(directoryHeaderContainer, 'directory');
   headerInfo.appendChild(directoryHeaderContainer);
   
   // Designer column header (sortable with icon)
+  const designerWrap = document.createElement('div');
+  designerWrap.className = 'list-view-col';
+  designerWrap.dataset.listCol = 'designer';
+  designerWrap.style.position = 'relative';
   const designerHeader = document.createElement('div');
   designerHeader.className = 'sortable-header';
   designerHeader.dataset.sortKey = 'designer';
   designerHeader.style.flexShrink = '0';
-  designerHeader.style.width = '120px';
+  designerHeader.style.width = '100%';
   designerHeader.style.fontSize = '12px';
   designerHeader.style.fontWeight = '600';
   designerHeader.style.color = '#aaa';
@@ -14728,23 +15194,39 @@ function createListViewHeader() {
     }
   };
   
-  headerInfo.appendChild(designerHeader);
+  designerWrap.appendChild(designerHeader);
+  attachListViewColumnResizeHandle(designerWrap, 'designer');
+  headerInfo.appendChild(designerWrap);
   
   // Parent Model column header (sortable)
-  const parentModelHeader = createSortableHeader('Parent Model', 'parentmodel', '120px');
-  headerInfo.appendChild(parentModelHeader);
+  const parentWrap = document.createElement('div');
+  parentWrap.className = 'list-view-col';
+  parentWrap.dataset.listCol = 'parentmodel';
+  parentWrap.style.position = 'relative';
+  const parentModelHeader = createSortableHeader('Parent Model', 'parentmodel', '100%');
+  parentModelHeader.style.width = '100%';
+  parentWrap.appendChild(parentModelHeader);
+  attachListViewColumnResizeHandle(parentWrap, 'parentmodel');
+  headerInfo.appendChild(parentWrap);
   
   // Printed column header (sortable - backend supports printed sorting)
-  const printedHeader = createSortableHeader('Printed', 'printed', '100px', { textAlign: 'center' });
-  headerInfo.appendChild(printedHeader);
+  const printedWrap = document.createElement('div');
+  printedWrap.className = 'list-view-col';
+  printedWrap.dataset.listCol = 'printed';
+  printedWrap.style.position = 'relative';
+  const printedHeader = createSortableHeader('Printed', 'printed', '100%', { textAlign: 'center' });
+  printedHeader.style.width = '100%';
+  printedWrap.appendChild(printedHeader);
+  attachListViewColumnResizeHandle(printedWrap, 'printed');
+  headerInfo.appendChild(printedWrap);
   
   // Tags column header (not easily sortable - tags are in a separate table)
   const tagsHeader = document.createElement('div');
+  tagsHeader.className = 'list-view-col';
+  tagsHeader.dataset.listCol = 'tags';
+  tagsHeader.style.position = 'relative';
   tagsHeader.style.display = 'flex';
   tagsHeader.style.alignItems = 'center';
-  tagsHeader.style.flexShrink = '1';
-  tagsHeader.style.minWidth = '160px';
-  tagsHeader.style.width = 'auto';
   const tagsIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M240-120q-33 0-56.5-23.5T160-200v-480q0-33 23.5-56.5T240-760h120l80 80h320q33 0 56.5 23.5T820-600v400q0 33-23.5 56.5T740-120H240Zm0-80h500v-400H447l-80-80H240v480Zm0 0v-480 480Zm280-240q17 0 28.5-11.5T560-480q0-17-11.5-28.5T520-520q-17 0-28.5 11.5T480-480q0 17 11.5 28.5T520-440Zm-160 0q17 0 28.5-11.5T400-480q0-17-11.5-28.5T360-520q-17 0-28.5 11.5T320-480q0 17 11.5 28.5T360-440Zm320 0q17 0 28.5-11.5T720-480q0-17-11.5-28.5T680-520q-17 0-28.5 11.5T640-480q0 17 11.5 28.5T680-440ZM520-280q17 0 28.5-11.5T560-320q0-17-11.5-28.5T520-360q-17 0-28.5 11.5T480-320q0 17 11.5 28.5T520-280Zm-160 0q17 0 28.5-11.5T400-320q0-17-11.5-28.5T360-360q-17 0-28.5 11.5T320-320q0 17 11.5 28.5T360-280Zm320 0q17 0 28.5-11.5T720-320q0-17-11.5-28.5T680-360q-17 0-28.5 11.5T640-320q0 17 11.5 28.5T680-280Z"/></svg>', 16);
   tagsHeader.appendChild(tagsIcon);
   const tagsText = document.createElement('span');
@@ -14756,15 +15238,19 @@ function createListViewHeader() {
   tagsText.style.letterSpacing = '0.5px';
   tagsText.style.marginLeft = '6px';
   tagsHeader.appendChild(tagsText);
+  attachListViewColumnResizeHandle(tagsHeader, 'tags');
   headerInfo.appendChild(tagsHeader);
   
   // Archive column header (with icon, not sortable)
+  const archiveWrap = document.createElement('div');
+  archiveWrap.className = 'list-view-col';
+  archiveWrap.dataset.listCol = 'archive';
+  archiveWrap.style.position = 'relative';
   const archiveHeader = document.createElement('div');
   archiveHeader.style.display = 'flex';
   archiveHeader.style.alignItems = 'center';
   archiveHeader.style.justifyContent = 'center';
-  archiveHeader.style.flexShrink = '0';
-  archiveHeader.style.width = '100px';
+  archiveHeader.style.width = '100%';
   const archiveIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M640-480v-80h80v80h-80Zm0 80h-80v-80h80v80Zm0 80v-80h80v80h-80ZM447-640l-80-80H160v480h400v-80h80v80h160v-400H640v80h-80v-80H447ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80v-480 480Z"/></svg>', 16);
   archiveHeader.appendChild(archiveIcon);
   const archiveText = document.createElement('span');
@@ -14776,7 +15262,9 @@ function createListViewHeader() {
   archiveText.style.letterSpacing = '0.5px';
   archiveText.style.marginLeft = '6px';
   archiveHeader.appendChild(archiveText);
-  headerInfo.appendChild(archiveHeader);
+  archiveWrap.appendChild(archiveHeader);
+  attachListViewColumnResizeHandle(archiveWrap, 'archive');
+  headerInfo.appendChild(archiveWrap);
   
   header.appendChild(headerInfo);
   
@@ -14806,6 +15294,7 @@ function createListViewHeader() {
   
   // Initial update of sort indicators
   header.updateSortIndicators();
+  applyListViewColumnLayoutToSubtree(header);
   
   return header;
 }
@@ -16294,14 +16783,6 @@ async function initializeGrid(sortOption = 'name') {
     const models = await window.electron.getAllModels(sortOption);
     const fileGrid = document.querySelector('.file-grid');
     
-    // Show welcome message if no models
-    if (models.length === 0) {
-      const welcomeDialog = document.getElementById('welcome-message');
-      if (welcomeDialog && !welcomeDialog.hasAttribute('open')) {
-        welcomeDialog.showModal();
-      }
-    }
-
     await updateModelCounts(models.length);
     fileGrid.innerHTML = '';
     // ... rest of grid initialization
@@ -16340,23 +16821,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Show the welcome dialog if this is the first run
-  try {
-    const hasRunBefore = await window.electron.getSetting('hasRunBefore');
-    console.log('hasRunBefore check:', hasRunBefore);
-    if (!hasRunBefore) {
-      console.log('Showing welcome dialog and saving hasRunBefore setting');
-      const welcomeDialog = document.getElementById('welcome-message');
-      if (welcomeDialog) {
-        welcomeDialog.showModal();
-      }
-      await window.electron.saveSetting('hasRunBefore', 'true');
-      console.log('hasRunBefore setting saved');
-    }
-  } catch (error) {
-    console.error('Error checking/saving hasRunBefore:', error);
-  }
-
+  // First-run welcome is handled in the primary DOMContentLoaded startup path in this file.
   debugLog('DOM fully loaded and parsed');
 
   // Continue with normal initialization (which includes update checking)
@@ -17124,9 +17589,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   }
 
   // Define thumbnail sizes based on view mode (optimized)
+  const previewPx = view === 'preview' ? getPreviewTileSizePx() : 0;
   const thumbnailSizes = {
     'list': { width: '48px', height: '48px' },      // Slightly larger for better visibility
-    'preview': { width: '140px', height: '140px' }, // Preview thumbnail size
+    'preview': { width: `${previewPx}px`, height: `${previewPx}px` },
     'detailed': { width: '276px', height: '276px' }  // Optimized large thumbnail
   };
   
@@ -17160,10 +17626,23 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   
   // Add image element right away to reserve space
   const img = document.createElement('img');
-  img.style.width = thumbSize.width;
-  img.style.height = thumbSize.height;
+  if (view === 'preview') {
+    img.style.width = '100%';
+    img.style.height = '100%';
+  } else {
+    img.style.width = thumbSize.width;
+    img.style.height = thumbSize.height;
+  }
   img.src = currentThumbnail || '3d.png';
   thumbnailContainer.appendChild(img);
+
+  if (model.isNew === 1 || model.isNew === true) {
+    const newStatusEl = document.createElement('div');
+    newStatusEl.className = 'new-status';
+    newStatusEl.textContent = 'New';
+    newStatusEl.title = 'New model — clears once you edit it';
+    thumbnailContainer.appendChild(newStatusEl);
+  }
 
   // When grid data omits thumbnail blobs, fetch full thumbnail list async (detailed + preview).
   if (model.filePath) {
@@ -17446,16 +17925,34 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
                   width: fileItem.style.width
                 };
                 
+                // Preserve virtual-grid and grouped-highlight state before replacing the node.
+                const preservedLayoutKey = fileItem.dataset.layoutKey || '';
+                const preservedParentGroupKey = fileItem.dataset.parentGroupKey || '';
+                const preserveGroupedClasses = [
+                  'parent-model-group-child',
+                  'parent-model-group-child-start',
+                  'parent-model-group-child-middle',
+                  'parent-model-group-child-end',
+                  'parent-model-group-child-single'
+                ];
+                const groupedClassesToRestore = preserveGroupedClasses.filter(cls => fileItem.classList.contains(cls));
+
                 // Remove the old item
                 fileItem.remove();
                 
                 // Create a new item with the updated thumbnail
                 const newItem = createModelItem(model, currentGridView);
                 newItem.dataset.index = itemIndex;
+                if (preservedLayoutKey) newItem.dataset.layoutKey = preservedLayoutKey;
+                if (preservedParentGroupKey) newItem.dataset.parentGroupKey = preservedParentGroupKey;
+                groupedClassesToRestore.forEach(cls => newItem.classList.add(cls));
                 newItem.style.position = 'absolute';
                 newItem.style.top = itemPosition.top;
                 newItem.style.left = itemPosition.left;
                 newItem.style.width = itemPosition.width;
+                if (fileItem.style.height) newItem.style.height = fileItem.style.height;
+                if (fileItem.style.minHeight) newItem.style.minHeight = fileItem.style.minHeight;
+                if (fileItem.style.maxHeight) newItem.style.maxHeight = fileItem.style.maxHeight;
                 newItem.style.pointerEvents = 'auto';
                 
                 // Add the new item to the DOM
@@ -17533,10 +18030,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   );
   
   // In detailed view, add file name directly after thumbnail, not in fileInfo
-  // For other views, add it to fileInfo as before
+  // List: name in fileInfo. Preview wall: name only in hover overlay (not in fileInfo).
   if (view === 'detailed') {
     // File name will be added after thumbnail in detailed view section
-  } else {
+  } else if (view !== 'preview') {
     fileInfo.appendChild(fileName);
   }
 
@@ -17570,9 +18067,9 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     fileInfo.style.gap = '12px';
     fileInfo.style.minWidth = '0';
     
-    // File name column (fixed width)
+    // File name column (width from list view column preferences)
+    fileName.setAttribute('data-list-col', 'name');
     fileName.style.flexShrink = '0';
-    fileName.style.width = '140px';
     fileName.style.overflow = 'hidden';
     fileName.style.textOverflow = 'ellipsis';
     fileName.style.whiteSpace = 'nowrap';
@@ -17589,13 +18086,13 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       fileName.style.setProperty('color', '#fff', 'important'); // White for non-zip files
     }
     
-    // File size column (fixed width, center-aligned)
+    // File size column (center-aligned; width from preferences)
     const sizeColumn = document.createElement('div');
     sizeColumn.className = 'file-size-column';
+    sizeColumn.setAttribute('data-list-col', 'size');
     sizeColumn.style.display = 'flex';
     sizeColumn.style.alignItems = 'center';
     sizeColumn.style.flexShrink = '0';
-    sizeColumn.style.width = '75px';
     sizeColumn.style.justifyContent = 'center';
     if (model.size) {
       const sizeText = document.createElement('span');
@@ -17607,13 +18104,13 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     }
     fileInfo.appendChild(sizeColumn);
     
-    // Date Added column (fixed width, center-aligned)
+    // Date Added column (center-aligned; width from preferences)
     const dateAddedColumn = document.createElement('div');
     dateAddedColumn.className = 'date-added-column';
+    dateAddedColumn.setAttribute('data-list-col', 'dateadded');
     dateAddedColumn.style.display = 'flex';
     dateAddedColumn.style.alignItems = 'center';
     dateAddedColumn.style.flexShrink = '0';
-    dateAddedColumn.style.width = '110px';
     dateAddedColumn.style.justifyContent = 'center';
     if (model.dateAdded) {
       const dateText = document.createElement('span');
@@ -17643,13 +18140,13 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     }
     fileInfo.appendChild(dateAddedColumn);
     
-    // Parent directory column (fixed width, clickable to filter, with icon)
+    // Parent directory column (clickable to filter, with icon)
     const directoryColumn = document.createElement('div');
     directoryColumn.className = 'directory-info-column';
+    directoryColumn.setAttribute('data-list-col', 'directory');
     directoryColumn.style.display = 'flex';
     directoryColumn.style.alignItems = 'center';
     directoryColumn.style.flexShrink = '0';
-    directoryColumn.style.width = '130px';
     directoryColumn.style.overflow = 'hidden';
     
     // Add folder icon or archive icon based on whether model is in zip archive
@@ -17752,10 +18249,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     // Designer column (with icon)
     const designerColumn = document.createElement('div');
     designerColumn.className = 'designer-info-column';
+    designerColumn.setAttribute('data-list-col', 'designer');
     designerColumn.style.display = 'flex';
     designerColumn.style.alignItems = 'center';
     designerColumn.style.flexShrink = '0';
-    designerColumn.style.width = '130px';
     designerColumn.style.overflow = 'hidden';
     
     // Add designer icon
@@ -17782,10 +18279,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     // Parent Model column
     const parentModelColumn = document.createElement('div');
     parentModelColumn.className = 'parent-model-column';
+    parentModelColumn.setAttribute('data-list-col', 'parentmodel');
     parentModelColumn.style.display = 'flex';
     parentModelColumn.style.alignItems = 'center';
     parentModelColumn.style.flexShrink = '0';
-    parentModelColumn.style.width = '130px';
     parentModelColumn.style.overflow = 'hidden';
     
     const parentModelText = document.createElement('span');
@@ -17806,11 +18303,11 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     // Printed column (status badge only, no icon)
     const printStatusColumn = document.createElement('div');
     printStatusColumn.className = 'print-status-column';
+    printStatusColumn.setAttribute('data-list-col', 'printed');
     printStatusColumn.style.display = 'flex';
     printStatusColumn.style.alignItems = 'center';
     printStatusColumn.style.justifyContent = 'center';
     printStatusColumn.style.flexShrink = '0';
-    printStatusColumn.style.width = '100px';
     
     if (printStatusElement) {
       // Remove all positioning styles and move to column
@@ -17829,14 +18326,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     }
     fileInfo.appendChild(printStatusColumn);
     
-    // Tags column (flexible width to prevent cutoff)
+    // Tags column
     const tagsColumn = document.createElement('div');
     tagsColumn.className = 'tags-info-column';
+    tagsColumn.setAttribute('data-list-col', 'tags');
     tagsColumn.style.display = 'flex';
     tagsColumn.style.alignItems = 'center';
-    tagsColumn.style.flexShrink = '1';
-    tagsColumn.style.minWidth = '160px';
-    tagsColumn.style.width = 'auto';
     tagsColumn.style.overflow = 'hidden';
     
     // Get tags from model
@@ -17885,12 +18380,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     // Archive column (with icon, only show for files in zip/archive)
     const archiveStatusColumn = document.createElement('div');
     archiveStatusColumn.className = 'archive-status-column';
+    archiveStatusColumn.setAttribute('data-list-col', 'archive');
     archiveStatusColumn.style.display = 'flex';
     archiveStatusColumn.style.alignItems = 'center';
     archiveStatusColumn.style.justifyContent = 'center';
     archiveStatusColumn.style.gap = '6px';
     archiveStatusColumn.style.flexShrink = '0';
-    archiveStatusColumn.style.width = '100px';
     
     // Only show archive icon and status for files in zip/archive
     if (isZipEntry) {
@@ -17926,6 +18421,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     }
     fileInfo.appendChild(archiveStatusColumn);
     
+    applyListViewColumnLayoutToSubtree(fileInfo);
     item.appendChild(fileInfo);
     
     // Add click event handler for model selection
@@ -17944,40 +18440,85 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     return item;
   }
   
-  // For preview view (formerly small), show thumbnail and filename only
+  // Preview view: dense square wall (see preview-wall.css)
   if (view === 'preview') {
-    // Optimized small view layout
-    item.style.width = '180px';
-    item.style.padding = '10px';
+    const tilePx = getPreviewTileSizePx();
+    item.classList.add('preview-tile');
+    item.style.width = `${tilePx}px`;
+    item.style.height = `${tilePx}px`;
+    item.style.minHeight = `${tilePx}px`;
+    item.style.maxHeight = `${tilePx}px`;
+    item.style.padding = '0';
     item.style.boxSizing = 'border-box';
-    
-    // Show filename below thumbnail
-    fileName.style.fontSize = '11px';
-    fileName.style.marginTop = '10px';
-    fileName.style.textAlign = 'center';
-    fileName.style.padding = '0 4px';
-    fileName.style.lineHeight = '1.3';
-    fileName.style.maxHeight = '32px';
-    fileName.style.overflow = 'hidden';
-    fileName.style.textOverflow = 'ellipsis';
-    fileName.style.display = '-webkit-box';
-    fileName.style.webkitLineClamp = '2';
-    fileName.style.webkitBoxOrient = 'vertical';
-    item.appendChild(fileInfo);
-    
-    // Add click event handler for model selection
+    item.style.position = 'relative';
+    item.style.display = 'flex';
+    item.style.flexDirection = 'column';
+    item.style.overflow = 'hidden';
+
+    thumbnailContainer.style.width = '100%';
+    thumbnailContainer.style.height = '100%';
+    thumbnailContainer.style.flex = '1';
+    thumbnailContainer.style.minHeight = '0';
+    thumbnailContainer.style.marginBottom = '0';
+
+    if (thumbnailWrapper !== thumbnailContainer) {
+      thumbnailWrapper.style.width = '100%';
+      thumbnailWrapper.style.height = '100%';
+    }
+
+    const checkEl = document.createElement('div');
+    checkEl.className = 'preview-tile-check';
+    checkEl.setAttribute('aria-hidden', 'true');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'preview-tile-overlay';
+    const nameRow = document.createElement('div');
+    nameRow.className = 'preview-tile-name';
+    nameRow.textContent = displayFileName;
+    if (isZipFile) {
+      nameRow.classList.add('zip-file');
+    }
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'preview-tile-open-btn';
+    openBtn.textContent = '3D Preview';
+    openBtn.title = 'Open 3D preview';
+    openBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof window.openPreview === 'function') {
+        window.openPreview(model.filePath);
+      }
+    });
+    overlay.appendChild(nameRow);
+    overlay.appendChild(openBtn);
+
+    item.appendChild(checkEl);
+    item.appendChild(overlay);
+
+    item.appendChild(printStatus);
+    if (archiveStatus) {
+      item.appendChild(archiveStatus);
+    }
+
+    item.addEventListener('dblclick', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof window.openPreview === 'function') {
+        window.openPreview(model.filePath);
+      }
+    });
+
     item.addEventListener('click', (e) => {
-      // Check if ctrl or cmd key is pressed for multi-select
       if (e.ctrlKey || e.metaKey) {
         handleFileClick(e, model.filePath);
       } else {
         toggleModelSelection(item, model.filePath);
       }
     });
-    
-    // Add context menu handler for preview view
+
     addContextMenuHandler(item, model.filePath);
-    
+
     return item;
   }
   
@@ -18444,10 +18985,791 @@ function isProgressiveModelListExtension(prevModels, nextModels) {
   return true;
 }
 
+const parentModelExpandedGroups = new Set();
+const zipArchiveExpandedGroups = new Set();
+let groupThumbnailPreferencesLoaded = false;
+let groupThumbnailPreferencesLoading = null;
+const groupThumbnailPreferences = {};
+
+async function loadGroupThumbnailPreferences() {
+  if (groupThumbnailPreferencesLoaded) return;
+  if (groupThumbnailPreferencesLoading) {
+    await groupThumbnailPreferencesLoading;
+    return;
+  }
+  groupThumbnailPreferencesLoading = (async () => {
+  groupThumbnailPreferencesLoaded = true;
+  try {
+    if (!window.electron?.getSetting) return;
+    const raw = await window.electron.getSetting('groupThumbnailPreferences');
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      Object.assign(groupThumbnailPreferences, parsed);
+    }
+  } catch (error) {
+    console.error('Failed to load group thumbnail preferences:', error);
+  }
+  })();
+  await groupThumbnailPreferencesLoading;
+  groupThumbnailPreferencesLoading = null;
+}
+
+async function saveGroupThumbnailPreferences() {
+  try {
+    if (!window.electron?.saveSetting) return;
+    await window.electron.saveSetting('groupThumbnailPreferences', JSON.stringify(groupThumbnailPreferences));
+  } catch (error) {
+    console.error('Failed to save group thumbnail preferences:', error);
+  }
+}
+
+function getParentModelGroupLabel(model) {
+  return model?.parentModel ? String(model.parentModel).trim() : '';
+}
+
+function getParentModelGroupKey(parentModel) {
+  return String(parentModel || '').trim().toLocaleLowerCase();
+}
+
+function getModelRenderKey(model) {
+  if (!model) return '';
+  if (model.id != null && model.id !== '') return `id:${model.id}`;
+  return `path:${model.filePath || ''}`;
+}
+
+function getParentModelGroupHeight(view) {
+  if (view === 'list') return 52;
+  if (view === 'preview') return getPreviewTileSizePx();
+  return 450;
+}
+
+function getZipArchiveGroupLabel(model) {
+  const parsed = parseZipPath(model?.filePath || '');
+  if (!parsed.isZipEntry || !parsed.zipPath) return '';
+  const normalized = String(parsed.zipPath).replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
+function getZipArchiveGroupKey(model) {
+  const parsed = parseZipPath(model?.filePath || '');
+  if (!parsed.isZipEntry || !parsed.zipPath) return '';
+  return normalizePathForComparison(parsed.zipPath);
+}
+
+function buildGroupedDisplayRecords(records, options) {
+  const {
+    groupKind,
+    keyPrefix,
+    expandedSet,
+    getGroupLabelFromModel,
+    getGroupKeyFromModel
+  } = options || {};
+
+  const groupedRecords = [];
+  const recordIndexByGroupKey = new Map();
+
+  (records || []).forEach(record => {
+    if (!record || record.type !== 'model' || !record.model) {
+      groupedRecords.push(record);
+      return;
+    }
+
+    const groupLabel = getGroupLabelFromModel(record.model);
+    const groupKeyRaw = getGroupKeyFromModel(record.model);
+    if (!groupLabel || !groupKeyRaw) {
+      groupedRecords.push(record);
+      return;
+    }
+
+    const groupKey = `${keyPrefix}:${groupKeyRaw}`;
+    const existingIndex = recordIndexByGroupKey.get(groupKey);
+    if (existingIndex == null) {
+      groupedRecords.push(record);
+      recordIndexByGroupKey.set(groupKey, groupedRecords.length - 1);
+      return;
+    }
+
+    const existingRecord = groupedRecords[existingIndex];
+    if (existingRecord?.type === 'model') {
+      groupedRecords[existingIndex] = {
+        type: 'group',
+        key: `group:${groupKey}`,
+        groupKind,
+        groupKey,
+        groupLabel,
+        children: [existingRecord.model, record.model]
+      };
+      return;
+    }
+
+    if (existingRecord?.type === 'group') {
+      existingRecord.children.push(record.model);
+    }
+  });
+
+  const flattened = [];
+  groupedRecords.forEach(record => {
+    if (record.type !== 'group') {
+      flattened.push(record);
+      return;
+    }
+    if ((record.children || []).length <= 1) {
+      const onlyModel = (record.children || [])[0];
+      if (onlyModel) {
+        flattened.push({
+          type: 'model',
+          key: `model:${getModelRenderKey(onlyModel)}`,
+          model: onlyModel
+        });
+      }
+      return;
+    }
+
+    const expanded = expandedSet.has(record.groupKey);
+    flattened.push({ ...record, expanded });
+    if (expanded) {
+      record.children.forEach(model => {
+        flattened.push({
+          type: 'model',
+          key: `child:${record.groupKey}:${getModelRenderKey(model)}`,
+          model,
+          parentGroupKey: record.groupKey
+        });
+      });
+    }
+  });
+
+  return flattened;
+}
+
+function buildParentModelDisplayRecords(models) {
+  const records = [];
+  const seenModelKeys = new Set();
+
+  (models || []).forEach((model, index) => {
+    let dedupeKey = getGridModelDedupeKey(model);
+    if (!dedupeKey) dedupeKey = `__row__:${index}`;
+    if (seenModelKeys.has(dedupeKey)) {
+      return;
+    }
+    seenModelKeys.add(dedupeKey);
+
+    const modelRenderKey = getModelRenderKey(model);
+
+    records.push({
+      type: 'model',
+      key: `model:${modelRenderKey}`,
+      model
+    });
+  });
+
+  const zipGroupedRecords = buildGroupedDisplayRecords(records, {
+    groupKind: 'zip',
+    keyPrefix: 'zip',
+    expandedSet: zipArchiveExpandedGroups,
+    getGroupLabelFromModel: getZipArchiveGroupLabel,
+    getGroupKeyFromModel: getZipArchiveGroupKey
+  });
+
+  return buildGroupedDisplayRecords(zipGroupedRecords, {
+    groupKind: 'parentModel',
+    keyPrefix: 'parent',
+    expandedSet: parentModelExpandedGroups,
+    getGroupLabelFromModel: getParentModelGroupLabel,
+    getGroupKeyFromModel: (model) => getParentModelGroupKey(getParentModelGroupLabel(model))
+  });
+}
+
+function buildParentModelLayoutRows(displayRecords, columns, view, itemHeight, paddingVertical, verticalGap) {
+  const rows = [];
+  let currentModelRow = [];
+
+  const flushModelRow = () => {
+    if (currentModelRow.length === 0) return;
+    rows.push({
+      type: 'models',
+      key: `models:${currentModelRow.map(record => record.key).join('|')}`,
+      records: currentModelRow,
+      height: itemHeight
+    });
+    currentModelRow = [];
+  };
+
+  displayRecords.forEach(record => {
+    if (record.type === 'group' && (record.children || []).length <= 1) {
+      const onlyModel = (record.children || [])[0];
+      if (onlyModel) {
+        currentModelRow.push({
+          type: 'model',
+          key: `model:${getModelRenderKey(onlyModel)}`,
+          model: onlyModel
+        });
+        if (currentModelRow.length >= columns) {
+          flushModelRow();
+        }
+      }
+      return;
+    }
+
+    if (record.type === 'group' && view === 'list') {
+      flushModelRow();
+      rows.push({
+        type: 'group',
+        key: record.key,
+        record,
+        height: getParentModelGroupHeight(view)
+      });
+      return;
+    }
+
+    currentModelRow.push(record);
+    if (currentModelRow.length >= columns) {
+      flushModelRow();
+    }
+  });
+
+  flushModelRow();
+
+  let top = paddingVertical;
+  rows.forEach((row, index) => {
+    row.top = top;
+    row.bottom = top + row.height;
+    top = row.bottom + (index < rows.length - 1 ? verticalGap : 0);
+  });
+
+  const totalHeight = rows.length > 0 ? rows[rows.length - 1].bottom + paddingVertical : paddingVertical * 2;
+  return { rows, totalHeight };
+}
+
+function getParentModelThumbnails(children, groupKey = '') {
+  const thumbnails = [];
+  const seen = new Set();
+
+  (children || []).forEach(child => {
+    if (!child.thumbnail || child.thumbnail === '3d.png') return;
+    String(child.thumbnail)
+      .split('::')
+      .filter(t => t && t !== '3d.png')
+      .forEach(t => {
+        if (seen.has(t)) return;
+        seen.add(t);
+        thumbnails.push(t);
+      });
+  });
+
+  const preferred = groupThumbnailPreferences[groupKey];
+  if (preferred) {
+    const preferredIndex = thumbnails.indexOf(preferred);
+    if (preferredIndex > 0) {
+      thumbnails.splice(preferredIndex, 1);
+      thumbnails.unshift(preferred);
+    }
+  }
+
+  return thumbnails;
+}
+
+function updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails) {
+  const validThumbnails = (thumbnails || []).filter(t => t && t !== '3d.png');
+  if (validThumbnails.length === 0) return;
+  const isListGroupView = Boolean(thumbnailWrap.closest('.parent-model-group-list'));
+
+  thumbnailWrap.dataset.thumbnails = JSON.stringify(validThumbnails);
+  thumbnailWrap.dataset.currentIndex = thumbnailWrap.dataset.currentIndex || '0';
+  imageElement.src = validThumbnails[0];
+
+  let leftNav = thumbnailWrap.querySelector('.thumbnail-nav-left');
+  let rightNav = thumbnailWrap.querySelector('.thumbnail-nav-right');
+  let badge = thumbnailWrap.querySelector('.thumbnail-count-badge');
+
+  if (validThumbnails.length < 2) {
+    leftNav?.remove();
+    rightNav?.remove();
+    badge?.remove();
+    return;
+  }
+
+  if (!leftNav) {
+    leftNav = document.createElement('div');
+    leftNav.className = 'thumbnail-nav-left';
+    leftNav.style.cssText = 'position:absolute;left:0;top:0;width:50%;height:100%;cursor:pointer;z-index:10;';
+    leftNav.title = 'Previous group thumbnail';
+    thumbnailWrap.appendChild(leftNav);
+  }
+
+  if (!rightNav) {
+    rightNav = document.createElement('div');
+    rightNav.className = 'thumbnail-nav-right';
+    rightNav.style.cssText = 'position:absolute;right:0;top:0;width:50%;height:100%;cursor:pointer;z-index:10;';
+    rightNav.title = 'Next group thumbnail';
+    thumbnailWrap.appendChild(rightNav);
+  }
+
+  if (isListGroupView) {
+    badge?.remove();
+    badge = null;
+  } else if (!badge) {
+    badge = document.createElement('div');
+    badge.className = 'thumbnail-count-badge';
+    badge.style.cssText =
+      'position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.7);color:#fff;padding:4px 8px;border-radius:12px;font-size:12px;font-weight:bold;z-index:11;pointer-events:none;';
+    thumbnailWrap.appendChild(badge);
+  }
+
+  const updateBadge = () => {
+    if (!badge) return;
+    const currentIdx = parseInt(thumbnailWrap.dataset.currentIndex, 10) || 0;
+    badge.textContent = `${currentIdx + 1}/${validThumbnails.length}`;
+    badge.title = `Group thumbnail ${currentIdx + 1} of ${validThumbnails.length}`;
+  };
+
+  const navigate = (direction, event) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    let currentIndex = parseInt(thumbnailWrap.dataset.currentIndex, 10) || 0;
+    currentIndex = direction === 'prev'
+      ? (currentIndex - 1 + validThumbnails.length) % validThumbnails.length
+      : (currentIndex + 1) % validThumbnails.length;
+    thumbnailWrap.dataset.currentIndex = String(currentIndex);
+    imageElement.src = validThumbnails[currentIndex];
+    updateBadge();
+  };
+
+  leftNav.onclick = (event) => navigate('prev', event);
+  rightNav.onclick = (event) => navigate('next', event);
+  updateBadge();
+}
+
+async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, children) {
+  if (!window.electron) return;
+
+  const parseThumbnailString = (thumbnailString) => {
+    if (!thumbnailString || thumbnailString === '3d.png') return [];
+    if (!thumbnailString.includes('::')) return [thumbnailString];
+    return thumbnailString.split('::').filter(Boolean);
+  };
+
+  const thumbnails = getParentModelThumbnails(children);
+  const seen = new Set(thumbnails);
+  const candidates = (children || []).filter(child => child.filePath);
+
+  if (thumbnails.length > 0) {
+    updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails);
+  }
+
+  for (const child of candidates) {
+    try {
+      // First fallback: pull full model record and parse thumbnail blob directly.
+      if (window.electron.getModel) {
+        const fullModel = await window.electron.getModel(child.filePath);
+        const directThumbnails = parseThumbnailString(fullModel?.thumbnail).filter(t => t && t !== '3d.png');
+        directThumbnails.forEach(t => {
+          if (seen.has(t)) return;
+          seen.add(t);
+          thumbnails.push(t);
+        });
+      }
+
+      const childThumbnails = window.electron.getAllThumbnails
+        ? await window.electron.getAllThumbnails(child.filePath)
+        : [];
+      let validChildThumbnails = (childThumbnails || [])
+        .filter(t => t && t !== '3d.png')
+      
+      if (validChildThumbnails.length === 0 && window.electron.getThumbnail) {
+        const singleThumbnail = await window.electron.getThumbnail(child.filePath);
+        if (singleThumbnail && singleThumbnail !== '3d.png') {
+          validChildThumbnails = [singleThumbnail];
+        }
+      }
+
+      validChildThumbnails.forEach(t => {
+        if (seen.has(t)) return;
+        seen.add(t);
+        thumbnails.push(t);
+      });
+
+      if (thumbnails.length > 0) {
+        updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails);
+      }
+    } catch (error) {
+      // Best-effort only; group cards can render with the placeholder while thumbnails load.
+    }
+  }
+
+  // Last-resort fallback: render a thumbnail from the first child model directly.
+  // This mirrors the model-card behavior when database thumbnails are missing.
+  if (thumbnails.length === 0 && candidates.length > 0 && typeof renderModelToPNG === 'function') {
+    try {
+      const tempContainer = document.createElement('div');
+      const rendered = await renderModelToPNG(candidates[0].filePath, tempContainer, null);
+      if (rendered && rendered !== '3d.png') {
+        thumbnails.push(rendered);
+        updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails);
+        if (window.electron.saveThumbnail) {
+          // Persist so future renders can use DB-backed thumbnails.
+          await window.electron.saveThumbnail(candidates[0].filePath, rendered);
+        }
+      }
+    } catch (error) {
+      // Keep the placeholder if rendering fallback fails.
+    }
+  }
+}
+
+async function collectThumbnailsForGroup(groupRecord) {
+  const parseThumbnailString = (thumbnailString) => {
+    if (!thumbnailString || thumbnailString === '3d.png') return [];
+    if (!thumbnailString.includes('::')) return [thumbnailString];
+    return thumbnailString.split('::').filter(Boolean);
+  };
+
+  const thumbnails = [];
+  const seen = new Set();
+  const addThumb = (thumb) => {
+    if (!thumb || thumb === '3d.png' || seen.has(thumb)) return;
+    seen.add(thumb);
+    thumbnails.push(thumb);
+  };
+
+  for (const child of (groupRecord.children || [])) {
+    (parseThumbnailString(child.thumbnail) || []).forEach(addThumb);
+    try {
+      if (window.electron?.getModel) {
+        const full = await window.electron.getModel(child.filePath);
+        (parseThumbnailString(full?.thumbnail) || []).forEach(addThumb);
+      }
+      if (window.electron?.getAllThumbnails) {
+        const all = await window.electron.getAllThumbnails(child.filePath);
+        (all || []).forEach(addThumb);
+      }
+      if (window.electron?.getThumbnail) {
+        const single = await window.electron.getThumbnail(child.filePath);
+        addThumb(single);
+      }
+    } catch (error) {
+      // keep collecting from remaining children
+    }
+  }
+
+  const preferred = groupThumbnailPreferences[groupRecord.groupKey];
+  if (preferred) {
+    const preferredIndex = thumbnails.indexOf(preferred);
+    if (preferredIndex > 0) {
+      thumbnails.splice(preferredIndex, 1);
+      thumbnails.unshift(preferred);
+    }
+  }
+
+  return thumbnails;
+}
+
+async function showManageGroupThumbnailsModal(groupRecord) {
+  await loadGroupThumbnailPreferences();
+
+  const dialog = document.getElementById('manage-thumbnails-dialog');
+  const grid = document.getElementById('thumbnails-grid');
+  if (!dialog || !grid) {
+    throw new Error('Manage thumbnails dialog elements not found');
+  }
+
+  const title = dialog.querySelector('h3');
+  const desc = dialog.querySelector('.form-group p');
+  const groupLabel = groupRecord?.groupLabel || groupRecord?.parentModel || 'group';
+  const groupLabelType = groupRecord?.groupKind === 'zip' ? 'ZIP archive group' : 'parent group';
+  if (title) title.textContent = `Manage Group Thumbnails`;
+  if (desc) desc.textContent = `Pick the thumbnail shown on ${groupLabelType} "${groupLabel}".`;
+
+  const thumbnails = await collectThumbnailsForGroup(groupRecord);
+  if (!thumbnails.length) {
+    alert('No thumbnails found in child models for this group.');
+    return;
+  }
+
+  grid.innerHTML = '';
+  thumbnails.forEach((thumbnail, index) => {
+    const item = document.createElement('div');
+    item.className = 'thumbnail-item';
+    if (index === 0) item.classList.add('active');
+
+    const img = document.createElement('img');
+    img.src = thumbnail;
+    img.alt = `Group Thumbnail ${index + 1}`;
+
+    const label = document.createElement('div');
+    label.className = 'thumbnail-item-label';
+    label.textContent = index === 0 ? 'Active' : `Image ${index + 1}`;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'thumbnail-item-overlay';
+
+    const setActiveButton = document.createElement('button');
+    setActiveButton.type = 'button';
+    setActiveButton.className = 'thumbnail-item-button set-active';
+    setActiveButton.textContent = index === 0 ? 'Active' : 'Set as Active';
+    setActiveButton.disabled = index === 0;
+
+    const setAsActive = async () => {
+      groupThumbnailPreferences[groupRecord.groupKey] = thumbnail;
+      await saveGroupThumbnailPreferences();
+      const container = document.querySelector('.file-grid');
+      if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+      await showManageGroupThumbnailsModal(groupRecord);
+    };
+
+    setActiveButton.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await setAsActive();
+    });
+
+    item.addEventListener('click', async (e) => {
+      if (e.target.closest('.thumbnail-item-button') || index === 0) return;
+      await setAsActive();
+    });
+
+    overlay.appendChild(setActiveButton);
+    item.appendChild(img);
+    item.appendChild(label);
+    item.appendChild(overlay);
+    grid.appendChild(item);
+  });
+
+  dialog.showModal();
+}
+
+function parseTagInput(tagInput) {
+  return String(tagInput || '')
+    .split(',')
+    .map(tag => tag.trim())
+    .filter(Boolean)
+    .filter((tag, index, array) => array.indexOf(tag) === index);
+}
+
+async function getGroupModelsWithTags(groupRecord) {
+  const children = groupRecord.children || [];
+  const result = [];
+  for (const child of children) {
+    try {
+      const model = await window.electron.getModel(child.filePath);
+      if (!model) continue;
+      const tags = Array.isArray(model.tags)
+        ? model.tags.map(tag => (typeof tag === 'string' ? tag : (tag?.name || tag))).filter(Boolean)
+        : [];
+      result.push({ model, tags });
+    } catch (error) {
+      console.error('Failed loading model for group tag update:', child.filePath, error);
+    }
+  }
+  return result;
+}
+
+async function updateGroupTags(groupRecord, mode = 'merge') {
+  const modelsWithTags = await getGroupModelsWithTags(groupRecord);
+  if (!modelsWithTags.length) {
+    await window.electron.showMessage('Group Tags', 'No models found in this group.');
+    return;
+  }
+
+  const commonTags = modelsWithTags
+    .map(entry => new Set(entry.tags))
+    .reduce((acc, set) => {
+      if (!acc) return new Set(set);
+      return new Set([...acc].filter(tag => set.has(tag)));
+    }, null);
+  const defaultInput = commonTags && commonTags.size > 0 ? Array.from(commonTags).sort().join(', ') : '';
+
+  const input = await window.electron.showInputDialog({
+    title: mode === 'replace' ? 'Replace Group Tags' : 'Add Tags to Group',
+    message: `Enter comma-separated tags for group "${groupRecord?.groupLabel || groupRecord?.parentModel || ''}"`,
+    defaultValue: defaultInput,
+    placeholder: 'e.g. Functional, Mechanical, MMU'
+  });
+
+  if (!input || !String(input).trim()) {
+    return;
+  }
+
+  const requestedTags = parseTagInput(input);
+  if (!requestedTags.length) {
+    await window.electron.showMessage('Group Tags', 'No valid tags provided.');
+    return;
+  }
+
+  for (const { model, tags } of modelsWithTags) {
+    const nextTags = mode === 'replace'
+      ? requestedTags
+      : Array.from(new Set([...(tags || []), ...requestedTags])).sort((a, b) => a.localeCompare(b));
+    model.tags = nextTags;
+    await window.electron.saveModel(model);
+  }
+
+  const container = document.querySelector('.file-grid');
+  if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+  await window.electron.showMessage(
+    'Group Tags Updated',
+    `Updated tags for ${modelsWithTags.length} model${modelsWithTags.length === 1 ? '' : 's'} in "${groupRecord?.groupLabel || groupRecord?.parentModel || ''}".`
+  );
+}
+
+function createParentModelGroupItem(groupRecord, viewMode = null) {
+  const view = viewMode || currentGridView;
+  const groupLabel = groupRecord?.groupLabel || groupRecord?.parentModel || 'Group';
+  const expandedSet = groupRecord?.groupKind === 'zip' ? zipArchiveExpandedGroups : parentModelExpandedGroups;
+  const isParentModelGroup = groupRecord?.groupKind !== 'zip';
+  const item = document.createElement('div');
+  item.className = `parent-model-group parent-model-group-${view}`;
+  if (view !== 'list') {
+    item.classList.add('file-item', `file-item-${view}`);
+  }
+  if (groupRecord.expanded) {
+    item.classList.add('expanded');
+  }
+  item.dataset.groupKey = groupRecord.groupKey;
+  item.dataset.groupKind = groupRecord.groupKind || 'parentModel';
+  item.dataset.childCount = String(groupRecord.children.length);
+  item.dataset.expanded = groupRecord.expanded ? '1' : '0';
+  item.tabIndex = 0;
+  item.setAttribute('role', 'button');
+  item.setAttribute('aria-expanded', groupRecord.expanded ? 'true' : 'false');
+  item.title = `${groupRecord.expanded ? 'Collapse' : 'Expand'} ${groupLabel}`;
+
+  const thumbnailWrap = document.createElement('div');
+  thumbnailWrap.className = 'parent-model-group-thumbnail';
+  thumbnailWrap.style.position = 'relative';
+
+  const thumbnailImg = document.createElement('img');
+  thumbnailImg.src = '3d.png';
+  thumbnailImg.alt = '';
+  thumbnailWrap.appendChild(thumbnailImg);
+
+  if (view !== 'list') {
+    const groupBadge = document.createElement('div');
+    groupBadge.className = 'parent-model-group-corner-badge';
+    groupBadge.classList.add(groupRecord.expanded ? 'is-expanded' : 'is-collapsed');
+    groupBadge.title = `${groupRecord?.groupKind === 'zip' ? 'ZIP archive group' : 'Parent model group'} (${groupRecord.expanded ? 'expanded' : 'collapsed'})`;
+    for (let i = 0; i < 3; i++) {
+      groupBadge.appendChild(document.createElement('span'));
+    }
+    thumbnailWrap.appendChild(groupBadge);
+  }
+
+  const groupThumbnails = getParentModelThumbnails(groupRecord.children, groupRecord.groupKey);
+  updateParentModelGroupThumbnailCarousel(thumbnailWrap, thumbnailImg, groupThumbnails);
+  hydrateParentModelGroupThumbnails(thumbnailWrap, thumbnailImg, groupRecord.children);
+
+  const details = document.createElement('div');
+  details.className = 'parent-model-group-details';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'parent-model-group-title-row';
+
+  const chevron = document.createElement('span');
+  chevron.className = 'parent-model-group-chevron';
+  chevron.textContent = groupRecord.expanded ? '▾' : '▸';
+
+  const title = document.createElement('span');
+  title.className = 'parent-model-group-title parent-model-filter-link';
+  title.textContent = groupLabel;
+  title.title = groupLabel;
+  if (isParentModelGroup) {
+    title.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const parentSelect = document.getElementById('parent-select');
+      if (!parentSelect) return;
+      parentSelect.value = groupLabel;
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      }
+    });
+  } else {
+    title.classList.remove('parent-model-filter-link');
+  }
+
+  titleRow.appendChild(chevron);
+  titleRow.appendChild(title);
+
+  const printedCount = groupRecord.children.filter(child => Boolean(child.printed)).length;
+  const meta = document.createElement('div');
+  meta.className = 'parent-model-group-meta';
+  meta.textContent = `${groupRecord.children.length} model${groupRecord.children.length === 1 ? '' : 's'} • ${printedCount}/${groupRecord.children.length} printed`;
+
+  details.appendChild(titleRow);
+  details.appendChild(meta);
+
+  item.appendChild(thumbnailWrap);
+  item.appendChild(details);
+
+  const toggleGroup = () => {
+    if (expandedSet.has(groupRecord.groupKey)) {
+      expandedSet.delete(groupRecord.groupKey);
+    } else {
+      expandedSet.add(groupRecord.groupKey);
+    }
+    const container = document.querySelector('.file-grid');
+    if (container?.renderVisibleItemsFn) {
+      container.renderVisibleItemsFn();
+    } else {
+      renderVirtualGrid(container?.currentModels || []);
+    }
+  };
+
+  item.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleGroup();
+  });
+  item.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleGroup();
+    }
+  });
+  item.addEventListener('contextmenu', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const paths = (groupRecord.children || []).map(c => c && c.filePath).filter(Boolean);
+    if (!paths.length) return;
+    const x = event.clientX;
+    const y = event.clientY;
+    const fileIdentifier = paths.length > 1 ? paths : paths[0];
+    try {
+      const menuResult = await window.electron.showContextMenu(fileIdentifier);
+      if (menuResult && menuResult.type === 'html-menu') {
+        showHtmlContextMenu(menuResult, x, y);
+      }
+    } catch (error) {
+      console.error('Error showing context menu for group:', error);
+    }
+  });
+
+  return item;
+}
+
 // Virtual grid function—renders only items visible in the scroll window.
 function renderVirtualGrid(models) {
   const container = document.querySelector('.file-grid');
   if (!container) return;
+
+  models = dedupeModelsForVirtualGrid(models || []);
+  pruneParentModelExpandedGroups(models);
+  pruneZipArchiveExpandedGroups(models);
+
+  if (currentGridView === 'preview') {
+    container.classList.add('preview-wall');
+    container.style.setProperty('--preview-tile', `${getPreviewTileSizePx()}px`);
+  } else {
+    container.classList.remove('preview-wall');
+    container.style.removeProperty('--preview-tile');
+  }
+
+  if (!groupThumbnailPreferencesLoaded) {
+    loadGroupThumbnailPreferences().then(() => {
+      if (container.renderVisibleItemsFn) container.renderVisibleItemsFn();
+    }).catch(() => {});
+  }
   
   // Prevent multiple simultaneous renders
   if (container.isRendering) {
@@ -18570,53 +19892,61 @@ function renderVirtualGrid(models) {
   container.style.height = `calc(100vh - ${containerTop}px)`;
   container.style.maxHeight = `calc(100vh - ${containerTop}px)`;
 
-  // Define item dimensions based on view mode
-  const viewDimensions = {
-    'list': { width: '100%', height: 52, itemWidth: '100%' },
-    'preview': { width: 180, height: 220, itemWidth: 180 },
-    'detailed': { width: 300, height: 450, itemWidth: 300 }
-  };
-  
-  const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];
-  
   // Assume fixed item size (in pixels) - optimized gaps
-  const paddingVertical = 10; // Grid top/bottom padding (small top padding to prevent menu overlap)
-  const paddingHorizontal = 20; // Grid left/right padding
+  const paddingVertical = currentGridView === 'preview' ? 8 : 10;
+  const paddingHorizontal = currentGridView === 'preview' ? 0 : 20;
   // Different gaps for different views - optimized for better visual spacing
   let verticalGap, horizontalGap;
   if (currentGridView === 'list') {
     verticalGap = 4; // Slight padding between list items
     horizontalGap = 0;
   } else if (currentGridView === 'preview') {
-    verticalGap = 24; // More vertical padding for preview thumbnails
-    horizontalGap = 24; // More horizontal padding for preview thumbnails
+    verticalGap = 2;
+    horizontalGap = 2;
   } else {
     // Detailed view: improved spacing for better visual hierarchy
     verticalGap = 28; // Better vertical spacing between rows with slight bottom padding
     horizontalGap = 20; // Consistent horizontal spacing
   }
+
+  const containerWidth = container.clientWidth;
+  const previewAvailableW = containerWidth - paddingHorizontal * 2;
+  let previewTilePx = null;
+  if (currentGridView === 'preview') {
+    previewTilePx = computePreviewTilePxFromWidth(previewAvailableW, horizontalGap);
+    container._previewTilePx = previewTilePx;
+    container.style.setProperty('--preview-tile', `${previewTilePx}px`);
+  } else {
+    delete container._previewTilePx;
+  }
+
+  // Define item dimensions based on view mode
+  const viewDimensions = {
+    'list': { width: '100%', height: 52, itemWidth: '100%' },
+    'preview':
+      currentGridView === 'preview' && previewTilePx != null
+        ? { width: previewTilePx, height: previewTilePx, itemWidth: previewTilePx }
+        : getPreviewTileDims(),
+    'detailed': { width: 300, height: 450, itemWidth: 300 }
+  };
+
+  const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];
   const itemWidth = dimensions.itemWidth;   // fixed model width
   const itemHeight = dimensions.height;  // fixed model height
   const itemHeightWithGap = itemHeight + verticalGap; // Total height including gap
-  const containerWidth = container.clientWidth;
 
-  // Calculate number of columns (at least 1), accounting for padding
-  // For list view, always 1 column
-  let columns, rowCount;
+  // Calculate number of columns (at least 1), accounting for padding.
+  // Group headers are laid out after this because they span the full row.
+  let columns;
   if (currentGridView === 'list') {
     columns = 1;
-    rowCount = models.length;
   } else if (currentGridView === 'preview') {
-    // For small view, account for horizontal gap
-    const availableWidth = containerWidth - (paddingHorizontal * 2);
-    const itemWidthWithGap = itemWidth + horizontalGap;
-    columns = Math.max(Math.floor(availableWidth / itemWidthWithGap), 1);
-    rowCount = Math.ceil(models.length / columns);
+    // Keep fixed column count by preview size; tile dimensions scale to fit width.
+    columns = PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
   } else {
     // For detailed view, calculate columns and center the grid
     const availableWidth = containerWidth - (paddingHorizontal * 2);
     columns = Math.max(Math.floor(availableWidth / itemWidth), 1);
-    rowCount = Math.ceil(models.length / columns);
     
     // Center the grid if we have fewer columns than would fill the width
     if (currentGridView === 'detailed') {
@@ -18631,6 +19961,10 @@ function renderVirtualGrid(models) {
     }
   }
 
+  const displayRecords = buildParentModelDisplayRecords(models);
+  const initialLayout = buildParentModelLayoutRows(displayRecords, columns, currentGridView, itemHeight, paddingVertical, verticalGap);
+  container.currentDisplayRecords = displayRecords;
+
   // Create a spacer element of full height to allow scrolling
   if (!spacer) {
     spacer = document.createElement('div');
@@ -18639,11 +19973,8 @@ function renderVirtualGrid(models) {
     spacer.style.position = 'relative';
     container.appendChild(spacer);
   }
-  // Calculate total height including gaps between rows
-  // For list view, add header height (36px + 4px margin) to spacer
-  const headerHeight = (currentGridView === 'list') ? 40 : 0;
-  const totalHeight = (rowCount * itemHeight) + ((rowCount - 1) * verticalGap) + (paddingVertical * 2) + headerHeight;
-  spacer.style.height = totalHeight + 'px';
+  // Calculate total height including variable-height group rows.
+  spacer.style.height = initialLayout.totalHeight + 'px';
   
   // Position spacer below header for list view
   if (currentGridView === 'list' && spacer) {
@@ -18698,8 +20029,8 @@ function renderVirtualGrid(models) {
       currentVerticalGap = 4;
       currentHorizontalGap = 0;
     } else if (currentGridView === 'preview') {
-      currentVerticalGap = 24;
-      currentHorizontalGap = 24;
+      currentVerticalGap = 2;
+      currentHorizontalGap = 2;
     } else {
       // Detailed view: gap between rows
       currentVerticalGap = 20;
@@ -18716,20 +20047,21 @@ function renderVirtualGrid(models) {
 
         // Recalculate columns in case of resize
         const currentContainerWidth = container.clientWidth;
-        let currentColumns, currentRowCount;
+        let effectivePreviewTilePx = itemWidth;
+        let effectiveItemHeight = itemHeight;
+        let currentColumns;
         if (currentGridView === 'list') {
           currentColumns = 1;
-          currentRowCount = currentModels.length;
         } else if (currentGridView === 'preview') {
-          // For small view, account for horizontal gap
           const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
-          const itemWidthWithGap = itemWidth + currentHorizontalGap;
-          currentColumns = Math.max(Math.floor(currentAvailableWidth / itemWidthWithGap), 1);
-          currentRowCount = Math.ceil(currentModels.length / currentColumns);
+          effectivePreviewTilePx = computePreviewTilePxFromWidth(currentAvailableWidth, currentHorizontalGap);
+          container._previewTilePx = effectivePreviewTilePx;
+          container.style.setProperty('--preview-tile', `${effectivePreviewTilePx}px`);
+          effectiveItemHeight = effectivePreviewTilePx;
+          currentColumns = PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
         } else {
           const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
           currentColumns = Math.max(Math.floor(currentAvailableWidth / itemWidth), 1);
-          currentRowCount = Math.ceil(currentModels.length / currentColumns);
           
           // Center the grid for detailed view
           if (currentGridView === 'detailed') {
@@ -18743,117 +20075,184 @@ function renderVirtualGrid(models) {
           }
         }
 
-        // Update spacer height
-        let currentTotalHeight;
-        currentTotalHeight = (currentRowCount * itemHeight) + ((currentRowCount - 1) * currentVerticalGap) + (paddingVertical * 2);
-        spacer.style.height = currentTotalHeight + 'px';
+        const currentDisplayRecords = buildParentModelDisplayRecords(currentModels);
+        const layoutRowHeight =
+          currentGridView === 'preview' ? effectiveItemHeight : itemHeight;
+        const layout = buildParentModelLayoutRows(
+          currentDisplayRecords,
+          currentColumns,
+          currentGridView,
+          layoutRowHeight,
+          paddingVertical,
+          currentVerticalGap
+        );
+        container.currentDisplayRecords = currentDisplayRecords;
+        spacer.style.height = layout.totalHeight + 'px';
 
-        const buffer = 2; // extra rows to render before and after the visible area
-        // Account for vertical gap when calculating visible rows
-        const rowHeightWithGap = itemHeight + currentVerticalGap;
-        const startRow = Math.max(0, Math.floor(scrollTop / rowHeightWithGap) - buffer);
-        const endRow = Math.min(currentRowCount, Math.ceil((scrollTop + containerHeight) / rowHeightWithGap) + buffer);
+        const groupH =
+          currentGridView === 'preview' ? effectivePreviewTilePx : getParentModelGroupHeight(currentGridView);
+        const bufferPx = Math.max(layoutRowHeight, groupH) * 2;
+        const visibleRows = layout.rows.filter(row => {
+          return row.bottom >= scrollTop - bufferPx && row.top <= scrollTop + containerHeight + bufferPx;
+        });
 
         // Track which items should be visible
-        const visibleIndices = new Set();
-        for (let row = startRow; row < endRow; row++) {
-          for (let col = 0; col < currentColumns; col++) {
-            const index = row * currentColumns + col;
-            if (index < currentModels.length) {
-              visibleIndices.add(index);
-            }
+        const visibleKeys = new Set();
+        visibleRows.forEach(row => {
+          if (row.type === 'group') {
+            visibleKeys.add(row.key);
+          } else {
+            row.records.forEach(record => visibleKeys.add(record.key));
           }
-        }
+        });
 
         // Remove items that are no longer visible
         const existingItems = Array.from(virtualContent.children);
         existingItems.forEach(item => {
-          const itemIndex = parseInt(item.dataset.index || '-1');
-          if (itemIndex === -1 || !visibleIndices.has(itemIndex)) {
+          const layoutKey = item.dataset.layoutKey;
+          if (!layoutKey || !visibleKeys.has(layoutKey)) {
             item.remove();
           }
         });
 
+        const findExistingLayoutItem = (layoutKey) => {
+          return Array.from(virtualContent.children).find(item => item.dataset.layoutKey === layoutKey) || null;
+        };
+
+        const positionModelItem = (item, row, col) => {
+          item.style.top = row.top + 'px';
+          if (currentGridView === 'list') {
+            item.style.left = paddingHorizontal + 'px';
+            item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+          } else if (currentGridView === 'preview') {
+            const w = effectivePreviewTilePx;
+            const leftPosition = (col * (w + currentHorizontalGap)) + paddingHorizontal;
+            item.style.left = leftPosition + 'px';
+            item.style.width = w + 'px';
+            item.style.height = w + 'px';
+            item.style.minHeight = w + 'px';
+            item.style.maxHeight = w + 'px';
+          } else {
+            const centeredOffset = container._centeredOffset || 0;
+            const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
+            item.style.left = leftPosition + 'px';
+            item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+          }
+        };
+
+        const positionGroupItem = (item, row) => {
+          item.style.top = row.top + 'px';
+          item.style.left = paddingHorizontal + 'px';
+          item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+          item.style.height = row.height + 'px';
+        };
+
+        const applyParentGroupHighlightClasses = (item, record, recordIndex) => {
+          item.classList.remove(
+            'parent-model-group-child',
+            'parent-model-group-child-start',
+            'parent-model-group-child-middle',
+            'parent-model-group-child-end',
+            'parent-model-group-child-single'
+          );
+          delete item.dataset.parentGroupKey;
+
+          const parentGroupKey = record.parentGroupKey;
+          if (!parentGroupKey) return;
+
+          item.classList.add('parent-model-group-child');
+          item.dataset.parentGroupKey = parentGroupKey;
+
+          const prevRecord = recordIndex > 0 ? currentDisplayRecords[recordIndex - 1] : null;
+          const nextRecord = recordIndex < currentDisplayRecords.length - 1 ? currentDisplayRecords[recordIndex + 1] : null;
+          const hasPrevInGroup = prevRecord?.parentGroupKey === parentGroupKey;
+          const hasNextInGroup = nextRecord?.parentGroupKey === parentGroupKey;
+
+          if (!hasPrevInGroup && !hasNextInGroup) {
+            item.classList.add('parent-model-group-child-single');
+          } else if (!hasPrevInGroup) {
+            item.classList.add('parent-model-group-child-start');
+          } else if (!hasNextInGroup) {
+            item.classList.add('parent-model-group-child-end');
+          } else {
+            item.classList.add('parent-model-group-child-middle');
+          }
+        };
+
         // Add or update visible items
-        for (let row = startRow; row < endRow; row++) {
-          for (let col = 0; col < currentColumns; col++) {
-            const index = row * currentColumns + col;
-            if (index >= currentModels.length) break;
+        for (const row of visibleRows) {
+          if (row.type === 'group') {
+            const existingGroup = findExistingLayoutItem(row.key);
+            if (existingGroup &&
+                existingGroup.dataset.childCount === String(row.record.children.length) &&
+                existingGroup.dataset.expanded === (row.record.expanded ? '1' : '0')) {
+              positionGroupItem(existingGroup, row);
+              continue;
+            }
+            if (existingGroup) existingGroup.remove();
 
-            // Get the model for this index - use currentModels to get fresh data
-            const model = currentModels[index];
+            const item = createParentModelGroupItem(row.record, currentGridView);
+            item.dataset.layoutKey = row.key;
+            item.style.position = 'absolute';
+            item.style.pointerEvents = 'auto';
+            positionGroupItem(item, row);
+            virtualContent.appendChild(item);
+            continue;
+          }
 
-            // Check if item already exists
-            const existingItem = virtualContent.querySelector(`[data-index="${index}"]`);
-            if (existingItem) {
-              // Verify that the existing item matches the model that should be at this index
-              // This handles cases where the order changed but wasn't detected
-              const existingFilePath = existingItem.getAttribute('data-filepath');
-              const expectedFilePath = model.filePath;
-              const normalizedExistingPath = normalizePathForComparison(existingFilePath);
-              const normalizedExpectedPath = normalizePathForComparison(expectedFilePath);
-              if (normalizedExistingPath !== normalizedExpectedPath) {
-                // Model at this index has changed, remove old item and create new one
-                existingItem.remove();
-              } else {
-                // Item matches, just update position if needed (in case of resize)
-                // Calculate top position
-                let topPosition;
-                topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
-                
-                existingItem.style.top = topPosition + 'px';
-                if (currentGridView === 'list') {
-                  existingItem.style.left = paddingHorizontal + 'px';
-                  existingItem.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
-                } else if (currentGridView === 'preview') {
-                  // Account for horizontal gap in preview view
-                  const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal;
-                  existingItem.style.left = leftPosition + 'px';
-                  existingItem.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
-                } else {
-                  // For detailed view, center the grid with proper spacing
-                  const centeredOffset = container._centeredOffset || 0;
-                  const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
-                  existingItem.style.left = leftPosition + 'px';
-                  existingItem.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
-                }
+          for (let col = 0; col < row.records.length; col++) {
+            const record = row.records[col];
+            const recordIndex = currentDisplayRecords.indexOf(record);
+            const existingItem = findExistingLayoutItem(record.key);
+
+            if (record.type === 'group') {
+              if (existingItem &&
+                  existingItem.dataset.childCount === String(record.children.length) &&
+                  existingItem.dataset.expanded === (record.expanded ? '1' : '0')) {
+                positionModelItem(existingItem, row, col);
                 continue;
               }
+              if (existingItem) existingItem.remove();
+
+              const item = createParentModelGroupItem(record, currentGridView);
+              item.dataset.layoutKey = record.key;
+              item.style.position = 'absolute';
+              positionModelItem(item, row, col);
+              item.style.pointerEvents = 'auto';
+              virtualContent.appendChild(item);
+              continue;
+            }
+
+            const model = record.model;
+            if (existingItem) {
+              const existingFilePath = existingItem.getAttribute('data-filepath');
+              const normalizedExistingPath = normalizePathForComparison(existingFilePath);
+              const normalizedExpectedPath = normalizePathForComparison(model.filePath);
+              if (normalizedExistingPath === normalizedExpectedPath) {
+                applyParentGroupHighlightClasses(existingItem, record, recordIndex);
+                positionModelItem(existingItem, row, col);
+                continue;
+              }
+              existingItem.remove();
             }
 
             // Create new item — prioritize thumbnails for cells in/near the viewport
-            let topPosition;
-            topPosition = paddingVertical + (row * itemHeight) + (row * currentVerticalGap);
             const listHeaderOffset = currentGridView === 'list' ? 40 : 0;
-            const itemContentY = listHeaderOffset + topPosition;
+            const itemContentY = listHeaderOffset + row.top;
             const thumbPriority = computeThumbPriorityForScroll(
               scrollTop,
               containerHeight,
               itemContentY,
-              itemHeight,
+              layoutRowHeight,
               col
             );
             const item = createModelItem(model, currentGridView, thumbPriority);
-            item.dataset.index = index;
+            item.dataset.index = String(recordIndex);
+            item.dataset.layoutKey = record.key;
+            applyParentGroupHighlightClasses(item, record, recordIndex);
             item.style.position = 'absolute';
             // Note: Header offset is handled by virtualContent top position for list view
-            
-            item.style.top = topPosition + 'px';
-            if (currentGridView === 'list') {
-              item.style.left = paddingHorizontal + 'px';
-              item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
-            } else if (currentGridView === 'preview') {
-              // Account for horizontal gap in preview view
-              const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal;
-              item.style.left = leftPosition + 'px';
-              item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
-            } else {
-              // For detailed view, center the grid with proper spacing
-              const centeredOffset = container._centeredOffset || 0;
-              const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
-              item.style.left = leftPosition + 'px';
-              item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
-            }
+            positionModelItem(item, row, col);
             item.style.pointerEvents = 'auto'; // Re-enable pointer events for items
 
             virtualContent.appendChild(item);

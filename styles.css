@@ -836,6 +836,8 @@ main {
 .grid-view-selector {
   position: relative;
   display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 10px;
   padding: 15px 20px;
   margin-left: 370px;
@@ -846,6 +848,11 @@ main {
 }
 
 .view-button {
+  width: auto;
+  max-width: none;
+  margin-bottom: 0;
+  flex: 0 0 auto;
+  align-self: center;
   padding: 10px 20px;
   background: rgba(255, 255, 255, 0.05);
   backdrop-filter: blur(10px);
@@ -856,12 +863,14 @@ main {
   font-size: 14px;
   font-weight: 500;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: none;
 }
 
 .view-button:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(0, 150, 200, 0.5);
   transform: translateY(-1px);
+  box-shadow: none;
 }
 
 .view-button.active {
@@ -1114,6 +1123,523 @@ main {
   color: #6bb3ff;
 }
 
+/* List view: column picker (toolbar, next to view mode buttons) + resize */
+.grid-view-selector .list-view-columns-toolbar-btn {
+  width: auto;
+  max-width: max-content;
+  margin-bottom: 0;
+  flex: 0 0 auto;
+  align-self: center;
+  flex-shrink: 0;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #e0e0e0;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: none;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.grid-view-selector .list-view-columns-toolbar-btn:hover {
+  color: #fff;
+  background: rgba(74, 158, 255, 0.18);
+  border-color: rgba(74, 158, 255, 0.4);
+  transform: none;
+  box-shadow: none;
+}
+
+/* Preview tile size S/M/L — global `button` uses width:90% and pill styling; reset like .view-button.
+   Scoped under .grid-view-selector so cascade beats generic rules and layout stays one row on WebKit/macOS. */
+.grid-view-selector:not(.preview-view-active) .preview-size-switcher {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.preview-size-switcher[hidden] {
+  display: none !important;
+}
+
+.grid-view-selector .preview-size-switcher {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  flex: 0 0 auto !important;
+  align-items: center !important;
+  align-self: center !important;
+  justify-content: flex-start !important;
+  box-sizing: border-box;
+  width: max-content !important;
+  max-width: 100%;
+  min-height: 0;
+  gap: 2px;
+  margin: 0 !important;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.grid-view-selector .preview-size-switcher > button {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: auto !important;
+  max-width: none !important;
+  min-width: 28px !important;
+  height: 26px !important;
+  margin: 0 !important;
+  margin-bottom: 0 !important;
+  padding: 0 6px !important;
+  flex: 0 0 auto !important;
+  flex-shrink: 0 !important;
+  align-self: center !important;
+  float: none !important;
+  box-sizing: border-box;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em;
+  line-height: 1 !important;
+  color: rgba(255, 255, 255, 0.75) !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 6px !important;
+  cursor: pointer;
+  box-shadow: none !important;
+}
+
+.grid-view-selector .preview-size-switcher > button::before {
+  content: none !important;
+  display: none !important;
+}
+
+.grid-view-selector .preview-size-switcher > button:hover {
+  color: #fff !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.grid-view-selector .preview-size-switcher > button.active {
+  color: #0a0a0a !important;
+  background: var(--primary-accent, #00d4ff) !important;
+}
+
+/* Global `button` sets display:flex and kills native [hidden]; restore hiding */
+#list-view-columns-toolbar-btn[hidden] {
+  display: none !important;
+}
+
+.list-view-col {
+  box-sizing: border-box;
+}
+
+.list-view-col-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  margin-right: -3px;
+  cursor: col-resize;
+  z-index: 2;
+}
+.list-view-col-resize-handle:hover {
+  background: rgba(74, 158, 255, 0.35);
+}
+
+.list-view-columns-popover {
+  min-width: 220px;
+  max-height: min(70vh, 420px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: rgba(22, 22, 34, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.list-view-columns-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  font-size: 13px;
+  color: #e0e0e0;
+  cursor: pointer;
+  user-select: none;
+}
+.list-view-columns-popover-row input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #4a9eff;
+}
+
+/* Parent model grouping */
+.parent-model-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.12), rgba(91, 159, 255, 0.06));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.parent-model-group.file-item-detailed,
+.parent-model-group.file-item-preview {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.parent-model-group.file-item-detailed {
+  flex-direction: column;
+  width: 300px;
+  height: 450px !important;
+  padding: 12px;
+}
+
+.parent-model-group.file-item-preview {
+  flex-direction: column;
+  width: 180px;
+  height: 220px;
+  padding: 12px;
+}
+
+.parent-model-group:hover,
+.parent-model-group:focus-visible {
+  border-color: rgba(0, 212, 255, 0.42);
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.18), rgba(91, 159, 255, 0.1));
+  outline: none;
+}
+
+.parent-model-group:hover {
+  transform: translateY(-1px);
+}
+
+.parent-model-group.file-item-detailed:hover,
+.parent-model-group.file-item-preview:hover,
+.parent-model-group.file-item-detailed:focus-visible,
+.parent-model-group.file-item-preview:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(0, 150, 200, 0.5);
+}
+
+.parent-model-group-thumbnail {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--model-background-color, #070147);
+  border: 1px solid rgba(0, 212, 255, 0.22);
+  position: relative;
+}
+
+.parent-model-group-detailed .parent-model-group-thumbnail {
+  width: 276px;
+  height: 276px;
+  border-radius: 6px;
+}
+
+.parent-model-group-preview .parent-model-group-thumbnail {
+  width: 140px;
+  height: 140px;
+  border-radius: 6px;
+}
+
+.parent-model-group-thumbnail img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.parent-model-group-corner-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 34px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(0, 212, 255, 0.45);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 12;
+}
+
+.parent-model-group-corner-badge span {
+  position: absolute;
+  display: block;
+  width: 15px;
+  height: 11px;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  background: rgba(0, 212, 255, 0.16);
+  transition: all 0.2s ease;
+}
+
+/* Collapsed: cards tightly stacked */
+.parent-model-group-corner-badge.is-collapsed span:nth-child(1) {
+  left: 8px;
+  top: 11px;
+  opacity: 0.85;
+  z-index: 1;
+}
+
+.parent-model-group-corner-badge.is-collapsed span:nth-child(2) {
+  left: 11px;
+  top: 8px;
+  opacity: 0.92;
+  z-index: 2;
+}
+
+.parent-model-group-corner-badge.is-collapsed span:nth-child(3) {
+  left: 14px;
+  top: 5px;
+  opacity: 1;
+  z-index: 3;
+}
+
+/* Expanded: cards spread/fanned out */
+.parent-model-group-corner-badge.is-expanded span:nth-child(1) {
+  left: 4px;
+  top: 12px;
+  opacity: 0.9;
+  z-index: 1;
+}
+
+.parent-model-group-corner-badge.is-expanded span:nth-child(2) {
+  left: 10px;
+  top: 8px;
+  opacity: 0.95;
+  z-index: 2;
+}
+
+.parent-model-group-corner-badge.is-expanded span:nth-child(3) {
+  left: 16px;
+  top: 4px;
+  opacity: 1;
+  z-index: 3;
+}
+
+.parent-model-group-details {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.parent-model-group-detailed .parent-model-group-details,
+.parent-model-group-preview .parent-model-group-details {
+  width: 100%;
+  text-align: center;
+  align-items: center;
+}
+
+.parent-model-group-title-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.parent-model-group-detailed .parent-model-group-title-row,
+.parent-model-group-preview .parent-model-group-title-row {
+  justify-content: center;
+  width: 100%;
+}
+
+.parent-model-group-chevron {
+  flex: 0 0 auto;
+  width: 18px;
+  color: var(--primary-accent, #00d4ff);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.parent-model-group-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.parent-model-filter-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgba(0, 212, 255, 0.5);
+  text-underline-offset: 2px;
+}
+
+.parent-model-filter-link:hover {
+  color: #7eb8ff;
+  text-decoration-color: rgba(126, 184, 255, 0.8);
+}
+
+.parent-model-group-detailed .parent-model-group-title {
+  max-width: 240px;
+  font-size: 13px;
+}
+
+.parent-model-group-preview .parent-model-group-title {
+  max-width: 120px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.parent-model-group-meta {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.parent-model-group-preview .parent-model-group-meta {
+  font-size: 11px;
+}
+
+.parent-model-group-list {
+  padding: 8px 16px;
+  border-radius: 12px;
+}
+
+.parent-model-group-list .parent-model-group-thumbnail {
+  width: 40px;
+  height: 40px;
+}
+
+.parent-model-group-list .parent-model-group-corner-badge {
+  top: 4px;
+  left: 4px;
+  transform: scale(0.72);
+  transform-origin: top left;
+}
+
+.parent-model-group-list .parent-model-group-title {
+  font-size: 14px;
+}
+
+.file-item.parent-model-group-child {
+  position: relative;
+  border: 2px solid rgba(0, 212, 255, 0.62);
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.22), 0 10px 28px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(165deg, rgba(0, 212, 255, 0.12), rgba(0, 212, 255, 0.04));
+}
+
+/* Keep grouped highlight visible in detailed/preview cards even when other card styles render. */
+.file-item.file-item-detailed.parent-model-group-child::before,
+.file-item.file-item-preview.parent-model-group-child::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  border: 2px solid rgba(0, 212, 255, 0.72);
+  box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.3);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Row-level badge used top/right 8px and collided with .archive-status and list tags; show on thumbnail */
+.file-item.parent-model-group-child::after {
+  content: none;
+}
+
+/* Preview + detailed: bottom-left (clear of top-right archive + bottom ... menu strip) */
+.file-item.parent-model-group-child .thumbnail-container::after {
+  content: "GROUPED";
+  position: absolute;
+  top: auto;
+  right: auto;
+  bottom: 40px;
+  left: 8px;
+  z-index: 12;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(0, 212, 255, 0.82);
+  color: #03121a;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  line-height: 1.2;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-item-list.parent-model-group-child {
+  border-left: 4px solid var(--primary-accent, #00d4ff);
+  background: linear-gradient(90deg, rgba(0, 212, 255, 0.12) 0, rgba(0, 212, 255, 0.06) 56px, rgba(255, 255, 255, 0.02) 57px, rgba(255, 255, 255, 0.02) 100%);
+  position: relative;
+}
+
+.file-item-list.parent-model-group-child::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  width: 4px;
+  background: rgba(0, 212, 255, 0.8);
+}
+
+.file-item-list.parent-model-group-child-start::before {
+  top: 0;
+  bottom: 50%;
+  border-top-left-radius: 8px;
+}
+
+.file-item-list.parent-model-group-child-middle::before {
+  top: 0;
+  bottom: 0;
+}
+
+.file-item-list.parent-model-group-child-end::before {
+  top: 50%;
+  bottom: 0;
+  border-bottom-left-radius: 8px;
+}
+
+.file-item-list.parent-model-group-child-single::before {
+  top: 0;
+  bottom: 0;
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+}
+
+/* List: archive is in its own column; keep label compact top-right on the thumb */
+.file-item-list.parent-model-group-child .thumbnail-container::after {
+  top: 2px;
+  left: auto;
+  bottom: auto;
+  right: 2px;
+  padding: 2px 5px;
+  font-size: 9px;
+  max-width: calc(100% - 4px);
+}
+
 /* Preview view (formerly Small thumbnail) - Optimized */
 .file-item-preview {
   width: 180px;
@@ -1189,6 +1715,21 @@ main {
   box-shadow: 0 12px 32px rgba(0, 212, 255, 0.2), 0 4px 16px rgba(0, 0, 0, 0.3);
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(0, 150, 200, 0.5);
+}
+
+/* Keep grouped-card highlight persistent after base card and hover rules are applied. */
+.file-item-preview.parent-model-group-child,
+.file-item-detailed.parent-model-group-child {
+  background: linear-gradient(165deg, rgba(0, 212, 255, 0.12), rgba(0, 212, 255, 0.04)) !important;
+  border-color: rgba(0, 212, 255, 0.72) !important;
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.22), 0 10px 28px rgba(0, 0, 0, 0.3) !important;
+}
+
+.file-item-preview.parent-model-group-child:hover,
+.file-item-detailed.parent-model-group-child:hover {
+  background: linear-gradient(165deg, rgba(0, 212, 255, 0.16), rgba(0, 212, 255, 0.06)) !important;
+  border-color: rgba(0, 212, 255, 0.85) !important;
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.28), 0 12px 32px rgba(0, 212, 255, 0.25), 0 4px 16px rgba(0, 0, 0, 0.3) !important;
 }
 
 .file-item-detailed .thumbnail-container {
@@ -1757,7 +2298,8 @@ header {
 }
 
 .sidebar .dropdown-with-list select,
-.sidebar .dropdown-with-list .tags-input-container select {
+.sidebar .dropdown-with-list .tags-input-container select,
+.sidebar .dropdown-with-list .tags-input-container input#tag-filter {
   flex: 1;
   min-width: 0;
   width: calc(100% - 34px); /* Account for list button (28px) + gap (6px) */
@@ -1784,8 +2326,8 @@ header {
   width: 100%;
 }
 
-/* Tag filter dropdown - match other filter dropdowns width */
-.sidebar .dropdown-with-list:has(#tag-filter) .tags-input-container select {
+/* Tag filter field - match other filter dropdowns width */
+.sidebar .dropdown-with-list:has(#tag-filter) .tags-input-container input#tag-filter {
   flex: 1;
   min-width: 0;
   width: calc(100% - 34px); /* Account for list button (28px) + gap (6px) */
@@ -2235,18 +2777,33 @@ header {
   transition: all 0.3s ease;
 }
 
+.tags-input-container input#tag-filter {
+  flex: 1;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  min-width: 0;
+  box-sizing: border-box;
+  font: inherit;
+  transition: all 0.3s ease;
+}
+
 /* In edit view, tag filter has 2 buttons (list, add) - allow full width */
 .tags-input-container:has(.list-button) select {
   flex: 1;
   min-width: 0;
 }
 
-/* In filter view, tag filter only has list button - make dropdown wider */
-.dropdown-with-list:has(#tag-filter) .tags-input-container select {
+/* In filter view, tag filter only has list button - make field wider */
+.dropdown-with-list:has(#tag-filter) .tags-input-container input#tag-filter {
   max-width: calc(100% - 38px); /* Account for list button (32px) + gap (6px) */
 }
 
-.tags-input-container select:focus {
+.tags-input-container select:focus,
+.tags-input-container input#tag-filter:focus {
   outline: none;
   border-color: #00d4ff;
   background: rgba(255, 255, 255, 0.08);
@@ -2254,7 +2811,8 @@ header {
 }
 
 /* SIMPLIFIED: .tags-input-container select options inherit from global select option rules */
-.tags-input-container select {
+.tags-input-container select,
+.tags-input-container input#tag-filter {
   color: #fff !important;
 }
 
@@ -3351,7 +3909,9 @@ header {
 }
 
 .thumbnail-wrapper:hover .thumbnail-nav-left,
-.thumbnail-wrapper:hover .thumbnail-nav-right {
+.thumbnail-wrapper:hover .thumbnail-nav-right,
+.parent-model-group-thumbnail:hover .thumbnail-nav-left,
+.parent-model-group-thumbnail:hover .thumbnail-nav-right {
   opacity: 1;
 }
 
@@ -4800,16 +5360,35 @@ header {
 #current-filter {
   padding: 8px;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   margin: 8px 8px;
   background: rgba(74, 158, 255, 0.1);
   border-radius: 4px;
   font-size: 14px;
   color: #fff;
   display: none;
+  align-self: stretch;
 }
 
 #current-filter.visible {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+#current-filter-body {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#clear-all-filters-button.clear-filter-button {
+  margin-left: 0;
+  margin-top: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .clear-filter-button {
@@ -5561,6 +6140,49 @@ header {
   z-index: 2;
 }
 
+/* New badge inside .thumbnail-container: mid-right so it never sits under the card-level Printed pill (TL).
+   Avoids Archive (card TR, one line), GROUPED (::after BL in detailed/preview; TR in list), 1/N badge (BR). */
+.file-grid .thumbnail-container > .new-status {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  left: auto;
+  bottom: auto;
+  transform: translateY(-50%);
+  background: rgba(52, 152, 219, 0.88);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  z-index: 13;
+  pointer-events: none;
+  line-height: 1.2;
+  white-space: nowrap;
+  max-width: min(42%, calc(100% - 52px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
+/* List: tiny thumb — tuck bottom-left (Printed/archive live in row columns; GROUPED is TR on thumb). */
+.file-item-list .thumbnail-container > .new-status {
+  top: auto;
+  bottom: 2px;
+  left: 2px;
+  right: auto;
+  transform: none;
+  padding: 2px 5px;
+  font-size: 9px;
+  max-width: calc(100% - 6px);
+}
+
+.file-item-detailed .thumbnail-container > .new-status,
+.file-item-preview .thumbnail-container > .new-status {
+  right: 8px;
+  max-width: min(46%, calc(100% - 56px));
+}
+
 .duplicate-group-header {
   font-size: 13px;
   color: #ccc;
@@ -5593,6 +6215,27 @@ header {
   gap: 8px;
   margin-top: 8px;
   margin-bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Search + tag chain: wrap within sidebar width (no horizontal overflow into main area) */
+.filter-pills-search-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  row-gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding-bottom: 2px;
+}
+
+.filter-pills-search-chain .filter-pill,
+.filter-pills-search-chain .filter-pill-search-op {
+  flex-shrink: 0;
 }
 
 .filter-pill {
@@ -6179,4 +6822,165 @@ header {
 .thumbnail-item-button.delete:disabled:hover {
   transform: none;
   box-shadow: none;
+}
+
+/* AND / OR / NOT toolbar under #current-filter */
+.search-boolean-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(30, 30, 46, 0.65);
+  border: 1px solid rgba(137, 180, 250, 0.22);
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.search-boolean-toolbar-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.78);
+  margin-right: 2px;
+}
+
+.search-boolean-op-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: #89b4fa;
+  text-decoration: underline;
+  text-decoration-color: rgba(137, 180, 250, 0.55);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0 1px;
+}
+
+.search-boolean-op-link:hover:not([aria-disabled="true"]) {
+  color: #b4befe;
+  text-decoration-color: rgba(180, 190, 254, 0.95);
+}
+
+.search-boolean-op-link.disabled-during-loading,
+.search-boolean-op-link[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.45;
+  cursor: default;
+  text-decoration: none;
+}
+
+.search-boolean-op-sep {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 12px;
+  user-select: none;
+  padding: 0 2px;
+}
+
+.search-boolean-hint {
+  flex: 1 1 160px;
+  font-size: 11px;
+  color: #fab387;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.filter-section.filter-section-awaiting-search {
+  box-shadow: inset 0 0 0 1px rgba(250, 179, 135, 0.45);
+  border-radius: 8px;
+}
+
+.filter-pill-search-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 10px;
+  margin: 2px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  border-radius: 8px;
+  border: 1px solid rgba(166, 218, 149, 0.55);
+  background: rgba(49, 50, 68, 0.92);
+  color: #a6e3a1;
+  vertical-align: middle;
+}
+
+/* Non-removable AND between search clause and tag segment (tags are not search tokens) */
+.filter-pill-logic-connector {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  margin: 2px;
+  cursor: default;
+  user-select: none;
+}
+
+.filter-pill-tag-combine-hint {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(200, 210, 225, 0.85);
+  margin-left: 2px;
+  white-space: nowrap;
+}
+
+.filter-pill-search-clause {
+  max-width: 100%;
+}
+
+.filter-multi-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.filter-multi-chips[hidden] {
+  display: none !important;
+}
+
+.filter-value-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 8px;
+  border-radius: 12px;
+  background: rgba(137, 180, 250, 0.2);
+  border: 1px solid rgba(137, 180, 250, 0.45);
+  font-size: 12px;
+}
+
+.filter-chip-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.filter-chip-remove:hover {
+  opacity: 1;
+}
+
+.filter-combine-row {
+  margin-top: 4px;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.filter-combine-row[hidden] {
+  display: none !important;
+}
+
+.filter-combine-label {
+  margin-right: 4px;
+  opacity: 0.85;
 }

@@ -6,6 +6,7 @@
   <title>Printventory - 3D Model Manager</title>
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="preview-wall.css">
   <script src="vendor/three.min.js"></script>
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
@@ -56,13 +57,25 @@
       <button id="stop-thumbnail-generation" class="stop-button" title="Stop thumbnail generation">Stop Processing</button>
       <div class="performance-notice">Scanning may impact performance.</div>
     </div>
-    <div id="current-filter"></div>
+    <div id="current-filter">
+      <div id="current-filter-body"></div>
+      <div id="search-boolean-toolbar" class="search-boolean-toolbar query-builder-control" hidden>
+        <span class="search-boolean-toolbar-label">Search logic:</span>
+        <a href="#" id="search-add-and-btn" class="search-boolean-op-link" title="Add AND to the query, then choose your next search or filter">AND</a>
+        <span class="search-boolean-op-sep" aria-hidden="true">·</span>
+        <a href="#" id="search-add-or-btn" class="search-boolean-op-link" title="Add OR to the query, then choose your next search or filter">OR</a>
+        <span class="search-boolean-op-sep" aria-hidden="true">·</span>
+        <a href="#" id="search-add-not-btn" class="search-boolean-op-link" title="Add NOT before the next search term">NOT</a>
+        <span id="search-boolean-hint" class="search-boolean-hint" hidden>Next: enter another search and press search, or pick a filter below.</span>
+      </div>
+      <button type="button" id="clear-all-filters-button" class="clear-filter-button" hidden>Clear All Filters</button>
+    </div>
     <div class="filter-section">
       <div class="form-group">
         <label for="search-filter-input">Search Models:</label>
         <div class="input-with-icon">
           <input type="text" id="search-filter-input" placeholder="Enter search term...">
-          <button id="filter-search-button" class="icon-button" title="Search models">🔍</button>
+          <button id="filter-search-button" class="icon-button" title="Add this text to the active query (all fields)">🔍</button>
           <button id="clear-filter-search-button" class="icon-button" title="Clear search">×</button>
         </div>
       </div>
@@ -95,6 +108,12 @@
           </select>
           <button type="button" class="list-button icon-button" data-field="designer" data-target="designer-select" title="Search existing designers">☰</button>
         </div>
+        <div id="designer-filter-chips" class="filter-multi-chips" hidden></div>
+        <div id="designer-combine-row" class="filter-combine-row query-builder-control" hidden>
+          <span class="filter-combine-label">Match:</span>
+          <label><input type="radio" name="designer-combine" value="OR" checked> Any</label>
+          <label><input type="radio" name="designer-combine" value="AND"> All</label>
+        </div>
       </div>
 
       <div class="form-group">
@@ -105,6 +124,12 @@
           </select>
           <button type="button" class="list-button icon-button" data-field="parent" data-target="parent-select" title="Search existing parent models">☰</button>
         </div>
+        <div id="parentModel-filter-chips" class="filter-multi-chips" hidden></div>
+        <div id="parentModel-combine-row" class="filter-combine-row query-builder-control" hidden>
+          <span class="filter-combine-label">Match:</span>
+          <label><input type="radio" name="parentModel-combine" value="OR" checked> Any</label>
+          <label><input type="radio" name="parentModel-combine" value="AND"> All</label>
+        </div>
       </div>
       <div class="form-group">
         <label for="license-select">Select License:</label>
@@ -114,6 +139,12 @@
           </select>
           <button type="button" class="list-button icon-button" data-field="license" data-target="license-select" title="Search existing licenses">☰</button>
         </div>
+        <div id="license-filter-chips" class="filter-multi-chips" hidden></div>
+        <div id="license-combine-row" class="filter-combine-row query-builder-control" hidden>
+          <span class="filter-combine-label">Match:</span>
+          <label><input type="radio" name="license-combine" value="OR" checked> Any</label>
+          <label><input type="radio" name="license-combine" value="AND"> All</label>
+        </div>
       </div>
       <div class="form-group">
         <label for="printed-select">Print Status:</label>
@@ -121,6 +152,14 @@
           <option value="all">All Models</option>
           <option value="printed">Printed</option>
           <option value="not-printed">Not Printed</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="new-select">New Status:</label>
+        <select id="new-select">
+          <option value="all">All Models</option>
+          <option value="new">New Models Only</option>
+          <option value="not-new">Exclude New Models</option>
         </select>
       </div>
       <div class="form-group">
@@ -141,6 +180,12 @@
             </select>
           </div>
           <button type="button" class="list-button icon-button" data-field="tag" data-target="tag-filter" title="Search existing tags">☰</button>
+        </div>
+        <div id="tags-filter-chips" class="filter-multi-chips" hidden></div>
+        <div id="tags-combine-row" class="filter-combine-row query-builder-control" hidden>
+          <span class="filter-combine-label">Match:</span>
+          <label><input type="radio" name="tags-combine" value="OR"> Any tag</label>
+          <label><input type="radio" name="tags-combine" value="AND" checked> All tags</label>
         </div>
       </div>
 
@@ -507,7 +552,7 @@
           <h4>File Processing</h4>
           <div class="form-group">
             <label for="max-file-size">Max File Size (MB):</label>
-            <input type="number" id="max-file-size" min="1" max="1000" value="50">
+            <input type="number" id="max-file-size" min="1" value="50">
             <p class="setting-description">Maximum file size to process. Files larger than this will be skipped during scanning.</p>
           </div>
         </div>
@@ -620,6 +665,7 @@
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-f3z"><span>F3Z (.f3z)</span></label>
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-gcode"><span>G-code (.gcode)</span></label>
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-igs"><span>IGES (.igs/.iges)</span></label>
+            <label class="scan-file-type-option"><input type="checkbox" id="scan-type-lys"><span>LYS/LYT (.lys/.lyt)</span></label>
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-obj"><span>OBJ (.obj)</span></label>
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-ply"><span>PLY (.ply)</span></label>
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-step"><span>STEP (.step/.stp)</span></label>
@@ -893,11 +939,19 @@
         <button class="view-button active" data-view="detailed" title="Detailed - Large thumbnails with full details">
           <span>Detailed</span>
         </button>
-        <button class="view-button" data-view="preview" title="Preview - Small thumbnails">
+        <button class="view-button" data-view="preview" title="Preview - Wall of thumbnails">
           <span>Preview</span>
         </button>
         <button class="view-button" data-view="list" title="List - Horizontal list view">
           <span>List</span>
+        </button>
+        <div class="preview-size-switcher" id="preview-size-switcher" hidden title="Tile size">
+          <button type="button" data-preview-size="s" title="Small tiles">S</button>
+          <button type="button" data-preview-size="m" class="active" title="Medium tiles">M</button>
+          <button type="button" data-preview-size="l" title="Large tiles">L</button>
+        </div>
+        <button type="button" id="list-view-columns-toolbar-btn" class="list-view-columns-toolbar-btn" title="Choose visible columns; drag column borders in the list header to resize" hidden>
+          Show/Hide columns
         </button>
       </div>
       <div class="file-grid"></div>
@@ -1468,6 +1522,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
     });
   </script>
   <script src="preview.js"></script>
+  <script src="query-builder.js"></script>
   <script src="search.js"></script>
   <script src="renderer.js"></script>
   <script type="module" src="slicer.js"></script>

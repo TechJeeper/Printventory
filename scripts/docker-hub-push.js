@@ -5,6 +5,7 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const containerRuntime = require('./container-runtime');
 
 // Read package.json for version
 const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -42,43 +43,49 @@ function exec(command, options = {}) {
   }
 }
 
-// Build the Docker image
+// Build the container image
 function buildImage() {
-  console.log('Building Docker image...');
+  const runtimeLabel = containerRuntime.getRuntimeLabel();
+  console.log(`Building container image (${runtimeLabel})...`);
   console.log(`Image: ${fullImageName}`);
   console.log('');
   
-  const buildCommand = `docker build -t ${fullImageName} .`;
+  // Podman fails to push images that still reference library/* base layers because
+  // Docker Hub requests multi-repository auth scopes (e.g. library/node:pull).
+  const runtime = containerRuntime.getRuntime();
+  const squashFlag = runtime.endsWith('podman') ? ' --squash-all' : '';
+  const buildCommand = `${runtime} build${squashFlag} -t ${fullImageName} .`;
   if (!exec(buildCommand)) {
-    console.error('Failed to build Docker image');
+    console.error('Failed to build container image');
     process.exit(1);
   }
   
   console.log('');
-  console.log('✓ Docker image built successfully');
+  console.log(`✓ Container image built successfully (${runtimeLabel})`);
 }
 
 // Tag the image with version and latest
 function tagImage() {
-  console.log('Tagging Docker image...');
+  const runtime = containerRuntime.getRuntime();
+  console.log('Tagging container image...');
   console.log(`  Version tag: ${versionTag}`);
   console.log(`  Latest tag: ${latestTag}`);
   console.log('');
   
   // Tag with version
-  if (!exec(`docker tag ${fullImageName} ${versionTag}`)) {
+  if (!exec(`${runtime} tag ${fullImageName} ${versionTag}`)) {
     console.error('Failed to tag image with version');
     process.exit(1);
   }
   
   // Tag as latest
-  if (!exec(`docker tag ${fullImageName} ${latestTag}`)) {
+  if (!exec(`${runtime} tag ${fullImageName} ${latestTag}`)) {
     console.error('Failed to tag image as latest');
     process.exit(1);
   }
   
   console.log('');
-  console.log('✓ Docker image tagged successfully');
+  console.log('✓ Container image tagged successfully');
 }
 
 // Push image to Docker Hub
@@ -89,19 +96,35 @@ function pushImage(tag = null) {
   console.log(`Repository: ${fullImageName}`);
   console.log('');
   
-  // Check if user is logged in to Docker Hub
+  const runtime = containerRuntime.getRuntime();
+  // Check if the container runtime is available and responsive
   try {
-    execSync('docker info', { stdio: 'pipe' });
+    containerRuntime.runQuiet('info');
   } catch (error) {
-    console.error('Error: Not logged in to Docker Hub');
-    console.error('Please run: docker login');
+    console.error(`Error: ${containerRuntime.getRuntimeLabel()} is not running or not logged in to Docker Hub`);
+    console.error(`Please run: ${containerRuntime.loginHint()}`);
     process.exit(1);
   }
   
+  if (containerRuntime.isPodmanOnWindows()) {
+    console.log('Syncing Docker Hub credentials into Podman VM...');
+    if (!containerRuntime.syncAuthToPodmanMachine()) {
+      process.exit(1);
+    }
+    console.log('');
+  }
+
   for (const imageTag of tagsToPush) {
     console.log(`Pushing ${imageTag}...`);
-    if (!exec(`docker push ${imageTag}`)) {
+    if (!exec(`${runtime} push ${imageTag}`)) {
       console.error(`Failed to push ${imageTag}`);
+      if (containerRuntime.isPodmanOnWindows()) {
+        console.error('');
+        console.error('On Windows, log in on the host (not inside the VM), then retry push:');
+        console.error(`  podman login ${containerRuntime.dockerHubRegistry()} -u <username> -p <access-token>`);
+      } else {
+        console.error(`Please run: ${containerRuntime.loginHint()}`);
+      }
       process.exit(1);
     }
     console.log(`✓ Pushed ${imageTag}`);
@@ -171,6 +194,7 @@ switch (command) {
     console.log('');
     console.log('Environment Variables:');
     console.log('  DOCKER_HUB_USERNAME  Your Docker Hub username (required)');
+    console.log('  CONTAINER_RUNTIME    Use "docker" or "podman" (auto-detected if unset)');
     console.log('');
     console.log('Example:');
     console.log('  export DOCKER_HUB_USERNAME=myusername');

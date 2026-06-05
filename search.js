@@ -18,21 +18,28 @@ async function getCombinedFilteredModels(overrides = {}) {
   const sortSelect = document.getElementById("sort-select");
   const sortOption = sortSelect ? sortSelect.value : "date-desc";
 
-  // Get filter values from the filter menu.
+  // Get filter values from the filter menu (multi-value + query builder filled in below).
   const designer = document.getElementById("designer-select")?.value || "";
   const license = document.getElementById("license-select")?.value || "";
   const parentModel = document.getElementById("parent-select")?.value || "";
   const printStatus = document.getElementById("printed-select")?.value || "all";
+  const newStatus = document.getElementById("new-select")?.value || "all";
   const tagFilter = document.getElementById("tag-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
 
-  // Get current search term from the new search bar in the filter menu.
-  const searchInput = document.getElementById("search-filter-input");
-  const currentSearchTerm = searchInput ? searchInput.value.trim() : "";
+  const activeSearchClauses =
+    typeof window.queryBuilderHasActiveSearchClauses === "function" &&
+    window.queryBuilderHasActiveSearchClauses();
+  const activeMulti =
+    typeof window.queryBuilderHasActiveMultiFilters === "function" &&
+    window.queryBuilderHasActiveMultiFilters();
 
   // Check if any filters are active - if so, we should reset viewingEntireLibrary flag
+  // Draft text in the search box alone does not count until you press search (clauses/tokens).
   const hasActiveFilters = designer || license || parentModel || printStatus !== "all" ||
-                          tagFilter || fileType || currentSearchTerm || window.currentDirectoryFilter || window.dateAddedFilter;
+                          newStatus !== "all" ||
+                          tagFilter || fileType || activeSearchClauses || activeMulti ||
+                          window.currentDirectoryFilter || window.dateAddedFilter;
 
   if (hasActiveFilters && window.viewingEntireLibrary) {
     // Reset the flag since filters are now being applied
@@ -40,24 +47,30 @@ async function getCombinedFilteredModels(overrides = {}) {
     console.log("Reset viewingEntireLibrary flag due to active filters");
   }
 
-  // Construct filters object; allow limit/offset overrides for progressive load
   const filters = {
     sortOption,
-    designer,
     designerInverted: window.invertedFilters?.designer || false,
     dateAdded: window.dateAddedFilter || null,
-    license,
     licenseInverted: window.invertedFilters?.license || false,
-    parentModel,
     parentModelInverted: window.invertedFilters?.parentModel || false,
     printed: printStatus === "all" ? undefined : printStatus,
-    tag: tagFilter,
+    isNew: newStatus === "all" ? undefined : newStatus,
     tagInverted: window.invertedFilters?.tag || false,
     fileType,
-    search: currentSearchTerm,
     searchInverted: window.invertedFilters?.search || false,
     directory: window.currentDirectoryFilter
   };
+  if (typeof window.queryBuilderAppendExtendedFilterFields === "function") {
+    window.queryBuilderAppendExtendedFilterFields(filters);
+  } else {
+    const searchInputValue = (document.getElementById("search-filter-input")?.value || "").trim();
+    const resolvedSearchTerm = searchInputValue || lastSearchTerm || "";
+    filters.designer = designer;
+    filters.license = license;
+    filters.parentModel = parentModel;
+    filters.tag = tagFilter;
+    filters.search = resolvedSearchTerm;
+  }
   if (overrides.limit != null) filters.limit = overrides.limit;
   if (overrides.offset != null) filters.offset = overrides.offset;
 
@@ -85,11 +98,19 @@ async function performCombinedSearch() {
     const license = document.getElementById("license-select")?.value || "";
     const parentModel = document.getElementById("parent-select")?.value || "";
     const printStatus = document.getElementById("printed-select")?.value || "all";
+    const newStatus = document.getElementById("new-select")?.value || "all";
     const tagFilter = document.getElementById("tag-filter")?.value || "";
     const fileType = document.getElementById("filetype-select")?.value || "";
-    const searchTerm = (document.getElementById("search-filter-input")?.value || "").trim();
+    const qbClauses =
+      typeof window.queryBuilderHasActiveSearchClauses === "function" &&
+      window.queryBuilderHasActiveSearchClauses();
+    const qbMulti =
+      typeof window.queryBuilderHasActiveMultiFilters === "function" &&
+      window.queryBuilderHasActiveMultiFilters();
     const noFiltersActive = !designer && !license && !parentModel && printStatus === "all" &&
-      !tagFilter && !fileType && !searchTerm && !window.currentDirectoryFilter && !window.dateAddedFilter;
+      newStatus === "all" &&
+      !tagFilter && !fileType && !qbClauses && !qbMulti &&
+      !window.currentDirectoryFilter && !window.dateAddedFilter;
     
     // Set the filtering flag to prevent concurrent operations
     isFilteringInProgress = true;
@@ -117,15 +138,15 @@ async function performCombinedSearch() {
     // Cannot use SQL LIMIT when tag filter is active — main process applies tags after the query.
     const PROGRESSIVE_INITIAL = 500;
     const PROGRESSIVE_CHUNK = 1200;
-    const useProgressiveFullLibrary = noFiltersActive && !tagFilter;
+    const useProgressiveFullLibrary = noFiltersActive;
 
     let filteredModels;
     if (useProgressiveFullLibrary) {
       filteredModels = await getCombinedFilteredModels({ limit: PROGRESSIVE_INITIAL });
       if (searchGeneration !== myGeneration) return;
       if (filteredModels.length === 0) {
-        const welcomeDialog = document.getElementById('welcome-message');
-        if (welcomeDialog) welcomeDialog.showModal();
+        // Empty library is normal; do not reopen the onboarding welcome dialog here —
+        // that caused a loop (dismiss → search → 0 models → showModal again).
         const viewLibMsg = document.getElementById('view-library-message');
         if (viewLibMsg) viewLibMsg.style.display = 'none';
         updateFilterIndicator(0);
@@ -197,23 +218,53 @@ async function performCombinedSearch() {
   }
 }
 
+/** Clears pill list and hides logic toolbar + clear button without removing persistent #current-filter children. */
+function resetCurrentFilterPanelShell() {
+  const panel = document.getElementById("current-filter");
+  const body = document.getElementById("current-filter-body");
+  const tb = document.getElementById("search-boolean-toolbar");
+  const clearBtn = document.getElementById("clear-all-filters-button");
+  if (body) body.innerHTML = "";
+  if (tb) tb.hidden = true;
+  if (clearBtn) clearBtn.hidden = true;
+  if (panel) panel.classList.remove("visible");
+}
+
 // Function to update the filter indicator with active filters
 function updateFilterIndicator(count) {
   const filterIndicator = document.getElementById("current-filter");
-  if (!filterIndicator) return;
+  const filterBody = document.getElementById("current-filter-body");
+  if (!filterIndicator || !filterBody) return;
   
   // Get active filter values
   const designer = document.getElementById("designer-select")?.value || "";
   const license = document.getElementById("license-select")?.value || "";
   const parentModel = document.getElementById("parent-select")?.value || "";
   const printStatus = document.getElementById("printed-select")?.value || "all";
+  const newStatus = document.getElementById("new-select")?.value || "all";
   const tagFilter = document.getElementById("tag-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
-  const searchTerm = document.getElementById("search-filter-input")?.value.trim() || "";
   const inverted = window.invertedFilters || {};
-  
-  // Check if any filters are active
-  const hasActiveFilters = designer || license || parentModel || printStatus !== "all" || tagFilter || fileType || searchTerm || window.currentDirectoryFilter;
+  const qbClauses =
+    typeof window.queryBuilderHasActiveSearchClauses === "function" &&
+    window.queryBuilderHasActiveSearchClauses();
+  const qbMulti =
+    typeof window.queryBuilderHasActiveMultiFilters === "function" &&
+    window.queryBuilderHasActiveMultiFilters();
+
+  // Draft text in the search box does not show the filter strip until you press search.
+  const hasActiveFilters =
+    designer ||
+    license ||
+    parentModel ||
+    printStatus !== "all" ||
+    newStatus !== "all" ||
+    tagFilter ||
+    fileType ||
+    qbClauses ||
+    qbMulti ||
+    window.currentDirectoryFilter ||
+    window.dateAddedFilter;
   
   // Start with basic count message
   let message = "";
@@ -222,37 +273,146 @@ function updateFilterIndicator(count) {
     message = `<div class="no-results">No models match your filters</div>`;
   } else {
     message = `<div class="filter-count">Showing ${count} models</div>`;
-    
-    // Create a container for filter pills
-    if (hasActiveFilters) {
-      message += `<div class="filter-pills-container">`;
-      
+  }
+
+  if (hasActiveFilters) {
+    message += `<div class="filter-pills-container">`;
+
+      // Search clauses + tag chips: one row that wraps within the sidebar — e.g. Search… AND Tag: 1 AND Tag: 2
+      const esc = (t) =>
+        String(t)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      const escAttr = (t) =>
+        String(t)
+          .replace(/&/g, "&amp;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      const chipTags = (window.multiFilterChips && window.multiFilterChips.tags && window.multiFilterChips.tags.length)
+        ? window.multiFilterChips.tags.slice()
+        : [];
+      const tagVals = chipTags.length ? chipTags : tagFilter ? [tagFilter] : [];
+      const tagsActive = tagVals.length > 0;
+      const tokens =
+        qbClauses && typeof window.queryBuilderReadSearchBoolTokens === "function"
+          ? window.queryBuilderReadSearchBoolTokens()
+          : [];
+      const openSearchTagChain = tokens.length > 0 || tagsActive;
+      const staticAnd = () => {
+        message += `<span class="filter-pill-search-op filter-pill-logic-connector" aria-hidden="true">AND</span>`;
+      };
+      if (openSearchTagChain) {
+        message += `<div class="filter-pills-search-chain">`;
+        const invertLabel = inverted.search ? '<span class="pill-invert">NOT</span>' : "";
+        const isQueryChainOperand = (tok) =>
+          !!(
+            tok &&
+            (tok.t === "clause" ||
+              tok.t === "filter" ||
+              tok.t === "filterMulti")
+          );
+
+        tokens.forEach((tok, i) => {
+          if (tok.t === "op") {
+            message += `<span class="filter-pill filter-pill-search-op" data-filter-type="searchToken" data-token-index="${i}">
+              ${tok.op === "OR" ? "OR" : "AND"}
+              <span class="filter-remove" data-filter-type="searchToken" data-token-index="${i}">×</span>
+            </span>`;
+          } else if (tok.t === "not") {
+            message += `<span class="filter-pill filter-pill-search-op" data-filter-type="searchToken" data-token-index="${i}">
+              NOT
+              <span class="filter-remove" data-filter-type="searchToken" data-token-index="${i}">×</span>
+            </span>`;
+          } else if (tok.t === "clause" && String(tok.value || "").trim()) {
+            const isAll = !tok.field || tok.field === "all";
+            const flab =
+              typeof window.queryBuilderSearchFieldLabel === "function"
+                ? window.queryBuilderSearchFieldLabel(tok.field)
+                : tok.field;
+            const searchLine = isAll
+              ? `Search: &quot;${esc(tok.value)}&quot; ${invertLabel}`
+              : `Search (${esc(flab)}): &quot;${esc(tok.value)}&quot; ${invertLabel}`;
+            message += `<div class="filter-pill filter-pill-search-clause ${inverted.search ? "inverted" : ""}" data-filter-type="searchToken" data-token-index="${i}">
+              ${searchLine}
+              <span class="filter-remove" data-filter-type="searchToken" data-token-index="${i}">×</span>
+            </div>`;
+          } else if (tok.t === "filter" || tok.t === "filterMulti") {
+            const plain =
+              typeof window.queryBuilderSidebarFilterTokenLabel === "function"
+                ? window.queryBuilderSidebarFilterTokenLabel(tok)
+                : "Filter";
+            const invFlip =
+              typeof window.queryBuilderInvertedFilterKindsForAtom === "function" &&
+              window.queryBuilderInvertedFilterKindsForAtom(tok);
+            const invLbl = invFlip ? '<span class="pill-invert">NOT</span>' : "";
+            message += `<div class="filter-pill filter-pill-search-clause filter-pill-query-atom ${invFlip ? "inverted" : ""}" data-filter-type="searchToken" data-token-index="${i}">
+              ${esc(plain)} ${invLbl}
+              <span class="filter-remove" data-filter-type="searchToken" data-token-index="${i}">×</span>
+            </div>`;
+          }
+        });
+        const lastTok = tokens.length ? tokens[tokens.length - 1] : null;
+        if (tagsActive && tokens.length && lastTok && isQueryChainOperand(lastTok)) {
+          staticAnd();
+        }
+        if (tagsActive) {
+          const combine = document.querySelector('input[name="tags-combine"]:checked')?.value || "AND";
+          tagVals.forEach((tv, ti) => {
+            if (ti > 0) staticAnd();
+            const inv = inverted.tag ? '<span class="pill-invert">NOT</span>' : "";
+            const av = escAttr(tv);
+            message += `<div class="filter-pill filter-pill-search-clause filter-pill-tag-chip ${inverted.tag ? "inverted" : ""}" data-filter-type="tagChip" data-tag-value="${av}">
+              Tag: ${esc(tv)} ${inv}
+              <span class="filter-remove" data-filter-type="tagChip" data-tag-value="${av}">×</span>
+            </div>`;
+          });
+          if (tagVals.length > 1) {
+            message += `<span class="filter-pill-tag-combine-hint">(${combine === "AND" ? "all" : "any"})</span>`;
+          }
+        }
+        message += `</div>`;
+      }
+
       // Add designer filter pill if active
-      if (designer) {
-        const displayText = designer === "__none__" ? "No designer" : `Designer: ${designer}`;
+      if (designer || (window.multiFilterChips && (window.multiFilterChips.designer || []).length)) {
+        const list = (window.multiFilterChips && window.multiFilterChips.designer && window.multiFilterChips.designer.length)
+          ? window.multiFilterChips.designer.map((d) => (d === "__none__" ? "No designer" : d)).join(", ")
+          : (designer === "__none__" ? "No designer" : designer);
+        const dMode = (window.multiFilterChips && window.multiFilterChips.designer && window.multiFilterChips.designer.length > 1)
+          ? ` (${document.querySelector('input[name="designer-combine"]:checked')?.value === "AND" ? "all" : "any"})` : "";
         const invertLabel = inverted.designer ? '<span class="pill-invert">NOT</span>' : '';
         message += `<div class="filter-pill ${inverted.designer ? 'inverted' : ''}" data-filter-type="designer">
-          ${displayText} ${invertLabel}
+          Designer: ${list}${dMode} ${invertLabel}
           <span class="filter-remove" data-filter-type="designer">×</span>
         </div>`;
       }
       
       // Add license filter pill if active
-      if (license) {
-        const displayText = license === "__none__" ? "No license" : `License: ${license}`;
+      if (license || (window.multiFilterChips && (window.multiFilterChips.license || []).length)) {
+        const list = (window.multiFilterChips && window.multiFilterChips.license && window.multiFilterChips.license.length)
+          ? window.multiFilterChips.license.map((d) => (d === "__none__" ? "No license" : d)).join(", ")
+          : (license === "__none__" ? "No license" : license);
+        const lMode = (window.multiFilterChips && window.multiFilterChips.license && window.multiFilterChips.license.length > 1)
+          ? ` (${document.querySelector('input[name="license-combine"]:checked')?.value === "AND" ? "all" : "any"})` : "";
         const invertLabel = inverted.license ? '<span class="pill-invert">NOT</span>' : '';
         message += `<div class="filter-pill ${inverted.license ? 'inverted' : ''}" data-filter-type="license">
-          ${displayText} ${invertLabel}
+          License: ${list}${lMode} ${invertLabel}
           <span class="filter-remove" data-filter-type="license">×</span>
         </div>`;
       }
       
       // Add parent model filter pill if active
-      if (parentModel) {
-        const displayText = parentModel === "__none__" ? "No parent model" : `Parent: ${parentModel}`;
+      if (parentModel || (window.multiFilterChips && (window.multiFilterChips.parentModel || []).length)) {
+        const list = (window.multiFilterChips && window.multiFilterChips.parentModel && window.multiFilterChips.parentModel.length)
+          ? window.multiFilterChips.parentModel.map((d) => (d === "__none__" ? "No parent" : d)).join(", ")
+          : (parentModel === "__none__" ? "No parent model" : parentModel);
+        const pMode = (window.multiFilterChips && window.multiFilterChips.parentModel && window.multiFilterChips.parentModel.length > 1)
+          ? ` (${document.querySelector('input[name="parentModel-combine"]:checked')?.value === "AND" ? "all" : "any"})` : "";
         const invertLabel = inverted.parentModel ? '<span class="pill-invert">NOT</span>' : '';
         message += `<div class="filter-pill ${inverted.parentModel ? 'inverted' : ''}" data-filter-type="parentModel">
-          ${displayText} ${invertLabel}
+          Parent: ${list}${pMode} ${invertLabel}
           <span class="filter-remove" data-filter-type="parentModel">×</span>
         </div>`;
       }
@@ -265,30 +425,22 @@ function updateFilterIndicator(count) {
           <span class="filter-remove" data-filter-type="printStatus">×</span>
         </div>`;
       }
-      
-      // Add tag filter pill if active
-      if (tagFilter) {
-        const invertLabel = inverted.tag ? '<span class="pill-invert">NOT</span>' : '';
-        message += `<div class="filter-pill ${inverted.tag ? 'inverted' : ''}" data-filter-type="tagFilter">
-          Tag: ${tagFilter} ${invertLabel}
-          <span class="filter-remove" data-filter-type="tagFilter">×</span>
+
+      if (newStatus !== "all") {
+        const displayText = newStatus === "new" ? "New models only" : "Exclude new models";
+        message += `<div class="filter-pill" data-filter-type="newStatus">
+          ${displayText}
+          <span class="filter-remove" data-filter-type="newStatus">×</span>
         </div>`;
       }
+      
+      // Tags are rendered in filter-pills-search-chain (per-tag AND Tag: n); skip merged pill here
       
       // Add file type filter pill if active
       if (fileType) {
         message += `<div class="filter-pill" data-filter-type="fileType">
           Type: ${fileType}
           <span class="filter-remove" data-filter-type="fileType">×</span>
-        </div>`;
-      }
-      
-      // Add search term pill if active
-      if (searchTerm) {
-        const invertLabel = inverted.search ? '<span class="pill-invert">NOT</span>' : '';
-        message += `<div class="filter-pill ${inverted.search ? 'inverted' : ''}" data-filter-type="searchTerm">
-          Search: "${searchTerm}" ${invertLabel}
-          <span class="filter-remove" data-filter-type="searchTerm">×</span>
         </div>`;
       }
       
@@ -299,40 +451,46 @@ function updateFilterIndicator(count) {
           <span class="filter-remove" data-filter-type="directory">×</span>
         </div>`;
       }
-      
-      message += `</div>`;
-    }
+
+    message += `</div>`;
   }
-  
-  // Add clear all filters button if any filters are active
+
+  const searchBoolToolbar = document.getElementById("search-boolean-toolbar");
+  const clearFilterButton = document.getElementById("clear-all-filters-button");
+
   if (hasActiveFilters) {
-    message += `<button class="clear-filter-button">Clear All Filters</button>`;
-    
-    // Only show the filter indicator if there are active filters
-    filterIndicator.innerHTML = message;
-    filterIndicator.classList.add('visible');
+    filterBody.innerHTML = message;
+    filterIndicator.classList.add("visible");
+    if (searchBoolToolbar) searchBoolToolbar.hidden = false;
+    if (clearFilterButton) clearFilterButton.hidden = false;
   } else {
-    // Hide the filter indicator when no filters are active
-    filterIndicator.innerHTML = "";
-    filterIndicator.classList.remove('visible');
+    filterBody.innerHTML = "";
+    filterIndicator.classList.remove("visible");
+    if (searchBoolToolbar) searchBoolToolbar.hidden = true;
+    if (clearFilterButton) clearFilterButton.hidden = true;
   }
-  
-  // Add event listener to clear all filters button
-  const clearFilterButton = filterIndicator.querySelector('.clear-filter-button');
+
   if (clearFilterButton) {
-    clearFilterButton.addEventListener('click', async () => {
+    clearFilterButton.onclick = async () => {
       // Reset all filter dropdowns
       if (designer) document.getElementById("designer-select").value = "";
       if (license) document.getElementById("license-select").value = "";
       if (parentModel) document.getElementById("parent-select").value = "";
       if (printStatus !== "all") document.getElementById("printed-select").value = "all";
+      if (newStatus !== "all") document.getElementById("new-select").value = "all";
       if (tagFilter) document.getElementById("tag-filter").value = "";
       if (fileType) document.getElementById("filetype-select").value = "";
+      if (typeof window.queryBuilderClearAllMultiChips === "function") {
+        window.queryBuilderClearAllMultiChips();
+      }
+      if (typeof window.clearSearchClauseList === "function") {
+        window.clearSearchClauseList();
+      }
       
       // Clear the search input and update its clear button
       const searchInput = document.getElementById("search-filter-input");
       const clearSearchButton = document.getElementById("clear-filter-search-button");
-      if (searchInput && searchTerm) {
+      if (searchInput) {
         searchInput.value = "";
         if (clearSearchButton) {
           clearSearchButton.style.display = "none";
@@ -349,9 +507,7 @@ function updateFilterIndicator(count) {
       // Clear the last search term
       lastSearchTerm = "";
       
-      // Reset the filter indicator immediately so UI feels responsive
-      filterIndicator.innerHTML = "";
-      filterIndicator.classList.remove('visible');
+      resetCurrentFilterPanelShell();
 
       // Clear inverted flags
       if (window.invertedFilters) {
@@ -368,11 +524,10 @@ function updateFilterIndicator(count) {
         window.resetFilterSelectionAndDetails();
       }
       await performCombinedSearch();
-    });
+    };
   }
-  
-  // Add event listeners to individual filter remove buttons
-  const removeButtons = filterIndicator.querySelectorAll('.filter-remove');
+
+  const removeButtons = filterBody.querySelectorAll(".filter-remove");
   removeButtons.forEach(button => {
     button.addEventListener('click', async (e) => {
       const filterType = e.target.dataset.filterType;
@@ -381,23 +536,57 @@ function updateFilterIndicator(count) {
       switch (filterType) {
         case 'designer':
           document.getElementById("designer-select").value = "";
+          if (window.multiFilterChips) window.multiFilterChips.designer = [];
+          if (typeof window.queryBuilderRenderMultiChips === "function") {
+            window.queryBuilderRenderMultiChips("designer");
+          }
           if (window.invertedFilters) window.invertedFilters.designer = false;
           break;
         case 'license':
           document.getElementById("license-select").value = "";
+          if (window.multiFilterChips) window.multiFilterChips.license = [];
+          if (typeof window.queryBuilderRenderMultiChips === "function") {
+            window.queryBuilderRenderMultiChips("license");
+          }
           if (window.invertedFilters) window.invertedFilters.license = false;
           break;
         case 'parentModel':
           document.getElementById("parent-select").value = "";
+          if (window.multiFilterChips) window.multiFilterChips.parentModel = [];
+          if (typeof window.queryBuilderRenderMultiChips === "function") {
+            window.queryBuilderRenderMultiChips("parentModel");
+          }
           if (window.invertedFilters) window.invertedFilters.parentModel = false;
           break;
         case 'printStatus':
           document.getElementById("printed-select").value = "all";
           break;
+        case 'newStatus':
+          document.getElementById("new-select").value = "all";
+          break;
         case 'tagFilter':
           document.getElementById("tag-filter").value = "";
+          if (window.multiFilterChips) window.multiFilterChips.tags = [];
+          if (typeof window.queryBuilderRenderMultiChips === "function") {
+            window.queryBuilderRenderMultiChips("tags");
+          }
           if (window.invertedFilters) window.invertedFilters.tag = false;
           break;
+        case "tagChip": {
+          const raw = e.target.getAttribute("data-tag-value");
+          if (raw != null && typeof window.queryBuilderRemoveMultiFilterChip === "function") {
+            window.queryBuilderRemoveMultiFilterChip("tags", raw);
+          }
+          const tagSel = document.getElementById("tag-filter");
+          if (tagSel && tagSel.value === raw) tagSel.value = "";
+          if (typeof window.queryBuilderRenderMultiChips === "function") {
+            window.queryBuilderRenderMultiChips("tags");
+          }
+          const left = (window.multiFilterChips && window.multiFilterChips.tags && window.multiFilterChips.tags.length) || 0;
+          const selLeft = tagSel && tagSel.value ? String(tagSel.value).trim() : "";
+          if (!left && !selLeft && window.invertedFilters) window.invertedFilters.tag = false;
+          break;
+        }
         case 'fileType':
           document.getElementById("filetype-select").value = "";
           break;
@@ -410,8 +599,19 @@ function updateFilterIndicator(count) {
               clearSearchButton.style.display = "none";
             }
           }
+          if (typeof window.clearSearchClauseList === "function") {
+            window.clearSearchClauseList();
+          }
           if (window.invertedFilters) window.invertedFilters.search = false;
           break;
+        case "searchToken": {
+          const idx = parseInt(e.target.getAttribute("data-token-index"), 10);
+          if (!Number.isNaN(idx) && typeof window.removeSearchTokenAt === "function") {
+            window.removeSearchTokenAt(idx);
+          }
+          if (window.invertedFilters) window.invertedFilters.search = false;
+          break;
+        }
         case 'directory':
           window.currentDirectoryFilter = "";
           break;
@@ -424,6 +624,7 @@ function updateFilterIndicator(count) {
       await performCombinedSearch();
     });
   });
+
 }
 
 async function initializeCombinedSearch() {
@@ -444,6 +645,7 @@ async function initializeCombinedSearch() {
     'license-select',
     'parent-select',
     'printed-select',
+    'new-select',
     'tag-filter',
     'filetype-select'
   ];
@@ -515,9 +717,47 @@ async function initializeCombinedSearch() {
         if (window._suppressFilterEvents) {
           return;
         }
-        
+
+        let consumedAwaitingTag = false;
+        if (elementId === "tag-filter") {
+          const raw = (e.target.value || "").trim();
+          if (raw) {
+            if (
+              typeof window.queryBuilderTryConsumeAwaitingTagPick === "function" &&
+              window.queryBuilderTryConsumeAwaitingTagPick(raw)
+            ) {
+              consumedAwaitingTag = true;
+              e.target.value = "";
+            } else if (typeof window.addMultiTagFilter === "function") {
+              window.addMultiTagFilter(raw);
+              e.target.value = "";
+            }
+          } else if (window.multiFilterChips && (window.multiFilterChips.tags || []).length) {
+            window.multiFilterChips.tags = [];
+            if (typeof window.queryBuilderRenderMultiChips === "function") {
+              window.queryBuilderRenderMultiChips("tags");
+            }
+          }
+        }
+
         console.log(`Filter changed: ${elementId} = ${e.target.value}`);
-        
+
+        let consumedAwaitingFilter = false;
+        if (
+          elementId !== "tag-filter" &&
+          typeof window.queryBuilderTryConsumeAwaitingFilterFromElement === "function"
+        ) {
+          consumedAwaitingFilter = window.queryBuilderTryConsumeAwaitingFilterFromElement(elementId);
+        }
+
+        if (
+          !consumedAwaitingTag &&
+          !consumedAwaitingFilter &&
+          typeof window.queryBuilderDismissSearchAwaiting === "function"
+        ) {
+          window.queryBuilderDismissSearchAwaiting();
+        }
+
         // If dateAddedFilter is active, only clear it if user manually changed a filter
         // (not when we're programmatically setting it via _suppressFilterEvents)
         if (window.dateAddedFilter && !window._suppressFilterEvents) {
@@ -541,7 +781,15 @@ async function initializeCombinedSearch() {
   });
 
   searchButton.addEventListener("click", async () => {
-    console.log("Filter search button clicked with term:", searchInput.value);
+    const raw = searchInput.value.trim();
+    lastSearchTerm = raw;
+    console.log("Filter search button clicked with term:", raw);
+    if (raw && typeof window.appendSearchClauseFromSidebar === "function") {
+      window.appendSearchClauseFromSidebar("all", raw);
+      searchInput.value = "";
+      clearButton.classList.add("hidden");
+      clearButton.style.display = "none";
+    }
     // Clear dateAddedFilter when user searches
     if (window.dateAddedFilter) {
       console.log('User performed search, clearing dateAddedFilter');
@@ -573,8 +821,13 @@ async function initializeCombinedSearch() {
   clearButton.addEventListener("click", async () => {
     console.log("Clear filter search button clicked");
     searchInput.value = "";
+    lastSearchTerm = "";
     clearButton.classList.add("hidden");
     clearButton.style.display = "none";
+    if (typeof window.clearSearchClauseList === "function") {
+      window.clearSearchClauseList();
+    }
+    if (window.invertedFilters) window.invertedFilters.search = false;
     if (typeof window.resetFilterSelectionAndDetails === 'function') {
       window.resetFilterSelectionAndDetails();
     }
@@ -591,11 +844,45 @@ async function initializeCombinedSearch() {
       clearButton.style.display = "none";
     }
   });
+
+  const wireSearchBoolLink = (id, fn) => {
+    const el = document.getElementById(id);
+    if (!el || typeof fn !== "function") return;
+    el.addEventListener("click", async (e) => {
+      e.preventDefault();
+      if (el.getAttribute("aria-disabled") === "true") return;
+      fn();
+      if (typeof window.resetFilterSelectionAndDetails === "function") {
+        window.resetFilterSelectionAndDetails();
+      }
+      await performCombinedSearch();
+    });
+  };
+  wireSearchBoolLink("search-add-and-btn", () => {
+    if (typeof window.appendSearchBoolOp === "function") window.appendSearchBoolOp("AND");
+  });
+  wireSearchBoolLink("search-add-or-btn", () => {
+    if (typeof window.appendSearchBoolOp === "function") window.appendSearchBoolOp("OR");
+  });
+  wireSearchBoolLink("search-add-not-btn", () => {
+    if (typeof window.appendSearchBoolNot === "function") window.appendSearchBoolNot();
+  });
+
+  if (typeof window.queryBuilderWireMultiFilterUI === "function") {
+    window.queryBuilderWireMultiFilterUI();
+  }
+  if (typeof window.queryBuilderWireSearchQueryBuilder === "function") {
+    window.queryBuilderWireSearchQueryBuilder();
+  }
+  if (typeof window.queryBuilderInitState === "function") {
+    window.queryBuilderInitState();
+  }
 }
 
 // Attach functions to the global window object IMMEDIATELY
 // This ensures they're available before renderer.js tries to use them
 window.getCombinedFilteredModels = getCombinedFilteredModels;
+window.resetCurrentFilterPanelShell = resetCurrentFilterPanelShell;
 window.updateFilterIndicator = updateFilterIndicator;
 window.performCombinedSearch = performCombinedSearch;
 window.initializeCombinedSearch = initializeCombinedSearch;
@@ -624,6 +911,7 @@ function toggleFilterControls(enabled) {
     'license-select',
     'parent-select',
     'printed-select',
+    'new-select',
     'tag-filter',
     'filetype-select',
     'sort-select',
@@ -668,4 +956,22 @@ function toggleFilterControls(enabled) {
       }
     }
   });
+
+  document
+    .querySelectorAll(
+      "#search-add-and-btn, #search-add-or-btn, #search-add-not-btn, .filter-combine-row input"
+    )
+    .forEach((el) => {
+      if (!el) return;
+      if (el.tagName === "A" && el.classList.contains("search-boolean-op-link")) {
+        el.setAttribute("aria-disabled", enabled ? "false" : "true");
+        el.tabIndex = enabled ? 0 : -1;
+        if (enabled) el.classList.remove("disabled-during-loading");
+        else el.classList.add("disabled-during-loading");
+        return;
+      }
+      el.disabled = !enabled;
+      if (enabled) el.classList.remove("disabled-during-loading");
+      else el.classList.add("disabled-during-loading");
+    });
 }

@@ -30,10 +30,12 @@ cp renderer.js "${DOCKER_DIST_DIR}/"
 cp index.html "${DOCKER_DIST_DIR}/"
 cp favicon.ico "${DOCKER_DIST_DIR}/" 2>/dev/null || true
 cp styles.css "${DOCKER_DIST_DIR}/"
+cp preview-wall.css "${DOCKER_DIST_DIR}/"
 cp server-bridge.js "${DOCKER_DIST_DIR}/"
 cp scan-worker.js "${DOCKER_DIST_DIR}/"
 cp parse-worker.js "${DOCKER_DIST_DIR}/"
 cp preview.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
+cp query-builder.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
 cp preview-3mf-worker-node.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
 cp threemf-loader-simple.js "${DOCKER_DIST_DIR}/" 2>/dev/null || true
 cp aitagging.js "${DOCKER_DIST_DIR}/"

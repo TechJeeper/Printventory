@@ -252,7 +252,17 @@ document.addEventListener("DOMContentLoaded", () => {
   // After the welcome dialog is dismissed, automatically show the guide.
   const dismissWelcomeButton = document.getElementById("dismiss-welcome");
   if (dismissWelcomeButton) {
-    dismissWelcomeButton.addEventListener("click", () => {
+    dismissWelcomeButton.addEventListener("click", async () => {
+      try {
+        const hasSeenQuickStartGuide = await window.electron.getSetting("hasSeenQuickStartGuide");
+        if (hasSeenQuickStartGuide) {
+          return;
+        }
+        await window.electron.saveSetting("hasSeenQuickStartGuide", "true");
+      } catch (error) {
+        console.warn("Unable to read/save hasSeenQuickStartGuide setting:", error);
+      }
+
       // Give a small delay so the welcome dialog can close.
       setTimeout(() => {
         showGuide();

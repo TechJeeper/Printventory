@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.1.0",
+  "version": "2.1.4",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -21,6 +21,7 @@
     "docker:push:latest": "node scripts/docker-hub-push.js push-latest",
     "docker:hub:all": "node scripts/docker-hub-push.js all",
     "zip:macos": "powershell -ExecutionPolicy Bypass -File scripts/zip-macos-build.ps1",
+    "build:mac:remote": "powershell -ExecutionPolicy Bypass -File scripts/build-mac-remote.ps1",
     "zip:github-source": "node scripts/create-github-source-zip.js",
     "postinstall": "electron-builder install-app-deps"
   },
@@ -105,6 +106,7 @@
       "renderer.js",
       "index.html",
       "styles.css",
+      "preview-wall.css",
       "logo.png",
       "dup.png",
       "roulette.png",
@@ -113,6 +115,7 @@
       "slicer.js",
       "guide.js",
       "preview.js",
+      "query-builder.js",
       "preview-3mf-worker-node.js",
       "threemf-loader-simple.js",
       "3d.png",

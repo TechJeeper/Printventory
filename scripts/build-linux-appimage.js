@@ -2,6 +2,7 @@ const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const containerRuntime = require('./container-runtime');
 
 const projectRoot = path.join(__dirname, '..');
 const distDir = path.join(projectRoot, 'dist');
@@ -19,25 +20,38 @@ function removeGeneratedDockerfile(dockerfilePath) {
 
 console.log('Building Linux AppImage from Windows...\n');
 
-// Check if WSL is available
+// Check if WSL is available with a dev-friendly distro (not Podman Machine's minimal VM)
 function checkWSL() {
   try {
     execSync('wsl --list --quiet', { stdio: 'ignore' });
+    const defaultDistro = execSync('wsl --list --quiet', { encoding: 'utf8', shell: true })
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\*\s*/, '').trim())
+      .find(Boolean);
+    if (defaultDistro && defaultDistro.toLowerCase().includes('podman-machine')) {
+      return false;
+    }
     return true;
   } catch (error) {
     return false;
   }
 }
 
-// Check if Docker is available
-function checkDocker() {
+function getWslInstallHint() {
   try {
-    execSync('docker --version', { stdio: 'ignore' });
-    return true;
-  } catch (error) {
-    return false;
+    const osRelease = execSync('wsl cat /etc/os-release 2>/dev/null', { encoding: 'utf8', shell: true });
+    if (/ID=fedora|ID=rhel|ID=centos|ID=rocky|ID=almalinux/i.test(osRelease)) {
+      return '  wsl sudo dnf install -y nodejs npm';
+    }
+    if (/ID=arch|ID=manjaro/i.test(osRelease)) {
+      return '  wsl sudo pacman -S nodejs npm';
+    }
+  } catch (_) {
+    // ignore
   }
+  return '  wsl sudo apt-get update\n  wsl sudo apt-get install -y nodejs npm';
 }
+
 
 // Convert Windows path to WSL path
 function toWSLPath(winPath) {
@@ -62,8 +76,9 @@ function buildWithWSL() {
   } catch (error) {
     console.error('ERROR: Node.js not found in WSL.');
     console.error('Please install Node.js in your WSL distribution:');
-    console.error('  wsl sudo apt-get update');
-    console.error('  wsl sudo apt-get install -y nodejs npm');
+    console.error(getWslInstallHint());
+    console.error('\nTip: Podman Machine\'s WSL VM is not a dev environment. Prefer container build:');
+    console.error('  Ensure Podman/Docker is available (Podman Desktop adds podman to PATH), or use a Ubuntu WSL distro.');
     process.exit(1);
   }
   
@@ -126,9 +141,11 @@ function buildWithWSL() {
   }
 }
 
-// Build using Docker
-function buildWithDocker() {
-  console.log('Using Docker for Linux build...\n');
+// Build using Docker or Podman
+function buildWithContainer() {
+  const runtime = containerRuntime.getRuntime();
+  const runtimeLabel = containerRuntime.getRuntimeLabel();
+  console.log(`Using ${runtimeLabel} for Linux build...\n`);
   
   // Create a temporary Dockerfile for building
   const dockerfileContent = `FROM node:20-slim
@@ -195,26 +212,27 @@ RUN npm run build:linux:internal
     fs.writeFileSync(dockerfilePath, dockerfileContent, 'utf8');
   }
 
-  console.log('Building Docker image for Linux build...');
+  console.log(`Building ${runtimeLabel} image for Linux build...`);
   try {
-    // Use cwd + relative -f so Docker Desktop (WSL2 backend) resolves the Dockerfile reliably;
+    // Use cwd + relative -f so Docker Desktop / Podman Machine (WSL2 backend) resolves the Dockerfile reliably;
     // absolute Windows paths to -f often fail with "no such file" / tiny dockerfile transfer.
-    execSync(`docker build -f ${DOCKERFILE_NAME} -t printventory-linux-builder .`, {
+    execSync(`${runtime} build -f ${DOCKERFILE_NAME} -t printventory-linux-builder .`, {
       stdio: 'inherit',
       cwd: projectRoot,
+      shell: true,
     });
   } catch (error) {
-    console.error('Failed to build Docker image');
+    console.error(`Failed to build ${runtimeLabel} image`);
     if (!hadDockerfile) removeGeneratedDockerfile(dockerfilePath);
     process.exit(1);
   }
   
-  console.log('\nRunning build in Docker container...');
+  console.log(`\nRunning build in ${runtimeLabel} container...`);
   const containerName = `printventory-linux-builder-${Date.now()}`;
   
   try {
     // Run the build
-    execSync(`docker run --name "${containerName}" printventory-linux-builder`, { stdio: 'inherit' });
+    execSync(`${runtime} run --name "${containerName}" printventory-linux-builder`, { stdio: 'inherit', shell: true });
     
     // Create dist directory if it doesn't exist
     if (!fs.existsSync(distDir)) {
@@ -227,7 +245,8 @@ RUN npm run build:linux:internal
     if (fs.existsSync(tempDist)) {
       fs.rmSync(tempDist, { recursive: true, force: true });
     }
-    execSync(`docker cp "${containerName}:/app/dist" "${tempDist}"`, { stdio: 'inherit' });
+    const hostDistPath = containerRuntime.usesWsl() ? toWSLPath(tempDist) : tempDist;
+    execSync(`${runtime} cp "${containerName}:/app/dist" "${hostDistPath}"`, { stdio: 'inherit', shell: true });
     
     // Merge contents into actual dist directory
     if (fs.existsSync(distDir)) {
@@ -265,7 +284,7 @@ RUN npm run build:linux:internal
     
     // Cleanup
     console.log('Cleaning up container...');
-    execSync(`docker rm "${containerName}"`, { stdio: 'ignore' });
+    execSync(`${runtime} rm "${containerName}"`, { stdio: 'ignore', shell: true });
     if (!hadDockerfile) removeGeneratedDockerfile(dockerfilePath);
 
     console.log('\n✓ Build completed successfully!');
@@ -274,7 +293,7 @@ RUN npm run build:linux:internal
     console.error('\n✗ Build failed!');
     // Try to cleanup on error
     try {
-      execSync(`docker rm "${containerName}"`, { stdio: 'ignore' });
+      execSync(`${runtime} rm "${containerName}"`, { stdio: 'ignore', shell: true });
     } catch (e) {}
     if (!hadDockerfile) removeGeneratedDockerfile(dockerfilePath);
     process.exit(1);
@@ -283,17 +302,20 @@ RUN npm run build:linux:internal
 
 // Main execution
 function main() {
-  if (checkDocker()) {
-    buildWithDocker();
+  if (containerRuntime.isAvailable()) {
+    buildWithContainer();
   } else if (checkWSL()) {
     buildWithWSL();
   } else {
-    console.error('ERROR: Neither Docker nor WSL is available.');
+    console.error('ERROR: No container runtime (Docker/Podman) or WSL dev distro is available.');
     console.error('\nTo build Linux AppImage from Windows, you need one of:');
-    console.error('1. Docker Desktop - Recommended');
-    console.error('   Install: https://www.docker.com/products/docker-desktop');
-    console.error('\n2. WSL (Windows Subsystem for Linux)');
-    console.error('   Install: wsl --install');
+    console.error('1. Docker Desktop or Podman - Recommended');
+    console.error('   Docker: https://www.docker.com/products/docker-desktop');
+    console.error('   Podman: https://podman.io/getting-started/installation');
+    console.error('   Optional: set CONTAINER_RUNTIME=podman or CONTAINER_RUNTIME=docker');
+    console.error('   (Podman inside WSL/Podman Machine is detected automatically)');
+    console.error('\n2. A full WSL Linux distro (e.g. Ubuntu), not Podman Machine alone');
+    console.error('   Install: wsl --install -d Ubuntu');
     console.error('   Then install Node.js in WSL: sudo apt-get install nodejs npm');
     process.exit(1);
   }

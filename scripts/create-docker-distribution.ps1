@@ -36,10 +36,12 @@ if (Test-Path "favicon.ico") {
     Copy-Item "favicon.ico" $dockerDistDir
 }
 Copy-Item "styles.css" $dockerDistDir
+Copy-Item "preview-wall.css" $dockerDistDir
 Copy-Item "server-bridge.js" $dockerDistDir
 Copy-Item "scan-worker.js" $dockerDistDir
 Copy-Item "parse-worker.js" $dockerDistDir
 Copy-Item "preview.js" $dockerDistDir -ErrorAction SilentlyContinue
+Copy-Item "query-builder.js" $dockerDistDir -ErrorAction SilentlyContinue
 Copy-Item "preview-3mf-worker-node.js" $dockerDistDir -ErrorAction SilentlyContinue
 Copy-Item "threemf-loader-simple.js" $dockerDistDir -ErrorAction SilentlyContinue
 Copy-Item "aitagging.js" $dockerDistDir
