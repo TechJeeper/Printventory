@@ -5,6 +5,7 @@
   "main": "main.js",
   "scripts": {
     "test": "playwright test",
+    "test:bundle": "node bundle-keys.test.js",
     "start": "electron .",
     "start:server": "electron . --server",
     "build": "electron-builder -mw",
@@ -102,6 +103,7 @@
     },
     "files": [
       "main.js",
+      "bundle-keys.js",
       "preload.js",
       "renderer.js",
       "index.html",

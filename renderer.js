@@ -1403,6 +1403,59 @@ function pruneZipArchiveExpandedGroups(models) {
   }
 }
 
+function deriveBundleFieldsForModel(model) {
+  const filePath = model?.filePath || '';
+  if (!filePath || filePath.startsWith('url::')) {
+    return { bundleKey: '', bundleLabel: '', bundleKind: '' };
+  }
+  if (filePath.includes('::')) {
+    const zipPath = filePath.split('::')[0];
+    const normalized = normalizePathForComparison(zipPath).toLowerCase();
+    const parts = normalized.split('/').filter(Boolean);
+    const label = parts.length ? parts[parts.length - 1] : zipPath;
+    return { bundleKey: `zip:${normalized}`, bundleLabel: label, bundleKind: 'zip' };
+  }
+  const normalized = normalizePathForComparison(filePath);
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    return { bundleKey: '', bundleLabel: '', bundleKind: '' };
+  }
+  parts.pop();
+  const dir = parts.join('/').toLowerCase();
+  const label = parts[parts.length - 1] || dir;
+  return { bundleKey: `folder:${dir}`, bundleLabel: label, bundleKind: 'folder' };
+}
+
+function getBundleGroupLabel(model) {
+  if (model?.bundleLabel) return String(model.bundleLabel).trim();
+  return deriveBundleFieldsForModel(model).bundleLabel;
+}
+
+function getBundleGroupKey(model) {
+  if (model?.bundleKey) return String(model.bundleKey).trim().toLowerCase();
+  return deriveBundleFieldsForModel(model).bundleKey;
+}
+
+function pruneBundleExpandedGroups(models) {
+  if (!bundleExpandedGroups.size) return;
+  const pathSets = new Map();
+  for (const model of models || []) {
+    const bundleKey = getBundleGroupKey(model);
+    if (!bundleKey) continue;
+    const gk = `bundle:${bundleKey}`;
+    const pathKey = normalizePathForComparison(model.filePath || '');
+    if (!pathKey) continue;
+    if (!pathSets.has(gk)) pathSets.set(gk, new Set());
+    pathSets.get(gk).add(pathKey);
+  }
+  for (const key of [...bundleExpandedGroups]) {
+    const set = pathSets.get(key);
+    if (!set || set.size < 2) {
+      bundleExpandedGroups.delete(key);
+    }
+  }
+}
+
 /** Merge fresh model into virtual grid's currentModels when paths match (normalized). */
 function mergeModelIntoGridCurrentModels(model) {
   const container = document.querySelector('.file-grid');
@@ -2388,6 +2441,8 @@ async function showModelDetails(filePath) {
     }
     
     if (!model) return;
+
+    hideBundleDetailsPanel();
 
     // Get the details panel reference
     const detailsPanel = document.getElementById('model-details');
@@ -10693,10 +10748,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (hasNodeAccess) {
             try {
               const { exec } = require('child_process');
-              let modelPath = filePath;
-              
-              // Handle zip entries - for now show instructions (would need extraction)
-              if (isZipEntry && zipPath && entryPath) {
+              const rawPaths = Array.isArray(commandData.filePaths) && commandData.filePaths.length
+                ? commandData.filePaths
+                : [filePath];
+              const modelPaths = isZipEntry && zipPath && entryPath && rawPaths.length === 1
+                ? null
+                : rawPaths.filter(Boolean);
+
+              if (!modelPaths) {
                 alert(`To open a file from a ZIP archive in your slicer:\n\n` +
                   `1. Download the ZIP file: ${zipPath}\n` +
                   `2. Extract ${entryPath} from the ZIP\n` +
@@ -10704,20 +10763,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                   `Slicer: ${slicerPath}`);
                 return;
               }
-              
-              // Construct command based on platform
-              let command;
-              if (process.platform === 'darwin' && slicerPath.toLowerCase().endsWith('.app')) {
-                command = `open -a "${slicerPath}" --args "${modelPath}"`;
-              } else {
-                command = `"${slicerPath}" "${modelPath}"`;
-              }
+
+              const command = buildSlicerLaunchCommand(slicerPath, modelPaths);
               
               exec(command, (error, stdout, stderr) => {
                 if (error) {
                   console.error('Error executing slicer on client:', error);
                   alert(`Error opening file in ${slicerName}:\n${error.message}\n\n` +
-                    `File: ${modelPath}\n` +
+                    `File(s): ${modelPaths.join(', ')}\n` +
                     `Slicer: ${slicerPath}\n\n` +
                     `Please try opening the file manually.`);
                 } else {
@@ -10742,6 +10795,37 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error handling client command:', error);
     }
   });
+
+  function escapeSlicerShellArg(filePath) {
+    return `"${String(filePath).replace(/"/g, '\\"')}"`;
+  }
+
+  function getDarwinSlicerAppBundlePath(slicerPath) {
+    if (!slicerPath || process.platform !== 'darwin') return null;
+    const normalized = String(slicerPath).replace(/\\/g, '/');
+    if (/\.app$/i.test(normalized)) return normalized;
+    const match = normalized.match(/^(.*?\.app)\//i);
+    return match ? match[1] : null;
+  }
+
+  function isPrusaFamilySlicerPath(slicerPath) {
+    const base = String(slicerPath).split(/[/\\]/).pop().toLowerCase();
+    return /bambu|orca|prusa|superslicer|slic3r/.test(base);
+  }
+
+  function buildSlicerLaunchCommand(slicerPath, modelPaths) {
+    const paths = (Array.isArray(modelPaths) ? modelPaths : [modelPaths]).filter(Boolean);
+    const escapedPaths = paths.map(escapeSlicerShellArg).join(' ');
+    const appBundle = getDarwinSlicerAppBundlePath(slicerPath);
+    if (appBundle) {
+      return `open -n -a ${escapeSlicerShellArg(appBundle)} --args ${escapedPaths}`;
+    }
+    let command = escapeSlicerShellArg(slicerPath);
+    if (isPrusaFamilySlicerPath(slicerPath)) {
+      command += ' --single-instance=0';
+    }
+    return `${command} ${escapedPaths}`;
+  }
 
   // Helper function to show slicer instructions
   function showSlicerInstructions(filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath) {
@@ -18987,6 +19071,7 @@ function isProgressiveModelListExtension(prevModels, nextModels) {
 
 const parentModelExpandedGroups = new Set();
 const zipArchiveExpandedGroups = new Set();
+const bundleExpandedGroups = new Set();
 let groupThumbnailPreferencesLoaded = false;
 let groupThumbnailPreferencesLoading = null;
 const groupThumbnailPreferences = {};
@@ -19165,15 +19250,15 @@ function buildParentModelDisplayRecords(models) {
     });
   });
 
-  const zipGroupedRecords = buildGroupedDisplayRecords(records, {
-    groupKind: 'zip',
-    keyPrefix: 'zip',
-    expandedSet: zipArchiveExpandedGroups,
-    getGroupLabelFromModel: getZipArchiveGroupLabel,
-    getGroupKeyFromModel: getZipArchiveGroupKey
+  const bundleGroupedRecords = buildGroupedDisplayRecords(records, {
+    groupKind: 'bundle',
+    keyPrefix: 'bundle',
+    expandedSet: bundleExpandedGroups,
+    getGroupLabelFromModel: getBundleGroupLabel,
+    getGroupKeyFromModel: getBundleGroupKey
   });
 
-  return buildGroupedDisplayRecords(zipGroupedRecords, {
+  return buildGroupedDisplayRecords(bundleGroupedRecords, {
     groupKind: 'parentModel',
     keyPrefix: 'parent',
     expandedSet: parentModelExpandedGroups,
@@ -19466,6 +19551,168 @@ async function collectThumbnailsForGroup(groupRecord) {
   return thumbnails;
 }
 
+function getBundleContainerPath(groupRecord) {
+  const first = groupRecord?.children?.[0];
+  if (!first?.filePath) {
+    return { path: '', kind: 'folder' };
+  }
+  const bundleKind = first.bundleKind || deriveBundleFieldsForModel(first).bundleKind;
+  if (bundleKind === 'zip' || first.filePath.includes('::')) {
+    return { path: parseZipPath(first.filePath).zipPath, kind: 'zip' };
+  }
+  const sep = Math.max(first.filePath.lastIndexOf('/'), first.filePath.lastIndexOf('\\'));
+  return { path: sep >= 0 ? first.filePath.slice(0, sep) : first.filePath, kind: 'folder' };
+}
+
+let currentBundleDetailsGroupKey = null;
+let currentBundleDetailsRecord = null;
+
+function hideBundleDetailsPanel() {
+  const panel = document.getElementById('bundle-details');
+  if (panel) panel.classList.add('hidden');
+  currentBundleDetailsGroupKey = null;
+  currentBundleDetailsRecord = null;
+  const container = document.querySelector('.file-grid');
+  if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+}
+
+async function showBundleDetails(groupRecord) {
+  if (!groupRecord?.children?.length) return;
+
+  currentBundleDetailsGroupKey = groupRecord.groupKey;
+  currentBundleDetailsRecord = groupRecord;
+
+  document.getElementById('model-details')?.classList.add('hidden');
+  document.getElementById('multi-edit-panel')?.classList.add('hidden');
+
+  const panel = document.getElementById('bundle-details');
+  if (!panel) return;
+
+  const bundleKind = groupRecord.children[0]?.bundleKind
+    || deriveBundleFieldsForModel(groupRecord.children[0]).bundleKind
+    || 'folder';
+  const groupLabel = groupRecord.groupLabel || 'Bundle';
+  const containerInfo = getBundleContainerPath(groupRecord);
+  const children = [...groupRecord.children].sort((a, b) =>
+    String(a.fileName || '').localeCompare(String(b.fileName || ''), undefined, { sensitivity: 'base' })
+  );
+
+  const titleEl = document.getElementById('bundle-details-title');
+  const subtitleEl = document.getElementById('bundle-details-subtitle');
+  const pathEl = document.getElementById('bundle-details-path');
+  const statsEl = document.getElementById('bundle-details-stats');
+  const bodyEl = document.getElementById('bundle-contents-body');
+
+  const kindLabel = bundleKind === 'zip' ? 'ZIP archive' : 'Folder bundle';
+  if (titleEl) titleEl.textContent = groupLabel;
+  if (subtitleEl) subtitleEl.textContent = `${kindLabel} • ${children.length} file${children.length === 1 ? '' : 's'}`;
+
+  const containerPath = containerInfo.path || '';
+  if (pathEl) pathEl.value = containerPath;
+
+  const totalBytes = children.reduce((sum, c) => sum + (Number(c.size) || 0), 0);
+  const printedCount = children.filter((c) => Boolean(c.printed)).length;
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <span><strong>${children.length}</strong> models</span>
+      <span><strong>${formatFileSize(totalBytes)}</strong> combined size</span>
+      <span><strong>${printedCount}/${children.length}</strong> printed</span>
+    `;
+  }
+
+  if (bodyEl) {
+    bodyEl.innerHTML = '';
+    for (const child of children) {
+      const tr = document.createElement('tr');
+      tr.className = 'bundle-contents-row';
+      tr.title = 'Click for model details • double-click to preview';
+      const entryName = child.filePath?.includes('::')
+        ? (child.filePath.split('::')[1] || child.fileName)
+        : child.fileName;
+      const cells = [
+        entryName || '—',
+        child.size ? formatFileSize(child.size) : '—',
+        child.printed ? 'Yes' : 'No',
+        child.designer || '—',
+      ];
+      cells.forEach((text) => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      tr.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        bodyEl.querySelectorAll('.bundle-contents-row-active').forEach((row) => {
+          row.classList.remove('bundle-contents-row-active');
+        });
+        tr.classList.add('bundle-contents-row-active');
+        if (child.filePath) showModelDetails(child.filePath);
+      });
+      tr.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (child.filePath && typeof window.openPreview === 'function') {
+          window.openPreview(child.filePath);
+        }
+      });
+      bodyEl.appendChild(tr);
+    }
+  }
+
+  const showPathBtn = document.getElementById('bundle-details-show-path');
+  if (showPathBtn) {
+    showPathBtn.onclick = async (e) => {
+      e.preventDefault();
+      if (containerPath && window.electron?.showItemInFolder) {
+        await window.electron.showItemInFolder(containerPath);
+      }
+    };
+    showPathBtn.disabled = !containerPath;
+  }
+
+  const expandBtn = document.getElementById('bundle-details-expand-grid');
+  if (expandBtn) {
+    expandBtn.onclick = (e) => {
+      e.preventDefault();
+      const expandedSet =
+        groupRecord.groupKind === 'bundle'
+          ? bundleExpandedGroups
+          : groupRecord.groupKind === 'zip'
+            ? zipArchiveExpandedGroups
+            : parentModelExpandedGroups;
+      expandedSet.add(groupRecord.groupKey);
+      const grid = document.querySelector('.file-grid');
+      if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
+      else renderVirtualGrid(grid?.currentModels || []);
+    };
+  }
+
+  const previewBtn = document.getElementById('bundle-details-preview');
+  if (previewBtn) {
+    previewBtn.onclick = (e) => {
+      e.preventDefault();
+      if (typeof window.openBundlePreview === 'function') {
+        window.openBundlePreview(groupRecord);
+      }
+    };
+  }
+
+  const closeBtn = document.getElementById('bundle-details-close');
+  if (closeBtn) {
+    closeBtn.onclick = (e) => {
+      e.preventDefault();
+      hideBundleDetailsPanel();
+    };
+  }
+
+  panel.classList.remove('hidden');
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  const grid = document.querySelector('.file-grid');
+  if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
+}
+
 async function showManageGroupThumbnailsModal(groupRecord) {
   await loadGroupThumbnailPreferences();
 
@@ -19478,7 +19725,11 @@ async function showManageGroupThumbnailsModal(groupRecord) {
   const title = dialog.querySelector('h3');
   const desc = dialog.querySelector('.form-group p');
   const groupLabel = groupRecord?.groupLabel || groupRecord?.parentModel || 'group';
-  const groupLabelType = groupRecord?.groupKind === 'zip' ? 'ZIP archive group' : 'parent group';
+  const groupLabelType = groupRecord?.groupKind === 'bundle'
+    ? (groupRecord.children?.[0]?.bundleKind === 'zip' ? 'ZIP bundle' : 'folder bundle')
+    : groupRecord?.groupKind === 'zip'
+      ? 'ZIP archive group'
+      : 'parent group';
   if (title) title.textContent = `Manage Group Thumbnails`;
   if (desc) desc.textContent = `Pick the thumbnail shown on ${groupLabelType} "${groupLabel}".`;
 
@@ -19616,8 +19867,16 @@ async function updateGroupTags(groupRecord, mode = 'merge') {
 function createParentModelGroupItem(groupRecord, viewMode = null) {
   const view = viewMode || currentGridView;
   const groupLabel = groupRecord?.groupLabel || groupRecord?.parentModel || 'Group';
-  const expandedSet = groupRecord?.groupKind === 'zip' ? zipArchiveExpandedGroups : parentModelExpandedGroups;
-  const isParentModelGroup = groupRecord?.groupKind !== 'zip';
+  const expandedSet =
+    groupRecord?.groupKind === 'bundle'
+      ? bundleExpandedGroups
+      : groupRecord?.groupKind === 'zip'
+        ? zipArchiveExpandedGroups
+        : parentModelExpandedGroups;
+  const isParentModelGroup = groupRecord?.groupKind === 'parentModel';
+  const bundleKind = groupRecord?.groupKind === 'bundle'
+    ? (groupRecord.children?.[0]?.bundleKind || 'folder')
+    : '';
   const item = document.createElement('div');
   item.className = `parent-model-group parent-model-group-${view}`;
   if (view !== 'list') {
@@ -19625,6 +19884,9 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   }
   if (groupRecord.expanded) {
     item.classList.add('expanded');
+  }
+  if (currentBundleDetailsGroupKey && groupRecord.groupKey === currentBundleDetailsGroupKey) {
+    item.classList.add('bundle-details-active');
   }
   item.dataset.groupKey = groupRecord.groupKey;
   item.dataset.groupKind = groupRecord.groupKind || 'parentModel';
@@ -19648,7 +19910,9 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     const groupBadge = document.createElement('div');
     groupBadge.className = 'parent-model-group-corner-badge';
     groupBadge.classList.add(groupRecord.expanded ? 'is-expanded' : 'is-collapsed');
-    groupBadge.title = `${groupRecord?.groupKind === 'zip' ? 'ZIP archive group' : 'Parent model group'} (${groupRecord.expanded ? 'expanded' : 'collapsed'})`;
+    groupBadge.title = groupRecord?.groupKind === 'bundle'
+      ? `${bundleKind === 'zip' ? 'ZIP bundle' : 'Folder bundle'} (${groupRecord.expanded ? 'expanded' : 'collapsed'})`
+      : `${groupRecord?.groupKind === 'zip' ? 'ZIP archive group' : 'Parent model group'} (${groupRecord.expanded ? 'expanded' : 'collapsed'})`;
     for (let i = 0; i < 3; i++) {
       groupBadge.appendChild(document.createElement('span'));
     }
@@ -19694,7 +19958,12 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   const printedCount = groupRecord.children.filter(child => Boolean(child.printed)).length;
   const meta = document.createElement('div');
   meta.className = 'parent-model-group-meta';
-  meta.textContent = `${groupRecord.children.length} model${groupRecord.children.length === 1 ? '' : 's'} • ${printedCount}/${groupRecord.children.length} printed`;
+  if (groupRecord?.groupKind === 'bundle') {
+    const kindLabel = bundleKind === 'zip' ? 'zip archive' : 'folder';
+    meta.textContent = `${groupRecord.children.length} part${groupRecord.children.length === 1 ? '' : 's'} • ${kindLabel} • ${printedCount}/${groupRecord.children.length} printed • click to preview all`;
+  } else {
+    meta.textContent = `${groupRecord.children.length} model${groupRecord.children.length === 1 ? '' : 's'} • ${printedCount}/${groupRecord.children.length} printed`;
+  }
 
   details.appendChild(titleRow);
   details.appendChild(meta);
@@ -19716,15 +19985,46 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     }
   };
 
-  item.addEventListener('click', (event) => {
+  chevron.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
     toggleGroup();
   });
+
+  item.addEventListener('click', (event) => {
+    if (event.target.closest('.parent-model-group-chevron')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip') {
+      if (typeof window.openBundlePreview === 'function') {
+        window.openBundlePreview(groupRecord);
+      } else {
+        showBundleDetails(groupRecord);
+      }
+      return;
+    }
+    toggleGroup();
+  });
+  item.addEventListener('dblclick', (event) => {
+    if (event.target.closest('.parent-model-group-chevron')) return;
+    if (groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip') {
+      event.preventDefault();
+      event.stopPropagation();
+      showBundleDetails(groupRecord);
+    }
+  });
   item.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      toggleGroup();
+      if (groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip') {
+        if (typeof window.openBundlePreview === 'function') {
+          window.openBundlePreview(groupRecord);
+        } else {
+          showBundleDetails(groupRecord);
+        }
+      } else {
+        toggleGroup();
+      }
     }
   });
   item.addEventListener('contextmenu', async (event) => {
@@ -19754,6 +20054,7 @@ function renderVirtualGrid(models) {
   if (!container) return;
 
   models = dedupeModelsForVirtualGrid(models || []);
+  pruneBundleExpandedGroups(models);
   pruneParentModelExpandedGroups(models);
   pruneZipArchiveExpandedGroups(models);
 

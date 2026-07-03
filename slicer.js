@@ -314,4 +314,6 @@ document.addEventListener('DOMContentLoaded', () => {
   window.electron.onOpenSlicerSettings(() => {
     openSlicerSettings();
   });
+
+  window.openSlicerSettings = openSlicerSettings;
 }); 

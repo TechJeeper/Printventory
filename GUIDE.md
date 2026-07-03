@@ -19,6 +19,7 @@ Printventory is a desktop application for managing your 3D printing model collec
 - Track print status
 - Add source URLs and notes
 - Link related models (parent/child relationships)
+- **Folder and ZIP bundles**: Models in the same subfolder or ZIP archive (2+ files) appear as one grouped row; click to preview all parts in 3D, double-click for bundle details
 - Assign licenses to models
 
 ### Multi-Edit Features
@@ -162,8 +163,26 @@ Printventory offers comprehensive settings to customize your experience:
 - Rendering performance optimization
 
 ### Slicer Path
-- Configure path to your slicer application
-- Used for opening models in external slicers
+- Configure one or more slicer applications (name + path)
+- **Open in Slicer** from the right-click context menu
+- **Send to Slicer** from the 3D preview dialog (single model or full bundle)
+- On macOS, each send opens a **new slicer instance** so models load even when the slicer is already open
+
+### Bundle groups (folders and ZIP archives)
+
+When a scan finds **two or more** STL/3MF files in the same folder or inside the same ZIP file, Printventory shows them as one **bundle** row instead of many separate entries.
+
+| Action | Result |
+|--------|--------|
+| Click bundle row | Opens **3D preview** with every part laid out on a grid |
+| Double-click bundle row | Opens **Bundle details** (path, sizes, print status, file list) |
+| Chevron (▸ / ▾) | Expand or collapse individual files in the grid |
+| **Send to Slicer** (in preview) | Sends all bundle STL/3MF files to your chosen slicer |
+
+**Notes:**
+- Single-file folders are not grouped (they stay normal model rows).
+- Bundle preview supports up to 32 STL/3MF parts per open; larger bundles show the first 32 with a notice.
+- ZIP entries are extracted to a temp file before sending to the slicer, same as the context menu.
 
 ### STL Home
 - Set default directory for file operations
@@ -181,6 +200,7 @@ Printventory offers comprehensive settings to customize your experience:
 - Enable multi-edit mode for batch operations
 - Use the Tag Manager to organize and clean up tags across your collection
 - Link related models using parent/child relationships
+- Look for **folder** and **ZIP** bundle rows when a multi-part project was scanned together; click to preview all parts at once
 
 ### AI Tagging
 - Start with a small batch to test your AI configuration
@@ -189,7 +209,7 @@ Printventory offers comprehensive settings to customize your experience:
 - Review AI-suggested tags before accepting to ensure accuracy
 
 ### View Modes
-- Use List view for quick scanning of large collections
+- Use List view for quick scanning of large collections; bundle groups appear as one row with a part count
 - Use Detailed view when reviewing models for printing
 - Preview view offers a good balance between information and space
 

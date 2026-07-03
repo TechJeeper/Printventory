@@ -271,6 +271,40 @@
       </div>
       <button id="save-model-button"></button>
     </div>
+
+    <div id="bundle-details" class="model-details bundle-details hidden">
+      <h3 id="bundle-details-title">Bundle Details</h3>
+      <p id="bundle-details-subtitle" class="bundle-details-subtitle"></p>
+      <div class="form-group">
+        <label>Container path</label>
+        <div class="bundle-details-path-row">
+          <input type="text" id="bundle-details-path" readonly>
+          <button type="button" id="bundle-details-show-path" class="icon-button" title="Show in folder">↗</button>
+        </div>
+      </div>
+      <div class="bundle-details-stats" id="bundle-details-stats"></div>
+      <div class="form-group">
+        <label>Contents</label>
+        <div class="bundle-contents-table-wrap">
+          <table class="bundle-contents-table" id="bundle-contents-table">
+            <thead>
+              <tr>
+                <th scope="col">File</th>
+                <th scope="col">Size</th>
+                <th scope="col">Printed</th>
+                <th scope="col">Designer</th>
+              </tr>
+            </thead>
+            <tbody id="bundle-contents-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="bundle-details-actions">
+        <button type="button" id="bundle-details-preview">Open 3D preview</button>
+        <button type="button" id="bundle-details-expand-grid">Expand in grid</button>
+        <button type="button" id="bundle-details-close">Close</button>
+      </div>
+    </div>
     <dialog id="new-designer-dialog" class="modal">
       <form method="dialog">
         <h3>Add New Designer</h3>
@@ -910,6 +944,9 @@
           </div>
           <div class="preview-controls">
             <div class="preview-control-group">
+              <button type="button" id="preview-send-to-slicer" class="preview-control-button preview-slicer-button" title="Open in slicer">
+                <span>🖨️</span> Send to Slicer
+              </button>
               <button type="button" id="preview-reset-view" class="preview-control-button" title="Reset View">
                 <span>🔄</span> Reset View
               </button>
@@ -920,6 +957,7 @@
                 <span>📐</span> Axes
               </button>
             </div>
+            <div id="preview-slicer-menu" class="preview-slicer-menu hidden" role="menu" aria-label="Choose slicer"></div>
             <div class="preview-info">
               <span id="preview-file-type"></span>
               <span id="preview-dimensions"></span>
