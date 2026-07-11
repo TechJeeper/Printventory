@@ -1,0 +1,4 @@
+# Ensure plist files use LF line endings for macOS compatibility
+*.plist text eol=lf
+
+

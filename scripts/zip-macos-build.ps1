@@ -42,12 +42,14 @@ $rootFiles = @(
     "scan-worker.js",
     "parse-worker.js",
     "aitagging.js",
+    "thumbnail-compress.js",
     "slicer.js",
     "guide.js",
     "preview.js",
     "query-builder.js",
     "preview-3mf-worker-node.js",
     "threemf-loader-simple.js",
+    "threemf-mesh-extract.js",
     "search.js",
     "installer.nsh",
     "logo.png",
@@ -60,6 +62,14 @@ $rootFiles = @(
     "sidebar-bg.jpg",
     "bg.png"
 )
+
+# Merge electron-builder file list so new app files are not omitted from macOS zip builds
+if ($packageJson.build -and $packageJson.build.files) {
+    foreach ($entry in $packageJson.build.files) {
+        if ($entry -match '[\*\?]' -or $entry.StartsWith('node_modules/')) { continue }
+        if ($entry -notin $rootFiles) { $rootFiles += $entry }
+    }
+}
 
 Write-Host "Copying root files..."
 foreach ($f in $rootFiles) {

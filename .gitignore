@@ -8,5 +8,10 @@ git_credentials
 *.credentials
 npm_output.log
 test-results/
+tests/test-results/
+tests/playwright-report/
+tests/test-user-data/
+tests/printventory.db
 app.log
 *.log
+.macssh

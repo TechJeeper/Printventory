@@ -24,6 +24,9 @@ async function getCombinedFilteredModels(overrides = {}) {
   const parentModel = document.getElementById("parent-select")?.value || "";
   const printStatus = document.getElementById("printed-select")?.value || "all";
   const newStatus = document.getElementById("new-select")?.value || "all";
+  const favoriteStatus = document.getElementById("favorite-select")?.value || "all";
+  const ratingStatus = document.getElementById("rating-select")?.value || "all";
+  const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
   const tagFilter = document.getElementById("tag-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
 
@@ -38,6 +41,9 @@ async function getCombinedFilteredModels(overrides = {}) {
   // Draft text in the search box alone does not count until you press search (clauses/tokens).
   const hasActiveFilters = designer || license || parentModel || printStatus !== "all" ||
                           newStatus !== "all" ||
+                          favoriteStatus !== "all" ||
+                          ratingStatus !== "all" ||
+                          ratingMinStatus !== "all" ||
                           tagFilter || fileType || activeSearchClauses || activeMulti ||
                           window.currentDirectoryFilter || window.dateAddedFilter;
 
@@ -55,6 +61,9 @@ async function getCombinedFilteredModels(overrides = {}) {
     parentModelInverted: window.invertedFilters?.parentModel || false,
     printed: printStatus === "all" ? undefined : printStatus,
     isNew: newStatus === "all" ? undefined : newStatus,
+    favorite: favoriteStatus === "all" ? undefined : favoriteStatus,
+    rating: ratingStatus === "all" ? undefined : ratingStatus,
+    ratingMin: ratingMinStatus === "all" ? undefined : ratingMinStatus,
     tagInverted: window.invertedFilters?.tag || false,
     fileType,
     searchInverted: window.invertedFilters?.search || false,
@@ -99,6 +108,9 @@ async function performCombinedSearch() {
     const parentModel = document.getElementById("parent-select")?.value || "";
     const printStatus = document.getElementById("printed-select")?.value || "all";
     const newStatus = document.getElementById("new-select")?.value || "all";
+    const favoriteStatus = document.getElementById("favorite-select")?.value || "all";
+    const ratingStatus = document.getElementById("rating-select")?.value || "all";
+    const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
     const tagFilter = document.getElementById("tag-filter")?.value || "";
     const fileType = document.getElementById("filetype-select")?.value || "";
     const qbClauses =
@@ -109,6 +121,9 @@ async function performCombinedSearch() {
       window.queryBuilderHasActiveMultiFilters();
     const noFiltersActive = !designer && !license && !parentModel && printStatus === "all" &&
       newStatus === "all" &&
+      favoriteStatus === "all" &&
+      ratingStatus === "all" &&
+      ratingMinStatus === "all" &&
       !tagFilter && !fileType && !qbClauses && !qbMulti &&
       !window.currentDirectoryFilter && !window.dateAddedFilter;
     
@@ -242,6 +257,9 @@ function updateFilterIndicator(count) {
   const parentModel = document.getElementById("parent-select")?.value || "";
   const printStatus = document.getElementById("printed-select")?.value || "all";
   const newStatus = document.getElementById("new-select")?.value || "all";
+  const favoriteStatus = document.getElementById("favorite-select")?.value || "all";
+  const ratingStatus = document.getElementById("rating-select")?.value || "all";
+  const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
   const tagFilter = document.getElementById("tag-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
   const inverted = window.invertedFilters || {};
@@ -259,6 +277,9 @@ function updateFilterIndicator(count) {
     parentModel ||
     printStatus !== "all" ||
     newStatus !== "all" ||
+    favoriteStatus !== "all" ||
+    ratingStatus !== "all" ||
+    ratingMinStatus !== "all" ||
     tagFilter ||
     fileType ||
     qbClauses ||
@@ -433,6 +454,29 @@ function updateFilterIndicator(count) {
           <span class="filter-remove" data-filter-type="newStatus">×</span>
         </div>`;
       }
+
+      if (favoriteStatus !== "all") {
+        const displayText = favoriteStatus === "favorited" ? "Favorites" : "Not favorites";
+        message += `<div class="filter-pill" data-filter-type="favoriteStatus">
+          ${displayText}
+          <span class="filter-remove" data-filter-type="favoriteStatus">×</span>
+        </div>`;
+      }
+
+      if (ratingStatus !== "all") {
+        const displayText = ratingStatus === "unrated" ? "Unrated" : `${ratingStatus} star${ratingStatus === "1" ? "" : "s"}`;
+        message += `<div class="filter-pill" data-filter-type="ratingStatus">
+          Rating: ${displayText}
+          <span class="filter-remove" data-filter-type="ratingStatus">×</span>
+        </div>`;
+      }
+
+      if (ratingMinStatus !== "all") {
+        message += `<div class="filter-pill" data-filter-type="ratingMinStatus">
+          Min rating: ${ratingMinStatus}+
+          <span class="filter-remove" data-filter-type="ratingMinStatus">×</span>
+        </div>`;
+      }
       
       // Tags are rendered in filter-pills-search-chain (per-tag AND Tag: n); skip merged pill here
       
@@ -478,6 +522,9 @@ function updateFilterIndicator(count) {
       if (parentModel) document.getElementById("parent-select").value = "";
       if (printStatus !== "all") document.getElementById("printed-select").value = "all";
       if (newStatus !== "all") document.getElementById("new-select").value = "all";
+      if (favoriteStatus !== "all") document.getElementById("favorite-select").value = "all";
+      if (ratingStatus !== "all") document.getElementById("rating-select").value = "all";
+      if (ratingMinStatus !== "all") document.getElementById("rating-min-select").value = "all";
       if (tagFilter) document.getElementById("tag-filter").value = "";
       if (fileType) document.getElementById("filetype-select").value = "";
       if (typeof window.queryBuilderClearAllMultiChips === "function") {
@@ -564,6 +611,15 @@ function updateFilterIndicator(count) {
         case 'newStatus':
           document.getElementById("new-select").value = "all";
           break;
+        case 'favoriteStatus':
+          document.getElementById("favorite-select").value = "all";
+          break;
+        case 'ratingStatus':
+          document.getElementById("rating-select").value = "all";
+          break;
+        case 'ratingMinStatus':
+          document.getElementById("rating-min-select").value = "all";
+          break;
         case 'tagFilter':
           document.getElementById("tag-filter").value = "";
           if (window.multiFilterChips) window.multiFilterChips.tags = [];
@@ -646,6 +702,9 @@ async function initializeCombinedSearch() {
     'parent-select',
     'printed-select',
     'new-select',
+    'favorite-select',
+    'rating-select',
+    'rating-min-select',
     'tag-filter',
     'filetype-select'
   ];
@@ -912,6 +971,9 @@ function toggleFilterControls(enabled) {
     'parent-select',
     'printed-select',
     'new-select',
+    'favorite-select',
+    'rating-select',
+    'rating-min-select',
     'tag-filter',
     'filetype-select',
     'sort-select',

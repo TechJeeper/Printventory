@@ -1,5 +1,6 @@
 # Printventory Server Mode Docker Image
-FROM node:20-slim
+# Electron 43+ V8 headers require C++20 (GCC 13+). Bookworm's GCC 12 fails to compile better-sqlite3.
+FROM node:22-trixie-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -79,19 +80,24 @@ ENV ELECTRON_BUILDER_CACHE=/tmp/.electron-builder-cache
 # ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 
 # Install npm dependencies (including devDependencies for Electron)
-# Install with retry logic and proper error handling
+# Skip postinstall during install; rebuild native modules explicitly below
 RUN npm config set proxy null && \
     npm config set https-proxy null && \
     npm config set registry https://registry.npmjs.org/ && \
-    npm install || \
+    npm install --ignore-scripts || \
     (echo "First install attempt failed, retrying..." && \
      sleep 10 && \
-     npm install) || \
+     npm install --ignore-scripts) || \
     (echo "Second install attempt failed, retrying with clean cache..." && \
      npm cache clean --force && \
      sleep 10 && \
-     npm install) && \
+     npm install --ignore-scripts) && \
     npm cache clean --force
+
+# Rebuild native modules for Electron (requires GCC 13+ from trixie)
+RUN rm -rf node_modules/better-sqlite3/build || true && \
+    npx @electron/rebuild --version=$(node -p 'require("electron/package.json").version') || \
+    npx electron-builder install-app-deps
 
 # Copy application files
 COPY main.js preload.js renderer.js index.html styles.css preview-wall.css ./

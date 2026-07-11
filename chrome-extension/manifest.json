@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Printventory Watcher",
+  "version": "1.0.8",
+  "description": "Adds STL/3MF/ZIP from 3D model websites to Printventory with metadata.",
+  "permissions": ["storage", "activeTab", "downloads", "notifications", "tabs"],
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon48.png"
+  },
+  "action": {
+    "default_title": "Printventory Watcher — open settings",
+    "default_icon": {
+      "48": "icon48.png"
+    }
+  },
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "ws://*/*",
+    "wss://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.makerworld.com/*",
+        "*://*.thangs.com/*",
+        "*://*.printables.com/*",
+        "*://*.thingiverse.com/*",
+        "*://*.cults3d.com/*",
+        "*://*.myminifactory.com/*"
+      ],
+      "js": ["debug.js", "scrapers.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html"
+}

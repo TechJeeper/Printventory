@@ -98,6 +98,8 @@
           <option value="parentmodel-desc">Parent Model (Z-A)</option>
           <option value="printed-asc">Printed (Not Printed First)</option>
           <option value="printed-desc">Printed (Printed First)</option>
+          <option value="rating-desc">Rating (Highest First)</option>
+          <option value="rating-asc">Rating (Lowest First)</option>
         </select>
       </div>
       <div class="form-group">
@@ -160,6 +162,37 @@
           <option value="all">All Models</option>
           <option value="new">New Models Only</option>
           <option value="not-new">Exclude New Models</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="favorite-select">Favorite:</label>
+        <select id="favorite-select">
+          <option value="all">All Models</option>
+          <option value="favorited">Favorites</option>
+          <option value="not-favorited">Not Favorites</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="rating-select">Rating:</label>
+        <select id="rating-select">
+          <option value="all">All Ratings</option>
+          <option value="unrated">Unrated</option>
+          <option value="1">1 Star</option>
+          <option value="2">2 Stars</option>
+          <option value="3">3 Stars</option>
+          <option value="4">4 Stars</option>
+          <option value="5">5 Stars</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="rating-min-select">Min Rating:</label>
+        <select id="rating-min-select">
+          <option value="all">All</option>
+          <option value="1">At Least 1</option>
+          <option value="2">At Least 2</option>
+          <option value="3">At Least 3</option>
+          <option value="4">At Least 4</option>
+          <option value="5">At Least 5</option>
         </select>
       </div>
       <div class="form-group">
@@ -923,6 +956,7 @@
             <div class="preview-info">
               <span id="preview-file-type"></span>
               <span id="preview-dimensions"></span>
+              <span id="preview-simplified-note" class="preview-simplified-note" style="display:none;"></span>
             </div>
           </div>
         </div>

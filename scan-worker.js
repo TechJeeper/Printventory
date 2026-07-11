@@ -168,6 +168,15 @@ const BASE_SCAN_EXTENSIONS = ['.stl', '.3mf'];
  * Normalize extension list from main (includes ADDITIONAL_FILE_TYPES_CATALOG selections: .obj, .step, .stp, …).
  * Used for both directory-queue filtering and processFile / ZIP entry matching so behavior stays consistent.
  */
+/** macOS ZIP junk: __MACOSX folder entries and AppleDouble (._*) resource forks */
+function isMacOsJunkZipEntry(entryPath) {
+  if (!entryPath) return false;
+  const normalized = entryPath.replace(/\\/g, '/');
+  if (normalized.split('/').some((seg) => seg.toLowerCase() === '__macosx')) return true;
+  const base = path.basename(entryPath);
+  return base.startsWith('._');
+}
+
 function buildScanExtensionSet(scanExtensions) {
   const set = new Set();
   const add = (raw) => {
@@ -364,6 +373,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
     
     for (const entry of Object.values(entries)) {
       if (!entry.isDirectory) {
+        if (isMacOsJunkZipEntry(entry.name)) continue;
         const ext = path.extname(entry.name).toLowerCase();
         if (extSet.has(ext)) {
           if (entry.size <= maxFileSize) {

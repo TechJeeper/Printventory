@@ -11,10 +11,10 @@ const containerRuntime = require('./container-runtime');
 const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const version = packageJson.version;
 
-// Get Docker Hub username from environment variable
-const dockerHubUsername = process.env.DOCKER_HUB_USERNAME;
+// Get Docker Hub username from environment variable (Docker Hub namespaces are lowercase)
+const dockerHubUsernameRaw = process.env.DOCKER_HUB_USERNAME;
 
-if (!dockerHubUsername) {
+if (!dockerHubUsernameRaw) {
   console.error('Error: DOCKER_HUB_USERNAME environment variable is not set.');
   console.error('');
   console.error('Please set it before running Docker Hub commands:');
@@ -26,7 +26,17 @@ if (!dockerHubUsername) {
   process.exit(1);
 }
 
+const dockerHubUsername = dockerHubUsernameRaw.toLowerCase();
+if (dockerHubUsername !== dockerHubUsernameRaw) {
+  console.warn(
+    `Note: DOCKER_HUB_USERNAME normalized to "${dockerHubUsername}" (Docker Hub namespaces are lowercase).`
+  );
+}
+
 const imageName = 'printventory';
+// Short Docker Hub form (docker.io implied). Lowercase namespace avoids the client
+// treating "Printventory/..." as a custom registry hostname. Do not prefix with
+// registry-1.docker.io — that key does not match credentials from `docker login`.
 const fullImageName = `${dockerHubUsername}/${imageName}`;
 const versionTag = `${fullImageName}:${version}`;
 const latestTag = `${fullImageName}:latest`;
@@ -88,6 +98,19 @@ function tagImage() {
   console.log('✓ Container image tagged successfully');
 }
 
+function printPushAuthHelp() {
+  console.error('');
+  console.error('Docker Hub rejected the push (insufficient_scope or access denied). Try:');
+  console.error('  1. docker logout');
+  console.error(`  2. docker login -u ${dockerHubUsername}`);
+  console.error('     Use a Personal Access Token as the password (not your account password):');
+  console.error('     https://hub.docker.com/settings/security');
+  console.error('     Token permissions: Read, Write, Delete');
+  console.error(`  3. Confirm DOCKER_HUB_USERNAME matches your Hub account (${dockerHubUsername})`);
+  console.error('  4. npm run docker:push');
+  console.error('');
+}
+
 // Push image to Docker Hub
 function pushImage(tag = null) {
   const tagsToPush = tag ? [tag] : [versionTag, latestTag];
@@ -121,9 +144,9 @@ function pushImage(tag = null) {
       if (containerRuntime.isPodmanOnWindows()) {
         console.error('');
         console.error('On Windows, log in on the host (not inside the VM), then retry push:');
-        console.error(`  podman login ${containerRuntime.dockerHubRegistry()} -u <username> -p <access-token>`);
+        console.error(`  podman login docker.io -u ${dockerHubUsername} -p <access-token>`);
       } else {
-        console.error(`Please run: ${containerRuntime.loginHint()}`);
+        printPushAuthHelp();
       }
       process.exit(1);
     }
@@ -176,7 +199,7 @@ switch (command) {
     console.log('=== Complete ===');
     console.log('');
     console.log('Your Printventory Docker image is now available on Docker Hub!');
-    console.log(`Pull it with: docker pull ${latestTag}`);
+    console.log('Pull it with: docker pull printventory/printventory:latest');
     break;
     
   default:

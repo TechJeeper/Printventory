@@ -43,9 +43,11 @@ const filesToCopy = [
   'parse-worker.js',
   'preview-3mf-worker-node.js',
   'threemf-loader-simple.js',
+  'threemf-mesh-extract.js',
   'preview.js',
   'query-builder.js',
   'aitagging.js',
+  'thumbnail-compress.js',
   'slicer.js',
   'guide.js',
   'search.js'

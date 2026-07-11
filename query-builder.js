@@ -228,10 +228,13 @@
       if (tok.t === "not") return true;
       if (tok.t === "filter") {
         const k = String(tok.kind || "").trim();
-        if (!k || !["designer", "license", "parentModel", "tag", "fileType", "printed", "isNew"].includes(k)) return false;
+        if (!k || !["designer", "license", "parentModel", "tag", "fileType", "printed", "isNew", "favorite", "rating", "ratingMin"].includes(k)) return false;
         const v = tok.value != null ? String(tok.value).trim() : "";
         if (k === "printed") return v === "printed" || v === "not-printed";
         if (k === "isNew") return v === "new" || v === "not-new";
+        if (k === "favorite") return v === "favorited" || v === "not-favorited";
+        if (k === "rating") return v === "unrated" || /^[1-5]$/.test(v);
+        if (k === "ratingMin") return /^[1-5]$/.test(v);
         return !!v;
       }
       if (tok.t === "filterMulti") {
@@ -285,6 +288,9 @@
     if (enc.has("fileType")) delete filters.fileType;
     if (enc.has("printed")) delete filters.printed;
     if (enc.has("isNew")) delete filters.isNew;
+    if (enc.has("favorite")) delete filters.favorite;
+    if (enc.has("rating")) delete filters.rating;
+    if (enc.has("ratingMin")) delete filters.ratingMin;
   }
 
   function readSearchClauses() {
@@ -338,6 +344,12 @@
     if (printed !== "all") atoms.push({ t: "filter", kind: "printed", value: printed });
     const nnew = document.getElementById("new-select")?.value || "all";
     if (nnew !== "all") atoms.push({ t: "filter", kind: "isNew", value: nnew });
+    const favorite = document.getElementById("favorite-select")?.value || "all";
+    if (favorite !== "all") atoms.push({ t: "filter", kind: "favorite", value: favorite });
+    const rating = document.getElementById("rating-select")?.value || "all";
+    if (rating !== "all") atoms.push({ t: "filter", kind: "rating", value: rating });
+    const ratingMin = document.getElementById("rating-min-select")?.value || "all";
+    if (ratingMin !== "all") atoms.push({ t: "filter", kind: "ratingMin", value: ratingMin });
     const ft = document.getElementById("filetype-select")?.value?.trim();
     if (ft) atoms.push({ t: "filter", kind: "fileType", value: ft });
 
@@ -415,6 +427,18 @@
       const sel = document.getElementById("new-select");
       if (sel) sel.value = "all";
     }
+    if (kindSet.has("favorite")) {
+      const sel = document.getElementById("favorite-select");
+      if (sel) sel.value = "all";
+    }
+    if (kindSet.has("rating")) {
+      const sel = document.getElementById("rating-select");
+      if (sel) sel.value = "all";
+    }
+    if (kindSet.has("ratingMin")) {
+      const sel = document.getElementById("rating-min-select");
+      if (sel) sel.value = "all";
+    }
   }
 
   function atomsFromSingleFilterChangeElement(elementId) {
@@ -425,6 +449,18 @@
     if (elementId === "new-select") {
       const n = document.getElementById("new-select")?.value || "all";
       return n !== "all" ? [{ t: "filter", kind: "isNew", value: n }] : [];
+    }
+    if (elementId === "favorite-select") {
+      const f = document.getElementById("favorite-select")?.value || "all";
+      return f !== "all" ? [{ t: "filter", kind: "favorite", value: f }] : [];
+    }
+    if (elementId === "rating-select") {
+      const r = document.getElementById("rating-select")?.value || "all";
+      return r !== "all" ? [{ t: "filter", kind: "rating", value: r }] : [];
+    }
+    if (elementId === "rating-min-select") {
+      const rm = document.getElementById("rating-min-select")?.value || "all";
+      return rm !== "all" ? [{ t: "filter", kind: "ratingMin", value: rm }] : [];
     }
     if (elementId === "filetype-select") {
       const ft = document.getElementById("filetype-select")?.value?.trim();
@@ -628,6 +664,12 @@
       if (tok.kind === "fileType") return `Type: ${vdisp}`;
       if (tok.kind === "printed") return tok.value === "printed" ? "Printed" : "Not printed";
       if (tok.kind === "isNew") return tok.value === "new" ? "New models only" : "Exclude new models";
+      if (tok.kind === "favorite") return tok.value === "favorited" ? "Favorites" : "Not favorites";
+      if (tok.kind === "rating") {
+        if (tok.value === "unrated") return "Rating: Unrated";
+        return `Rating: ${tok.value} star${tok.value === "1" ? "" : "s"}`;
+      }
+      if (tok.kind === "ratingMin") return `Min rating: ${tok.value}+`;
     }
     return "Filter";
   }

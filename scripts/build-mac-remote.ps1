@@ -2,7 +2,8 @@
 # 1. Create macOS source zip (zip-macos-build.ps1)
 # 2. Copy zip to remote host
 # 3. unzip, npm install, npm run build:mac on remote
-# 4. Copy universal .dmg back to local dist/
+# 4. Install built .app to /Applications on the remote Mac (for remote testing)
+# 5. Copy universal .dmg back to local dist/
 #
 # Requires: OpenSSH client (scp/ssh).
 # Auth: set up SSH keys (recommended) to skip password prompts — see one-time setup below.
@@ -18,8 +19,9 @@
 #     IdentityFile ~/.ssh/id_ed25519_printventory
 
 param(
-    [string]$SshHost = $(if ($env:MAC_BUILD_SSH_HOST) { $env:MAC_BUILD_SSH_HOST } else { "cody@192.168.4.61" }),
-    [string]$RemoteBase = $(if ($env:MAC_BUILD_REMOTE_DIR) { $env:MAC_BUILD_REMOTE_DIR } else { "~/printventory-remote-build" })
+    [string]$SshHost = $(if ($env:MAC_BUILD_SSH_HOST) { $env:MAC_BUILD_SSH_HOST } else { "cody@192.168.68.94" }),
+    [string]$RemoteBase = $(if ($env:MAC_BUILD_REMOTE_DIR) { $env:MAC_BUILD_REMOTE_DIR } else { "~/printventory-remote-build" }),
+    [switch]$SkipRemoteInstall = [bool]($env:MAC_BUILD_SKIP_INSTALL -eq "1")
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,7 +124,7 @@ function Get-RemoteShellPath([string]$Path) {
 
 function Invoke-RemoteZsh([string]$TargetHost, [string]$Script, [switch]$Capture) {
     # Windows here-strings use CRLF; zsh treats trailing CR as part of each command.
-    $Script = $Script -replace "`r", ""
+    $Script = ($Script -replace "`r`n", "`n") -replace "`r", "`n"
     if ($Capture) {
         $prev = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
@@ -161,7 +163,7 @@ Write-Host "Remote:    $RemoteBase"
 Write-Host ""
 
 # Step 1: Create macOS build zip locally
-Write-Host "[1/4] Creating macOS build zip..." -ForegroundColor Yellow
+Write-Host "[1/5] Creating macOS build zip..." -ForegroundColor Yellow
 & (Join-Path $scriptDir "zip-macos-build.ps1")
 if (-not (Test-Path $zipPath)) {
     Write-Error "Zip not found after packaging: $zipPath"
@@ -181,7 +183,7 @@ if ($script:MultiplexEnabled) {
 
 # Step 2: Copy zip to remote Mac
 Write-Host ""
-Write-Host "[2/4] Uploading zip to $SshHost ..." -ForegroundColor Yellow
+Write-Host "[2/5] Uploading zip to $SshHost ..." -ForegroundColor Yellow
 Invoke-SshCommand "mkdir -p $RemoteBase"
 if ((Invoke-ScpCommand -Source $zipPath -Destination "${SshHost}:${remoteZipPath}") -ne 0) {
     Write-Error "Failed to upload zip to $SshHost"
@@ -190,7 +192,7 @@ Write-Host "Uploaded: $remoteZipPath" -ForegroundColor Green
 
 # Step 3: Build on remote Mac (login + interactive zsh so nvm/fnm/Homebrew PATH is loaded)
 Write-Host ""
-Write-Host "[3/4] Running npm install and build:mac on remote (this may take several minutes)..." -ForegroundColor Yellow
+Write-Host "[3/5] Running npm install and build:mac on remote (this may take several minutes)..." -ForegroundColor Yellow
 $remoteBuildScript = @"
 set -e
 set -u
@@ -205,8 +207,9 @@ rm -rf '$stagingName'
 unzip -o -q '$zipName'
 cd '$stagingName'
 npm install
+rm -rf node_modules/better-sqlite3/build
+chmod -R u+w node_modules/better-sqlite3 2>/dev/null || true
 npm run build:mac
-ls -la "dist/printventory-$version-universal.dmg"
 "@
 
 try {
@@ -222,9 +225,59 @@ if (-not $remoteDmgPath) {
 }
 Write-Host "Remote DMG: $remoteDmgPath" -ForegroundColor Green
 
-# Step 4: Copy DMG back to local dist/
+if (-not $SkipRemoteInstall) {
+    Write-Host ""
+    Write-Host "[4/5] Installing app on remote Mac (/Applications) ..." -ForegroundColor Yellow
+    $remoteInstallScript = @"
+set -e
+set -u
+setopt pipefail
+DMG='$remoteDmgPath'
+if [ ! -f "`$DMG" ]; then
+  echo "DMG not found: `$DMG"
+  exit 1
+fi
+
+osascript -e 'quit app "printventory"' 2>/dev/null || true
+sleep 1
+
+MOUNT_DIR=`$(hdiutil attach "`$DMG" -nobrowse -noverify -noautofsck | grep -o '/Volumes/.*' | head -1 | tr -d '\r')
+if [ -z "`$MOUNT_DIR" ] || [ ! -d "`$MOUNT_DIR" ]; then
+  echo "Failed to mount DMG: `$DMG"
+  exit 1
+fi
+
+APP_SRC=`$(find "`$MOUNT_DIR" -maxdepth 1 -name '*.app' -print -quit)
+if [ -z "`$APP_SRC" ]; then
+  hdiutil detach "`$MOUNT_DIR" -quiet || true
+  echo "No .app bundle found in DMG"
+  exit 1
+fi
+
+APP_NAME=`$(basename "`$APP_SRC")
+DEST="/Applications/`$APP_NAME"
+echo "Installing `$APP_NAME to `$DEST ..."
+rm -rf "`$DEST"
+ditto "`$APP_SRC" "`$DEST"
+hdiutil detach "`$MOUNT_DIR" -quiet
+echo "Installed: `$DEST"
+test -d "`$DEST"
+"@
+
+    try {
+        Invoke-RemoteZsh $SshHost $remoteInstallScript
+    } catch {
+        Write-Error "Remote install failed. $($_.Exception.Message)"
+    }
+    Write-Host "Remote install finished. Open Printventory from /Applications or Spotlight on the Mac." -ForegroundColor Green
+} else {
+    Write-Host ""
+    Write-Host "[4/5] Skipping remote install (SkipRemoteInstall / MAC_BUILD_SKIP_INSTALL=1)." -ForegroundColor DarkGray
+}
+
+# Step 5: Copy DMG back to local dist/
 Write-Host ""
-Write-Host "[4/4] Downloading universal DMG to $distDir ..." -ForegroundColor Yellow
+Write-Host "[5/5] Downloading universal DMG to $distDir ..." -ForegroundColor Yellow
 if (-not (Test-Path $distDir)) {
     New-Item -ItemType Directory -Path $distDir | Out-Null
 }

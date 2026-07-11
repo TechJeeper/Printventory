@@ -13,6 +13,30 @@ console.log('[Preview] preview.js script loaded');
   let previewLoadToken = 0;
   let preview3mfRequestId = null;
 
+  function formatUserFacingPreviewError(error) {
+    let message = error?.message || String(error || 'Unknown error');
+    const ipcMatch = message.match(/Error invoking remote method 'parse-3mf-preview':\s*(?:Error:\s*)?([\s\S]+)/);
+    if (ipcMatch) {
+      message = ipcMatch[1].trim();
+    } else if (message.startsWith('Error: ')) {
+      message = message.slice(7);
+    }
+    if (message.includes('ERR_WORKER_OUT_OF_MEMORY') || message.includes('heap out of memory')) {
+      return 'Preview ran out of memory while processing this model. Try closing other previews first, or restart the app.';
+    }
+    return message;
+  }
+
+  function resetPreviewLoadingUI() {
+    const loading = document.getElementById('preview-loading');
+    if (!loading) return;
+    loading.style.display = 'flex';
+    loading.innerHTML = `
+      <div class="loader"></div>
+      <p>Loading model...</p>
+    `;
+  }
+
   // Register preview-model listener (server mode WebSocket and normal IPC both dispatch here)
   const previewCallback = (filePath) => {
     console.log('[Preview] Received preview-model event for file:', filePath);
@@ -112,6 +136,10 @@ console.log('[Preview] preview.js script loaded');
   // Open preview modal
   async function openPreview(filePath) {
     console.log('[Preview] openPreview called with:', filePath);
+    if (preview3mfRequestId) {
+      window.electron.cancel3MFPreview?.(preview3mfRequestId);
+      preview3mfRequestId = null;
+    }
     currentFilePath = filePath;
     const loadToken = ++previewLoadToken;
     const dialog = document.getElementById('preview-dialog');
@@ -129,8 +157,8 @@ console.log('[Preview] preview.js script loaded');
     const fileName = filePath.split(/[/\\]/).pop();
     modelName.textContent = fileName;
 
-    // Show loading
-    loading.style.display = 'flex';
+    // Show loading (reset any prior error UI)
+    resetPreviewLoadingUI();
     fileType.textContent = '';
     dimensions.textContent = '';
 
@@ -147,18 +175,21 @@ console.log('[Preview] preview.js script loaded');
     try {
       console.log('Starting model load...');
       await loadPreviewModel(filePath, loadToken);
+      if (loadToken !== previewLoadToken) return;
       console.log('Model loaded successfully');
       loading.style.display = 'none';
     } catch (error) {
+      if (loadToken !== previewLoadToken) return;
       const message = error && error.message ? error.message : '';
       if (message === 'Preview cancelled' || message.includes('Preview cancelled')) {
         return;
       }
       console.error('Error loading preview model:', error);
+      const displayMessage = formatUserFacingPreviewError(error);
       loading.innerHTML = `
         <div style="color: #ff6b6b; text-align: center; padding: 20px; max-width: 500px;">
           <p style="font-size: 18px; font-weight: 600; margin-bottom: 10px;">Error loading model</p>
-          <p style="font-size: 14px; line-height: 1.6; white-space: pre-line;">${error.message}</p>
+          <p style="font-size: 14px; line-height: 1.6; white-space: pre-line;">${displayMessage}</p>
           <button onclick="document.getElementById('preview-dialog').close()" 
                   style="margin-top: 20px; padding: 10px 20px; background: rgba(255,255,255,0.1); 
                          border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; 
@@ -207,7 +238,9 @@ console.log('[Preview] preview.js script loaded');
     previewRenderer = new THREE.WebGLRenderer({ 
       canvas: canvas,
       antialias: true,
-      alpha: false
+      alpha: false,
+      powerPreference: 'default',
+      failIfMajorPerformanceCaveat: false
     });
     if (previewRenderer.debug) {
       previewRenderer.debug.checkShaderErrors = false;
@@ -567,6 +600,21 @@ console.log('[Preview] preview.js script loaded');
           centerAndScaleModel(previewModel);
           updateModelDimensions(previewModel);
 
+          const meta = json.metadata || {};
+          if (meta.previewSimplified && meta.sourceTriangles && meta.keptTriangles) {
+            const note = document.getElementById('preview-simplified-note');
+            if (note) {
+              note.textContent =
+                `Simplified preview (${meta.keptTriangles.toLocaleString('en-US')} of ` +
+                `${meta.sourceTriangles.toLocaleString('en-US')} triangles)`;
+              note.style.display = 'inline';
+            }
+          } else {
+            const note = document.getElementById('preview-simplified-note');
+            if (note) note.style.display = 'none';
+          }
+
+          preview3mfRequestId = null;
           resolve();
 
         } else {
@@ -720,6 +768,22 @@ console.log('[Preview] preview.js script loaded');
     previewRenderer.setSize(width, height);
   }
 
+  function disposeObject3D(object) {
+    if (!object) return;
+    object.traverse((child) => {
+      if (child.isMesh) {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((mat) => mat.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      }
+    });
+  }
+
   // Cleanup preview scene
   function cleanupPreviewScene() {
     // Stop animation
@@ -732,21 +796,27 @@ console.log('[Preview] preview.js script loaded');
     window.removeEventListener('resize', onPreviewResize);
 
     // Dispose of Three.js objects
-    if (previewModel) {
-      previewModel.traverse((child) => {
+    if (previewScene) {
+      if (previewModel) {
+        previewScene.remove(previewModel);
+        disposeObject3D(previewModel);
+        previewModel = null;
+      }
+      previewScene.traverse((child) => {
         if (child.isMesh) {
           if (child.geometry) child.geometry.dispose();
           if (child.material) {
             if (Array.isArray(child.material)) {
-              child.material.forEach(mat => mat.dispose());
+              child.material.forEach((mat) => mat.dispose());
             } else {
               child.material.dispose();
             }
           }
         }
       });
-      previewScene.remove(previewModel);
-      previewModel = null;
+      while (previewScene.children.length > 0) {
+        previewScene.remove(previewScene.children[0]);
+      }
     }
 
     if (previewRenderer) {
@@ -761,6 +831,7 @@ console.log('[Preview] preview.js script loaded');
 
     previewScene = null;
     previewCamera = null;
+    previewAxesHelper = null;
   }
 
   // Close preview modal

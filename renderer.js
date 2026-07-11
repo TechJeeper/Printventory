@@ -433,7 +433,16 @@ window.clearSTLHomeDirectory = async function clearSTLHomeDirectory() {
 
 // Lazy load Puter.js only when needed to avoid unnecessary socket.io connections
 let puterLoadingPromise = null;
+function isPuterJsSupportedHere() {
+  const protocol = window.location && window.location.protocol;
+  return protocol === 'http:' || protocol === 'https:';
+}
+
 async function loadPuterJS() {
+  if (!isPuterJsSupportedHere()) {
+    throw new Error('Puter.com AI is unavailable in this view (file:// protocol). Restart the desktop app or use Server Mode in a browser.');
+  }
+
   // If already loaded, return immediately
   if (typeof puter !== 'undefined' && puter && puter.ai) {
     console.log('[Puter] Puter.js already loaded');
@@ -505,54 +514,104 @@ async function loadPuterJS() {
   return puterLoadingPromise;
 }
 
+/** True when Puter API must be reached via our server proxy (not https://puter.com origin). */
+function needsPuterProxy() {
+  const loc = window.location;
+  if (!loc || loc.protocol === 'file:') return false;
+  const host = (loc.hostname || '').toLowerCase();
+  return host !== 'puter.com' && host !== 'www.puter.com';
+}
+
+function extractPuterResponseText(response) {
+  if (typeof response === 'string') return response;
+  if (response && typeof response === 'object') {
+    return response.text || response.content || response.message || JSON.stringify(response);
+  }
+  return String(response || '');
+}
+
+function mapPuterApiError(apiError) {
+  const msg = apiError && apiError.message ? String(apiError.message) : '';
+  if (msg.includes('timeout') || msg.includes('Network') || msg.includes('Failed to fetch')) {
+    return new Error('Network error: Unable to connect to Puter.com API. Please check your internet connection. If running in Docker, ensure the container or browser has internet access.');
+  }
+  if (msg.includes('CORS') || msg.includes('Access-Control-Allow-Origin')) {
+    return new Error('Puter.com API blocked by browser CORS policy. The server proxy should handle this — try refreshing the page.');
+  }
+  if (msg.includes('403')) {
+    return new Error('Puter.com API access denied (403). This may be due to CORS restrictions or API limitations. Please try using a different AI service or check puter.com documentation.');
+  }
+  if (msg.includes('Forbidden')) {
+    return new Error('Puter.com API access forbidden. This service may require additional setup or have usage restrictions.');
+  }
+  return apiError;
+}
+
+/** Call Puter AI — uses server proxy on localhost to avoid CORS; direct puter.ai.chat on puter.com. */
+async function callPuterAI(prompt, imageUrl, model) {
+  await loadPuterJS();
+  let retries = 0;
+  const maxRetries = 10;
+  while ((typeof puter === 'undefined' || !puter.ai) && retries < maxRetries) {
+    await new Promise((r) => setTimeout(r, 100));
+    retries++;
+  }
+  if (typeof puter === 'undefined' || !puter.ai) {
+    throw new Error('Puter.js is not loaded. Please refresh the application.');
+  }
+
+  const modelName = model || 'gpt-5-nano';
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Network timeout: Unable to reach Puter.com API. Please check your internet connection.')), 55000);
+  });
+
+  if (needsPuterProxy()) {
+    if (!puter.authToken && puter.ui && typeof puter.ui.authenticateWithPuter === 'function') {
+      console.log('[Puter AI] Authenticating with Puter.com (captcha may appear)...');
+      await puter.ui.authenticateWithPuter();
+    }
+    const proxyCall = fetch('/api/puter-ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        imageUrl: imageUrl || null,
+        model: modelName,
+        authToken: puter.authToken || null
+      })
+    }).then(async (resp) => {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const err = new Error(data.error || `Puter AI proxy error (${resp.status})`);
+        if (data.code) err.code = data.code;
+        throw err;
+      }
+      return data.response;
+    });
+    return await Promise.race([proxyCall, timeoutPromise]);
+  }
+
+  if (!puter.ai.chat) {
+    throw new Error('Puter.js AI chat is not available. Please refresh the application.');
+  }
+  return await Promise.race([
+    puter.ai.chat(prompt, imageUrl, { model: modelName }),
+    timeoutPromise
+  ]);
+}
+
 // Assign puter-ai-chat-request handler early so Test (Puter) works in Docker/server before DOMContentLoaded
 window._electronRealEventHandlers['puter-ai-chat-request'] = async function(requestId, prompt, imageUrl, model) {
   console.log('[Puter AI] Received request, Puter.js captcha may appear in this window');
   try {
-    await loadPuterJS();
-    var retries = 0;
-    var maxRetries = 10;
-    while ((typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) && retries < maxRetries) {
-      await new Promise(function(r) { setTimeout(r, 100); });
-      retries++;
-    }
-    if (typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) {
-      throw new Error('Puter.js is not loaded. Please refresh the application.');
-    }
-    var response;
-    try {
-      var timeoutPromise = new Promise(function(_, reject) {
-        setTimeout(function() { reject(new Error('Network timeout: Unable to reach Puter.com API. Please check your internet connection.')); }, 55000);
-      });
-      response = await Promise.race([
-        puter.ai.chat(prompt, imageUrl, { model: model || 'gpt-5-nano' }),
-        timeoutPromise
-      ]);
-    } catch (apiError) {
-      if (apiError.message && (apiError.message.indexOf('timeout') !== -1 || apiError.message.indexOf('Network') !== -1 || apiError.message.indexOf('Failed to fetch') !== -1)) {
-        throw new Error('Network error: Unable to connect to Puter.com API. Please check your internet connection. If running in Docker, ensure the container or browser has internet access.');
-      }
-      if (apiError.message && apiError.message.indexOf('403') !== -1) {
-        throw new Error('Puter.com API access denied (403). This may be due to CORS restrictions or API limitations. Please try using a different AI service or check puter.com documentation.');
-      }
-      if (apiError.message && apiError.message.indexOf('Forbidden') !== -1) {
-        throw new Error('Puter.com API access forbidden. This service may require additional setup or have usage restrictions.');
-      }
-      throw apiError;
-    }
-    var responseText;
-    if (typeof response === 'string') {
-      responseText = response;
-    } else if (response && typeof response === 'object') {
-      responseText = response.text || response.content || response.message || JSON.stringify(response);
-    } else {
-      responseText = String(response || '');
-    }
+    const response = await callPuterAI(prompt, imageUrl, model);
+    const responseText = extractPuterResponseText(response);
     console.log('[Puter AI] Sending response back, requestId:', requestId, 'response length:', responseText ? responseText.length : 0);
     window.electron.send('puter-ai-chat-response', requestId, { response: responseText });
   } catch (error) {
     console.error('[Puter AI] Error calling puter.ai.chat:', error);
-    var errorMessage = error.message || 'Unknown error';
+    const mapped = mapPuterApiError(error);
+    const errorMessage = mapped.message || 'Unknown error';
     window.electron.send('puter-ai-chat-response', requestId, { error: errorMessage });
   }
 };
@@ -1134,22 +1193,20 @@ async function loadModel(filePath, options = {}) {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
 
-    // STL: read bytes the same way as 3D preview (readModelFile) and hand them to the worker.
-    // Thumbnails used to rely only on fetch(HTTP) / file URL in the worker; in Docker/server mode
-    // that path can fail for some paths where direct fs read and preview still work.
-    let stlArrayBuffer = null;
-    if (fileExtension === 'stl' && window.electron && typeof window.electron.readModelFile === 'function') {
+    // Read file bytes via main process (same as 3D preview) — avoids fragile file:// fetch in the worker.
+    let modelArrayBuffer = null;
+    if (window.electron && typeof window.electron.readModelFile === 'function') {
       try {
         const raw = await window.electron.readModelFile(filePath);
         if (raw) {
-          stlArrayBuffer = raw instanceof ArrayBuffer
+          modelArrayBuffer = raw instanceof ArrayBuffer
             ? raw
             : raw.buffer
               ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)
-            : null;
+              : null;
         }
       } catch (e) {
-        console.warn('loadModel: readModelFile for STL failed, worker will use URL:', e);
+        console.warn('loadModel: readModelFile failed, worker will use URL:', e);
       }
     }
 
@@ -1164,11 +1221,12 @@ async function loadModel(filePath, options = {}) {
         worker.terminate();
 
         if (!data.success) {
-          console.error('Worker error:', data.error);
+          const errMsg = data.error || 'Unknown worker parse error';
+          console.error('Worker error:', errMsg, filePath);
           if (tempFilePath) {
             window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
           }
-          reject(new Error(data.error));
+          reject(new Error(errMsg));
           return;
         }
 
@@ -1224,7 +1282,7 @@ async function loadModel(filePath, options = {}) {
       };
 
       worker.onerror = function(error) {
-        console.error('Worker failed:', error.message);
+        console.error('Worker failed:', error.message, filePath);
         worker.terminate();
         if (tempFilePath) {
           window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
@@ -1236,23 +1294,21 @@ async function loadModel(filePath, options = {}) {
         id: jobId,
         fileExtension,
         url: encodedFilePath,
-        arrayBuffer: stlArrayBuffer || undefined
+        arrayBuffer: modelArrayBuffer || undefined
       };
-      const transfer = stlArrayBuffer && stlArrayBuffer instanceof ArrayBuffer ? [stlArrayBuffer] : undefined;
+      const transfer = modelArrayBuffer && modelArrayBuffer instanceof ArrayBuffer ? [modelArrayBuffer] : undefined;
       if (transfer) {
         worker.postMessage(payload, transfer);
       } else {
         worker.postMessage(payload);
       }
+    }).finally(() => {
+      const endTime = Date.now();
+      console.log(`[DEBUG] loadModel: Finished loading ${filePath}. Took ${endTime - startTime}ms.`);
     });
   } catch (error) {
     console.error('loadModel error:', error);
     throw error;
-  } finally {
-    const endTime = Date.now();
-    console.log(`[DEBUG] loadModel: Finished loading ${filePath}. Took ${endTime - startTime}ms.`);
-    // Note: Temp file cleanup is handled by OS or on next extraction
-    // We don't delete immediately as the file may still be in use by Three.js
   }
 }
 
@@ -1403,6 +1459,35 @@ function pruneZipArchiveExpandedGroups(models) {
   }
 }
 
+/** True when the model should show the "New" badge (SQLite 1, boolean, or string "1"). */
+function isModelNew(model) {
+  if (!model) return false;
+  const v = model.isNew;
+  return v === 1 || v === true || v === '1';
+}
+
+/** Keep the thumbnail "New" pill in sync with model.isNew (create, update, virtual-grid reuse). */
+function syncModelNewBadge(fileItem, model) {
+  if (!fileItem) return;
+  fileItem.querySelector(':scope > .new-status')?.remove();
+  const thumbHost =
+    fileItem.querySelector('.thumbnail-wrapper .thumbnail-container') ||
+    fileItem.querySelector('.thumbnail-container');
+  if (!thumbHost) return;
+  const existingBadge = thumbHost.querySelector(':scope > .new-status');
+  if (isModelNew(model)) {
+    if (!existingBadge) {
+      const newStatusEl = document.createElement('div');
+      newStatusEl.className = 'new-status';
+      newStatusEl.textContent = 'New';
+      newStatusEl.title = 'New model — clears once you edit it';
+      thumbHost.appendChild(newStatusEl);
+    }
+  } else if (existingBadge) {
+    existingBadge.remove();
+  }
+}
+
 /** Merge fresh model into virtual grid's currentModels when paths match (normalized). */
 function mergeModelIntoGridCurrentModels(model) {
   const container = document.querySelector('.file-grid');
@@ -1461,6 +1546,9 @@ async function updateModelElement(filePath) {
     const parentModel = document.getElementById('parent-select')?.value || '';
     const printStatus = document.getElementById('printed-select')?.value || 'all';
     const newStatus = document.getElementById('new-select')?.value || 'all';
+    const favoriteStatus = document.getElementById('favorite-select')?.value || 'all';
+    const ratingStatus = document.getElementById('rating-select')?.value || 'all';
+    const ratingMinStatus = document.getElementById('rating-min-select')?.value || 'all';
     const fileType = document.getElementById('filetype-select')?.value || '';
     const searchTerm = document.getElementById('search-filter-input')?.value.trim() || '';
     
@@ -1499,9 +1587,26 @@ async function updateModelElement(filePath) {
     }
 
     if (shouldBeVisible && newStatus === 'new') {
-      shouldBeVisible = !!(model.isNew === 1 || model.isNew === true);
+      shouldBeVisible = isModelNew(model);
     } else if (shouldBeVisible && newStatus === 'not-new') {
-      shouldBeVisible = !(model.isNew === 1 || model.isNew === true);
+      shouldBeVisible = !isModelNew(model);
+    }
+
+    if (shouldBeVisible && favoriteStatus === 'favorited') {
+      shouldBeVisible = Boolean(model.favorite);
+    } else if (shouldBeVisible && favoriteStatus === 'not-favorited') {
+      shouldBeVisible = !model.favorite;
+    }
+
+    const modelRating = normalizeModelRatingValue(model.rating);
+    if (shouldBeVisible && ratingStatus === 'unrated') {
+      shouldBeVisible = modelRating === 0;
+    } else if (shouldBeVisible && ratingStatus !== 'all' && /^[1-5]$/.test(ratingStatus)) {
+      shouldBeVisible = modelRating === parseInt(ratingStatus, 10);
+    }
+
+    if (shouldBeVisible && ratingMinStatus !== 'all' && /^[1-5]$/.test(ratingMinStatus)) {
+      shouldBeVisible = modelRating >= parseInt(ratingMinStatus, 10);
     }
     
     // Check file type filter
@@ -1561,22 +1666,7 @@ async function updateModelElement(filePath) {
       return;
     }
 
-    existingElement.querySelector(':scope > .new-status')?.remove();
-
-    const thumbHost =
-      existingElement.querySelector('.thumbnail-wrapper .thumbnail-container') ||
-      existingElement.querySelector('.thumbnail-container');
-    const modelIsNew = model.isNew === 1 || model.isNew === true;
-    let newBadge = thumbHost ? thumbHost.querySelector(':scope > .new-status') : null;
-    if (modelIsNew && thumbHost && !newBadge) {
-      newBadge = document.createElement('div');
-      newBadge.className = 'new-status';
-      newBadge.textContent = 'New';
-      newBadge.title = 'New model — clears once you edit it';
-      thumbHost.appendChild(newBadge);
-    } else if (!modelIsNew && newBadge) {
-      newBadge.remove();
-    }
+    syncModelNewBadge(existingElement, model);
     
     // Check if we're in detailed view
     const isDetailedView = existingElement.classList.contains('file-item-detailed');
@@ -1684,6 +1774,15 @@ async function updateModelElement(filePath) {
       });
       
       existingElement.appendChild(statusElement);
+    }
+
+    const engagementBar = existingElement.querySelector('.model-engagement-bar:not(.is-group)');
+    if (engagementBar) {
+      updateEngagementBarDisplay(
+        engagementBar,
+        normalizeModelRatingValue(model.rating),
+        Boolean(model.favorite)
+      );
     }
     
     // Remove any existing designer info elements that might have been added (redundant with metadata)
@@ -2830,6 +2929,55 @@ let isRegeneratingThumbnails = false;
 // Flag to prevent multiple DeDup delete confirmations from showing
 let isDeletingDuplicates = false;
 
+const DEDUP_PREVIEW_CONCURRENCY = 4;
+
+function setDuplicatePreviewPlaceholder(previewEl) {
+  previewEl.innerHTML = `
+    <div class="dedup-preview-loading" style="display:flex;align-items:center;justify-content:center;min-height:120px;color:#888;font-size:0.85rem;">
+      Loading preview…
+    </div>
+  `;
+}
+
+async function loadDuplicateGroupPreview(previewEl, filePath) {
+  try {
+    const thumbnail = await window.electron.getThumbnail(filePath);
+    if (thumbnail && thumbnail !== '3d.png' && thumbnail.trim() !== '') {
+      const img = document.createElement('img');
+      img.src = thumbnail;
+      previewEl.innerHTML = '';
+      previewEl.appendChild(img);
+      return;
+    }
+    const rendered = await renderModelToPNG(filePath, previewEl);
+    if (rendered) {
+      const img = document.createElement('img');
+      img.src = rendered;
+      previewEl.innerHTML = '';
+      previewEl.appendChild(img);
+    } else {
+      previewEl.innerHTML = '<div class="error-message">No preview available</div>';
+    }
+  } catch (error) {
+    console.error('Error loading duplicate preview:', error);
+    previewEl.innerHTML = '<div class="error-message">No preview available</div>';
+  }
+}
+
+function loadDuplicatePreviewsInBackground(tasks) {
+  if (!tasks.length) return;
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const task = tasks[next++];
+      await loadDuplicateGroupPreview(task.preview, task.filePath);
+    }
+  };
+  const workerCount = Math.min(DEDUP_PREVIEW_CONCURRENCY, tasks.length);
+  Promise.all(Array.from({ length: workerCount }, () => worker()))
+    .catch((err) => console.error('Error loading dedup previews:', err));
+}
+
 // Add or update the loadDuplicateFiles function
 // refreshOnly: when true, only refresh duplicate-groups content and do not call showModal() (dialog stays open)
 async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
@@ -3073,13 +3221,16 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
     const dialog = document.getElementById('dedup-dialog');
     const duplicateGroups = dialog.querySelector('.duplicate-groups');
     
-    // Show loading indicator immediately
+    // Show loading indicator and open dialog immediately so the UI is not blocked by preview work
     duplicateGroups.innerHTML = `
       <div style="text-align: center; padding: 40px; color: #888;">
         <div style="display: inline-block; width: 40px; height: 40px; border: 4px solid #333; border-top-color: #4a9eff; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px;"></div>
         <div style="margin-top: 15px;">Loading duplicate files...</div>
       </div>
     `;
+    if (!refreshOnly && !dialog.open) {
+      dialog.showModal();
+    }
     
     // Check if ZIP is enabled and show/hide the checkbox
     const enableZipArchives = await window.electron.getSetting('enableZipArchives');
@@ -3129,8 +3280,9 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
     console.log('Is generating hashes:', isGeneratingHashes);
     console.log('Include zip:', includeZip);
     
-    // Clear loading message; previews are rendered on demand by showDuplicateFiles via renderModelToPNG
+    // Clear loading message; previews load in the background after the list is shown
     duplicateGroups.innerHTML = '';
+    const previewTasks = [];
     
     // Show warning if hashes are being generated
     if (isGeneratingHashes) {
@@ -3176,45 +3328,10 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
         const group = document.createElement('div');
         group.className = 'duplicate-group';
         
-        // Add preview container
         const preview = document.createElement('div');
         preview.className = 'duplicate-preview';
-        
-        // Try stored thumbnail first, then fall back to on-the-fly render (covers models with no thumbnail yet)
-        try {
-          const thumbnail = await window.electron.getThumbnail(files[0].filePath);
-          if (thumbnail && thumbnail !== '3d.png' && thumbnail.trim() !== '') {
-            const img = document.createElement('img');
-            img.src = thumbnail;
-            preview.appendChild(img);
-          } else {
-            const rendered = await renderModelToPNG(files[0].filePath, preview);
-            if (rendered) {
-              const img = document.createElement('img');
-              img.src = rendered;
-              preview.innerHTML = '';
-              preview.appendChild(img);
-            } else {
-              preview.innerHTML = '<div class="error-message">No preview available</div>';
-            }
-          }
-        } catch (error) {
-          console.error('Error getting thumbnail:', error);
-          try {
-            const rendered = await renderModelToPNG(files[0].filePath, preview);
-            if (rendered) {
-              const img = document.createElement('img');
-              img.src = rendered;
-              preview.innerHTML = '';
-              preview.appendChild(img);
-            } else {
-              preview.innerHTML = '<div class="error-message">No preview available</div>';
-            }
-          } catch (renderErr) {
-            console.error('Error rendering preview:', renderErr);
-            preview.innerHTML = '<div class="error-message">No preview available</div>';
-          }
-        }
+        setDuplicatePreviewPlaceholder(preview);
+        previewTasks.push({ preview, filePath: files[0].filePath });
         
         // Add files list
         const filesList = document.createElement('div');
@@ -3279,10 +3396,11 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
         group.appendChild(filesList);
         duplicateGroups.appendChild(group);
       }
+
+      loadDuplicatePreviewsInBackground(previewTasks);
     }
 
-    // Show the dialog only if not refresh-only (e.g. after delete we stay in dialog and just refreshed list)
-    if (!refreshOnly) {
+    if (!refreshOnly && !dialog.open) {
       dialog.showModal();
     }
     
@@ -7136,10 +7254,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   window.confirmPurgeModelsFromDialog = confirmPurgeModelsFromDialog;
 
-  document.getElementById('confirm-purge-button')?.addEventListener('click', async () => {
-    await confirmPurgeModelsFromDialog();
-  });
-
   // Sort-select handler is now managed by search.js via initializeCombinedSearch()
   // which properly calls performCombinedSearch() to re-render with filters preserved
 
@@ -8614,7 +8728,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Add event listeners on filter and search elements so that the "view-library-message" is removed when a filter or search is active.
-  ["designer-select", "license-select", "parent-select", "printed-select", "new-select", "tag-filter", "filetype-select", "search-filter-input"].forEach(id => {
+  ["designer-select", "license-select", "parent-select", "printed-select", "new-select", "favorite-select", "rating-select", "rating-min-select", "tag-filter", "filetype-select", "search-filter-input"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("change", () => {
@@ -8660,66 +8774,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   window._electronRealEventHandlers['puter-ai-chat-request'] = async function(requestId, prompt, imageUrl, model) {
     console.log('[Puter AI] Received request, Puter.js captcha may appear in this window');
     try {
-      await loadPuterJS();
-      
-      // Wait for puter.js to be fully initialized
-      let retries = 0;
-      const maxRetries = 10;
-      while ((typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) && retries < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        retries++;
-      }
-      
-      // Check if puter is available
-      if (typeof puter === 'undefined' || !puter.ai || !puter.ai.chat) {
-        throw new Error('Puter.js is not loaded. Please refresh the application.');
-      }
-      
-      // Call puter.ai.chat() with error handling
-      let response;
-      try {
-        // Add timeout wrapper to detect network issues
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Network timeout: Unable to reach Puter.com API. Please check your internet connection.')), 55000);
-        });
-        
-        response = await Promise.race([
-          puter.ai.chat(prompt, imageUrl, { model: model || 'gpt-5-nano' }),
-          timeoutPromise
-        ]);
-      } catch (apiError) {
-        console.error('[Puter AI] API call error:', apiError);
-        // Handle network/timeout errors
-        if (apiError.message && (apiError.message.includes('timeout') || apiError.message.includes('Network') || apiError.message.includes('Failed to fetch'))) {
-          throw new Error('Network error: Unable to connect to Puter.com API. Please check your internet connection. If running in Docker, ensure the container or browser has internet access.');
-        }
-        // Handle 403 or other API errors
-        if (apiError.message && apiError.message.includes('403')) {
-          throw new Error('Puter.com API access denied (403). This may be due to CORS restrictions or API limitations. Please try using a different AI service or check puter.com documentation.');
-        } else if (apiError.message && apiError.message.includes('Forbidden')) {
-          throw new Error('Puter.com API access forbidden. This service may require additional setup or have usage restrictions.');
-        }
-        throw apiError;
-      }
-      
-      // Extract serializable content from response
-      // puter.ai.chat() may return a string or an object, ensure we only send serializable data
-      let responseText;
-      if (typeof response === 'string') {
-        responseText = response;
-      } else if (response && typeof response === 'object') {
-        // Try to extract text content from various possible response formats
-        responseText = response.text || response.content || response.message || JSON.stringify(response);
-      } else {
-        responseText = String(response || '');
-      }
-      
-      // Send response back to main process with requestId (only send serializable string)
+      const response = await callPuterAI(prompt, imageUrl, model);
+      const responseText = extractPuterResponseText(response);
       console.log('[Puter AI] Sending response back, requestId:', requestId, 'response length:', responseText?.length);
       window.electron.send('puter-ai-chat-response', requestId, { response: responseText });
     } catch (error) {
       console.error('[Puter AI] Error calling puter.ai.chat:', error);
-      const errorMessage = error.message || 'Unknown error';
+      const mapped = mapPuterApiError(error);
+      const errorMessage = mapped.message || 'Unknown error';
       console.log('[Puter AI] Sending error response, requestId:', requestId, 'error:', errorMessage);
       window.electron.send('puter-ai-chat-response', requestId, { error: errorMessage });
     }
@@ -11447,6 +11509,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const license = document.getElementById('license-select').value;
     const parentModel = document.getElementById('parent-select').value;
     const printStatus = document.getElementById('printed-select').value;
+    const favoriteStatus = document.getElementById('favorite-select')?.value || 'all';
+    const ratingStatus = document.getElementById('rating-select')?.value || 'all';
+    const ratingMinStatus = document.getElementById('rating-min-select')?.value || 'all';
     const tagFilter = document.getElementById('tag-filter').value;
     const fileType = document.getElementById('filetype-select').value;
     const searchTerm = document.getElementById('search-filter-input')?.value.trim() || '';
@@ -11458,6 +11523,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (parentModel && model.parentModel !== parentModel) return false;
     if (printStatus === 'printed' && !model.printed) return false;
     if (printStatus === 'not-printed' && model.printed) return false;
+    if (favoriteStatus === 'favorited' && !model.favorite) return false;
+    if (favoriteStatus === 'not-favorited' && model.favorite) return false;
+    const modelRating = normalizeModelRatingValue(model.rating);
+    if (ratingStatus === 'unrated' && modelRating !== 0) return false;
+    if (ratingStatus !== 'all' && /^[1-5]$/.test(ratingStatus) && modelRating !== parseInt(ratingStatus, 10)) return false;
+    if (ratingMinStatus !== 'all' && /^[1-5]$/.test(ratingMinStatus) && modelRating < parseInt(ratingMinStatus, 10)) return false;
     if (fileType) {
       if (fileType.toLowerCase() === 'zip') {
         // For zip filter, show all models inside ZIP archives (entries with :: separator)
@@ -12275,6 +12346,9 @@ async function refreshModelDisplay() {
     const parentModel = document.getElementById('parent-select').value;
     const printStatus = document.getElementById('printed-select').value;
     const newStatus = document.getElementById('new-select')?.value || 'all';
+    const favoriteStatus = document.getElementById('favorite-select')?.value || 'all';
+    const ratingStatus = document.getElementById('rating-select')?.value || 'all';
+    const ratingMinStatus = document.getElementById('rating-min-select')?.value || 'all';
     const tagFilter = document.getElementById('tag-filter').value;
     const sortOption = document.getElementById('sort-select').value;
     const fileType = document.getElementById('filetype-select').value; // Add this line
@@ -12291,6 +12365,12 @@ async function refreshModelDisplay() {
     document.getElementById('printed-select').value = printStatus;
     const newSelRestore = document.getElementById('new-select');
     if (newSelRestore) newSelRestore.value = newStatus;
+    const favSelRestore = document.getElementById('favorite-select');
+    if (favSelRestore) favSelRestore.value = favoriteStatus;
+    const ratingSelRestore = document.getElementById('rating-select');
+    if (ratingSelRestore) ratingSelRestore.value = ratingStatus;
+    const ratingMinSelRestore = document.getElementById('rating-min-select');
+    if (ratingMinSelRestore) ratingMinSelRestore.value = ratingMinStatus;
     document.getElementById('tag-filter').value = tagFilter;
     document.getElementById('filetype-select').value = fileType; // Add this line
 
@@ -12342,9 +12422,24 @@ async function refreshModelDisplay() {
       models = models.filter(model => !model.printed);
     }
     if (newStatus === 'new') {
-      models = models.filter(model => model.isNew === 1 || model.isNew === true);
+      models = models.filter(model => isModelNew(model));
     } else if (newStatus === 'not-new') {
-      models = models.filter(model => !(model.isNew === 1 || model.isNew === true));
+      models = models.filter(model => !isModelNew(model));
+    }
+    if (favoriteStatus === 'favorited') {
+      models = models.filter(model => Boolean(model.favorite));
+    } else if (favoriteStatus === 'not-favorited') {
+      models = models.filter(model => !model.favorite);
+    }
+    if (ratingStatus === 'unrated') {
+      models = models.filter(model => normalizeModelRatingValue(model.rating) === 0);
+    } else if (ratingStatus !== 'all' && /^[1-5]$/.test(ratingStatus)) {
+      const exact = parseInt(ratingStatus, 10);
+      models = models.filter(model => normalizeModelRatingValue(model.rating) === exact);
+    }
+    if (ratingMinStatus !== 'all' && /^[1-5]$/.test(ratingMinStatus)) {
+      const min = parseInt(ratingMinStatus, 10);
+      models = models.filter(model => normalizeModelRatingValue(model.rating) >= min);
     }
     if (tagFilter) {
       models = await Promise.all(models.map(async (model) => {
@@ -12765,8 +12860,14 @@ async function processRenderQueue() {
           }
         } catch (error) {
           console.error(`Render task failed: ${error.message}`);
-          // Retry once after longer delay
-          setTimeout(() => renderQueue.push(task), 2000);
+          const isWebGLHardFail = /Error creating WebGL context/i.test(error && error.message ? error.message : '');
+          if (isWebGLHardFail) {
+            // Do not requeue forever when the GPU/WebGL stack cannot create a context.
+            task.reject(error);
+          } else {
+            // Retry once after longer delay
+            setTimeout(() => renderQueue.push(task), 2000);
+          }
         } finally {
           activeRenders--;
           const pauseMs = isLowPriorityThumbnailTask(task) ? RENDER_DELAY_BACKGROUND : RENDER_DELAY;
@@ -12788,13 +12889,43 @@ async function processRenderQueue() {
 
 // 2. Optimize renderer settings and reuse renderer instance
 let sharedCanvas = null;
+let sharedWebGLUnavailable = false;
+
+function createThumbnailWebGLRenderer(canvas) {
+  // Prefer options that succeed on macOS Electron; fall back if a preference is rejected.
+  const attempts = [
+    { antialias: false, alpha: true, canvas, preserveDrawingBuffer: true, powerPreference: 'default', failIfMajorPerformanceCaveat: false },
+    { antialias: false, alpha: true, canvas, preserveDrawingBuffer: true, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false },
+    { antialias: false, alpha: true, canvas, preserveDrawingBuffer: true, failIfMajorPerformanceCaveat: false },
+    { antialias: false, alpha: true, canvas, preserveDrawingBuffer: true }
+  ];
+  let lastError = null;
+  for (const opts of attempts) {
+    try {
+      const renderer = new THREE.WebGLRenderer(opts);
+      if (renderer.debug) {
+        // Some WebGL stacks return null from getProgramInfoLog/getShaderInfoLog; Three.js calls .trim() and throws.
+        renderer.debug.checkShaderErrors = false;
+      }
+      return renderer;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('Error creating WebGL context.');
+}
 
 function getSharedRenderer() {
+  if (sharedWebGLUnavailable) {
+    throw new Error('Error creating WebGL context.');
+  }
   if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
     // Clean up existing resources before creating new ones
     if (sharedRenderer) {
-      sharedRenderer.dispose();
-      sharedRenderer.forceContextLoss();
+      try {
+        sharedRenderer.dispose();
+        sharedRenderer.forceContextLoss();
+      } catch (_) { /* ignore */ }
       sharedRenderer = null;
     }
     if (sharedCanvas) {
@@ -12802,21 +12933,32 @@ function getSharedRenderer() {
       sharedCanvas = null;
     }
 
-    // Create new canvas and renderer
+    // Create new canvas and attach to DOM. Detached canvases often fail getContext('webgl') on macOS Electron.
     sharedCanvas = document.createElement('canvas');
     sharedCanvas.width = 250;
     sharedCanvas.height = 250;
-
-    sharedRenderer = new THREE.WebGLRenderer({
-      antialias: false,
-      alpha: true,
-      canvas: sharedCanvas,
-      powerPreference: 'low-power',
-      preserveDrawingBuffer: true // Add this for better context management
+    sharedCanvas.setAttribute('aria-hidden', 'true');
+    Object.assign(sharedCanvas.style, {
+      position: 'fixed',
+      left: '-9999px',
+      top: '0',
+      width: '250px',
+      height: '250px',
+      opacity: '0',
+      pointerEvents: 'none'
     });
-    // Some WebGL stacks return null from getProgramInfoLog/getShaderInfoLog; Three.js calls .trim() and throws.
-    if (sharedRenderer.debug) {
-      sharedRenderer.debug.checkShaderErrors = false;
+    document.body.appendChild(sharedCanvas);
+
+    try {
+      sharedRenderer = createThumbnailWebGLRenderer(sharedCanvas);
+    } catch (err) {
+      sharedWebGLUnavailable = true;
+      if (sharedCanvas) {
+        sharedCanvas.remove();
+        sharedCanvas = null;
+      }
+      console.error('WebGL unavailable for thumbnails:', err && err.message ? err.message : err);
+      throw err;
     }
 
     contextUseCount = 0;
@@ -12824,9 +12966,17 @@ function getSharedRenderer() {
     // Add context loss handler
     sharedCanvas.addEventListener('webglcontextlost', (event) => {
       event.preventDefault();
-      sharedRenderer.dispose();
+      sharedWebGLUnavailable = false;
+      try {
+        if (sharedRenderer) {
+          sharedRenderer.dispose();
+        }
+      } catch (_) { /* ignore */ }
       sharedRenderer = null;
-      sharedCanvas = null;
+      if (sharedCanvas) {
+        sharedCanvas.remove();
+        sharedCanvas = null;
+      }
     }, false);
   }
   contextUseCount++;
@@ -13003,7 +13153,21 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
 
   let scene, camera;
   let model = null; // Declare model in outer scope
-  const renderer = getSharedRenderer();
+  let renderer;
+  try {
+    renderer = getSharedRenderer();
+  } catch (webglError) {
+    console.error('WebGL unavailable, using placeholder:', webglError && webglError.message ? webglError.message : webglError);
+    const corruptedDataUrl = generateCorruptedPlaceholder();
+    const img = document.createElement('img');
+    img.src = corruptedDataUrl;
+    img.style.width = '250px';
+    img.style.height = '250px';
+    img.alt = 'WebGL unavailable';
+    container.innerHTML = '';
+    container.appendChild(img);
+    return corruptedDataUrl;
+  }
 
   try {
     renderer.setSize(250, 250);
@@ -17545,6 +17709,172 @@ function upgradeGridItemToThumbnailCarousel(thumbnailContainer, model, validThum
   if (imgEl && validThumbnails[0]) imgEl.src = validThumbnails[0];
 }
 
+function normalizeModelRatingValue(value) {
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n < 0) return 0;
+  if (n > 5) return 5;
+  return n;
+}
+
+function computeGroupEngagementFromChildren(children) {
+  const list = Array.isArray(children) ? children : [];
+  if (!list.length) return { rating: 0, favorite: false };
+  const ratings = list.map((c) => normalizeModelRatingValue(c?.rating));
+  const sum = ratings.reduce((a, b) => a + b, 0);
+  const avg = Math.round(sum / list.length);
+  const favorite = list.some((c) => Boolean(c?.favorite));
+  return { rating: avg, favorite };
+}
+
+function updateEngagementBarDisplay(bar, rating, favorite, hoverRating = null) {
+  if (!bar) return;
+  const displayRating = hoverRating != null ? hoverRating : normalizeModelRatingValue(rating);
+  const stars = bar.querySelectorAll('.model-star');
+  stars.forEach((star, i) => {
+    const starNum = i + 1;
+    const filled = starNum <= displayRating;
+    star.classList.toggle('is-filled', filled);
+    star.textContent = filled ? '★' : '☆';
+  });
+  const favBtn = bar.querySelector('.model-favorite-btn');
+  if (favBtn) {
+    favBtn.classList.toggle('is-favorited', Boolean(favorite));
+    favBtn.setAttribute('aria-pressed', favorite ? 'true' : 'false');
+    favBtn.textContent = favorite ? '♥' : '♡';
+  }
+  bar.dataset.rating = String(normalizeModelRatingValue(rating));
+  bar.dataset.favorite = favorite ? '1' : '0';
+}
+
+async function bulkSaveModelsEngagement(filePaths, field, value) {
+  if (!filePaths || !filePaths.length) return false;
+  const updates = [];
+  for (const filePath of filePaths) {
+    try {
+      const model = await window.electron.getModel(filePath);
+      if (!model) continue;
+      model[field] = value;
+      updates.push(model);
+    } catch (err) {
+      console.error('bulkSaveModelsEngagement load error:', filePath, err);
+    }
+  }
+  if (!updates.length) return false;
+  try {
+    const success = await window.electron.updateModelsBatch(updates);
+    if (success) {
+      for (const m of updates) {
+        await updateModelElement(m.filePath);
+      }
+    }
+    return success;
+  } catch (err) {
+    console.error('bulkSaveModelsEngagement save error:', err);
+    return false;
+  }
+}
+
+function createModelEngagementBar(context, options = {}) {
+  const { groupMode = false, children = [] } = options;
+  let rating = 0;
+  let favorite = false;
+  let filePaths = [];
+
+  if (groupMode) {
+    const agg = computeGroupEngagementFromChildren(children);
+    rating = agg.rating;
+    favorite = agg.favorite;
+    filePaths = (children || []).map((c) => c?.filePath).filter(Boolean);
+  } else {
+    rating = normalizeModelRatingValue(context?.rating);
+    favorite = Boolean(context?.favorite);
+    filePaths = context?.filePath ? [context.filePath] : [];
+  }
+
+  const bar = document.createElement('div');
+  bar.className = 'model-engagement-bar' + (groupMode ? ' is-group' : '');
+
+  const ratingWrap = document.createElement('div');
+  ratingWrap.className = 'model-rating';
+  ratingWrap.setAttribute('role', 'radiogroup');
+  ratingWrap.setAttribute('aria-label', groupMode ? 'Group rating' : 'Rating');
+
+  let hoverRating = null;
+
+  for (let i = 1; i <= 5; i++) {
+    const star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'model-star';
+    star.dataset.star = String(i);
+    star.setAttribute('aria-label', `${i} star${i === 1 ? '' : 's'}`);
+    star.textContent = '☆';
+
+    star.addEventListener('mouseenter', () => {
+      hoverRating = i;
+      updateEngagementBarDisplay(bar, rating, favorite, hoverRating);
+    });
+    star.addEventListener('mouseleave', () => {
+      hoverRating = null;
+      updateEngagementBarDisplay(bar, rating, favorite, null);
+    });
+    star.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const starNum = i;
+      const newRating = normalizeModelRatingValue(rating) === starNum ? 0 : starNum;
+      if (groupMode) {
+        const ok = await bulkSaveModelsEngagement(filePaths, 'rating', newRating);
+        if (ok) {
+          rating = newRating;
+          children.forEach((c) => { if (c) c.rating = newRating; });
+          updateEngagementBarDisplay(bar, rating, favorite);
+        }
+      } else {
+        const ok = await autoSaveModel('rating', newRating, context.filePath);
+        if (ok) {
+          rating = newRating;
+          updateEngagementBarDisplay(bar, rating, favorite);
+        }
+      }
+    });
+
+    ratingWrap.appendChild(star);
+  }
+
+  const favBtn = document.createElement('button');
+  favBtn.type = 'button';
+  favBtn.className = 'model-favorite-btn';
+  favBtn.setAttribute('aria-pressed', favorite ? 'true' : 'false');
+  favBtn.title = groupMode ? 'Favorite all models in group' : 'Favorite';
+  favBtn.textContent = favorite ? '♥' : '♡';
+
+  favBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const newFavorite = !favorite;
+    if (groupMode) {
+      const ok = await bulkSaveModelsEngagement(filePaths, 'favorite', newFavorite);
+      if (ok) {
+        favorite = newFavorite;
+        children.forEach((c) => { if (c) c.favorite = newFavorite; });
+        updateEngagementBarDisplay(bar, rating, favorite);
+      }
+    } else {
+      const ok = await autoSaveModel('favorite', newFavorite, context.filePath);
+      if (ok) {
+        favorite = newFavorite;
+        updateEngagementBarDisplay(bar, rating, favorite);
+      }
+    }
+  });
+
+  bar.appendChild(ratingWrap);
+  bar.appendChild(favBtn);
+  updateEngagementBarDisplay(bar, rating, favorite);
+
+  return bar;
+}
+
 // Helper function to create a DOM element for a model item
 function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_BACKGROUND) {
   const view = viewMode || currentGridView;
@@ -17636,7 +17966,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   img.src = currentThumbnail || '3d.png';
   thumbnailContainer.appendChild(img);
 
-  if (model.isNew === 1 || model.isNew === true) {
+  if (isModelNew(model)) {
     const newStatusEl = document.createElement('div');
     newStatusEl.className = 'new-status';
     newStatusEl.textContent = 'New';
@@ -18907,6 +19237,11 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   
   item.appendChild(fileInfo);
 
+  if (view === 'detailed') {
+    const engagementBar = createModelEngagementBar(model);
+    item.appendChild(engagementBar);
+  }
+
   // Add click event handler for model selection
   item.addEventListener('click', (e) => {
     // Check if ctrl or cmd key is pressed for multi-select
@@ -19702,6 +20037,14 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   item.appendChild(thumbnailWrap);
   item.appendChild(details);
 
+  if (view === 'detailed') {
+    const engagementBar = createModelEngagementBar(null, {
+      groupMode: true,
+      children: groupRecord.children || []
+    });
+    item.appendChild(engagementBar);
+  }
+
   const toggleGroup = () => {
     if (expandedSet.has(groupRecord.groupKey)) {
       expandedSet.delete(groupRecord.groupKey);
@@ -20231,6 +20574,7 @@ function renderVirtualGrid(models) {
               if (normalizedExistingPath === normalizedExpectedPath) {
                 applyParentGroupHighlightClasses(existingItem, record, recordIndex);
                 positionModelItem(existingItem, row, col);
+                syncModelNewBadge(existingItem, model);
                 continue;
               }
               existingItem.remove();

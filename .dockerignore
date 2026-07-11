@@ -40,7 +40,6 @@ playwright.config.js
 verify.spec.js
 
 # Development files
-scripts/
 .cursor/
 
 # Database files (will be created in container)

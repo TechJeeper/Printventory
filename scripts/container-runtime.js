@@ -90,7 +90,7 @@ function runQuiet(args, options = {}) {
 }
 
 function dockerHubRegistry() {
-  return 'registry-1.docker.io';
+  return 'docker.io';
 }
 
 function loginHint() {
@@ -102,7 +102,7 @@ function loginHint() {
     }
     return `${runtime} login ${registry} -u <username> --password-stdin`;
   }
-  return `${runtime} login`;
+  return `${runtime} login -u <username>`;
 }
 
 function isPodmanOnWindows() {

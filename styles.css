@@ -1701,6 +1701,7 @@ main {
   padding: 16px;
   box-sizing: border-box;
   border-radius: 16px;
+  overflow: hidden;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   background: rgba(255, 255, 255, 0.05);
   backdrop-filter: blur(20px) saturate(180%);
@@ -1762,7 +1763,7 @@ main {
 }
 
 .file-item-detailed .file-info {
-  flex: 0 0 auto; /* Don't grow, don't shrink, auto size - prevents overflow */
+  flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1771,6 +1772,135 @@ main {
   overflow: hidden;
   padding: 0 !important; /* Override all padding from other rules */
   margin: 0;
+}
+
+.file-item-detailed .file-details {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.model-engagement-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: auto;
+  margin-left: -16px;
+  margin-right: -16px;
+  margin-bottom: -16px;
+  width: calc(100% + 32px);
+  flex-shrink: 0;
+  padding: 12px 14px 10px;
+  box-sizing: border-box;
+  border-top: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0.18) 35%,
+    rgba(0, 0, 0, 0.32) 100%
+  );
+  border-radius: 0 0 16px 16px;
+}
+
+.model-engagement-bar.is-group {
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0.14) 35%,
+    rgba(0, 0, 0, 0.26) 100%
+  );
+}
+
+/* Reset global button styles (width: 90%, pill gradient, etc.) */
+.model-engagement-bar button {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  font-weight: normal;
+  line-height: 1;
+  text-align: center;
+  position: static;
+  overflow: visible;
+}
+
+.model-engagement-bar button::before {
+  display: none;
+}
+
+.model-rating {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+.model-star {
+  font-size: 17px;
+  color: rgba(255, 255, 255, 0.3);
+  transition: color 0.2s ease, transform 0.15s ease;
+}
+
+.model-star.is-filled,
+.model-star:hover {
+  color: #00d4ff;
+  transform: scale(1.06);
+}
+
+.model-favorite-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  max-width: 26px;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  transition: color 0.2s ease, background 0.2s ease, transform 0.15s ease;
+}
+
+.model-favorite-btn:hover {
+  color: #ff6b8a;
+  background: rgba(255, 107, 138, 0.14);
+  transform: scale(1.08);
+}
+
+.model-favorite-btn.is-favorited {
+  color: #ff4d6d;
+  background: rgba(255, 77, 109, 0.16);
+}
+
+.parent-model-group.file-item-detailed {
+  display: flex;
+  flex-direction: column;
+}
+
+.parent-model-group.file-item-detailed .model-engagement-bar {
+  margin-left: -12px;
+  margin-right: -12px;
+  margin-bottom: -12px;
+  width: calc(100% + 24px);
+  border-radius: 0 0 16px 16px;
+}
+
+.file-item-detailed:not(.parent-model-group) .model-engagement-bar {
+  margin-left: -10px;
+  margin-right: -10px;
+  margin-bottom: -10px;
+  width: calc(100% + 20px);
 }
 
 .file-item-detailed .file-details {
@@ -1790,7 +1920,7 @@ main {
   backdrop-filter: none;
   border-radius: 0;
   border: none;
-  overflow: visible;
+  overflow: hidden;
   box-sizing: border-box;
 }
 
@@ -6648,6 +6778,12 @@ header {
   font-size: 14px;
   margin-top: 4px;
   justify-content: center;
+}
+
+.preview-simplified-note {
+  color: rgba(255, 200, 100, 0.9);
+  font-size: 13px;
+  font-style: italic;
 }
 
 .preview-instructions {

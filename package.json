@@ -1,15 +1,14 @@
 {
   "name": "printventory",
-  "version": "2.1.4",
+  "version": "2.1.6",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
-    "test": "playwright test",
     "start": "electron .",
     "start:server": "electron . --server",
     "build": "electron-builder -mw",
     "prebuild:mac": "node scripts/check-mac-dependencies.js",
-    "build:mac": "electron-builder --mac --universal",
+    "build:mac": "node scripts/build-mac.js",
     "build:win": "node scripts/build-win.js",
     "build:linux": "node scripts/build-linux-appimage.js",
     "build:linux:internal": "electron-builder --linux --x64",
@@ -23,11 +22,14 @@
     "zip:macos": "powershell -ExecutionPolicy Bypass -File scripts/zip-macos-build.ps1",
     "build:mac:remote": "powershell -ExecutionPolicy Bypass -File scripts/build-mac-remote.ps1",
     "zip:github-source": "node scripts/create-github-source-zip.js",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "test": "playwright test",
+    "test:full": "playwright test full-app-e2e.spec.js"
   },
   "author": "TechJeeper Designs",
   "license": "MIT",
   "build": {
+    "nativeRebuilder": "legacy",
     "appId": "com.printventory.app",
     "mac": {
       "category": "public.app-category.utilities",
@@ -112,12 +114,14 @@
       "roulette.png",
       "tag.png",
       "aitagging.js",
+      "thumbnail-compress.js",
       "slicer.js",
       "guide.js",
       "preview.js",
       "query-builder.js",
       "preview-3mf-worker-node.js",
       "threemf-loader-simple.js",
+      "threemf-mesh-extract.js",
       "3d.png",
       "file-icon.png",
       "sidebar-bg.jpg",
@@ -139,16 +143,16 @@
     "asar": true
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.2",
     "@playwright/test": "^1.57.0",
-    "electron": "^39.2.4",
+    "electron": "^43.1.0",
     "electron-builder": "^26.5.0"
   },
   "overrides": {
-    "tar": "^6.2.1"
+    "tar": "^6.2.1",
+    "node-abi": "^3.94.0"
   },
   "dependencies": {
-    "better-sqlite3": "^12.5.0",
+    "better-sqlite3": "^12.11.1",
     "electron-google-analytics": "^1.0.2",
     "express": "^4.18.2",
     "fflate": "^0.8.1",

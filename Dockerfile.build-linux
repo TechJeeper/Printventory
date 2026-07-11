@@ -1,4 +1,5 @@
-FROM node:20-slim
+# Electron 43+ V8 headers require C++20 (GCC 13+). Bookworm's GCC 12 fails to compile better-sqlite3.
+FROM node:22-trixie-slim
 
 # Install build dependencies for AppImage and native modules
 RUN apt-get update && apt-get install -y \
@@ -19,7 +20,7 @@ RUN apt-get update && apt-get install -y \
     libatk1.0-0 \
     libcairo-gobject2 \
     libgtk-3-0 \
-    libgdk-pixbuf2.0-0 \
+    libgdk-pixbuf-2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -34,17 +35,16 @@ RUN npm config set fetch-retries 5 && \
 COPY package*.json ./
 COPY scripts/ ./scripts/
 
-# Install dependencies with retry logic
-RUN npm install --loglevel=error || \
-    (sleep 5 && npm install --loglevel=error) || \
-    (sleep 10 && npm install --loglevel=error) && \
+# Skip postinstall during install; rebuild native modules explicitly below
+RUN npm install --ignore-scripts --loglevel=error || \
+    (sleep 5 && npm install --ignore-scripts --loglevel=error) || \
+    (sleep 10 && npm install --ignore-scripts --loglevel=error) && \
     npm cache clean --force
 
 # Clean any existing native module builds to ensure fresh rebuild
 RUN rm -rf node_modules/better-sqlite3/build || true
 
-# Explicitly rebuild native modules for Electron on Linux
-# Use @electron/rebuild which is more reliable
+# Rebuild native modules for Electron on Linux (requires GCC 13+ from trixie)
 RUN npx @electron/rebuild --version=$(node -p 'require("electron/package.json").version') || npx electron-builder install-app-deps
 
 # Copy application files

@@ -5,65 +5,98 @@ const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { Worker } = require('worker_threads');
+
+// macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
+// Must be set before app ready so Three.js thumbnail rendering can create a context.
+if (process.platform === 'darwin') {
+  app.commandLine.appendSwitch('ignore-gpu-blocklist');
+  app.commandLine.appendSwitch('enable-webgl');
+}
+
 // 3MF preview worker/caching
 const preview3mfWorkers = new Map();
 const preview3mfCache = new Map();
-const PREVIEW_3MF_CACHE_LIMIT = 5;
-const PREVIEW_3MF_POOL_SIZE = Math.max(
-  1,
-  Math.min(4, Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_POOL_SIZE || '2', 10) || 2)
-);
+const PREVIEW_3MF_CACHE_LIMIT = 1;
 const PREVIEW_3MF_MAX_FILE_SIZE_MB = Math.max(
   10,
   Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB || '200', 10) || 200
 );
-const preview3mfWorkerPool = [];
+const PREVIEW_3MF_WORKER_MEMORY_MB = Math.max(
+  512,
+  Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB || '2048', 10) || 2048
+);
+const PREVIEW_3MF_MAX_DISK_CACHE_MB = Math.max(
+  50,
+  Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_MAX_DISK_CACHE_MB || '150', 10) || 150
+);
 
 function getPreview3mfCacheDir() {
   return path.join(app.getPath('userData'), '3mf-preview-cache');
 }
 
-function acquirePreview3mfWorker(workerPath) {
-  const idle = preview3mfWorkerPool.find(entry => !entry.busy);
-  if (idle) {
-    idle.busy = true;
-    return idle;
-  }
-
-  if (preview3mfWorkerPool.length < PREVIEW_3MF_POOL_SIZE) {
-    const worker = new Worker(workerPath);
-    const entry = { worker, busy: true, temporary: false };
-    preview3mfWorkerPool.push(entry);
-    return entry;
-  }
-
-  // Fallback: temporary worker when pool is busy
-  return { worker: new Worker(workerPath), busy: true, temporary: true };
-}
-
-function releasePreview3mfWorker(entry) {
-  if (!entry) return;
-  if (entry.temporary) {
-    try {
-      entry.worker.terminate();
-    } catch (error) {
-      console.error('Error terminating temp 3MF preview worker:', error);
+function createPreview3mfWorker(workerPath) {
+  return new Worker(workerPath, {
+    resourceLimits: {
+      maxOldGenerationSizeMb: PREVIEW_3MF_WORKER_MEMORY_MB,
+      maxYoungGenerationSizeMb: Math.min(256, Math.floor(PREVIEW_3MF_WORKER_MEMORY_MB / 4))
     }
-    return;
-  }
-  entry.busy = false;
+  });
 }
 
-function removePreview3mfWorker(entry) {
-  if (!entry || entry.temporary) return;
-  const index = preview3mfWorkerPool.indexOf(entry);
-  if (index >= 0) {
-    preview3mfWorkerPool.splice(index, 1);
+function terminatePreview3mfWorker(entry) {
+  if (!entry?.worker) return;
+  try {
+    entry.worker.terminate();
+  } catch (error) {
+    console.error('Error terminating 3MF preview worker:', error);
   }
+}
+
+function formatPreview3mfError(error) {
+  const msg = error?.message || String(error || 'Failed to parse 3MF');
+  if (msg.includes('ERR_WORKER_OUT_OF_MEMORY') || msg.includes('heap out of memory')) {
+    return 'Preview ran out of memory while processing this model. Try closing other previews first, or restart the app.';
+  }
+  return msg;
+}
+
+function cancelAllPreview3mfWorkers(exceptRequestId = null) {
+  for (const [id, entry] of preview3mfWorkers.entries()) {
+    if (exceptRequestId && id === exceptRequestId) continue;
+    terminatePreview3mfWorker(entry.entry);
+    entry.reject?.(new Error('Preview cancelled'));
+    if (entry.cleanup) {
+      Promise.resolve(entry.cleanup()).catch(() => {});
+    }
+    preview3mfWorkers.delete(id);
+  }
+}
+
+function trimPreview3mfMemoryCache() {
+  while (preview3mfCache.size > PREVIEW_3MF_CACHE_LIMIT) {
+    const oldestKey = preview3mfCache.keys().next().value;
+    preview3mfCache.delete(oldestKey);
+  }
+}
+
+function serializePreview3mfForDisk(json) {
+  return JSON.stringify(json, (_key, value) => {
+    if (ArrayBuffer.isView(value)) {
+      return Array.from(value);
+    }
+    return value;
+  });
 }
 const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
+const {
+  compressThumbnailBlob,
+  compressDataUrl,
+  needsCompression,
+  THUMBNAIL_MAX_STORED_CHARS,
+  THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS
+} = require('./thumbnail-compress');
 
 // Additional file types for scan/library (alphabetical by label). id used in settings; extensions for scan/filter.
 const ADDITIONAL_FILE_TYPES_CATALOG = [
@@ -411,6 +444,8 @@ function debugLog(...args) {
 // Server mode detection
 const isServerMode = process.argv.includes('--server');
 let httpServer = null;
+let electronUiServer = null;
+let electronUiPort = null;
 let wss = null; // WebSocket server
 let wsClients = null; // WebSocket clients Set
 
@@ -545,6 +580,92 @@ function loadOptionalServerTlsOptions() {
   return opts;
 }
 
+/**
+ * Proxy Puter AI chat requests server-side to avoid CORS (api.puter.com only allows https://puter.com).
+ * The browser still uses Puter.js for authentication/captcha; only the drivers/call is proxied.
+ */
+function registerPuterAiProxyRoute(expressApp) {
+  expressApp.post('/api/puter-ai/chat', express.json({ limit: '50mb' }), async (req, res) => {
+    try {
+      const { prompt, imageUrl, model, authToken } = req.body || {};
+      if (!prompt || typeof prompt !== 'string') {
+        res.status(400).json({ error: 'prompt is required' });
+        return;
+      }
+
+      let args;
+      if (imageUrl && typeof imageUrl === 'string') {
+        const isVideo = /\.(mp4|webm|mov|avi|mkv)(\?|$)/i.test(imageUrl) || imageUrl.startsWith('data:video/');
+        const mediaBlock = isVideo ? { video_url: { url: imageUrl } } : { image_url: { url: imageUrl } };
+        args = {
+          vision: true,
+          messages: [{ content: [prompt, mediaBlock] }],
+          model: model || 'gpt-5-nano'
+        };
+      } else {
+        args = {
+          messages: [{ content: prompt }],
+          model: model || 'gpt-5-nano'
+        };
+      }
+
+      const puterBody = JSON.stringify({
+        interface: 'puter-chat-completion',
+        driver: 'ai-chat',
+        test_mode: false,
+        method: 'complete',
+        args,
+        auth_token: authToken || undefined
+      });
+
+      const puterResponse = await fetch('https://api.puter.com/drivers/call', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain;actually=json',
+          'Origin': 'https://puter.com',
+          'Referer': 'https://puter.com/'
+        },
+        body: puterBody
+      });
+
+      let data;
+      const puterRawBody = await puterResponse.text();
+      try {
+        data = puterRawBody ? JSON.parse(puterRawBody) : {};
+      } catch (parseErr) {
+        res.status(502).json({ error: `Invalid response from Puter API (${puterResponse.status})`, details: puterRawBody.slice(0, 500) });
+        return;
+      }
+
+      if (!puterResponse.ok || data.success === false) {
+        const errMsg = data?.error?.message || data?.message || `Puter API error (${puterResponse.status})`;
+        const code = data?.error?.code || data?.code;
+        res.status(puterResponse.status >= 400 ? puterResponse.status : 500).json({ error: errMsg, code, details: data });
+        return;
+      }
+
+      const result = data.result;
+      let chatText;
+      if (typeof result === 'string') {
+        chatText = result;
+      } else if (result?.message?.content) {
+        chatText = result.message.content;
+      } else if (typeof result?.text === 'string') {
+        chatText = result.text;
+      } else if (result != null) {
+        chatText = JSON.stringify(result);
+      } else {
+        chatText = '';
+      }
+
+      res.json({ response: chatText });
+    } catch (err) {
+      console.error('[Puter AI Proxy] Error:', err);
+      res.status(500).json({ error: err.message || 'Puter AI proxy error' });
+    }
+  });
+}
+
 // HTTP Server Function
 function startHttpServer(port = 5000, localhostOnly = false) {
   const expressApp = express();
@@ -565,6 +686,7 @@ function startHttpServer(port = 5000, localhostOnly = false) {
 
   // JSON body parser for extension upload (large payloads for base64 file)
   expressApp.use(express.json({ limit: '50mb' }));
+  registerPuterAiProxyRoute(expressApp);
 
   // Serve static files from the application directory
   const appDir = __dirname;
@@ -1300,6 +1422,80 @@ ${bridgeCode}
   return serverPromise;
 }
 
+/**
+ * Serve the Electron desktop UI over http://127.0.0.1 so third-party scripts (e.g. Puter.js)
+ * are not loaded from file://, which they reject and replace with an intrusive error page.
+ */
+function startElectronUiServer() {
+  if (electronUiServer && electronUiPort) {
+    return Promise.resolve(electronUiPort);
+  }
+
+  const expressApp = express();
+  const appDir = __dirname;
+
+  expressApp.use(express.json({ limit: '50mb' }));
+  registerPuterAiProxyRoute(expressApp);
+
+  expressApp.use(express.static(appDir, {
+    setHeaders: (res, filePath) => {
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeTypes = {
+        '.html': 'text/html',
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon',
+        '.bmp': 'image/bmp',
+        '.webp': 'image/webp'
+      };
+      if (mimeTypes[ext]) {
+        res.setHeader('Content-Type', mimeTypes[ext]);
+      }
+    }
+  }));
+
+  expressApp.get('*', (req, res) => {
+    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
+      res.status(404).type('text/plain').send('Not Found');
+      return;
+    }
+    res.sendFile(path.join(appDir, 'index.html'));
+  });
+
+  return new Promise((resolve, reject) => {
+    electronUiServer = expressApp.listen(0, '127.0.0.1', () => {
+      electronUiPort = electronUiServer.address().port;
+      console.log(`[Electron UI] Serving desktop window at http://127.0.0.1:${electronUiPort}/`);
+      resolve(electronUiPort);
+    });
+    electronUiServer.on('error', (err) => {
+      electronUiServer = null;
+      electronUiPort = null;
+      reject(err);
+    });
+  });
+}
+
+function stopElectronUiServer() {
+  return new Promise((resolve) => {
+    if (!electronUiServer) {
+      resolve();
+      return;
+    }
+    electronUiServer.close(() => {
+      electronUiServer = null;
+      electronUiPort = null;
+      resolve();
+    });
+  });
+}
+
 // Stop HTTP server function
 function stopHttpServer() {
   return new Promise((resolve) => {
@@ -1405,6 +1601,179 @@ let db;
 let mainWindow;
 let isGeneratingHashes = false; // Track hash generation state
 let isHashGenerationScheduled = false;
+let isCompressingThumbnailsBackground = false;
+const THUMBNAIL_MIGRATION_DELAY_MS = Math.max(
+  15000,
+  Number.parseInt(process.env.PRINTVENTORY_THUMBNAIL_MIGRATION_DELAY_MS || '30000', 10) || 30000
+);
+const THUMBNAIL_MIGRATION_MAX_PER_SESSION = Math.max(
+  25,
+  Number.parseInt(process.env.PRINTVENTORY_THUMBNAIL_MIGRATION_MAX_PER_SESSION || '200', 10) || 200
+);
+const THUMBNAIL_MIGRATION_YIELD_MS = 25;
+
+function scheduleBackgroundThumbnailCompression(reason) {
+  setTimeout(() => {
+    compressExistingThumbnailsInBackground(reason).catch((error) => {
+      console.error('Background thumbnail compression failed:', error);
+    });
+  }, THUMBNAIL_MIGRATION_DELAY_MS);
+}
+
+function getThumbnailStoredLength(filePath) {
+  if (!db || !filePath) return 0;
+  const row = db.prepare('SELECT LENGTH(thumbnail) AS len FROM models WHERE filePath = ?').get(filePath);
+  return row?.len ?? 0;
+}
+
+function clearThumbnailForPath(filePath, reason) {
+  if (!db || !filePath) return false;
+  try {
+    const result = db.prepare('UPDATE models SET thumbnail = NULL WHERE filePath = ?').run(filePath);
+    if (result.changes > 0) {
+      console.warn(`Cleared thumbnail for ${filePath}${reason ? ` (${reason})` : ''}`);
+    }
+    return result.changes > 0;
+  } catch (error) {
+    console.error(`Failed to clear thumbnail for ${filePath}:`, error);
+    return false;
+  }
+}
+
+function purgeCorruptThumbnailsOnly(maxChars = THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS) {
+  if (!db) return 0;
+  try {
+    const result = db.prepare(`
+      UPDATE models
+      SET thumbnail = NULL
+      WHERE thumbnail IS NOT NULL
+        AND LENGTH(thumbnail) > ?
+    `).run(maxChars);
+    if (result.changes > 0) {
+      console.warn(`Cleared ${result.changes} thumbnail(s) over ${maxChars} chars (corrupt/oversized safeguard)`);
+    }
+    return result.changes;
+  } catch (error) {
+    console.error('Failed to clear corrupt thumbnails:', error);
+    return 0;
+  }
+}
+
+function readThumbnailColumn(filePath, { allowOversized = false } = {}) {
+  if (!db || !filePath) return null;
+  const storedLength = getThumbnailStoredLength(filePath);
+  if (storedLength <= 0) return null;
+  if (!allowOversized && storedLength > THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS) {
+    return null;
+  }
+  try {
+    const row = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    return row?.thumbnail ?? null;
+  } catch (error) {
+    console.error(`Failed to read thumbnail for ${filePath}:`, error);
+    return null;
+  }
+}
+
+async function compressExistingThumbnailsInBackground(reason) {
+  if (isCompressingThumbnailsBackground || !db) return;
+  isCompressingThumbnailsBackground = true;
+  try {
+    purgeCorruptThumbnailsOnly();
+
+    const rows = db.prepare(`
+      SELECT filePath, LENGTH(thumbnail) AS thumbLen
+      FROM models
+      WHERE thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png'
+        AND thumbnail LIKE 'data:image%'
+        AND LENGTH(thumbnail) > ?
+      ORDER BY LENGTH(thumbnail) DESC
+    `).all(THUMBNAIL_MAX_STORED_CHARS);
+
+    if (rows.length === 0) return;
+
+    const batch = rows.slice(0, THUMBNAIL_MIGRATION_MAX_PER_SESSION);
+    const remaining = rows.length - batch.length;
+    console.log(
+      `Migrating ${batch.length} legacy thumbnail(s) (${reason || 'startup'})` +
+      (remaining > 0 ? `; ${remaining} deferred to a later session` : '') +
+      '...'
+    );
+
+    let updated = 0;
+    for (const row of batch) {
+      try {
+        const allowOversized = row.thumbLen > THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS;
+        const thumbnail = readThumbnailColumn(row.filePath, { allowOversized });
+        if (!thumbnail) continue;
+
+        const parts = thumbnail.includes('::') ? thumbnail.split('::').filter(Boolean) : [thumbnail];
+        const needsWork = parts.some((part) => needsCompression(part));
+        if (!needsWork) continue;
+
+        const { value, changed } = compressThumbnailBlob(thumbnail);
+        if (changed) {
+          db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(value, row.filePath);
+          updated++;
+        }
+      } catch (rowError) {
+        console.error(`Thumbnail migration failed for ${row.filePath}:`, rowError);
+      }
+      await new Promise((resolve) => setTimeout(resolve, THUMBNAIL_MIGRATION_YIELD_MS));
+    }
+    if (updated > 0) {
+      console.log(`Thumbnail migration complete: ${updated}/${batch.length} model(s) updated`);
+    }
+  } finally {
+    isCompressingThumbnailsBackground = false;
+  }
+}
+
+function ensureThumbnailCompressedOnLoad(filePath, thumbnailString) {
+  try {
+    const { value, changed } = compressThumbnailBlob(thumbnailString);
+    if (changed) {
+      db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(value, filePath);
+    }
+    return value;
+  } catch (error) {
+    console.error(`Failed to compress thumbnail for ${filePath}:`, error);
+    return thumbnailString;
+  }
+}
+
+function loadThumbnailForModel(filePath) {
+  try {
+    const thumbnail = readThumbnailColumn(filePath);
+    if (!thumbnail) return null;
+    return ensureThumbnailCompressedOnLoad(filePath, thumbnail);
+  } catch (error) {
+    console.error(`Failed to load thumbnail for ${filePath}:`, error);
+    return null;
+  }
+}
+
+const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite';
+
+function getModelByFilePath(filePath, { includeThumbnail = false } = {}) {
+  if (!db || !filePath) return null;
+  const row = db.prepare(`SELECT ${MODEL_DETAIL_COLUMNS} FROM models WHERE filePath = ?`).get(filePath);
+  if (!row) return null;
+  if (includeThumbnail) {
+    row.thumbnail = loadThumbnailForModel(filePath);
+  }
+  return row;
+}
+
+function getModelById(modelId, { includeThumbnail = false } = {}) {
+  if (!db || modelId == null) return null;
+  const row = db.prepare(`SELECT ${MODEL_DETAIL_COLUMNS} FROM models WHERE id = ?`).get(modelId);
+  if (!row) return null;
+  if (includeThumbnail) {
+    row.thumbnail = loadThumbnailForModel(row.filePath);
+  }
+  return row;
+}
 
 function scheduleBackgroundHashGeneration(reason) {
   if (!isServerMode) return;
@@ -1497,6 +1866,7 @@ if (!gotTheLock) {
         await createHiddenWindow();
         // Schedule background hash generation for any existing models with missing hashes
         scheduleBackgroundHashGeneration('startup');
+        scheduleBackgroundThumbnailCompression('startup');
         setTimeout(() => {
           try {
             verifyDatabaseIntegrity();
@@ -1525,12 +1895,14 @@ if (!gotTheLock) {
             }
           });
         }
-        // Normal mode: create window
-        createWindow();
+        // Normal mode: create window (UI served over localhost HTTP for Puter.js compatibility)
+        await createWindow();
 
         app.on('activate', () => {
           if (BrowserWindow.getAllWindows().length === 0) {
-            createWindow();
+            createWindow().catch((err) => {
+              console.error('Failed to recreate main window:', err);
+            });
           }
         });
 
@@ -1551,6 +1923,7 @@ if (!gotTheLock) {
             console.error('Deferred database integrity check failed:', e);
           }
         }, 3000);
+        scheduleBackgroundThumbnailCompression('startup');
       }
       
       // Track application usage after initialization (skip in server mode; do not block ready)
@@ -1583,6 +1956,11 @@ if (!gotTheLock) {
     
     // Create a backup of the database before updates
     app.on('before-quit', async () => {
+      try {
+        await stopElectronUiServer();
+      } catch (error) {
+        console.error('Error stopping Electron UI server:', error);
+      }
       try {
         const dbPath = getDatabasePath();
         const backupPath = path.join(userDataPath, 'backup_printventory.db');
@@ -1632,7 +2010,9 @@ function initializeDatabase() {
           license TEXT,
           modifiedDate DATETIME,
           dateAdded DATETIME,
-          isNew INTEGER DEFAULT 1
+          isNew INTEGER DEFAULT 1,
+          rating INTEGER DEFAULT 0,
+          favorite INTEGER DEFAULT 0
       )`).run();
 
       // Create tags table
@@ -1691,10 +2071,13 @@ function initializeDatabase() {
     // This must run before creating indexes on dateAdded
     migrateDateAddedColumn();
     migrateIsNewColumn();
+    migrateRatingFavoriteColumns();
     
     // Create index for dateAdded after migration (in case it was just added)
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_dateadded ON models(dateAdded)').run();
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_isnew ON models(isNew)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_models_rating ON models(rating)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_models_favorite ON models(favorite)').run();
     
     // Clean up any database objects that reference models_old (from old migrations)
     cleanupModelsOldReferences();
@@ -1773,6 +2156,37 @@ function migrateIsNewColumn() {
     console.error('Error migrating isNew column:', error);
     return false;
   }
+}
+
+/** Add rating (0-5) and favorite (0/1) columns for model engagement. */
+function migrateRatingFavoriteColumns() {
+  try {
+    console.log('Checking for rating/favorite column migration...');
+    const tableInfo = db.prepare('PRAGMA table_info(models)').all();
+    const hasRating = tableInfo.some(col => col.name === 'rating');
+    const hasFavorite = tableInfo.some(col => col.name === 'favorite');
+    if (!hasRating) {
+      console.log('rating column not found. Adding it...');
+      db.prepare('ALTER TABLE models ADD COLUMN rating INTEGER DEFAULT 0').run();
+      db.prepare('UPDATE models SET rating = 0 WHERE rating IS NULL').run();
+    }
+    if (!hasFavorite) {
+      console.log('favorite column not found. Adding it...');
+      db.prepare('ALTER TABLE models ADD COLUMN favorite INTEGER DEFAULT 0').run();
+      db.prepare('UPDATE models SET favorite = 0 WHERE favorite IS NULL').run();
+    }
+    return true;
+  } catch (error) {
+    console.error('Error migrating rating/favorite columns:', error);
+    return false;
+  }
+}
+
+function normalizeModelRating(value) {
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n < 0) return 0;
+  if (n > 5) return 5;
+  return n;
 }
 
 // Add this function to clean up any database objects referencing models_old
@@ -1942,7 +2356,7 @@ function initializeDefaultSettings() {
   }
 }
 
-function createWindow() {
+async function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
     width: Math.min(1600, width),
@@ -2163,12 +2577,27 @@ function createWindow() {
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
 
-  mainWindow.loadFile('index.html');
-
-  // Show the window only when it is ready to be shown
-  mainWindow.once('ready-to-show', () => {
+  // Register before loadURL — localhost static server can finish before await returns,
+  // so attaching ready-to-show after loadURL misses the event and the window stays hidden.
+  let mainWindowShown = false;
+  const showMainWindowWhenReady = () => {
+    if (mainWindowShown || !mainWindow || mainWindow.isDestroyed()) return;
+    mainWindowShown = true;
     mainWindow.show();
-  });
+  };
+  mainWindow.once('ready-to-show', showMainWindowWhenReady);
+
+  try {
+    const uiPort = await startElectronUiServer();
+    await mainWindow.loadURL(`http://127.0.0.1:${uiPort}/`);
+  } catch (err) {
+    console.error('[Electron UI] Failed to start localhost server, falling back to file://:', err);
+    await mainWindow.loadFile('index.html');
+  }
+
+  if (!mainWindowShown) {
+    showMainWindowWhenReady();
+  }
 
   // Set up keep-alive ping
   setInterval(() => {
@@ -3045,7 +3474,7 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
 
 ipcMain.handle('get-model', async (event, filePath) => {
   try {
-    const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+    const model = getModelByFilePath(filePath, { includeThumbnail: true });
     if (!model) return null;
 
     // Get tags for this model
@@ -3116,8 +3545,14 @@ ipcMain.handle('get-licenses', async () => {
 
 ipcMain.handle('get-models-by-designer', async (event, designer) => {
   try {
-    const rows = db.prepare('SELECT * FROM models WHERE designer = ?').all(designer);
-    return rows;
+    const rows = db.prepare(`
+      SELECT id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
+      FROM models WHERE designer = ?
+    `).all(designer);
+    return rows.map((row) => ({
+      ...row,
+      thumbnail: loadThumbnailForModel(row.filePath)
+    }));
   } catch (error) {
     console.error('Error getting models by designer:', error);
     throw error;
@@ -3168,12 +3603,18 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
       case "dateadded-desc":
         orderClause = "ORDER BY dateAdded DESC";
         break;
+      case "rating-asc":
+        orderClause = "ORDER BY rating ASC, fileName ASC";
+        break;
+      case "rating-desc":
+        orderClause = "ORDER BY rating DESC, fileName ASC";
+        break;
       default:
         orderClause = "ORDER BY modifiedDate DESC";
         break;
     }
 
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
 
     let models;
     if (limit === 0) {
@@ -3272,13 +3713,22 @@ function sanitizeSearchTokensForCompile(raw) {
       out.push({ t: 'not' });
     } else if (x.t === 'filter') {
       const kind = String(x.kind || '').trim();
-      if (!kind || !['designer', 'license', 'parentModel', 'tag', 'fileType', 'printed', 'isNew'].includes(kind)) continue;
+      if (!kind || !['designer', 'license', 'parentModel', 'tag', 'fileType', 'printed', 'isNew', 'favorite', 'rating', 'ratingMin'].includes(kind)) continue;
       const valRaw = String(x.value != null ? x.value : '').trim();
       if (kind === 'printed') {
         if (valRaw !== 'printed' && valRaw !== 'not-printed') continue;
         out.push({ t: 'filter', kind, value: valRaw });
       } else if (kind === 'isNew') {
         if (valRaw !== 'new' && valRaw !== 'not-new') continue;
+        out.push({ t: 'filter', kind, value: valRaw });
+      } else if (kind === 'favorite') {
+        if (valRaw !== 'favorited' && valRaw !== 'not-favorited') continue;
+        out.push({ t: 'filter', kind, value: valRaw });
+      } else if (kind === 'rating') {
+        if (valRaw !== 'unrated' && !/^[1-5]$/.test(valRaw)) continue;
+        out.push({ t: 'filter', kind, value: valRaw });
+      } else if (kind === 'ratingMin') {
+        if (!/^[1-5]$/.test(valRaw)) continue;
         out.push({ t: 'filter', kind, value: valRaw });
       } else if (!valRaw) {
         continue;
@@ -3384,6 +3834,26 @@ function compileSidebarFilterClauseToSQL(tok, filters, params) {
   if (tok.kind === 'isNew') {
     if (tok.value === 'new') return '(isNew = 1)';
     if (tok.value === 'not-new') return '(isNew = 0 OR isNew IS NULL)';
+    return null;
+  }
+  if (tok.kind === 'favorite') {
+    if (tok.value === 'favorited') return '(favorite = 1)';
+    if (tok.value === 'not-favorited') return '(favorite = 0 OR favorite IS NULL)';
+    return null;
+  }
+  if (tok.kind === 'rating') {
+    if (tok.value === 'unrated') return '(rating = 0 OR rating IS NULL)';
+    if (/^[1-5]$/.test(tok.value)) {
+      params.push(parseInt(tok.value, 10));
+      return '(rating = ?)';
+    }
+    return null;
+  }
+  if (tok.kind === 'ratingMin') {
+    if (/^[1-5]$/.test(tok.value)) {
+      params.push(parseInt(tok.value, 10));
+      return '(rating >= ?)';
+    }
     return null;
   }
   return null;
@@ -3595,6 +4065,56 @@ const getModelsFilteredHandler = async (event, filters) => {
         conditions.push("(isNew = 0 OR isNew IS NULL)");
       }
     }
+
+    const normalizedFavorite =
+      typeof filters.favorite === 'string' ? filters.favorite.trim().toLowerCase() : filters.favorite;
+    if (
+      normalizedFavorite !== undefined &&
+      normalizedFavorite !== null &&
+      normalizedFavorite !== '' &&
+      normalizedFavorite !== 'all' &&
+      normalizedFavorite !== 'undefined' &&
+      normalizedFavorite !== 'null'
+    ) {
+      if (normalizedFavorite === 'favorited') {
+        conditions.push("favorite = 1");
+      } else if (normalizedFavorite === 'not-favorited') {
+        conditions.push("(favorite = 0 OR favorite IS NULL)");
+      }
+    }
+
+    const normalizedRating =
+      typeof filters.rating === 'string' ? filters.rating.trim().toLowerCase() : filters.rating;
+    if (
+      normalizedRating !== undefined &&
+      normalizedRating !== null &&
+      normalizedRating !== '' &&
+      normalizedRating !== 'all' &&
+      normalizedRating !== 'undefined' &&
+      normalizedRating !== 'null'
+    ) {
+      if (normalizedRating === 'unrated') {
+        conditions.push("(rating = 0 OR rating IS NULL)");
+      } else if (/^[1-5]$/.test(String(normalizedRating))) {
+        conditions.push("rating = ?");
+        params.push(parseInt(normalizedRating, 10));
+      }
+    }
+
+    const normalizedRatingMin =
+      typeof filters.ratingMin === 'string' ? filters.ratingMin.trim().toLowerCase() : filters.ratingMin;
+    if (
+      normalizedRatingMin !== undefined &&
+      normalizedRatingMin !== null &&
+      normalizedRatingMin !== '' &&
+      normalizedRatingMin !== 'all' &&
+      normalizedRatingMin !== 'undefined' &&
+      normalizedRatingMin !== 'null' &&
+      /^[1-5]$/.test(String(normalizedRatingMin))
+    ) {
+      conditions.push("rating >= ?");
+      params.push(parseInt(normalizedRatingMin, 10));
+    }
     
     // File type filter
     if (filters.fileType) {
@@ -3749,6 +4269,12 @@ const getModelsFilteredHandler = async (event, filters) => {
       case "printed-desc":
         orderClause = "ORDER BY printed DESC";
         break;
+      case "rating-asc":
+        orderClause = "ORDER BY rating ASC, fileName ASC";
+        break;
+      case "rating-desc":
+        orderClause = "ORDER BY rating DESC, fileName ASC";
+        break;
       case "designer-asc":
         orderClause = "ORDER BY designer ASC";
         break;
@@ -3772,7 +4298,7 @@ const getModelsFilteredHandler = async (event, filters) => {
         break;
     }
     
-    const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
 
     // Execute query (optional limit/offset for progressive load when clearing filters in Server/Docker)
     // SQLite requires LIMIT when using OFFSET; use a large limit when only offset is set
@@ -4161,7 +4687,8 @@ function setDefaultThumbnailIndex(thumbnailString, index) {
 
 async function saveThumbnail(filePath, thumbnail) {
   try {
-    db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(thumbnail, filePath);
+    const { value } = compressThumbnailBlob(thumbnail);
+    db.prepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(value, filePath);
     return true;
   } catch (error) {
     console.error('Error saving thumbnail:', error);
@@ -4541,7 +5068,10 @@ ipcMain.handle('restore-database', async (event, payload = null) => {
 // Export library handler
 ipcMain.handle('export-library', async () => {
   const buildExportData = () => {
-    const models = db.prepare('SELECT * FROM models').all();
+    const models = db.prepare(`
+      SELECT id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
+      FROM models
+    `).all();
     const modelsWithTags = models.map(model => {
       const tags = db.prepare(`
         SELECT t.name 
@@ -4559,6 +5089,8 @@ ipcMain.handle('export-library', async () => {
         printed: model.printed,
         parentModel: model.parentModel,
         license: model.license,
+        rating: model.rating || 0,
+        favorite: model.favorite ? 1 : 0,
         tags: tags || []
       };
     });
@@ -4718,7 +5250,11 @@ ipcMain.handle('import-library', async (event, payload = null) => {
 
 ipcMain.handle('get-duplicate-files', async () => {
   try {
-    const models = db.prepare('SELECT filePath, hash, size, thumbnail FROM models WHERE hash IS NOT NULL').all();
+    const models = db.prepare(`
+      SELECT filePath, hash, size,
+        CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail
+      FROM models WHERE hash IS NOT NULL
+    `).all();
     
     // Group files by hash
     const duplicates = {};
@@ -4731,7 +5267,7 @@ ipcMain.handle('get-duplicate-files', async () => {
       duplicates[model.hash].push({
         filePath: model.filePath,
         size: model.size,
-        thumbnail: model.thumbnail
+        hasThumbnail: model.hasThumbnail === 1
       });
     }
     
@@ -5727,7 +6263,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             }
           } else if (filesToProcess.length === 1) {
             // For single file, also open dialog immediately with "Generating..." status
-            const singleModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filesToProcess[0]);
+            const singleModel = getModelByFilePath(filesToProcess[0], { includeThumbnail: true });
             if (singleModel) {
               const modelTagRows = db.prepare(`
                 SELECT t.name 
@@ -5788,7 +6324,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           const processFile = async (filePath, index) => {
             try {
               // Get the model from the database to access its thumbnail
-              const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+              const model = getModelByFilePath(filePath, { includeThumbnail: true });
               
               if (!model) {
                 console.log(`Model not found in database: ${filePath}, skipping`);
@@ -6014,7 +6550,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           // Check existing models to see if any have data that will be overwritten
           const modelsWithData = [];
           for (const filePath of threeMFFiles) {
-            const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+            const model = getModelByFilePath(filePath, { includeThumbnail: true });
             if (model) {
               const hasData = (model.designer && model.designer.trim()) ||
                              (model.parentModel && model.parentModel.trim()) ||
@@ -6069,7 +6605,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               
               if (filteredMetadata && (filteredMetadata.designer || filteredMetadata.parentModel || filteredMetadata.notes || filteredMetadata.license)) {
                 // Get or create model in database
-                let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+                let existingModel = getModelByFilePath(filePath, { includeThumbnail: true });
                 
                 if (!existingModel) {
                   // Create new model entry
@@ -6211,15 +6747,13 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               
               // Add the same image to each selected model
               for (const filePath of filePaths) {
-                const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-                const currentThumbnail = model?.thumbnail || null;
+                const currentThumbnail = readThumbnailColumn(filePath);
                 const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, dataUrl);
                 const thumbnails = parseThumbnails(thumbnailsWithNew);
                 const newImageIndex = thumbnails.length - 1;
                 const updatedThumbnail = setDefaultThumbnailIndex(thumbnailsWithNew, newImageIndex);
                 await saveThumbnail(filePath, updatedThumbnail);
-                const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-                const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
+                const finalThumbnails = parseThumbnails(readThumbnailColumn(filePath) || '');
                 event.sender.send('thumbnail-added', {
                   filePath: filePath,
                   thumbnailCount: finalThumbnails.length,
@@ -6254,8 +6788,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       if (filePaths.length !== 1) return;
       try {
         // Check if model has at least one thumbnail
-        const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePaths[0]);
-        const thumbnails = model?.thumbnail ? parseThumbnails(model.thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')) : [];
+        const storedThumbnail = readThumbnailColumn(filePaths[0]);
+        const thumbnails = storedThumbnail ? parseThumbnails(storedThumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')) : [];
         
         if (thumbnails.length === 0) {
           const win = BrowserWindow.fromWebContents(event.sender);
@@ -6843,9 +7377,11 @@ function parseZipPath(filePath) {
   return { zipPath: filePath, entryPath: null, isZipEntry: false };
 }
 
-// Skip macOS resource-fork / AppleDouble entries (._*) - they are not valid 3MF/ZIP
+// Skip macOS resource-fork / AppleDouble entries (._*) and __MACOSX metadata — not valid models
 function isMacOsResourceForkEntry(entryPath) {
   if (!entryPath) return false;
+  const normalized = entryPath.replace(/\\/g, '/');
+  if (normalized.split('/').some((seg) => seg.toLowerCase() === '__macosx')) return true;
   const base = path.basename(entryPath);
   return base.startsWith('._');
 }
@@ -7187,7 +7723,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
           const dbFilePath = filePath;
           
           // Get the model from database to check existing values
-          let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(dbFilePath);
+          let existingModel = getModelByFilePath(dbFilePath);
           
           // If model doesn't exist, create it (similar to add-multiple-thumbnails handler)
           if (!existingModel) {
@@ -7533,6 +8069,8 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
     );
   }
 
+  cancelAllPreview3mfWorkers();
+
   const cacheKey = fileStat ? `${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
   const cacheDir = getPreview3mfCacheDir();
   const cacheHash = cacheKey ? crypto.createHash('sha256').update(cacheKey).digest('hex') : null;
@@ -7553,17 +8091,18 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
   if (cachePath) {
     try {
       await fs.promises.mkdir(cacheDir, { recursive: true });
-      const cachedJson = await fs.promises.readFile(cachePath, 'utf8');
-      const parsed = JSON.parse(cachedJson);
-      preview3mfCache.set(cacheKey, parsed);
-      if (preview3mfCache.size > PREVIEW_3MF_CACHE_LIMIT) {
-        const oldestKey = preview3mfCache.keys().next().value;
-        preview3mfCache.delete(oldestKey);
+      const cacheStat = await fs.promises.stat(cachePath);
+      if (cacheStat.size <= PREVIEW_3MF_MAX_DISK_CACHE_MB * 1024 * 1024) {
+        const cachedJson = await fs.promises.readFile(cachePath, 'utf8');
+        const parsed = JSON.parse(cachedJson);
+        preview3mfCache.set(cacheKey, parsed);
+        trimPreview3mfMemoryCache();
+        if (shouldCleanup && actualFilePath !== filePath) {
+          try { await fs.promises.unlink(actualFilePath); } catch {}
+        }
+        return parsed;
       }
-      if (shouldCleanup && actualFilePath !== filePath) {
-        try { await fs.promises.unlink(actualFilePath); } catch {}
-      }
-      return parsed;
+      try { await fs.promises.unlink(cachePath); } catch {}
     } catch (error) {
       if (error && error.code !== 'ENOENT') {
         console.error('Error reading 3MF preview cache:', error);
@@ -7573,12 +8112,22 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
 
   return new Promise((resolve, reject) => {
     const workerPath = path.join(__dirname, 'preview-3mf-worker-node.js');
-    const entry = acquirePreview3mfWorker(workerPath);
+    const entry = { worker: createPreview3mfWorker(workerPath) };
     const worker = entry.worker;
+    let settled = false;
+
+    const finish = (handler) => {
+      if (settled) return;
+      settled = true;
+      worker.off('message', onMessage);
+      worker.off('error', onError);
+      worker.off('exit', onExit);
+      handler();
+    };
 
     const cleanup = async () => {
       preview3mfWorkers.delete(requestId);
-      releasePreview3mfWorker(entry);
+      terminatePreview3mfWorker(entry);
       if (shouldCleanup && actualFilePath !== filePath) {
         try { await fs.promises.unlink(actualFilePath); } catch {}
       }
@@ -7598,41 +8147,51 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
         return;
       }
 
-      worker.off('message', onMessage);
-      await cleanup();
-      if (!ok) {
-        reject(new Error(error || 'Failed to parse 3MF'));
-        return;
-      }
-
-      if (cacheKey) {
-        preview3mfCache.set(cacheKey, json);
-        if (preview3mfCache.size > PREVIEW_3MF_CACHE_LIMIT) {
-          const oldestKey = preview3mfCache.keys().next().value;
-          preview3mfCache.delete(oldestKey);
+      finish(async () => {
+        await cleanup();
+        if (!ok) {
+          reject(new Error(formatPreview3mfError(new Error(error || 'Failed to parse 3MF'))));
+          return;
         }
-        if (cachePath) {
-          try {
-            await fs.promises.mkdir(cacheDir, { recursive: true });
-            await fs.promises.writeFile(cachePath, JSON.stringify(json));
-          } catch (cacheError) {
-            console.error('Error writing 3MF preview cache:', cacheError);
+
+        if (cacheKey) {
+          preview3mfCache.set(cacheKey, json);
+          trimPreview3mfMemoryCache();
+          if (cachePath) {
+            try {
+              const serialized = serializePreview3mfForDisk(json);
+              if (serialized.length <= PREVIEW_3MF_MAX_DISK_CACHE_MB * 1024 * 1024) {
+                await fs.promises.mkdir(cacheDir, { recursive: true });
+                await fs.promises.writeFile(cachePath, serialized);
+              }
+            } catch (cacheError) {
+              console.error('Error writing 3MF preview cache:', cacheError);
+            }
           }
         }
-      }
 
-      resolve(json);
+        resolve(json);
+      });
     };
 
     const onError = async (error) => {
-      worker.off('error', onError);
-      await cleanup();
-      removePreview3mfWorker(entry);
-      reject(error);
+      finish(async () => {
+        await cleanup();
+        reject(new Error(formatPreview3mfError(error)));
+      });
+    };
+
+    const onExit = async (code) => {
+      if (code === 0) return;
+      finish(async () => {
+        await cleanup();
+        reject(new Error(`3MF preview worker exited unexpectedly (code ${code})`));
+      });
     };
 
     worker.on('message', onMessage);
     worker.on('error', onError);
+    worker.on('exit', onExit);
 
     worker.postMessage({ filePath: actualFilePath });
   });
@@ -7646,13 +8205,7 @@ ipcMain.handle('cancel-3mf-preview', async (event, requestId) => {
   const entry = preview3mfWorkers.get(requestId);
   if (!entry) return;
 
-  try {
-    entry.worker.terminate();
-  } catch (error) {
-    console.error('Error terminating 3MF preview worker:', error);
-  }
-
-  removePreview3mfWorker(entry.entry);
+  terminatePreview3mfWorker(entry.entry);
   await entry.cleanup?.();
   entry.reject?.(new Error('Preview cancelled'));
 });
@@ -7680,7 +8233,7 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
     // Check existing models to see if any have data that will be overwritten
     const modelsWithData = [];
     for (const filePath of threeMFFiles) {
-      const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+      const model = getModelByFilePath(filePath, { includeThumbnail: true });
       if (model) {
         const hasData = (model.designer && model.designer.trim()) ||
                        (model.parentModel && model.parentModel.trim()) ||
@@ -7735,7 +8288,7 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
         
         if (filteredMetadata && (filteredMetadata.designer || filteredMetadata.parentModel || filteredMetadata.notes || filteredMetadata.license)) {
           // Get or create model in database
-          let existingModel = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+          let existingModel = getModelByFilePath(filePath, { includeThumbnail: true });
           
           if (!existingModel) {
             // Create new model entry
@@ -8165,10 +8718,9 @@ ipcMain.handle('calculate-file-hash', async (event, filePath) => {
 // Add this IPC handler for thumbnails
 ipcMain.handle('getThumbnail', async (event, filePath) => {
   try {
-    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    if (!model || !model.thumbnail) return null;
-    // Return the default (first) thumbnail
-    return getDefaultThumbnail(model.thumbnail, 0);
+    const stored = loadThumbnailForModel(filePath);
+    if (!stored) return null;
+    return getDefaultThumbnail(stored, 0);
   } catch (error) {
     console.error('Error getting thumbnail:', error);
     return null;
@@ -8178,9 +8730,9 @@ ipcMain.handle('getThumbnail', async (event, filePath) => {
 // IPC handler to get all thumbnails for a model
 ipcMain.handle('get-all-thumbnails', async (event, filePath) => {
   try {
-    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    if (!model || !model.thumbnail) return [];
-    return parseThumbnails(model.thumbnail);
+    const stored = loadThumbnailForModel(filePath);
+    if (!stored) return [];
+    return parseThumbnails(stored);
   } catch (error) {
     console.error('Error getting all thumbnails:', error);
     return [];
@@ -8208,9 +8760,9 @@ function addMultipleThumbnails(thumbnailString, newThumbnails) {
 // IPC handler to add a thumbnail to a model
 ipcMain.handle('add-thumbnail', async (event, filePath, imageDataUrl) => {
   try {
-    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    const currentThumbnail = model?.thumbnail || null;
-    const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, imageDataUrl);
+    const currentThumbnail = readThumbnailColumn(filePath);
+    const compressedImage = compressDataUrl(imageDataUrl);
+    const thumbnailsWithNew = addThumbnailToModel(currentThumbnail, compressedImage);
     
     // Parse thumbnails to get count and new index
     const thumbnails = parseThumbnails(thumbnailsWithNew);
@@ -8221,8 +8773,7 @@ ipcMain.handle('add-thumbnail', async (event, filePath, imageDataUrl) => {
     await saveThumbnail(filePath, updatedThumbnail);
     
     // Verify the save was successful
-    const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    const finalThumbnails = parseThumbnails(verifyModel?.thumbnail || '');
+    const finalThumbnails = parseThumbnails(readThumbnailColumn(filePath) || '');
     
     // Send message to renderer to refresh the grid with updated thumbnail
     // In server mode always broadcast so browser clients get the update (invoke may come via hidden window)
@@ -8257,7 +8808,7 @@ ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls)
     }
     
     // Check if model exists in database
-    let model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+    let model = getModelByFilePath(filePath);
     if (!model) {
       // Model doesn't exist yet - create it with just the thumbnails
       // Extract fileName from filePath
@@ -8270,16 +8821,18 @@ ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls)
         VALUES (?, ?, ?, ?, 1)
       `).run(filePath, fileName, '', dateAdded);
       // Re-fetch the model
-      model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
+      model = getModelByFilePath(filePath);
       if (!model) {
         return false;
       }
     }
     
-    const currentThumbnail = model?.thumbnail || null;
+    const currentThumbnail = readThumbnailColumn(filePath);
     
-    // Filter out any null/undefined/empty images
-    const validImages = imageDataUrls.filter(img => img && typeof img === 'string' && img.length > 0);
+    // Filter out any null/undefined/empty images and compress on ingest
+    const validImages = imageDataUrls
+      .filter(img => img && typeof img === 'string' && img.length > 0)
+      .map((img) => compressDataUrl(img));
     
     if (validImages.length === 0) {
       return false;
@@ -8292,12 +8845,7 @@ ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls)
     await saveThumbnail(filePath, updatedThumbnail);
     
     // Verify it was saved
-    const verifyModel = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    if (!verifyModel) {
-      return { success: false, error: 'Model not found after save' };
-    }
-    
-    const verifyThumbnail = verifyModel.thumbnail;
+    const verifyThumbnail = readThumbnailColumn(filePath);
     const verifyCount = verifyThumbnail ? parseThumbnails(verifyThumbnail).length : 0;
     
     if (verifyCount !== finalCount) {
@@ -8321,9 +8869,9 @@ ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls)
 // IPC handler to set the default thumbnail index
 ipcMain.handle('set-default-thumbnail', async (event, filePath, index) => {
   try {
-    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    if (!model || !model.thumbnail) return false;
-    const updatedThumbnail = setDefaultThumbnailIndex(model.thumbnail, index);
+    const thumbnail = readThumbnailColumn(filePath);
+    if (!thumbnail) return false;
+    const updatedThumbnail = setDefaultThumbnailIndex(thumbnail, index);
     await saveThumbnail(filePath, updatedThumbnail);
     return true;
   } catch (error) {
@@ -8335,10 +8883,10 @@ ipcMain.handle('set-default-thumbnail', async (event, filePath, index) => {
 // IPC handler to delete a thumbnail by index
 ipcMain.handle('delete-thumbnail', async (event, filePath, index) => {
   try {
-    const model = db.prepare('SELECT thumbnail FROM models WHERE filePath = ?').get(filePath);
-    if (!model || !model.thumbnail) return false;
+    const thumbnail = readThumbnailColumn(filePath);
+    if (!thumbnail) return false;
     
-    const thumbnails = parseThumbnails(model.thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image'));
+    const thumbnails = parseThumbnails(thumbnail).filter(t => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image'));
     
     // Ensure model has at least one thumbnail and index is valid
     if (thumbnails.length <= 1) {
@@ -8710,7 +9258,7 @@ ipcMain.handle('generate-tags', async (event, filePath) => {
     aitagging.initializeOpenAI(settings.apiKey, settings.apiEndpoint, settings.aiService, puterIPCHandler);
     
     // Get the model from the database to access its thumbnail
-    const model = db.prepare('SELECT * FROM models WHERE filePath = ?').get(filePath);
+    const model = getModelByFilePath(filePath, { includeThumbnail: true });
     
     if (!model) {
       console.log(`Model not found in database: ${filePath}`);
@@ -8847,7 +9395,7 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
     const models = db.prepare(`
       SELECT ${selectCols} FROM models
       WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
@@ -8863,7 +9411,7 @@ ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
 ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) => {
   try {
     const offset = (page - 1) * pageSize;
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
     const models = db.prepare(
       `SELECT ${selectCols} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);
@@ -9306,7 +9854,12 @@ async function updateModelsBatch(modelDataBatch) {
     // Use a transaction for better performance - update models and tags together
     const transaction = db.transaction(() => {
       const getModelIdStmt = db.prepare('SELECT id FROM models WHERE filePath = ?');
-      const getExistingModelStmt = db.prepare('SELECT * FROM models WHERE filePath = ?');
+      const getExistingModelStmt = db.prepare(`SELECT ${MODEL_DETAIL_COLUMNS} FROM models WHERE filePath = ?`);
+      const getExistingTagsStmt = db.prepare(`
+        SELECT t.name FROM model_tags mt
+        JOIN tags t ON mt.tag_id = t.id
+        WHERE mt.model_id = ?
+      `);
       const updateStmt = db.prepare(`
         UPDATE models SET 
           fileName = ?,
@@ -9316,7 +9869,9 @@ async function updateModelsBatch(modelDataBatch) {
           printed = ?,
           parentModel = ?,
           license = ?,
-          isNew = 0
+          rating = ?,
+          favorite = ?,
+          isNew = CASE WHEN ? THEN 0 ELSE isNew END
         WHERE filePath = ?
       `);
 
@@ -9337,6 +9892,8 @@ async function updateModelsBatch(modelDataBatch) {
           printed,
           parentModel,
           license,
+          rating,
+          favorite,
           tags
         } = modelData;
 
@@ -9360,6 +9917,23 @@ async function updateModelsBatch(modelDataBatch) {
         const finalPrinted = printed !== undefined ? (printed ? 1 : 0) : existingModel.printed;
         const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModel.parentModel;
         const finalLicense = license !== undefined ? (license || null) : existingModel.license;
+        const finalRating = rating !== undefined ? normalizeModelRating(rating) : normalizeModelRating(existingModel.rating);
+        const finalFavorite = favorite !== undefined ? (favorite ? 1 : 0) : (existingModel.favorite ? 1 : 0);
+
+        const finals = {
+          fileName: finalFileName,
+          designer: finalDesigner,
+          source: finalSource,
+          notes: finalNotes,
+          printed: finalPrinted,
+          parentModel: finalParentModel,
+          license: finalLicense
+        };
+        let clearIsNew = modelUserFieldsChanged(existingModel, finals);
+        if (!clearIsNew && tags !== undefined && Array.isArray(tags)) {
+          const existingTagRows = getExistingTagsStmt.all(existingModel.id).map((row) => row.name);
+          clearIsNew = JSON.stringify(sortedTagNames(existingTagRows)) !== JSON.stringify(sortedTagNames(tags));
+        }
 
         // Update model fields
         console.log(`[Batch ${i}] Updating model with values:`, {
@@ -9370,7 +9944,8 @@ async function updateModelsBatch(modelDataBatch) {
           finalPrinted,
           finalParentModel,
           finalLicense,
-          filePath
+          filePath,
+          clearIsNew
         });
         const updateResult = updateStmt.run(
           finalFileName,
@@ -9380,6 +9955,9 @@ async function updateModelsBatch(modelDataBatch) {
           finalPrinted,
           finalParentModel,
           finalLicense,
+          finalRating,
+          finalFavorite,
+          clearIsNew ? 1 : 0,
           filePath
         );
         console.log(`[Batch ${i}] Update result:`, updateResult);
@@ -9422,6 +10000,26 @@ async function updateModelsBatch(modelDataBatch) {
   }
 }
 
+/** Returns true when user-editable model fields differ (used to clear isNew only on real edits). */
+function modelUserFieldsChanged(existing, finals) {
+  if (!existing || !finals) return false;
+  const norm = (v) => (v == null || String(v).trim() === '' ? null : v);
+  return (
+    finals.fileName !== existing.fileName ||
+    norm(finals.designer) !== norm(existing.designer) ||
+    norm(finals.source) !== norm(existing.source) ||
+    norm(finals.notes) !== norm(existing.notes) ||
+    Number(finals.printed ? 1 : 0) !== Number(existing.printed ? 1 : 0) ||
+    norm(finals.parentModel) !== norm(existing.parentModel) ||
+    norm(finals.license) !== norm(existing.license)
+  );
+}
+
+function sortedTagNames(tags) {
+  if (!Array.isArray(tags)) return [];
+  return tags.map((t) => String(t).trim()).filter(Boolean).sort();
+}
+
 // Add this function before the IPC handlers
 async function saveModel(modelData) {
   try {
@@ -9437,6 +10035,8 @@ async function saveModel(modelData) {
       printed,
       parentModel,
       license,
+      rating,
+      favorite,
       tags: rawTags
     } = modelData;
 
@@ -9492,7 +10092,9 @@ async function saveModel(modelData) {
       await zip.close();
       const modelExts = getSupportedExtensionsForLibrary(db);
       const toAdd = Object.values(entries).filter(
-        (e) => !e.isDirectory && modelExts.includes(path.extname(e.name).toLowerCase())
+        (e) => !e.isDirectory
+          && modelExts.includes(path.extname(e.name).toLowerCase())
+          && !isMacOsResourceForkEntry(e.name)
       );
       if (toAdd.length === 0) {
         throw new Error('No supported model files found in the ZIP file. Enable additional file types in Settings > File Type if needed.');
@@ -9504,6 +10106,8 @@ async function saveModel(modelData) {
         printed,
         parentModel,
         license,
+        rating,
+        favorite,
         tags: rawTags
       };
       for (const entry of toAdd) {
@@ -9538,7 +10142,7 @@ async function saveModel(modelData) {
         console.log(`Updating existing model with ID: ${existingModel.id}`);
         
         // Get existing model data to preserve values that aren't being updated
-        const existingModelData = db.prepare('SELECT * FROM models WHERE id = ?').get(existingModel.id);
+        const existingModelData = getModelById(existingModel.id);
         
         // Only update fields that are explicitly provided (not undefined)
         // Preserve existing values for fields that are undefined in the update
@@ -9549,6 +10153,27 @@ async function saveModel(modelData) {
         const finalPrinted = printed !== undefined ? (printed ? 1 : 0) : existingModelData.printed;
         const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModelData.parentModel;
         const finalLicense = license !== undefined ? (license || null) : existingModelData.license;
+        const finalRating = rating !== undefined ? normalizeModelRating(rating) : normalizeModelRating(existingModelData.rating);
+        const finalFavorite = favorite !== undefined ? (favorite ? 1 : 0) : (existingModelData.favorite ? 1 : 0);
+
+        const finals = {
+          fileName: finalFileName,
+          designer: finalDesigner,
+          source: finalSource,
+          notes: finalNotes,
+          printed: finalPrinted,
+          parentModel: finalParentModel,
+          license: finalLicense
+        };
+        let clearIsNew = modelUserFieldsChanged(existingModelData, finals);
+        if (!clearIsNew && rawTags !== undefined) {
+          const existingTagRows = db.prepare(`
+            SELECT t.name FROM model_tags mt
+            JOIN tags t ON mt.tag_id = t.id
+            WHERE mt.model_id = ?
+          `).all(existingModel.id).map((row) => row.name);
+          clearIsNew = JSON.stringify(sortedTagNames(existingTagRows)) !== JSON.stringify(sortedTagNames(tags));
+        }
         
         // Use a simpler update approach to avoid foreign key issues
         const updateStmt = db.prepare(`
@@ -9560,7 +10185,9 @@ async function saveModel(modelData) {
             printed = ?,
             parentModel = ?,
             license = ?,
-            isNew = 0
+            rating = ?,
+            favorite = ?,
+            isNew = CASE WHEN ? THEN 0 ELSE isNew END
           WHERE id = ?
         `);
         
@@ -9572,6 +10199,9 @@ async function saveModel(modelData) {
           finalPrinted,
           finalParentModel,
           finalLicense,
+          finalRating,
+          finalFavorite,
+          clearIsNew ? 1 : 0,
           existingModel.id
         );
         
@@ -9583,8 +10213,8 @@ async function saveModel(modelData) {
         const dateAdded = new Date().toISOString();
         const insertStmt = db.prepare(`
           INSERT INTO models (
-            filePath, fileName, designer, source, notes, printed, parentModel, license, dateAdded, isNew
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            filePath, fileName, designer, source, notes, printed, parentModel, license, dateAdded, isNew, rating, favorite
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         `);
         
         const result = insertStmt.run(
@@ -9596,7 +10226,9 @@ async function saveModel(modelData) {
           printed ? 1 : 0,
           parentModel || null,
           license || null,
-          dateAdded
+          dateAdded,
+          normalizeModelRating(rating),
+          favorite ? 1 : 0
         );
         
         modelId = result.lastInsertRowid;

@@ -41,7 +41,7 @@ services:
       - GIO_USE_VFS=local
       - GIO_USE_VOLUME_MONITOR=unix
       # Preview parsing memory controls (override defaults when needed)
-      - PRINTVENTORY_PREVIEW_3MF_POOL_SIZE=2
+      - PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB=1024
       - PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB=200
       # Optional: Set STL Home directory via environment variable (applied when unset in DB, or set
       # PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 to always apply env on every start — legacy behavior).
