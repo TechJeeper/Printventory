@@ -1,0 +1,60 @@
+name: Publish beta release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semver to publish (defaults to package.json)
+        required: false
+        type: string
+      changelog:
+        description: Changelog lines (one per line)
+        required: false
+        type: string
+      skip_website:
+        description: Skip Printventory-Website update
+        required: false
+        type: boolean
+        default: false
+      skip_discord:
+        description: Skip Discord #latest-builds update
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  publish-beta:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Publish beta (website + Discord)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.version }}" ]; then
+            ARGS="$ARGS --version ${{ inputs.version }}"
+          fi
+          if [ -n "${{ inputs.changelog }}" ]; then
+            ARGS="$ARGS --changelog \"${{ inputs.changelog }}\""
+          fi
+          if [ "${{ inputs.skip_website }}" = "true" ]; then
+            ARGS="$ARGS --skip-website"
+          fi
+          if [ "${{ inputs.skip_discord }}" = "true" ]; then
+            ARGS="$ARGS --skip-discord"
+          fi
+          node scripts/publish-beta-release.js $ARGS

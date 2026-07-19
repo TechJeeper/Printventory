@@ -15,3 +15,7 @@ tests/printventory.db
 app.log
 *.log
 .macssh
+scripts/publish-beta-release.local.json
+.cursor/
+.deploySteps
+.env

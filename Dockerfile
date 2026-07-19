@@ -102,12 +102,17 @@ RUN rm -rf node_modules/better-sqlite3/build || true && \
 # Copy application files
 COPY main.js preload.js renderer.js index.html styles.css preview-wall.css ./
 COPY server-bridge.js scan-worker.js parse-worker.js ./
-COPY preview-3mf-worker-node.js threemf-loader-simple.js ./
-COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js ./
+COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
+COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js thumbnail-compress.js ./
 COPY vendor/ ./vendor/
 COPY favicon.ico ./
 COPY *.png *.jpg *.bmp ./
 COPY guide/ ./guide/
+
+# Fail the build if required app modules were omitted from COPY above
+RUN for f in thumbnail-compress.js threemf-mesh-extract.js; do \
+      test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
+    done
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/

@@ -8071,7 +8071,8 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
 
   cancelAllPreview3mfWorkers();
 
-  const cacheKey = fileStat ? `${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
+  // Bump preview cache version when simplification/placement logic changes
+  const cacheKey = fileStat ? `v3|${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
   const cacheDir = getPreview3mfCacheDir();
   const cacheHash = cacheKey ? crypto.createHash('sha256').update(cacheKey).digest('hex') : null;
   const cachePath = cacheHash ? path.join(cacheDir, `${cacheHash}.json`) : null;

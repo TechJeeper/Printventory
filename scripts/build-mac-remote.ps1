@@ -19,7 +19,7 @@
 #     IdentityFile ~/.ssh/id_ed25519_printventory
 
 param(
-    [string]$SshHost = $(if ($env:MAC_BUILD_SSH_HOST) { $env:MAC_BUILD_SSH_HOST } else { "cody@192.168.68.94" }),
+    [string]$SshHost = $(if ($env:MAC_BUILD_SSH_HOST) { $env:MAC_BUILD_SSH_HOST } else { "cody@192.168.68.92" }),
     [string]$RemoteBase = $(if ($env:MAC_BUILD_REMOTE_DIR) { $env:MAC_BUILD_REMOTE_DIR } else { "~/printventory-remote-build" }),
     [switch]$SkipRemoteInstall = [bool]($env:MAC_BUILD_SKIP_INSTALL -eq "1")
 )
@@ -123,26 +123,67 @@ function Get-RemoteShellPath([string]$Path) {
 }
 
 function Invoke-RemoteZsh([string]$TargetHost, [string]$Script, [switch]$Capture) {
-    # Windows here-strings use CRLF; zsh treats trailing CR as part of each command.
-    $Script = ($Script -replace "`r`n", "`n") -replace "`r", "`n"
-    if ($Capture) {
-        $prev = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        try {
-            $output = $Script | & ssh.exe @($script:MacBuildSshOpts + @($TargetHost, "zsh -ils"))
-        } finally {
-            $ErrorActionPreference = $prev
+    # Windows here-strings and PowerShell piping both inject CRLF; zsh treats trailing CR as
+    # part of the command (e.g. npm looks for script "build:mac`r"). Write LF bytes to ssh stdin.
+    $Script = (($Script -replace "`r`n", "`n") -replace "`r", "`n").TrimEnd() + "`n"
+    $scriptBytes = [System.Text.Encoding]::UTF8.GetBytes($Script)
+    $echoLive = -not $Capture
+
+    $argList = @($script:MacBuildSshOpts) + @($TargetHost, "zsh -ils")
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "ssh.exe"
+    $psi.Arguments = ($argList | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $stderrBuilder = New-Object System.Text.StringBuilder
+
+    $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -MessageData @{
+        Builder = $stdoutBuilder
+        Echo = $echoLive
+    } -Action {
+        if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+            [void]$Event.MessageData.Builder.AppendLine($EventArgs.Data)
+            if ($Event.MessageData.Echo) { Write-Host $EventArgs.Data }
         }
-        if ($LASTEXITCODE -ne 0) {
-            if ($output) { $output | Write-Host }
-            throw "Remote zsh command failed (exit code $LASTEXITCODE)"
+    }
+    $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -MessageData @{
+        Builder = $stderrBuilder
+        Echo = $echoLive
+    } -Action {
+        if (-not [string]::IsNullOrEmpty($EventArgs.Data)) {
+            [void]$Event.MessageData.Builder.AppendLine($EventArgs.Data)
+            if ($Event.MessageData.Echo) { Write-Host $EventArgs.Data }
         }
-        return $output
     }
 
-    $Script | & ssh.exe @($script:MacBuildSshOpts + @($TargetHost, "zsh -ils"))
-    if ($LASTEXITCODE -ne 0) {
-        throw "Remote zsh command failed (exit code $LASTEXITCODE)"
+    [void]$proc.Start()
+    $proc.BeginOutputReadLine()
+    $proc.BeginErrorReadLine()
+    $proc.StandardInput.BaseStream.Write($scriptBytes, 0, $scriptBytes.Length)
+    $proc.StandardInput.Close()
+    $proc.WaitForExit()
+
+    Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+    Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+    Remove-Job $outEvent.Id -Force -ErrorAction SilentlyContinue
+    Remove-Job $errEvent.Id -Force -ErrorAction SilentlyContinue
+
+    $combined = ($stdoutBuilder.ToString() + $stderrBuilder.ToString()).TrimEnd()
+    if ($proc.ExitCode -ne 0) {
+        if ($Capture -and $combined) { Write-Host $combined }
+        throw "Remote zsh command failed (exit code $($proc.ExitCode))"
+    }
+    if ($Capture) {
+        return $combined
     }
 }
 
@@ -219,7 +260,8 @@ try {
 }
 Write-Host "Remote build finished." -ForegroundColor Green
 
-$remoteDmgPath = (Invoke-RemoteZsh $SshHost "ls -1 $remoteShellProject/dist/*.dmg 2>/dev/null | head -1" -Capture).Trim()
+$remoteDmgListing = Invoke-RemoteZsh $SshHost "ls -1 $remoteShellProject/dist/*.dmg 2>/dev/null | head -1" -Capture
+$remoteDmgPath = ($remoteDmgListing -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '\.dmg$' } | Select-Object -Last 1)
 if (-not $remoteDmgPath) {
     Write-Error "No .dmg on remote after build. Expected: $remoteShellProject/dist/*.dmg"
 }

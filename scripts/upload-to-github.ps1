@@ -153,3 +153,19 @@ foreach ($asset in $assets) {
 }
 
 Write-Host "Release $tag updated with assets." -ForegroundColor Green
+
+if ($env:GITHUB_TOKEN -or $env:DISCORD_BOT_TOKEN) {
+    Write-Host "Publishing beta release (website + Discord)..." -ForegroundColor Cyan
+    $releaseBody = $release.body
+    if ($releaseBody) {
+        $env:RELEASE_BODY = $releaseBody
+    }
+    node "$scriptDir\publish-beta-release.js" --version $version
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Beta publish failed (exit code $LASTEXITCODE). Release upload succeeded." -ForegroundColor Yellow
+    } else {
+        Write-Host "Beta website and Discord updated." -ForegroundColor Green
+    }
+} else {
+    Write-Host "Skipping beta publish (set GITHUB_TOKEN and/or DISCORD_BOT_TOKEN)." -ForegroundColor Gray
+}

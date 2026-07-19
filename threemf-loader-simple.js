@@ -6,10 +6,69 @@
 const fflate = require('fflate');
 const {
   PREVIEW_3MF_TARGET_TRIANGLES,
-  countTrianglesInXml,
   extractAllMeshesFast,
-  shouldUseFastPath
+  simplifyForPreview,
+  shouldUseFastPath,
+  modelHasPlacementTransforms
 } = require('./threemf-mesh-extract.js');
+
+/** Identity 4x4 matrix, column-major (THREE.Matrix4 layout). */
+function mat4Identity() {
+  return new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1
+  ]);
+}
+
+/**
+ * Parse 3MF transform="a b c d e f g h i tx ty tz" into a column-major 4x4
+ * matching THREE.3MFLoader / the 3MF spec.
+ */
+function parseTransformAttr(transform) {
+  if (!transform || typeof transform !== 'string') return null;
+  const t = transform.trim().split(/\s+/).map(parseFloat);
+  if (t.length < 12 || t.some(n => Number.isNaN(n))) return null;
+  // THREE.Matrix4.set(n11,n12,n13,n14, n21,...) then .elements is column-major
+  return new Float32Array([
+    t[0], t[1], t[2], 0,
+    t[3], t[4], t[5], 0,
+    t[6], t[7], t[8], 0,
+    t[9], t[10], t[11], 1
+  ]);
+}
+
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      out[col * 4 + row] =
+        a[0 * 4 + row] * b[col * 4 + 0] +
+        a[1 * 4 + row] * b[col * 4 + 1] +
+        a[2 * 4 + row] * b[col * 4 + 2] +
+        a[3 * 4 + row] * b[col * 4 + 3];
+    }
+  }
+  return out;
+}
+
+function mat4ApplyPoint(m, x, y, z) {
+  return {
+    x: m[0] * x + m[4] * y + m[8] * z + m[12],
+    y: m[1] * x + m[5] * y + m[9] * z + m[13],
+    z: m[2] * x + m[6] * y + m[10] * z + m[14]
+  };
+}
+
+function isIdentityMatrix(m) {
+  if (!m) return true;
+  const id = mat4Identity();
+  for (let i = 0; i < 16; i++) {
+    if (Math.abs(m[i] - id[i]) > 1e-8) return false;
+  }
+  return true;
+}
 
 class GrowableFloat32Array {
   constructor(initialCapacity = 4096) {
@@ -84,7 +143,10 @@ class Simple3MFLoader {
       const textDecoder = new TextDecoder();
       const modelXmlParts = modelEntries.map(path => textDecoder.decode(unzipped[path]));
 
-      if (shouldUseFastPath(modelXmlParts)) {
+      // Fast path skips build/item transforms — keep it for dense single-object
+      // models (HueForge). Multi-part plate layouts need the DOM path.
+      const hasPlacement = modelHasPlacementTransforms(modelXmlParts);
+      if (shouldUseFastPath(modelXmlParts) && !hasPlacement) {
         this.postStatus('Large model detected — building simplified preview...');
         const fast = extractAllMeshesFast(modelXmlParts, this.targetTriangles);
         if (fast.simplified) {
@@ -98,6 +160,10 @@ class Simple3MFLoader {
           sourceTriangles: fast.sourceTriangles,
           keptTriangles: fast.keptTriangles
         });
+      }
+
+      if (hasPlacement && shouldUseFastPath(modelXmlParts)) {
+        this.postStatus('Multi-part model — placing parts for preview...');
       }
 
       return this.parseWithDom(modelXmlParts, modelEntries, unzipped);
@@ -155,7 +221,7 @@ class Simple3MFLoader {
       return results;
     };
 
-    let meshNodes = [];
+    let meshInstances = [];
     const objectMap = new Map();
     const buildItemsAll = [];
 
@@ -191,15 +257,23 @@ class Simple3MFLoader {
       return null;
     };
 
-    const collectMeshesFromObject = (objId, modelPath, visited = new Set()) => {
+    const collectMeshesFromObject = (objId, modelPath, parentMatrix, visited = new Set()) => {
       if (!objId || !modelPath) return;
       const key = `${modelPath}::${objId}`;
       if (visited.has(key)) return;
       visited.add(key);
       const entry = objectMap.get(key);
       if (!entry) return;
+
       const meshesInObj = findByLocalName(entry.node, 'mesh');
-      if (meshesInObj && meshesInObj.length > 0) meshNodes.push(...meshesInObj);
+      // Prefer leaf mesh objects; composites are usually component-only.
+      if (meshesInObj && meshesInObj.length > 0) {
+        for (let i = 0; i < meshesInObj.length; i++) {
+          meshInstances.push({ meshNode: meshesInObj[i], matrix: parentMatrix });
+        }
+        return;
+      }
+
       const componentNodes = findByLocalName(entry.node, 'component');
       if (componentNodes && componentNodes.length > 0) {
         for (const comp of componentNodes) {
@@ -209,7 +283,9 @@ class Simple3MFLoader {
           const rid = getAttr(comp, 'p:pid') || getAttr(comp, 'pid') || getAttr(comp, 'p:rid') || getAttr(comp, 'rid');
           if (!refPath && rid && relsMap.has(rid)) refPath = relsMap.get(rid);
           const targetPath = refPath ? refPath.replace(/^\//, '') : modelPath;
-          if (refId) collectMeshesFromObject(refId, targetPath, visited);
+          const compTransform = parseTransformAttr(getAttr(comp, 'transform'));
+          const childMatrix = compTransform ? mat4Multiply(parentMatrix, compTransform) : parentMatrix;
+          if (refId) collectMeshesFromObject(refId, targetPath, childMatrix, new Set(visited));
         }
       }
     };
@@ -222,34 +298,42 @@ class Simple3MFLoader {
         if (rid && relsMap.has(rid)) targetPath = relsMap.get(rid);
       }
       targetPath = targetPath ? targetPath.replace(/^\//, '') : path;
-      collectMeshesFromObject(targetId, targetPath);
+      const itemTransform = parseTransformAttr(getAttr(item, 'transform'));
+      const itemMatrix = itemTransform || mat4Identity();
+      collectMeshesFromObject(targetId, targetPath, itemMatrix);
     }
 
-    if (meshNodes.length === 0 && objectMap.size > 0) {
+    if (meshInstances.length === 0 && objectMap.size > 0) {
       for (const key of objectMap.keys()) {
         const [modelPath, objId] = key.split('::');
-        collectMeshesFromObject(objId, modelPath);
+        collectMeshesFromObject(objId, modelPath, mat4Identity());
       }
     }
 
-    if (meshNodes.length === 0) {
+    if (meshInstances.length === 0) {
       for (const { xmlDoc } of modelDocs) {
         let fallbackMeshes = xmlDoc.getElementsByTagName('mesh');
-        if (fallbackMeshes && fallbackMeshes.length > 0) { meshNodes.push(...Array.from(fallbackMeshes)); continue; }
-        fallbackMeshes = xmlDoc.getElementsByTagNameNS('*', 'mesh');
-        if (fallbackMeshes && fallbackMeshes.length > 0) { meshNodes.push(...Array.from(fallbackMeshes)); continue; }
-        const byLocal = findByLocalName(xmlDoc.documentElement, 'mesh');
-        if (byLocal && byLocal.length > 0) meshNodes.push(...byLocal);
+        if (!fallbackMeshes || fallbackMeshes.length === 0) {
+          fallbackMeshes = xmlDoc.getElementsByTagNameNS('*', 'mesh');
+        }
+        if (!fallbackMeshes || fallbackMeshes.length === 0) {
+          fallbackMeshes = findByLocalName(xmlDoc.documentElement, 'mesh');
+        }
+        if (fallbackMeshes && fallbackMeshes.length > 0) {
+          for (let i = 0; i < fallbackMeshes.length; i++) {
+            meshInstances.push({ meshNode: fallbackMeshes[i], matrix: mat4Identity() });
+          }
+        }
       }
     }
 
-    if (!meshNodes || meshNodes.length === 0) {
+    if (!meshInstances || meshInstances.length === 0) {
       throw new Error('No mesh found in 3MF model');
     }
 
     let totalSourceTriangles = 0;
-    for (let m = 0; m < meshNodes.length; m++) {
-      const meshNode = meshNodes[m];
+    for (let m = 0; m < meshInstances.length; m++) {
+      const meshNode = meshInstances[m].meshNode;
       let trianglesNode = meshNode.getElementsByTagName('triangles')[0];
       if (!trianglesNode) trianglesNode = meshNode.getElementsByTagNameNS('*', 'triangles')[0];
       if (trianglesNode) {
@@ -261,25 +345,21 @@ class Simple3MFLoader {
       }
     }
 
-    const stride = totalSourceTriangles > this.targetTriangles
-      ? Math.ceil(totalSourceTriangles / this.targetTriangles)
-      : 1;
-    const simplified = stride > 1;
-
-    if (simplified) {
+    const needsSimplify = totalSourceTriangles > this.targetTriangles;
+    if (needsSimplify) {
       this.postStatus(
-        `Simplifying preview: keeping ~${Math.ceil(totalSourceTriangles / stride).toLocaleString('en-US')} of ` +
-        `${totalSourceTriangles.toLocaleString('en-US')} triangles`
+        `Simplifying preview: ${totalSourceTriangles.toLocaleString('en-US')} triangles → solid LOD`
       );
     }
 
     const positions = new GrowableFloat32Array();
     const indices = new GrowableUint32Array();
     let totalVertices = 0;
-    let globalTriIndex = 0;
 
-    for (let m = 0; m < meshNodes.length; m++) {
-      const meshNode = meshNodes[m];
+    for (let m = 0; m < meshInstances.length; m++) {
+      const { meshNode, matrix } = meshInstances[m];
+      const applyTransform = !isIdentityMatrix(matrix);
+
       let verticesNode = meshNode.getElementsByTagName('vertices')[0];
       if (!verticesNode) verticesNode = meshNode.getElementsByTagNameNS('*', 'vertices')[0];
       if (!verticesNode) continue;
@@ -292,11 +372,15 @@ class Simple3MFLoader {
       const meshVertexOffset = totalVertices;
       for (let i = 0; i < vertexNodes.length; i++) {
         const v = vertexNodes[i];
-        positions.push3(
-          parseFloat(v.getAttribute('x') || 0),
-          parseFloat(v.getAttribute('y') || 0),
-          parseFloat(v.getAttribute('z') || 0)
-        );
+        const x = parseFloat(v.getAttribute('x') || 0);
+        const y = parseFloat(v.getAttribute('y') || 0);
+        const z = parseFloat(v.getAttribute('z') || 0);
+        if (applyTransform) {
+          const p = mat4ApplyPoint(matrix, x, y, z);
+          positions.push3(p.x, p.y, p.z);
+        } else {
+          positions.push3(x, y, z);
+        }
       }
       totalVertices += vertexNodes.length;
 
@@ -310,15 +394,12 @@ class Simple3MFLoader {
       }
 
       for (let i = 0; i < triangleNodes.length; i++) {
-        if (globalTriIndex % stride === 0) {
-          const t = triangleNodes[i];
-          indices.push3(
-            parseInt(t.getAttribute('v1') || 0, 10) + meshVertexOffset,
-            parseInt(t.getAttribute('v2') || 0, 10) + meshVertexOffset,
-            parseInt(t.getAttribute('v3') || 0, 10) + meshVertexOffset
-          );
-        }
-        globalTriIndex++;
+        const t = triangleNodes[i];
+        indices.push3(
+          parseInt(t.getAttribute('v1') || 0, 10) + meshVertexOffset,
+          parseInt(t.getAttribute('v2') || 0, 10) + meshVertexOffset,
+          parseInt(t.getAttribute('v3') || 0, 10) + meshVertexOffset
+        );
       }
     }
 
@@ -326,10 +407,18 @@ class Simple3MFLoader {
       throw new Error('No geometry data found in 3MF model');
     }
 
-    return this.buildThreeObject(positions.toArray(), indices.toArray(), {
-      simplified,
-      sourceTriangles: totalSourceTriangles,
-      keptTriangles: indices.length / 3
+    const simplified = simplifyForPreview(positions.toArray(), indices.toArray(), this.targetTriangles);
+    if (simplified.simplified) {
+      this.postStatus(
+        `Simplified preview: ${simplified.keptTriangles.toLocaleString('en-US')} of ` +
+        `${simplified.sourceTriangles.toLocaleString('en-US')} triangles`
+      );
+    }
+
+    return this.buildThreeObject(simplified.positions, simplified.indices, {
+      simplified: simplified.simplified,
+      sourceTriangles: simplified.sourceTriangles,
+      keptTriangles: simplified.keptTriangles
     });
   }
 

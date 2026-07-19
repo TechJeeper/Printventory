@@ -55,10 +55,14 @@ const filesToCopy = [
 
 // Copy files
 console.log('Copying files...');
-filesToCopy.forEach(file => {
-  if (fs.existsSync(file)) {
-    fs.copyFileSync(file, path.join(dockerDistDir, file));
-  }
+const missingFiles = filesToCopy.filter((file) => !fs.existsSync(file));
+if (missingFiles.length) {
+  console.error('Missing required files for Docker distribution:');
+  missingFiles.forEach((file) => console.error(`  - ${file}`));
+  process.exit(1);
+}
+filesToCopy.forEach((file) => {
+  fs.copyFileSync(file, path.join(dockerDistDir, file));
 });
 
 // Copy assets

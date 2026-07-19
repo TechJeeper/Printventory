@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -22,6 +22,10 @@
     "zip:macos": "powershell -ExecutionPolicy Bypass -File scripts/zip-macos-build.ps1",
     "build:mac:remote": "powershell -ExecutionPolicy Bypass -File scripts/build-mac-remote.ps1",
     "zip:github-source": "node scripts/create-github-source-zip.js",
+    "publish:beta": "node scripts/publish-beta-release.js",
+    "publish:beta:discord-init": "node scripts/publish-beta-release.js --discord-init",
+    "discord:latest-builds": "node scripts/publish-beta-release.js --discord-only",
+    "discord:latest-builds:init": "node scripts/publish-beta-release.js --discord-init",
     "postinstall": "electron-builder install-app-deps",
     "test": "playwright test",
     "test:full": "playwright test full-app-e2e.spec.js"
@@ -145,7 +149,9 @@
   "devDependencies": {
     "@playwright/test": "^1.57.0",
     "electron": "^43.1.0",
-    "electron-builder": "^26.5.0"
+    "electron-builder": "^26.5.0",
+    "testdriverai": "^7.9.3",
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "tar": "^6.2.1",
@@ -153,6 +159,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "dotenv": "^17.4.2",
     "electron-google-analytics": "^1.0.2",
     "express": "^4.18.2",
     "fflate": "^0.8.1",
