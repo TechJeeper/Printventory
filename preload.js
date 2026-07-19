@@ -288,6 +288,7 @@ contextBridge.exposeInMainWorld('electron', {
   fetchMakerWorldPage: (url) => ipcRenderer.invoke('fetch-makerworld-page', url),
   onOpenSlicerSettings: (callback) => ipcRenderer.on('open-slicer-settings', callback),
   getSlicers: () => ipcRenderer.invoke('get-slicers'),
+  openFileInSlicer: (options) => ipcRenderer.invoke('open-file-in-slicer', options),
   saveSlicer: (slicer) => ipcRenderer.invoke('save-slicer', slicer),
   deleteSlicer: (id) => ipcRenderer.invoke('delete-slicer', id),
   clearAndSaveSlicers: (slicers) => ipcRenderer.invoke('clear-and-save-slicers', slicers),

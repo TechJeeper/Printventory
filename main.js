@@ -5,6 +5,7 @@ const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { Worker } = require('worker_threads');
+const { deriveBundleFromFilePath } = require('./bundle-keys');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -1753,7 +1754,7 @@ function loadThumbnailForModel(filePath) {
   }
 }
 
-const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite';
+const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind';
 
 function getModelByFilePath(filePath, { includeThumbnail = false } = {}) {
   if (!db || !filePath) return null;
@@ -2012,7 +2013,10 @@ function initializeDatabase() {
           dateAdded DATETIME,
           isNew INTEGER DEFAULT 1,
           rating INTEGER DEFAULT 0,
-          favorite INTEGER DEFAULT 0
+          favorite INTEGER DEFAULT 0,
+          bundleKey TEXT,
+          bundleLabel TEXT,
+          bundleKind TEXT
       )`).run();
 
       // Create tags table
@@ -2072,6 +2076,7 @@ function initializeDatabase() {
     migrateDateAddedColumn();
     migrateIsNewColumn();
     migrateRatingFavoriteColumns();
+    migrateBundleColumns();
     
     // Create index for dateAdded after migration (in case it was just added)
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_dateadded ON models(dateAdded)').run();
@@ -2178,6 +2183,48 @@ function migrateRatingFavoriteColumns() {
     return true;
   } catch (error) {
     console.error('Error migrating rating/favorite columns:', error);
+    return false;
+  }
+}
+
+/** Folder / zip bundle columns for grouped browsing. */
+function migrateBundleColumns() {
+  try {
+    console.log('Checking for bundle column migration...');
+    const tableInfo = db.prepare('PRAGMA table_info(models)').all();
+    const names = new Set(tableInfo.map((col) => col.name));
+    const additions = [
+      ['bundleKey', 'TEXT'],
+      ['bundleLabel', 'TEXT'],
+      ['bundleKind', 'TEXT'],
+    ];
+    for (const [col, ddl] of additions) {
+      if (!names.has(col)) {
+        db.prepare(`ALTER TABLE models ADD COLUMN ${col} ${ddl}`).run();
+        console.log(`Added models.${col}`);
+      }
+    }
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_models_bundlekey ON models(bundleKey)').run();
+
+    const rows = db.prepare(
+      "SELECT id, filePath FROM models WHERE bundleKey IS NULL OR bundleKey = ''"
+    ).all();
+    if (rows.length > 0) {
+      const update = db.prepare(
+        'UPDATE models SET bundleKey = ?, bundleLabel = ?, bundleKind = ? WHERE id = ?'
+      );
+      const backfill = db.transaction(() => {
+        for (const row of rows) {
+          const bundle = deriveBundleFromFilePath(row.filePath);
+          update.run(bundle.bundleKey || null, bundle.bundleLabel || null, bundle.bundleKind || null, row.id);
+        }
+      });
+      backfill();
+      console.log(`Backfilled bundle fields for ${rows.length} model(s)`);
+    }
+    return true;
+  } catch (error) {
+    console.error('Error migrating bundle columns:', error);
     return false;
   }
 }
@@ -3280,14 +3327,20 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
             // Otherwise every scan would overwrite hashes with '' and trigger full hash regeneration on each start.
             const updateExisting = db.prepare(`
               UPDATE models 
-              SET hash = COALESCE(NULLIF(?, ''), hash), size = ?, modifiedDate = ?
+              SET hash = COALESCE(NULLIF(?, ''), hash),
+                  size = ?,
+                  modifiedDate = ?,
+                  bundleKey = ?,
+                  bundleLabel = ?,
+                  bundleKind = ?
               WHERE filePath = ?
             `);
             
             const insertNew = db.prepare(`
               INSERT INTO models (
-                filePath, fileName, hash, size, modifiedDate, dateAdded, isNew
-              ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                filePath, fileName, hash, size, modifiedDate, dateAdded, isNew,
+                bundleKey, bundleLabel, bundleKind
+              ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             `);
 
             // Track count of newly inserted files
@@ -3313,12 +3366,16 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
                 const batch = files.slice(i, i + batchSize);
                 
                 for (const file of batch) {
+                  const bundle = deriveBundleFromFilePath(file.filePath);
                   // Use Set lookup instead of database query - O(1) vs O(log n) database query
                   if (existingFilePaths.has(file.filePath)) {
                     updateExisting.run(
                       file.hash || '',
                       file.size,
                       file.mtime.toISOString(),
+                      bundle.bundleKey || null,
+                      bundle.bundleLabel || null,
+                      bundle.bundleKind || null,
                       file.filePath
                     );
                   } else {
@@ -3329,7 +3386,10 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
                       file.hash || '',
                       file.size,
                       file.mtime.toISOString(),
-                      dateAdded
+                      dateAdded,
+                      bundle.bundleKey || null,
+                      bundle.bundleLabel || null,
+                      bundle.bundleKind || null
                     );
                     newFilesCount++;
                     // Add to set so we don't try to insert duplicates within the same transaction
@@ -3614,7 +3674,7 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
         break;
     }
 
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
 
     let models;
     if (limit === 0) {
@@ -4298,7 +4358,7 @@ const getModelsFilteredHandler = async (event, filters) => {
         break;
     }
     
-    const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
 
     // Execute query (optional limit/offset for progressive load when clearing filters in Server/Docker)
     // SQLite requires LIMIT when using OFFSET; use a large limit when only offset is set
@@ -6120,7 +6180,6 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             }
             
             // Execute slicer command (only in normal mode, not server mode)
-            const { exec } = require('child_process');
             let modelPath = filePaths[0]; // Use the first file selected
             
             // If it's a zip entry, extract to temp first
@@ -6133,23 +6192,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               console.error('[Slicer] Blocked Windows path execution in Docker:', slicer.path);
               throw new Error('Cannot execute Windows executable in Docker container. Please use a Linux-compatible slicer path.');
             }
-            
-            let command;
-            if (process.platform === 'darwin' && slicer.path.toLowerCase().endsWith('.app')) {
-              command = `open -a "${slicer.path}" --args "${modelPath}"`;
-            } else {
-              command = `"${slicer.path}" "${modelPath}"`;
-            }
-            
-            exec(command, (error, stdout, stderr) => {
-              if (error) {
-                console.error('Error executing slicer command:', error);
-                const win = getWindowFromEvent(event);
-                if (win && !win.isDestroyed()) {
-                  dialog.showErrorBox('Slice Model Error', error.message);
-                }
-              }
-            });
+
+            await runSlicerWithModelPaths(slicer, [modelPath]);
           } catch (error) {
             console.error('Error slicing model:', error);
             const win = getWindowFromEvent(event);
@@ -7419,6 +7463,97 @@ async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
     console.error(`Error extracting ${entryPath} from ${zipPath}:`, error);
     throw error;
   }
+}
+
+async function resolveModelPathsForSlicer(filePaths) {
+  const rawPaths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean);
+  const resolved = [];
+
+  for (const fp of rawPaths) {
+    if (typeof fp !== 'string' || isUrlModel(fp)) continue;
+
+    const pathInfo = parseZipPath(fp);
+    if (pathInfo.isZipEntry) {
+      if (isMacOsResourceForkEntry(pathInfo.entryPath)) continue;
+      resolved.push(await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath));
+    } else if (fs.existsSync(fp)) {
+      resolved.push(fp);
+    }
+  }
+
+  return resolved;
+}
+
+function getSlicerBySelection(slicers, { slicerId, slicerName } = {}) {
+  if (!Array.isArray(slicers) || slicers.length === 0) return null;
+  if (slicerId != null) {
+    return slicers.find((slicer) => slicer.id === slicerId) || null;
+  }
+  if (slicerName) {
+    return slicers.find((slicer) => slicer.name === slicerName) || null;
+  }
+  return slicers[0];
+}
+
+function escapeShellArg(filePath) {
+  return `"${String(filePath).replace(/"/g, '\\"')}"`;
+}
+
+function getDarwinAppBundlePath(slicerPath) {
+  if (!slicerPath || process.platform !== 'darwin') return null;
+  const normalized = String(slicerPath).replace(/\\/g, '/');
+  if (/\.app$/i.test(normalized)) return normalized;
+  const match = normalized.match(/^(.*?\.app)\//i);
+  return match ? match[1] : null;
+}
+
+function isPrusaFamilySlicer(slicerPath) {
+  const base = path.basename(String(slicerPath)).toLowerCase();
+  return /bambu|orca|prusa|superslicer|slic3r/.test(base);
+}
+
+function buildSlicerLaunchCommand(slicerPath, modelPaths) {
+  const paths = (Array.isArray(modelPaths) ? modelPaths : [modelPaths]).filter(Boolean);
+  if (!paths.length) {
+    throw new Error('No model files to open in slicer');
+  }
+
+  const escapedPaths = paths.map(escapeShellArg).join(' ');
+  const appBundle = getDarwinAppBundlePath(slicerPath);
+  if (appBundle) {
+    // -n opens a new instance even when the slicer is already running (macOS).
+    return `open -n -a ${escapeShellArg(appBundle)} --args ${escapedPaths}`;
+  }
+
+  let command = escapeShellArg(slicerPath);
+  if (isPrusaFamilySlicer(slicerPath)) {
+    command += ' --single-instance=0';
+  }
+  return `${command} ${escapedPaths}`;
+}
+
+function runSlicerWithModelPaths(slicer, modelPaths) {
+  if (!modelPaths.length) {
+    return Promise.reject(new Error('No model files to open in slicer'));
+  }
+
+  const inDocker = isDockerContainer();
+  if (inDocker && (/^[A-Za-z]:[\\/]/.test(slicer.path) || /^\\\\/.test(slicer.path))) {
+    return Promise.reject(new Error(
+      `The slicer path "${slicer.path}" is a Windows path, but the application is running in a Docker container (Linux). ` +
+      'Use a Linux slicer path or run Printventory in normal mode.'
+    ));
+  }
+
+  const { exec } = require('child_process');
+  const command = buildSlicerLaunchCommand(slicer.path, modelPaths);
+
+  return new Promise((resolve, reject) => {
+    exec(command, (error) => {
+      if (error) reject(error);
+      else resolve({ success: true, count: modelPaths.length });
+    });
+  });
 }
 
 // Helper function to clean HTML entities and special characters from description text
@@ -8817,10 +8952,19 @@ ipcMain.handle('add-multiple-thumbnails', async (event, filePath, imageDataUrls)
       const fileName = path.basename(filePath);
       // Create model entry
       const dateAdded = new Date().toISOString();
+      const bundle = deriveBundleFromFilePath(filePath);
       db.prepare(`
-        INSERT INTO models (filePath, fileName, thumbnail, dateAdded, isNew)
-        VALUES (?, ?, ?, ?, 1)
-      `).run(filePath, fileName, '', dateAdded);
+        INSERT INTO models (filePath, fileName, thumbnail, dateAdded, isNew, bundleKey, bundleLabel, bundleKind)
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(
+        filePath,
+        fileName,
+        '',
+        dateAdded,
+        bundle.bundleKey || null,
+        bundle.bundleLabel || null,
+        bundle.bundleKind || null
+      );
       // Re-fetch the model
       model = getModelByFilePath(filePath);
       if (!model) {
@@ -9396,7 +9540,7 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
     const models = db.prepare(`
       SELECT ${selectCols} FROM models
       WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
@@ -9412,7 +9556,7 @@ ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
 ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) => {
   try {
     const offset = (page - 1) * pageSize;
-    const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
     const models = db.prepare(
       `SELECT ${selectCols} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);
@@ -9600,6 +9744,62 @@ ipcMain.handle('clear-and-save-slicers', clearAndSaveSlicersHandler);
 // Register in handler registry for WebSocket/Server mode
 ipcHandlerRegistry.set('clear-and-save-slicers', clearAndSaveSlicersHandler);
 
+const openFileInSlicerHandler = async (event, options = {}) => {
+  const { filePaths, slicerId, slicerName } = options || {};
+  const paths = Array.isArray(filePaths) ? filePaths : (filePaths ? [filePaths] : []);
+  if (!paths.length) {
+    throw new Error('No file paths provided');
+  }
+
+  ensureSlicersTableExists();
+  const slicers = db.prepare('SELECT * FROM slicers').all();
+  const slicer = getSlicerBySelection(slicers, { slicerId, slicerName });
+  if (!slicer) {
+    throw new Error('No slicer configured. Add a slicer in Settings.');
+  }
+
+  if (isServerMode) {
+    const firstPath = paths[0];
+    const pathInfo = parseZipPath(firstPath);
+    const commandPayload = {
+      type: 'open-in-slicer',
+      filePaths: paths,
+      filePath: firstPath,
+      slicerName: slicer.name,
+      slicerPath: slicer.path,
+      isZipEntry: pathInfo.isZipEntry,
+      zipPath: pathInfo.isZipEntry ? pathInfo.zipPath : null,
+      entryPath: pathInfo.isZipEntry ? pathInfo.entryPath : null
+    };
+
+    if (global.broadcastEvent) {
+      global.broadcastEvent('execute-client-command', commandPayload);
+    } else {
+      event.sender.send('execute-client-command', commandPayload);
+    }
+    return { success: true, serverMode: true, count: paths.length };
+  }
+
+  const modelPaths = await resolveModelPathsForSlicer(paths);
+  if (!modelPaths.length) {
+    throw new Error('No valid local model files to open in slicer');
+  }
+
+  try {
+    return await runSlicerWithModelPaths(slicer, modelPaths);
+  } catch (error) {
+    console.error('Error opening file in slicer:', error);
+    const win = getWindowFromEvent(event);
+    if (win && !win.isDestroyed()) {
+      dialog.showErrorBox('Send to Slicer', error.message);
+    }
+    throw error;
+  }
+};
+
+ipcMain.handle('open-file-in-slicer', openFileInSlicerHandler);
+ipcHandlerRegistry.set('open-file-in-slicer', openFileInSlicerHandler);
+
 ipcMain.handle('get-file-stats', async (event, filePath) => {
   try {
     const stats = await fs.promises.stat(filePath);
@@ -9630,47 +9830,40 @@ const executeClientCommandHandler = async (event, commandData) => {
       }
       return { success: true };
     } else if (type === 'open-in-slicer') {
-      // Execute slicer command on client machine
-      const { exec } = require('child_process');
-      let modelPath = filePath;
-      
-      // Handle zip entries - would need extraction, but for now just use zip path
-      if (isZipEntry && zipPath && entryPath) {
-        // For zip entries, we can't easily pass the entry to the slicer
-        // Show a message instead
+      const rawPaths = Array.isArray(commandData.filePaths) && commandData.filePaths.length
+        ? commandData.filePaths
+        : (filePath ? [filePath] : []);
+
+      let modelPaths = [];
+      try {
+        modelPaths = await resolveModelPathsForSlicer(rawPaths);
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+
+      if (!modelPaths.length) {
         const win = getWindowFromEvent(event);
+        const detail = isZipEntry && zipPath && entryPath
+          ? `To open ${entryPath} from ${zipPath}:\n\n1. Extract ${entryPath} from the ZIP file\n2. Open the extracted file in ${slicerName}`
+          : `Could not resolve local model paths for the slicer.`;
         if (win && !win.isDestroyed()) {
           dialog.showMessageBox(win, {
             type: 'info',
-            title: 'ZIP Entry',
-            message: 'Cannot open ZIP entry directly in slicer',
-            detail: `To open ${entryPath} from ${zipPath}:\n\n` +
-              `1. Extract ${entryPath} from the ZIP file\n` +
-              `2. Open the extracted file in ${slicerName}`
+            title: 'Send to Slicer',
+            message: 'Cannot open these models in slicer from here',
+            detail
           });
         }
-        return { success: false, message: 'ZIP entries require extraction first' };
+        return { success: false, message: 'No resolvable model paths' };
       }
-      
-      // Construct command based on platform
-      let command;
-      if (process.platform === 'darwin' && slicerPath.toLowerCase().endsWith('.app')) {
-        command = `open -a "${slicerPath}" --args "${modelPath}"`;
-      } else {
-        command = `"${slicerPath}" "${modelPath}"`;
+
+      try {
+        await runSlicerWithModelPaths({ name: slicerName, path: slicerPath }, modelPaths);
+        return { success: true, count: modelPaths.length };
+      } catch (error) {
+        console.error('Error executing slicer command on client:', error);
+        return { success: false, error: error.message };
       }
-      
-      return new Promise((resolve) => {
-        exec(command, (error, stdout, stderr) => {
-          if (error) {
-            console.error('Error executing slicer command on client:', error);
-            resolve({ success: false, error: error.message });
-          } else {
-            console.log('Successfully executed slicer command on client');
-            resolve({ success: true });
-          }
-        });
-      });
     }
     
     return { success: false, error: 'Unknown command type' };
@@ -10175,6 +10368,7 @@ async function saveModel(modelData) {
           `).all(existingModel.id).map((row) => row.name);
           clearIsNew = JSON.stringify(sortedTagNames(existingTagRows)) !== JSON.stringify(sortedTagNames(tags));
         }
+        const bundle = deriveBundleFromFilePath(filePath);
         
         // Use a simpler update approach to avoid foreign key issues
         const updateStmt = db.prepare(`
@@ -10188,6 +10382,9 @@ async function saveModel(modelData) {
             license = ?,
             rating = ?,
             favorite = ?,
+            bundleKey = ?,
+            bundleLabel = ?,
+            bundleKind = ?,
             isNew = CASE WHEN ? THEN 0 ELSE isNew END
           WHERE id = ?
         `);
@@ -10202,6 +10399,9 @@ async function saveModel(modelData) {
           finalLicense,
           finalRating,
           finalFavorite,
+          bundle.bundleKey || null,
+          bundle.bundleLabel || null,
+          bundle.bundleKind || null,
           clearIsNew ? 1 : 0,
           existingModel.id
         );
@@ -10212,10 +10412,12 @@ async function saveModel(modelData) {
         console.log('Inserting new model');
         
         const dateAdded = new Date().toISOString();
+        const bundle = deriveBundleFromFilePath(filePath);
         const insertStmt = db.prepare(`
           INSERT INTO models (
-            filePath, fileName, designer, source, notes, printed, parentModel, license, dateAdded, isNew, rating, favorite
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            filePath, fileName, designer, source, notes, printed, parentModel, license,
+            dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
         `);
         
         const result = insertStmt.run(
@@ -10229,7 +10431,10 @@ async function saveModel(modelData) {
           license || null,
           dateAdded,
           normalizeModelRating(rating),
-          favorite ? 1 : 0
+          favorite ? 1 : 0,
+          bundle.bundleKey || null,
+          bundle.bundleLabel || null,
+          bundle.bundleKind || null
         );
         
         modelId = result.lastInsertRowid;
