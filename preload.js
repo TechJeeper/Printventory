@@ -38,14 +38,14 @@ const previewModelListenerCount = { count: 0 };
 ipcRenderer.on = function(channel, ...args) {
   // Only block preview-model and download-model if we're CERTAIN we're in server mode
   // In normal mode or if not cached yet, allow these listeners to register normally
-  if ((channel === 'preview-model' || channel === 'download-model') && isServerModeCached === true) {
+  if ((channel === 'preview-model' || channel === 'download-model' || channel === 'preview-bundle-models') && isServerModeCached === true) {
     previewModelListenerCount.count++;
     console.warn(`[Preload] BLOCKED ipcRenderer.on('${channel}') call #${previewModelListenerCount.count} in server mode hidden window - events go to WebSocket clients`);
     return ipcRenderer; // Return ipcRenderer to allow chaining
   }
   // If not cached yet, check asynchronously but don't block (normal mode needs to work immediately)
   // The receive() and on() methods will handle the blocking properly for their specific cases
-  if ((channel === 'preview-model' || channel === 'download-model') && isServerModeCached === null) {
+  if ((channel === 'preview-model' || channel === 'download-model' || channel === 'preview-bundle-models') && isServerModeCached === null) {
     checkIsServerMode().then(isServer => {
       if (isServer) {
         console.warn(`[Preload] Note: '${channel}' listener registered via direct ipcRenderer.on() in server mode - consider using receive() method`);
@@ -211,7 +211,7 @@ contextBridge.exposeInMainWorld('electron', {
   on: (channel, callback) => {
     // Prevent preview-model and download-model registration ONLY in server mode hidden window
     // In normal mode, allow these to work normally
-    if (channel === 'preview-model' || channel === 'download-model') {
+    if (channel === 'preview-model' || channel === 'download-model' || channel === 'preview-bundle-models') {
       // Check server mode - if true, block; if false/null, allow (normal mode)
       if (isServerModeCached === true) {
         console.warn(`[Preload] Blocking '${channel}' listener registration in server mode hidden window - use receive() method or events go to WebSocket clients`);
@@ -308,7 +308,7 @@ contextBridge.exposeInMainWorld('electron', {
   benchmarkFilesystem: () => ipcRenderer.invoke('benchmark-filesystem'),
   benchmarkDatabase: () => ipcRenderer.invoke('benchmark-database'),
   receive: (channel, callback) => {
-    const validChannels = ['preview-model', 'download-model'];
+    const validChannels = ['preview-model', 'preview-bundle-models', 'download-model'];
     if (validChannels.includes(channel)) {
       // Prevent duplicate registrations regardless of mode - check FIRST
       if (registeredChannels.has(channel)) {

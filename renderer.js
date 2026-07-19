@@ -20295,7 +20295,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   meta.className = 'parent-model-group-meta';
   if (groupRecord?.groupKind === 'bundle') {
     const kindLabel = bundleKind === 'zip' ? 'zip archive' : 'folder';
-    meta.textContent = `${groupRecord.children.length} part${groupRecord.children.length === 1 ? '' : 's'} • ${kindLabel} • ${printedCount}/${groupRecord.children.length} printed • click to preview all`;
+    meta.textContent = `${groupRecord.children.length} part${groupRecord.children.length === 1 ? '' : 's'} • ${kindLabel} • ${printedCount}/${groupRecord.children.length} printed • right-click Preview for 3D`;
   } else {
     meta.textContent = `${groupRecord.children.length} model${groupRecord.children.length === 1 ? '' : 's'} • ${printedCount}/${groupRecord.children.length} printed`;
   }
@@ -20338,14 +20338,6 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (event.target.closest('.parent-model-group-chevron')) return;
     event.preventDefault();
     event.stopPropagation();
-    if (groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip') {
-      if (typeof window.openBundlePreview === 'function') {
-        window.openBundlePreview(groupRecord);
-      } else {
-        showBundleDetails(groupRecord);
-      }
-      return;
-    }
     toggleGroup();
   });
   item.addEventListener('dblclick', (event) => {
@@ -20359,15 +20351,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   item.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      if (groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip') {
-        if (typeof window.openBundlePreview === 'function') {
-          window.openBundlePreview(groupRecord);
-        } else {
-          showBundleDetails(groupRecord);
-        }
-      } else {
-        toggleGroup();
-      }
+      toggleGroup();
     }
   });
   item.addEventListener('contextmenu', async (event) => {
@@ -20377,7 +20361,14 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (!paths.length) return;
     const x = event.clientX;
     const y = event.clientY;
-    const fileIdentifier = paths.length > 1 ? paths : paths[0];
+    const isBundleGroup = groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+    const fileIdentifier = isBundleGroup || paths.length > 1
+      ? {
+          filePaths: paths,
+          groupLabel: groupRecord.groupLabel || groupRecord.parentModel || 'Group',
+          previewAsBundle: isBundleGroup || paths.length > 1
+        }
+      : paths[0];
     try {
       const menuResult = await window.electron.showContextMenu(fileIdentifier);
       if (menuResult && menuResult.type === 'html-menu') {

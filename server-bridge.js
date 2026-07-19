@@ -656,7 +656,7 @@
   };
   
   window.electron.receive = function(channel, callback) {
-    const validChannels = ['preview-model', 'download-model'];
+    const validChannels = ['preview-model', 'preview-bundle-models', 'download-model'];
     if (validChannels.includes(channel)) {
       console.log('[Bridge] Registering receive listener for channel:', channel);
       window.electron.on(channel, callback);

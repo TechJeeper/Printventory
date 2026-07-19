@@ -5871,9 +5871,54 @@ const purgeModelsHandler = async (event, options = {}) => {
 ipcMain.handle('purge-models', purgeModelsHandler);
 ipcHandlerRegistry.set('purge-models', purgeModelsHandler);
 
+function getPreviewableExtension(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
+  return path.extname(pathForExt).toLowerCase();
+}
+
+function isPreviewableModelFile(filePath) {
+  const ext = getPreviewableExtension(filePath);
+  return ext === '.stl' || ext === '.3mf';
+}
+
+function sendPreviewBundleEvent(event, payload) {
+  if (isServerMode && global.broadcastEvent) {
+    global.broadcastEvent('preview-bundle-models', payload);
+  } else if (event && event.sender) {
+    event.sender.send('preview-bundle-models', payload);
+  } else {
+    throw new Error('Cannot preview bundle: no connection available');
+  }
+}
+
+function sendPreviewModelEvent(event, filePath) {
+  if (isServerMode && global.broadcastEvent) {
+    global.broadcastEvent('preview-model', filePath);
+  } else if (event && event.sender) {
+    event.sender.send('preview-model', filePath);
+  } else {
+    throw new Error('Cannot preview file: no connection available');
+  }
+}
+
 // Update the show-context-menu handler
 ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
-  const filePaths = Array.isArray(fileIdentifier) ? fileIdentifier : [fileIdentifier];
+  let filePaths;
+  let groupLabel = null;
+  let previewAsBundle = false;
+  if (
+    fileIdentifier &&
+    typeof fileIdentifier === 'object' &&
+    !Array.isArray(fileIdentifier) &&
+    Array.isArray(fileIdentifier.filePaths)
+  ) {
+    filePaths = fileIdentifier.filePaths.filter(Boolean);
+    groupLabel = fileIdentifier.groupLabel || null;
+    previewAsBundle = Boolean(fileIdentifier.previewAsBundle);
+  } else {
+    filePaths = Array.isArray(fileIdentifier) ? fileIdentifier : [fileIdentifier];
+  }
 
   // In single edit mode, if exactly one file is right-clicked, instruct the renderer to select it.
   if (filePaths.length === 1) {
@@ -5886,50 +5931,66 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   
   let menuItems = [];
 
-  // Add "Preview" option at the top
-  if (filePaths.length === 1) {
-    const fp = filePaths[0];
-    const ext = fp.includes('::')
-      ? path.extname(fp.split('::')[1] || '').toLowerCase()
-      : path.extname(fp).toLowerCase();
-    const isSupported = ext === '.stl' || ext === '.3mf';
-
-    if (isSupported) {
-      menuItems.push({
-        label: 'Preview',
-        click: async () => {
-          try {
-            console.log('Preview clicked for file:', fp);
-            // In server mode (including Docker), use broadcastEvent to send to all WebSocket clients
-            if (isServerMode && global.broadcastEvent) {
-              console.log('Broadcasting preview-model event via WebSocket');
-              global.broadcastEvent('preview-model', fp);
-            } else if (event && event.sender) {
-              // In normal mode, use event.sender.send
-              console.log('Sending preview-model event via event.sender');
-              event.sender.send('preview-model', fp);
-            } else {
-              console.error('Cannot send preview event: no sender and not in server mode');
-              throw new Error('Cannot preview file: no connection available');
-            }
-          } catch (error) {
-            console.error('Error triggering preview:', error);
-            if (event && event.sender) {
-              const win = BrowserWindow.fromWebContents(event.sender);
-              if (win) {
-                dialog.showMessageBox(win, {
-                  type: 'error',
-                  title: 'Error',
-                  message: 'Could not preview file',
-                  detail: error.message
-                });
-              }
+  // Add "Preview" option at the top (single model or full bundle/group)
+  const previewablePaths = filePaths.filter((fp) => isPreviewableModelFile(fp));
+  if (previewablePaths.length === 1 && !previewAsBundle) {
+    const fp = previewablePaths[0];
+    menuItems.push({
+      label: 'Preview',
+      click: async () => {
+        try {
+          console.log('Preview clicked for file:', fp);
+          sendPreviewModelEvent(event, fp);
+        } catch (error) {
+          console.error('Error triggering preview:', error);
+          if (event && event.sender) {
+            const win = BrowserWindow.fromWebContents(event.sender);
+            if (win) {
+              dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'Error',
+                message: 'Could not preview file',
+                detail: error.message
+              });
             }
           }
         }
-      });
-      menuItems.push({ type: 'separator' });
-    }
+      }
+    });
+    menuItems.push({ type: 'separator' });
+  } else if (previewablePaths.length > 1 || (previewAsBundle && previewablePaths.length >= 1)) {
+    const bundlePayload = {
+      groupLabel: groupLabel || (previewablePaths.length > 1 ? 'Bundle' : 'Preview'),
+      children: previewablePaths.map((fp) => ({
+        filePath: fp,
+        fileName: fp.includes('::')
+          ? path.basename(fp.split('::')[1] || fp)
+          : path.basename(fp)
+      }))
+    };
+    menuItems.push({
+      label: 'Preview',
+      click: async () => {
+        try {
+          console.log('Preview clicked for bundle/group:', bundlePayload.groupLabel, bundlePayload.children.length);
+          sendPreviewBundleEvent(event, bundlePayload);
+        } catch (error) {
+          console.error('Error triggering bundle preview:', error);
+          if (event && event.sender) {
+            const win = BrowserWindow.fromWebContents(event.sender);
+            if (win) {
+              dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'Error',
+                message: 'Could not preview bundle',
+                detail: error.message
+              });
+            }
+          }
+        }
+      }
+    });
+    menuItems.push({ type: 'separator' });
   }
   
   // Add "Download" option for server mode at the top

@@ -72,7 +72,7 @@ const guidePages = [
       <li><strong>De-Dup</strong> – Say goodbye to clutter! Easily clean up duplicate files in your library, ensuring your collection stays organized and efficient! 🧹</li>
       <li><strong>AI Tagging</strong> – Configure your AI services in <strong>Settings > AI Config</strong> to enable powerful AI-assisted tagging! Right-click on one or multiple models to "Generate Tags using AI" and automatically categorize your models. 🤖</li>
       <li><strong>Slicer Integration</strong> – Configure slicers in <strong>Settings</strong> for right-click <strong>Open in Slicer</strong> and the preview dialog <strong>Send to Slicer</strong> button. Sending again while a slicer is open starts a new instance with your model loaded. 🖨️</li>
-      <li><strong>Folder &amp; ZIP bundles</strong> – Multi-part folders and ZIP archives group into one row. Click for an all-parts 3D preview; double-click for bundle details. 📦</li>
+      <li><strong>Folder &amp; ZIP bundles</strong> – Multi-part folders and ZIP archives group into one row. Click to expand; right-click <strong>Preview</strong> for an all-parts 3D view; double-click for bundle details. 📦</li>
     </ul>
     Thank you for choosing Printventory! Visit <strong>Help > Support Printventory</strong> to learn how you can support this amazing project!`,
     image: ""

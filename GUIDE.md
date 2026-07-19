@@ -19,7 +19,7 @@ Printventory is a desktop application for managing your 3D printing model collec
 - Track print status
 - Add source URLs and notes
 - Link related models (parent/child relationships)
-- **Folder and ZIP bundles**: Models in the same subfolder or ZIP archive (2+ files) appear as one grouped row; click to preview all parts in 3D, double-click for bundle details
+- **Folder and ZIP bundles**: Models in the same subfolder or ZIP archive (2+ files) appear as one grouped row; click to expand, right-click **Preview** for all parts in 3D, double-click for bundle details
 - Assign licenses to models
 
 ### Multi-Edit Features
@@ -174,7 +174,8 @@ When a scan finds **two or more** STL/3MF files in the same folder or inside the
 
 | Action | Result |
 |--------|--------|
-| Click bundle row | Opens **3D preview** with every part laid out on a grid |
+| Click bundle row | Expand or collapse the files in the grid |
+| Right-click → **Preview** | Opens **3D preview** with every part laid out on a grid |
 | Double-click bundle row | Opens **Bundle details** (path, sizes, print status, file list) |
 | Chevron (▸ / ▾) | Expand or collapse individual files in the grid |
 | **Send to Slicer** (in preview) | Sends all bundle STL/3MF files to your chosen slicer |
@@ -200,7 +201,7 @@ When a scan finds **two or more** STL/3MF files in the same folder or inside the
 - Enable multi-edit mode for batch operations
 - Use the Tag Manager to organize and clean up tags across your collection
 - Link related models using parent/child relationships
-- Look for **folder** and **ZIP** bundle rows when a multi-part project was scanned together; click to preview all parts at once
+- Look for **folder** and **ZIP** bundle rows when a multi-part project was scanned together; right-click **Preview** to view all parts at once
 
 ### AI Tagging
 - Start with a small batch to test your AI configuration

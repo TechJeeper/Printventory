@@ -47,31 +47,48 @@ console.log('[Preview] preview.js script loaded');
       console.error('[Preview] Error opening preview:', error);
     }
   };
-  
+
+  const previewBundleCallback = (payload) => {
+    console.log('[Preview] Received preview-bundle-models event:', payload?.groupLabel, payload?.children?.length);
+    try {
+      if (typeof openBundlePreview === 'function') {
+        openBundlePreview(payload || {});
+      } else {
+        console.error('[Preview] openBundlePreview is not available yet');
+      }
+    } catch (error) {
+      console.error('[Preview] Error opening bundle preview:', error);
+    }
+  };
+
+  function registerPreviewChannel(channel, callback) {
+    if (window.electron && typeof window.electron.receive === 'function') {
+      console.log(`[Preview] Registering ${channel} listener via receive()`);
+      window.electron.receive(channel, callback);
+      return true;
+    }
+    if (window.electron && typeof window.electron.on === 'function') {
+      console.log(`[Preview] Registering ${channel} listener via on()`);
+      window.electron.on(channel, callback);
+      return true;
+    }
+    return false;
+  }
+
   // Register listener - works in both normal mode and server mode (bridge does not register preview-model)
-  if (window.electron && typeof window.electron.receive === 'function') {
-    console.log('[Preview] Registering preview-model listener via receive()');
-    window.electron.receive('preview-model', previewCallback);
-  } else if (window.electron && typeof window.electron.on === 'function') {
-    console.log('[Preview] Registering preview-model listener via on()');
-    window.electron.on('preview-model', previewCallback);
-  } else {
+  if (!registerPreviewChannel('preview-model', previewCallback) ||
+      !registerPreviewChannel('preview-bundle-models', previewBundleCallback)) {
     console.warn('[Preview] window.electron not available yet, will retry');
-    // Retry when electron is available
     const maxAttempts = 50;
     let attempts = 0;
     const retryInterval = setInterval(() => {
       attempts++;
-      if (window.electron && typeof window.electron.receive === 'function') {
-        console.log('[Preview] Registering preview-model listener via receive() (retry)');
-        window.electron.receive('preview-model', previewCallback);
-        clearInterval(retryInterval);
-      } else if (window.electron && typeof window.electron.on === 'function') {
-        console.log('[Preview] Registering preview-model listener via on() (retry)');
-        window.electron.on('preview-model', previewCallback);
+      const modelOk = registerPreviewChannel('preview-model', previewCallback);
+      const bundleOk = registerPreviewChannel('preview-bundle-models', previewBundleCallback);
+      if (modelOk && bundleOk) {
         clearInterval(retryInterval);
       } else if (attempts >= maxAttempts) {
-        console.error('[Preview] Failed to register preview-model listener after', attempts, 'attempts');
+        console.error('[Preview] Failed to register preview listeners after', attempts, 'attempts');
         clearInterval(retryInterval);
       }
     }, 100);
