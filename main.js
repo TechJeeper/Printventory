@@ -991,15 +991,8 @@ ${bridgeCode}
       // Clean up temp file after streaming (for zip entries)
       if (pathInfo.isZipEntry) {
         fileStream.on('end', () => {
-          // Clean up temp file asynchronously
           setTimeout(() => {
-            try {
-              if (fs.existsSync(actualFilePath)) {
-                fs.unlinkSync(actualFilePath);
-              }
-            } catch (cleanupError) {
-              console.error('Error cleaning up temp file:', cleanupError);
-            }
+            cleanupExtractTempFile(actualFilePath).catch(() => {});
           }, 1000);
         });
       }
@@ -1855,6 +1848,14 @@ if (!gotTheLock) {
       applyDockerEnvSettingIfNeeded('stlHome', process.env.STL_HOME);
       applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
 
+      // Clear leftover zip-extract temps from prior runs (OS temp only)
+      try {
+        ensureExtractTempDir();
+        await cleanupExtractTempDirectory({ maxAgeMs: 0 });
+      } catch (tempCleanupErr) {
+        console.warn('Extract temp cleanup on startup failed:', tempCleanupErr.message);
+      }
+
       // Server mode: start HTTP server and create hidden window for IPC
       if (isServerMode) {
         try {
@@ -1961,6 +1962,11 @@ if (!gotTheLock) {
         await stopElectronUiServer();
       } catch (error) {
         console.error('Error stopping Electron UI server:', error);
+      }
+      try {
+        await cleanupExtractTempDirectory({ maxAgeMs: 0 });
+      } catch (error) {
+        console.warn('Extract temp cleanup on quit failed:', error.message);
       }
       try {
         const dbPath = getDatabasePath();
@@ -6036,10 +6042,10 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         try {
           // Normal mode: open with system default application
           if (isZipEntry && pathInfo) {
-            // Extract to temp file first
+            // Extract to OS temp, open, then schedule cleanup
             const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
             await shell.openPath(tempPath);
-            // Note: temp file will be cleaned up by OS or on next extraction
+            scheduleExtractTempCleanup(tempPath);
           } else {
             await shell.openPath(filePaths[0]);
           }
@@ -6243,7 +6249,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             // Execute slicer command (only in normal mode, not server mode)
             let modelPath = filePaths[0]; // Use the first file selected
             
-            // If it's a zip entry, extract to temp first
+            // If it's a zip entry, extract to OS temp first
             if (isZipEntry && pathInfo) {
               modelPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
             }
@@ -7497,6 +7503,144 @@ function isLikelyValidZipBuffer(data) {
   return data[0] === 0x50 && data[1] === 0x4B; // PK
 }
 
+/** Dedicated OS-temp folder for zip-entry extracts — never the library / STL home. */
+const EXTRACT_TEMP_DIR_NAME = 'printventory-extracts';
+const EXTRACT_TEMP_FILE_PREFIX = 'printventory_';
+/** Slicer may still be reading the file after launch; delay cleanup. */
+const EXTRACT_TEMP_SLICER_CLEANUP_MS = 10 * 60 * 1000;
+const pendingExtractTempCleanups = new Set();
+
+function getOsTempRoot() {
+  try {
+    if (typeof app !== 'undefined' && app && typeof app.isReady === 'function' && app.isReady()) {
+      return app.getPath('temp');
+    }
+  } catch (_) { /* use os.tmpdir */ }
+  return os.tmpdir();
+}
+
+function getExtractTempDir() {
+  const osDir = path.join(getOsTempRoot(), EXTRACT_TEMP_DIR_NAME);
+  // Guard: if TEMP is mounted inside the library (common Docker misconfig), use userData instead
+  try {
+    if (typeof app !== 'undefined' && app && typeof app.isReady === 'function' && app.isReady() && db) {
+      const stlRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome');
+      const stlHome = stlRow && stlRow.value ? path.resolve(String(stlRow.value)) : '';
+      if (stlHome) {
+        const resolvedDir = path.resolve(osDir);
+        if (resolvedDir === stlHome || resolvedDir.startsWith(stlHome + path.sep)) {
+          return path.join(app.getPath('userData'), EXTRACT_TEMP_DIR_NAME);
+        }
+      }
+    }
+  } catch (_) { /* keep OS temp */ }
+  return osDir;
+}
+
+function ensureExtractTempDir() {
+  const dir = getExtractTempDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+function isPrintventoryExtractTempPath(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  try {
+    const resolved = path.resolve(filePath);
+    const base = path.basename(resolved);
+    if (!base.startsWith(EXTRACT_TEMP_FILE_PREFIX)) return false;
+
+    const allowedRoots = [
+      path.resolve(getExtractTempDir()),
+      path.resolve(path.join(getOsTempRoot(), EXTRACT_TEMP_DIR_NAME)),
+      path.resolve(getOsTempRoot())
+    ];
+    try {
+      if (typeof app !== 'undefined' && app && typeof app.isReady === 'function' && app.isReady()) {
+        allowedRoots.push(path.resolve(path.join(app.getPath('userData'), EXTRACT_TEMP_DIR_NAME)));
+      }
+    } catch (_) { /* ignore */ }
+
+    const parent = path.resolve(path.dirname(resolved));
+    return allowedRoots.some((root) => parent === root || resolved.startsWith(root + path.sep));
+  } catch (_) {
+    return false;
+  }
+}
+
+function isPrintventoryExtractTempFileName(fileName) {
+  return typeof fileName === 'string' && fileName.startsWith(EXTRACT_TEMP_FILE_PREFIX);
+}
+
+async function cleanupExtractTempFile(filePath) {
+  if (!isPrintventoryExtractTempPath(filePath)) return false;
+  try {
+    if (fs.existsSync(filePath)) {
+      await fs.promises.unlink(filePath);
+    }
+    pendingExtractTempCleanups.delete(filePath);
+    return true;
+  } catch (err) {
+    console.warn('Failed to clean up extract temp file:', filePath, err.message);
+    return false;
+  }
+}
+
+function scheduleExtractTempCleanup(filePath, delayMs = EXTRACT_TEMP_SLICER_CLEANUP_MS) {
+  if (!isPrintventoryExtractTempPath(filePath)) return;
+  pendingExtractTempCleanups.add(filePath);
+  setTimeout(() => {
+    cleanupExtractTempFile(filePath).catch(() => {});
+  }, Math.max(0, delayMs));
+}
+
+function scheduleExtractTempCleanupMany(filePaths, delayMs = EXTRACT_TEMP_SLICER_CLEANUP_MS) {
+  for (const fp of filePaths || []) {
+    scheduleExtractTempCleanup(fp, delayMs);
+  }
+}
+
+/** Remove leftover extract temps (startup / quit). Optionally only files older than maxAgeMs. */
+async function cleanupExtractTempDirectory({ maxAgeMs = 0 } = {}) {
+  const now = Date.now();
+  const dirs = new Set([getExtractTempDir(), path.join(getOsTempRoot(), EXTRACT_TEMP_DIR_NAME)]);
+  try {
+    if (typeof app !== 'undefined' && app && typeof app.isReady === 'function' && app.isReady()) {
+      dirs.add(path.join(app.getPath('userData'), EXTRACT_TEMP_DIR_NAME));
+    }
+  } catch (_) { /* ignore */ }
+
+  async function sweepDir(dir) {
+    if (!dir || !fs.existsSync(dir)) return;
+    let entries;
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.startsWith(EXTRACT_TEMP_FILE_PREFIX)) continue;
+      const full = path.join(dir, entry.name);
+      try {
+        if (maxAgeMs > 0) {
+          const stat = await fs.promises.stat(full);
+          if (now - stat.mtimeMs < maxAgeMs) continue;
+        }
+        await fs.promises.unlink(full);
+        pendingExtractTempCleanups.delete(full);
+      } catch (_) { /* ignore busy files */ }
+    }
+  }
+
+  for (const dir of dirs) {
+    await sweepDir(dir);
+  }
+  // Legacy flat printventory_* files written directly under OS temp
+  await sweepDir(getOsTempRoot());
+}
+
 // Helper function to extract model from zip to temp file or specified destination
 async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
   try {
@@ -7513,10 +7657,10 @@ async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
       await fs.promises.writeFile(destPath, entryData);
       return destPath;
     } else {
-      // Create temp file
-      const tempDir = os.tmpdir();
-      const fileName = path.basename(entryPath);
-      const tempPath = path.join(tempDir, `printventory_${Date.now()}_${fileName}`);
+      // Always OS temp subdirectory — never adjacent to the zip / library
+      const tempDir = ensureExtractTempDir();
+      const fileName = path.basename(entryPath).replace(/[<>:"|?*]/g, '_');
+      const tempPath = path.join(tempDir, `${EXTRACT_TEMP_FILE_PREFIX}${Date.now()}_${fileName}`);
       await fs.promises.writeFile(tempPath, entryData);
       return tempPath;
     }
@@ -7611,6 +7755,8 @@ function runSlicerWithModelPaths(slicer, modelPaths) {
 
   return new Promise((resolve, reject) => {
     exec(command, (error) => {
+      // Temp extracts for zip entries: give the slicer time to load, then remove
+      scheduleExtractTempCleanupMany(modelPaths);
       if (error) reject(error);
       else resolve({ success: true, count: modelPaths.length });
     });
@@ -8169,17 +8315,13 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
     // Look for STL files in the 3MF
     for (const [entryPath, file] of Object.entries(contents.files)) {
       if (entryPath.endsWith('.stl')) {
-        // Extract to temp directory
-        const tempPath = path.join(os.tmpdir(), `temp_${Date.now()}.stl`);
+        // Extract STL payload into dedicated OS temp dir
+        const tempPath = path.join(ensureExtractTempDir(), `${EXTRACT_TEMP_FILE_PREFIX}${Date.now()}.stl`);
         await fs.promises.writeFile(tempPath, await file.async('nodebuffer'));
         
-        // Clean up intermediate temp file if needed
+        // Clean up intermediate zip-entry extract if needed
         if (shouldCleanup && actualFilePath !== filePath) {
-          try {
-            await fs.promises.unlink(actualFilePath);
-          } catch (cleanupError) {
-            console.error('Error cleaning up temp file:', cleanupError);
-          }
+          await cleanupExtractTempFile(actualFilePath);
         }
         
         return tempPath;
@@ -8205,11 +8347,12 @@ ipcMain.handle('get3MFSTL', async (event, filePath) => {
 // Read model file for preview (STL parsing in renderer)
 const readModelFileHandler = async (event, filePath) => {
   if (isUrlModel(filePath)) throw new Error('URL-only model has no file to read');
+  let tempPath = null;
   try {
-    // Handle zip entries
+    // Handle zip entries — extract to OS temp, read, then delete
     if (filePath.includes('::')) {
       const pathInfo = parseZipPath(filePath);
-      const tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+      tempPath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
       const data = await fs.promises.readFile(tempPath);
       return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     }
@@ -8219,6 +8362,10 @@ const readModelFileHandler = async (event, filePath) => {
   } catch (error) {
     console.error(`Error reading model file ${filePath}:`, error);
     throw error;
+  } finally {
+    if (tempPath) {
+      await cleanupExtractTempFile(tempPath);
+    }
   }
 };
 ipcMain.handle('read-model-file', readModelFileHandler);
@@ -8570,6 +8717,19 @@ ipcMain.handle('extract-model-from-zip', async (event, filePath) => {
     console.error('Error extracting model from zip:', error);
     throw error;
   }
+});
+
+// Renderer cleanup for extract temps (loadModel / preview)
+ipcMain.handle('delete-temp-file', async (event, filePath) => {
+  try {
+    return await cleanupExtractTempFile(filePath);
+  } catch (error) {
+    console.warn('delete-temp-file failed:', error.message);
+    return false;
+  }
+});
+ipcHandlerRegistry.set('delete-temp-file', async (event, filePath) => {
+  return await cleanupExtractTempFile(filePath);
 });
 
 // Add handler to extract zip archive
@@ -9849,6 +10009,8 @@ const openFileInSlicerHandler = async (event, options = {}) => {
   try {
     return await runSlicerWithModelPaths(slicer, modelPaths);
   } catch (error) {
+    // Launch failed — remove any extracts we just created
+    scheduleExtractTempCleanupMany(modelPaths, 0);
     console.error('Error opening file in slicer:', error);
     const win = getWindowFromEvent(event);
     if (win && !win.isDestroyed()) {

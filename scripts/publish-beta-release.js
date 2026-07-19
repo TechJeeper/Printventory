@@ -2,17 +2,16 @@
 /**
  * Publish a Printventory beta release to:
  * 1. Printventory-Website (beta.version + beta.change on GitHub main)
- * 2. Discord #latest-builds (download links + changelog message)
+ * 2. Discord #latest-builds via Printventory-Build bot (announcement + @beta-testers)
  *
  * Requires GITHUB_TOKEN (PAT with repo write on Printventory-Website).
- * Discord: set webhookUrl in publish-beta-release.local.json (or DISCORD_WEBHOOK_URL).
- * Bot token is optional when a webhook is configured.
+ * Discord bot credentials: scripts/.discord (ApplicationID / PublicKey / BotToken)
+ *   or DISCORD_BOT_TOKEN env override.
  *
  * Usage:
  *   GITHUB_TOKEN=... node scripts/publish-beta-release.js --changelog "- Fix foo\n- Fix bar"
  *   node scripts/publish-beta-release.js --website-only --changelog "Fix foo"
  *   node scripts/publish-beta-release.js --discord-only --changelog "- Fix foo"
- *   node scripts/publish-beta-release.js --discord-init
  *   node scripts/publish-beta-release.js --dry-run --changelog "- Fix foo"
  */
 
@@ -22,6 +21,7 @@ const path = require('path');
 const CONFIG_PATH = path.join(__dirname, 'publish-beta-release.config.json');
 const LOCAL_CONFIG_PATH = path.join(__dirname, 'publish-beta-release.local.json');
 const LEGACY_DISCORD_CONFIG_PATH = path.join(__dirname, 'discord-latest-builds.config.json');
+const DISCORD_CREDENTIALS_PATH = path.join(__dirname, '.discord');
 const PACKAGE_PATH = path.join(__dirname, '..', 'package.json');
 const DISCORD_API = 'https://discord.com/api/v10';
 const GITHUB_API = 'https://api.github.com';
@@ -67,6 +67,33 @@ function loadConfig() {
   return config;
 }
 
+function parseKeyValueFile(filePath) {
+  const data = {};
+  if (!fs.existsSync(filePath)) return data;
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf(':');
+    if (idx === -1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const value = trimmed.slice(idx + 1).trim();
+    if (key) data[key] = value;
+  }
+  return data;
+}
+
+function loadDiscordBotCredentials(discordConfig) {
+  const fileName = discordConfig.botCredentialsFile || '.discord';
+  const filePath = path.isAbsolute(fileName) ? fileName : path.join(__dirname, fileName);
+  const fromFile = parseKeyValueFile(filePath);
+  return {
+    applicationId: fromFile.ApplicationID || fromFile.applicationId || null,
+    publicKey: fromFile.PublicKey || fromFile.publicKey || null,
+    botToken: fromFile.BotToken || fromFile.botToken || null,
+    credentialsPath: filePath,
+  };
+}
+
 function loadVersion(explicitVersion) {
   if (explicitVersion) return explicitVersion.replace(/^v/, '');
   const pkg = JSON.parse(fs.readFileSync(PACKAGE_PATH, 'utf8'));
@@ -80,7 +107,6 @@ function parseArgs(argv) {
     dryRun: false,
     websiteOnly: false,
     discordOnly: false,
-    discordInit: false,
     skipWebsite: false,
     skipDiscord: false,
   };
@@ -90,13 +116,14 @@ function parseArgs(argv) {
     if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--website-only') args.websiteOnly = true;
     else if (arg === '--discord-only') args.discordOnly = true;
-    else if (arg === '--discord-init') args.discordInit = true;
     else if (arg === '--skip-website') args.skipWebsite = true;
     else if (arg === '--skip-discord') args.skipDiscord = true;
     else if (arg === '--version') args.version = argv[++i];
     else if (arg === '--changelog') args.changelog = argv[++i];
-    else if (arg === '--init') args.discordInit = true;
-    else if (arg === '--help' || arg === '-h') {
+    else if (arg === '--discord-init' || arg === '--init') {
+      console.error('--discord-init is no longer used. Discord posts a fresh announcement each release.');
+      process.exit(1);
+    } else if (arg === '--help' || arg === '-h') {
       console.log(`Usage: node scripts/publish-beta-release.js [options]
 
 Options:
@@ -104,11 +131,13 @@ Options:
   --changelog <text>     Changelog lines (markdown bullets or plain lines)
   --dry-run              Print changes without calling GitHub or Discord
   --website-only         Update Printventory-Website only
-  --discord-only         Update Discord #latest-builds only
-  --discord-init         Post starter Discord messages and print config IDs
+  --discord-only         Post Discord #latest-builds announcement only
   --skip-website         Skip website update
   --skip-discord         Skip Discord update
   --help                 Show this help
+
+Discord auth:
+  scripts/.discord  (BotToken)  or  DISCORD_BOT_TOKEN
 `);
       process.exit(0);
     } else {
@@ -126,13 +155,11 @@ Options:
 }
 
 function resolveTargets(args) {
-  if (args.discordInit) return { website: false, discord: true, initOnly: true };
-  if (args.websiteOnly) return { website: true, discord: false, initOnly: false };
-  if (args.discordOnly) return { website: false, discord: true, initOnly: false };
+  if (args.websiteOnly) return { website: true, discord: false };
+  if (args.discordOnly) return { website: false, discord: true };
   return {
     website: !args.skipWebsite,
     discord: !args.skipDiscord,
-    initOnly: false,
   };
 }
 
@@ -177,26 +204,31 @@ function prependWebsiteChange(existingContent, version, bullets) {
   return `${section}${trimmed}\n`;
 }
 
-function buildDiscordChangelogSection(version, bullets) {
-  if (bullets.length === 0) {
-    return `**${version}**\n- Release ${version}`;
-  }
-  return `**${version}**\n${bullets.join('\n')}`;
-}
-
-function prependDiscordChangelog(existingContent, version, bullets) {
-  const section = buildDiscordChangelogSection(version, bullets);
-  const trimmed = (existingContent || '').trim();
-  if (!trimmed) return `${section}\n`;
-  return `${section}\n---\n\n${trimmed}`;
-}
-
 function buildDownloadLinks(version, baseUrl) {
   const root = baseUrl.replace(/\/$/, '');
   return [
     `${root}/Printventory-Setup-${version}.exe`,
-    `${root}/Printventory-${version}-universal.dmg`,
-    `${root}/Printventory-${version}.AppImage`,
+    `${root}/printventory-${version}-universal.dmg`,
+    `${root}/printventory-${version}.AppImage`,
+  ];
+}
+
+function buildDiscordAnnouncement(version, baseUrl, bullets, roleId) {
+  const links = buildDownloadLinks(version, baseUrl);
+  const changeLines =
+    bullets.length > 0
+      ? bullets.map((line) => (line.startsWith('- ') ? line : `- ${line}`))
+      : [`- Release ${version}`];
+
+  return [
+    `<@&${roleId}>`,
+    `**Printventory ${version} beta is ready for testing!**`,
+    '',
+    'Downloads:',
+    ...links,
+    '',
+    'Changes:',
+    ...changeLines,
   ].join('\n');
 }
 
@@ -210,20 +242,28 @@ function requireGithubToken() {
   return token;
 }
 
-function hasDiscordWebhook(discordConfig) {
-  return Boolean(parseWebhookUrl(process.env.DISCORD_WEBHOOK_URL || discordConfig.webhookUrl));
+function resolveDiscordBotToken(discordConfig) {
+  const fromEnv = process.env.DISCORD_BOT_TOKEN || null;
+  if (fromEnv) return fromEnv;
+
+  const creds = loadDiscordBotCredentials(discordConfig);
+  if (creds.botToken) return creds.botToken;
+
+  if (discordConfig.botToken) return discordConfig.botToken;
+
+  console.error('Discord bot token not found.');
+  console.error(`Add BotToken to ${creds.credentialsPath} (Printventory-Build) or set DISCORD_BOT_TOKEN.`);
+  process.exit(1);
 }
 
-function resolveDiscordAuth(discordConfig) {
-  const token = process.env.DISCORD_BOT_TOKEN || discordConfig.botToken || null;
-  if (hasDiscordWebhook(discordConfig)) {
-    return token;
-  }
-  if (!token) {
-    console.error('Set DISCORD_WEBHOOK_URL (or webhookUrl in publish-beta-release.local.json) or DISCORD_BOT_TOKEN.');
-    process.exit(1);
-  }
-  return token;
+function applyDiscordEnv(discordConfig) {
+  return {
+    ...discordConfig,
+    guildId: process.env.DISCORD_GUILD_ID || discordConfig.guildId,
+    channelId: process.env.DISCORD_CHANNEL_ID || discordConfig.channelId,
+    betaTestersRoleId: process.env.DISCORD_BETA_TESTERS_ROLE_ID || discordConfig.betaTestersRoleId,
+    betaTestersRoleName: process.env.DISCORD_BETA_TESTERS_ROLE_NAME || discordConfig.betaTestersRoleName || 'beta-testers',
+  };
 }
 
 function githubHeaders(token) {
@@ -324,16 +364,17 @@ async function updateWebsiteBeta(token, websiteConfig, version, bullets, dryRun)
   console.log('Website beta files updated.');
 }
 
-function discordHeaders(token, useAuth = true) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (useAuth && token) headers.Authorization = `Bot ${token}`;
-  return headers;
+function discordHeaders(token) {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bot ${token}`,
+  };
 }
 
-async function discordRequest(method, url, token, body, options = {}) {
+async function discordRequest(method, url, token, body) {
   const response = await fetch(url, {
     method,
-    headers: discordHeaders(token, options.useAuth !== false),
+    headers: discordHeaders(token),
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -355,134 +396,88 @@ async function discordRequest(method, url, token, body, options = {}) {
   return data;
 }
 
-function parseWebhookUrl(webhookUrl) {
-  if (!webhookUrl) return null;
-  const match = webhookUrl.match(/webhooks\/(\d+)\/([^/?#]+)/);
+async function resolveBetaTestersRoleId(discordConfig, token) {
+  if (discordConfig.betaTestersRoleId) return discordConfig.betaTestersRoleId;
+
+  const guildId = discordConfig.guildId;
+  if (!guildId) {
+    throw new Error('discord.guildId is required to look up @beta-testers');
+  }
+
+  const roles = await discordRequest('GET', `${DISCORD_API}/guilds/${guildId}/roles`, token);
+  const wanted = (discordConfig.betaTestersRoleName || 'beta-testers').toLowerCase();
+  const match = roles.find((role) => {
+    const name = String(role.name || '').toLowerCase();
+    return name === wanted || name.replace(/\s+/g, '-') === wanted || /beta.?testers?/.test(name);
+  });
+
   if (!match) {
-    throw new Error('Invalid webhookUrl. Expected .../webhooks/{id}/{token}');
+    throw new Error(
+      `Could not find Discord role matching "${discordConfig.betaTestersRoleName || 'beta-testers'}". ` +
+        'Set discord.betaTestersRoleId in publish-beta-release.config.json or publish-beta-release.local.json.'
+    );
   }
-  return { id: match[1], token: match[2] };
+
+  return match.id;
 }
 
-function applyDiscordEnv(discordConfig) {
-  return {
-    ...discordConfig,
-    channelId: process.env.DISCORD_CHANNEL_ID || discordConfig.channelId,
-    webhookUrl: process.env.DISCORD_WEBHOOK_URL || discordConfig.webhookUrl,
-  };
-}
-
-async function getDiscordMessage(discordConfig, token, messageId) {
-  if (!messageId) {
-    throw new Error('Discord message ID must be set in publish-beta-release.config.json');
-  }
-
-  const webhook = parseWebhookUrl(discordConfig.webhookUrl);
-  if (webhook) {
-    const url = `${DISCORD_API}/webhooks/${webhook.id}/${webhook.token}/messages/${messageId}`;
-    return discordRequest('GET', url, null, null, { useAuth: false });
-  }
-
-  const { channelId } = discordConfig;
-  if (!channelId || !token) {
-    throw new Error('Discord channelId and bot token are required without a webhook');
-  }
-  return discordRequest(
-    'GET',
-    `${DISCORD_API}/channels/${channelId}/messages/${messageId}`,
-    token
-  );
-}
-
-async function editDiscordMessage(discordConfig, token, messageId, content) {
-  const webhook = parseWebhookUrl(discordConfig.webhookUrl);
-  if (webhook) {
-    const url = `${DISCORD_API}/webhooks/${webhook.id}/${webhook.token}/messages/${messageId}`;
-    return discordRequest('PATCH', url, null, { content }, { useAuth: false });
-  }
-
-  return discordRequest(
-    'PATCH',
-    `${DISCORD_API}/channels/${discordConfig.channelId}/messages/${messageId}`,
-    token,
-    { content }
-  );
-}
-
-async function postDiscordMessage(discordConfig, token, content) {
-  const webhook = parseWebhookUrl(discordConfig.webhookUrl);
-  if (webhook) {
-    const url = `${DISCORD_API}/webhooks/${webhook.id}/${webhook.token}?wait=true`;
-    return discordRequest('POST', url, null, { content }, { useAuth: false });
-  }
-
+async function postDiscordAnnouncement(discordConfig, token, content, roleId) {
   if (!discordConfig.channelId) {
-    throw new Error('Discord channelId is required to post messages without a webhook');
+    throw new Error('discord.channelId is required');
   }
+
   return discordRequest(
     'POST',
     `${DISCORD_API}/channels/${discordConfig.channelId}/messages`,
     token,
-    { content }
+    {
+      content,
+      allowed_mentions: { roles: [roleId] },
+    }
   );
 }
 
-async function runDiscordInit(discordConfig, token, version) {
-  const downloadContent = buildDownloadLinks(version, discordConfig.downloadBaseUrl);
-  const changelogContent = buildDiscordChangelogSection(version, ['Initial automated changelog post']);
-
-  console.log('Posting starter messages to #latest-builds...');
-  const downloadMessage = await postDiscordMessage(discordConfig, token, downloadContent);
-  const changelogMessage = await postDiscordMessage(discordConfig, token, `${changelogContent}\n`);
-
-  console.log('\nAdd these IDs to scripts/publish-beta-release.config.json under "discord":\n');
-  console.log(JSON.stringify({
-    channelId: discordConfig.channelId || downloadMessage.channel_id,
-    downloadLinksMessageId: downloadMessage.id,
-    changelogMessageId: changelogMessage.id,
-    downloadBaseUrl: discordConfig.downloadBaseUrl,
-  }, null, 2));
-
-  console.log('\nPin both messages in Discord, then delete the old manual posts when ready.');
+function persistBetaTestersRoleId(roleId) {
+  let local = {};
+  if (fs.existsSync(LOCAL_CONFIG_PATH)) {
+    local = JSON.parse(fs.readFileSync(LOCAL_CONFIG_PATH, 'utf8'));
+  }
+  if (!local.discord) local.discord = {};
+  if (local.discord.betaTestersRoleId === roleId) return;
+  local.discord.betaTestersRoleId = roleId;
+  fs.writeFileSync(LOCAL_CONFIG_PATH, `${JSON.stringify(local, null, 2)}\n`, 'utf8');
+  console.log('Saved betaTestersRoleId to publish-beta-release.local.json');
 }
 
 async function updateDiscordLatestBuilds(discordConfig, token, version, bullets, dryRun) {
-  const downloadContent = buildDownloadLinks(version, discordConfig.downloadBaseUrl);
-
-  let changelogContent;
-  if (dryRun && !discordConfig.changelogMessageId) {
-    changelogContent = prependDiscordChangelog('**2.1.5**\n- Previous change\n---', version, bullets);
-  } else {
-    const existingChangelog = await getDiscordMessage(
-      discordConfig,
-      token,
-      discordConfig.changelogMessageId
-    );
-    if (existingChangelog.content.includes('Initial automated changelog post')) {
-      changelogContent = `${buildDiscordChangelogSection(version, bullets)}\n`;
-    } else {
-      changelogContent = prependDiscordChangelog(existingChangelog.content, version, bullets);
-    }
+  if (!token && !dryRun) {
+    throw new Error('Discord bot token is required');
   }
 
+  let roleId = discordConfig.betaTestersRoleId || null;
+  if (!dryRun) {
+    roleId = await resolveBetaTestersRoleId(discordConfig, token);
+  } else if (!roleId) {
+    roleId = 'ROLE_ID';
+  }
+
+  const content = buildDiscordAnnouncement(
+    version,
+    discordConfig.downloadBaseUrl,
+    bullets,
+    roleId
+  );
+
   if (dryRun) {
-    console.log('--- Discord download links ---');
-    console.log(downloadContent);
-    console.log('\n--- Discord changelog ---');
-    console.log(changelogContent);
+    console.log('--- Discord #latest-builds announcement ---');
+    console.log(content);
     return;
   }
 
-  if (!discordConfig.downloadLinksMessageId || !discordConfig.changelogMessageId) {
-    throw new Error(
-      'Discord downloadLinksMessageId and changelogMessageId must be set. Run with --discord-init first.'
-    );
-  }
-
-  console.log(`Updating Discord #latest-builds for v${version}...`);
-  await editDiscordMessage(discordConfig, token, discordConfig.downloadLinksMessageId, downloadContent);
-  await editDiscordMessage(discordConfig, token, discordConfig.changelogMessageId, changelogContent);
-  console.log('Discord #latest-builds updated.');
+  console.log(`Posting Discord #latest-builds announcement for v${version} (Printventory-Build bot)...`);
+  const message = await postDiscordAnnouncement(discordConfig, token, content, roleId);
+  persistBetaTestersRoleId(roleId);
+  console.log(`Discord announcement posted (${message.id}), tagged @beta-testers.`);
 }
 
 async function main() {
@@ -492,12 +487,6 @@ async function main() {
   const targets = resolveTargets(args);
   const discordConfig = applyDiscordEnv(config.discord || {});
   const websiteConfig = config.website;
-
-  if (targets.initOnly) {
-    const token = resolveDiscordAuth(discordConfig);
-    await runDiscordInit(discordConfig, token, version);
-    return;
-  }
 
   const changelogSource =
     args.changelog ||
@@ -533,14 +522,8 @@ async function main() {
   if (targets.discord) {
     try {
       const discordToken = args.dryRun
-        ? (process.env.DISCORD_BOT_TOKEN || discordConfig.botToken || null)
-        : resolveDiscordAuth(discordConfig);
-
-      if (!args.dryRun && (!discordConfig.downloadLinksMessageId || !discordConfig.changelogMessageId)) {
-        throw new Error(
-          'Discord message IDs not configured. Run with --discord-init or set them in publish-beta-release.config.json.'
-        );
-      }
+        ? process.env.DISCORD_BOT_TOKEN || loadDiscordBotCredentials(discordConfig).botToken || null
+        : resolveDiscordBotToken(discordConfig);
 
       await updateDiscordLatestBuilds(discordConfig, discordToken, version, bullets, args.dryRun);
     } catch (error) {

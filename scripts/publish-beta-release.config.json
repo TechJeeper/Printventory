@@ -5,10 +5,10 @@
     "branch": "main"
   },
   "discord": {
+    "guildId": "1331093666915156059",
     "channelId": "1331101902196310018",
-    "downloadLinksMessageId": "1525334296112529471",
-    "changelogMessageId": "1525334305717616651",
     "downloadBaseUrl": "https://printventory.techjeeper.com",
-    "webhookUrl": ""
+    "betaTestersRoleName": "beta-testers",
+    "botCredentialsFile": ".discord"
   }
 }

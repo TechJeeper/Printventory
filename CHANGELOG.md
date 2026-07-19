@@ -4,6 +4,12 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.9] - 2026-07-19
+
+### Fixed
+
+- ZIP model extracts now always land under the OS temp folder (`printventory-extracts/`), never beside library files, and are cleaned up after preview/read, slicer launch, open, download, app quit, and on startup.
+
 ## [2.1.8] - 2026-07-19
 
 ### Added

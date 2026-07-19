@@ -230,6 +230,8 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   const extSet = buildScanExtensionSet(scanExtensions);
 
   const shouldQueueFile = (fileName) => {
+    // Skip Printventory zip-extract temps if they somehow land under a scanned tree
+    if (typeof fileName === 'string' && fileName.startsWith('printventory_')) return false;
     const ext = path.extname(fileName).toLowerCase();
     if (extSet.has(ext)) return true;
     if (enableZipArchives && ext === '.zip') return true;
@@ -300,8 +302,9 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
         const fullPath = path.join(dirPath, entry.name);
 
         if (entry.isDirectory()) {
-          // Skip system directories and __MACOSX
+          // Skip system directories, __MACOSX, and Printventory extract temp folders
           if (entry.name.toLowerCase() === '__macosx' ||
+              entry.name === 'printventory-extracts' ||
               /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
             continue;
           }

@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.1.8",
+  "version": "2.1.9",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -23,9 +23,8 @@
     "build:mac:remote": "powershell -ExecutionPolicy Bypass -File scripts/build-mac-remote.ps1",
     "zip:github-source": "node scripts/create-github-source-zip.js",
     "publish:beta": "node scripts/publish-beta-release.js",
-    "publish:beta:discord-init": "node scripts/publish-beta-release.js --discord-init",
     "discord:latest-builds": "node scripts/publish-beta-release.js --discord-only",
-    "discord:latest-builds:init": "node scripts/publish-beta-release.js --discord-init",
+    "discord:announce": "node scripts/discord-announce-beta.js",
     "postinstall": "electron-builder install-app-deps",
     "test": "playwright test",
     "test:bundle": "node bundle-keys.test.js",

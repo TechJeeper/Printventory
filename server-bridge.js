@@ -359,6 +359,7 @@
     'get3MFSTL': 'get3MFSTL',
     'extractModelFromZip': 'extract-model-from-zip',
     'extractZipArchive': 'extract-zip-archive',
+    'deleteTempFile': 'delete-temp-file',
     'getDuplicates': 'get-duplicates',
     'isGeneratingHashes': 'is-generating-hashes',
     'getModelsWithoutHash': 'getModelsWithoutHash',
