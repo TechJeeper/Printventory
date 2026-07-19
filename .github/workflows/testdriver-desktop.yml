@@ -1,0 +1,53 @@
+name: TestDriver Desktop (Electron) E2E
+
+# Dedicated workflow for the TestDriver computer-use test that drives the
+# Printventory DESKTOP build (tests/electron-app.test.js).
+#
+# The app itself is cloned + installed INSIDE the TestDriver sandbox by the test,
+# so the GitHub runner only needs vitest + testdriverai — NOT the app's full
+# native dependencies (which require the heavy electron-builder postinstall).
+# That's why this installs devDeps with --ignore-scripts instead of `npm ci`.
+#
+# Requires the repo secret TD_API_KEY (Settings → Secrets and variables → Actions).
+
+on:
+  workflow_dispatch: {}
+  # Also run when the desktop test or its deps change.
+  push:
+    paths:
+      - 'tests/electron-app.test.js'
+      - 'vitest.config.js'
+      - '.github/workflows/testdriver-desktop.yml'
+
+jobs:
+  desktop-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install ONLY the test runner deps. --ignore-scripts avoids the app's
+      # electron-builder install-app-deps postinstall, which we don't need on
+      # the runner (the app is provisioned inside the sandbox by the test).
+      - name: Install test-runner dependencies
+        run: npm install --no-audit --no-fund --legacy-peer-deps --ignore-scripts
+
+      - name: Run TestDriver desktop test
+        env:
+          TD_API_KEY: ${{ secrets.TD_API_KEY }}
+        run: npx vitest run tests/electron-app.test.js
+
+      - name: Upload TestDriver results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testdriver-desktop-results
+          path: |
+            .testdriver/**
+            test-results/**
+          retention-days: 30
+          if-no-files-found: ignore
