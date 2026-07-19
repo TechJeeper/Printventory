@@ -1,0 +1,47 @@
+name: TestDriver.ai Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required to mint the OIDC token for auth
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    # Authenticate to TestDriver via GitHub OIDC (no stored secret needed once the
+    # TestDriver GitHub App is authorized for your org). Falls back to a TD_API_KEY
+    # secret if you set one. Exports TD_API_KEY for the test step below.
+    - name: Authenticate to TestDriver
+      uses: testdriverai/action@test
+      with:
+        channel: test
+        api-key: ${{ secrets.TD_API_KEY }}
+
+    - name: Run TestDriver.ai tests
+      run: npx vitest run
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: test-results/
+        retention-days: 30
