@@ -21,6 +21,7 @@ Printventory is an Electron-based desktop application for managing your 3D print
 - **Source URLs**: Store links to where you found or purchased models
 - **Notes**: Add custom notes to any model
 - **Parent/Child Relationships**: Link related models together
+- **Folder & ZIP bundle grouping**: Automatically group models from the same subfolder or ZIP archive; preview all parts in one 3D view
 - **License Tracking**: Assign licenses to models
 
 ### Advanced Features
@@ -29,6 +30,8 @@ Printventory is an Electron-based desktop application for managing your 3D print
 - **Duplicate Detection**: Find duplicate files based on content hash with visual comparison
 - **Print Roulette**: Randomly select models from your collection
 - **AI Tagging**: Automated tag suggestions using AI
+- **3D bundle preview**: Open every STL/3MF in a folder or ZIP in a single preview layout
+- **Send to Slicer from preview**: Open the current model or entire bundle in your configured slicer (new instance when already running)
 - **Search & Filter**: Real-time search by filename and filter by designer, tags, print status, parent model, or license
 - **Tag Manager**: Comprehensive tag management interface
 - **Metadata Editor**: Bulk metadata editing capabilities
@@ -41,6 +44,8 @@ Printventory is an Electron-based desktop application for managing your 3D print
 - **Auto-save**: Changes are automatically saved
 
 For a complete list of features and detailed usage instructions, see the [GUIDE.md](GUIDE.md) file.
+
+See [CHANGELOG.md](CHANGELOG.md) for recent feature additions and migration notes.
 
 ## Installation
 

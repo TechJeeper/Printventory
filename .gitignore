@@ -1,6 +1,8 @@
 dist
 node_modules
 printventory.db
+printventory.db-shm
+printventory.db-wal
 package-lock.json
 test-files.zip
 git_credentials

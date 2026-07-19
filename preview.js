@@ -12,6 +12,7 @@ console.log('[Preview] preview.js script loaded');
   let currentFilePath = null;
   let previewLoadToken = 0;
   let preview3mfRequestId = null;
+  let currentBundleGroupRecord = null;
 
   function formatUserFacingPreviewError(error) {
     let message = error?.message || String(error || 'Unknown error');
@@ -109,6 +110,20 @@ console.log('[Preview] preview.js script loaded');
       toggleAxes();
     });
 
+    const slicerBtn = document.getElementById('preview-send-to-slicer');
+    if (slicerBtn) {
+      slicerBtn.addEventListener('click', () => {
+        handlePreviewSendToSlicer();
+      });
+    }
+
+    document.addEventListener('click', (event) => {
+      const menu = document.getElementById('preview-slicer-menu');
+      if (!menu || menu.classList.contains('hidden')) return;
+      if (event.target.closest('#preview-slicer-menu') || event.target.closest('#preview-send-to-slicer')) return;
+      hidePreviewSlicerMenu();
+    });
+
     // Close on backdrop click
     dialog.addEventListener('click', (e) => {
       if (e.target === dialog) {
@@ -141,6 +156,8 @@ console.log('[Preview] preview.js script loaded');
       preview3mfRequestId = null;
     }
     currentFilePath = filePath;
+    currentBundleGroupRecord = null;
+    hidePreviewSlicerMenu();
     const loadToken = ++previewLoadToken;
     const dialog = document.getElementById('preview-dialog');
     
@@ -161,6 +178,7 @@ console.log('[Preview] preview.js script loaded');
     resetPreviewLoadingUI();
     fileType.textContent = '';
     dimensions.textContent = '';
+    updatePreviewSlicerButton();
 
     // Open dialog
     dialog.showModal();
@@ -178,6 +196,7 @@ console.log('[Preview] preview.js script loaded');
       if (loadToken !== previewLoadToken) return;
       console.log('Model loaded successfully');
       loading.style.display = 'none';
+      updatePreviewSlicerButton();
     } catch (error) {
       if (loadToken !== previewLoadToken) return;
       const message = error && error.message ? error.message : '';
@@ -203,7 +222,8 @@ console.log('[Preview] preview.js script loaded');
   
   // Exposed for debugging and any late-loaded code; server bridge no longer calls this directly
   window.openPreview = openPreview;
-  console.log('[Preview] Exposed window.openPreview globally');
+  window.openBundlePreview = openBundlePreview;
+  console.log('[Preview] Exposed window.openPreview and window.openBundlePreview globally');
 
   // Initialize Three.js scene
   function initPreviewScene() {
@@ -478,153 +498,412 @@ console.log('[Preview] preview.js script loaded');
     });
   }
 
+  function getPreviewExtension(filePath) {
+    const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
+    return pathForExt.split('.').pop().toLowerCase();
+  }
+
+  function isPreviewableModelPath(filePath) {
+    const ext = getPreviewExtension(filePath);
+    return ext === 'stl' || ext === '3mf';
+  }
+
+  function applyPartTint(object, index, total) {
+    if (total <= 1) return;
+    const hue = (index / total) * 0.75 + 0.05;
+    const tint = new THREE.Color().setHSL(hue, 0.55, 0.52);
+    object.traverse((child) => {
+      if (!child.isMesh) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((mat, matIndex) => {
+        if (!mat || mat.map || mat.vertexColors) return;
+        const tinted = mat.clone();
+        tinted.color = tint.clone();
+        if (Array.isArray(child.material)) {
+          child.material[matIndex] = tinted;
+        } else {
+          child.material = tinted;
+        }
+      });
+    });
+  }
+
+  async function createPreviewObjectFromPath(filePath, loadToken) {
+    if (loadToken !== previewLoadToken) {
+      throw new Error('Preview cancelled');
+    }
+
+    const ext = getPreviewExtension(filePath);
+    if (ext !== 'stl' && ext !== '3mf') {
+      throw new Error(`Unsupported file type: ${ext}`);
+    }
+
+    if (ext === 'stl') {
+      if (!THREE.STLLoader) {
+        throw new Error('STLLoader not available');
+      }
+
+      const loader = new THREE.STLLoader();
+      const arrayBuffer = await window.electron.readModelFile(filePath);
+      if (loadToken !== previewLoadToken) {
+        throw new Error('Preview cancelled');
+      }
+
+      validateSTLBuffer(arrayBuffer);
+      const geometry = loader.parse(arrayBuffer);
+      if (!geometry) {
+        throw new Error('Failed to parse STL geometry');
+      }
+
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+
+      const material = new THREE.MeshStandardMaterial({
+        color: 0x4a9eff,
+        metalness: 0.3,
+        roughness: 0.6,
+        flatShading: false,
+        emissive: 0x002244,
+        emissiveIntensity: 0.2
+      });
+
+      return new THREE.Mesh(geometry, material);
+    }
+
+    const loading = document.getElementById('preview-loading');
+    if (loading && loading.querySelector('p')) {
+      loading.querySelector('p').textContent =
+        'Loading 3MF file...\nThis could take time for larger files.';
+    }
+
+    preview3mfRequestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const json = await window.electron.parse3MFPreview(filePath, preview3mfRequestId);
+    if (loadToken !== previewLoadToken) {
+      throw new Error('Preview cancelled');
+    }
+
+    if (!json) {
+      throw new Error('Failed to load 3MF file');
+    }
+
+    const objectLoader = new THREE.ObjectLoader();
+    const object = objectLoader.parse(json);
+    if (!object) {
+      throw new Error('Failed to parse 3MF preview');
+    }
+
+    object.traverse((child) => {
+      if (child.isMesh && child.geometry) {
+        if (!child.geometry.attributes.normal || child.geometry.attributes.normal.count === 0) {
+          child.geometry.computeVertexNormals();
+        }
+      }
+    });
+
+    if (!hasColorData(object)) {
+      applyDefaultMetalMaterial(object);
+    } else {
+      ensureLitMaterials(object);
+    }
+
+    const meta = json.metadata || {};
+    if (meta.previewSimplified && meta.sourceTriangles && meta.keptTriangles) {
+      const note = document.getElementById('preview-simplified-note');
+      if (note) {
+        note.textContent =
+          `Simplified preview (${meta.keptTriangles.toLocaleString('en-US')} of ` +
+          `${meta.sourceTriangles.toLocaleString('en-US')} triangles)`;
+        note.style.display = 'inline';
+      }
+    } else {
+      const note = document.getElementById('preview-simplified-note');
+      if (note) note.style.display = 'none';
+    }
+
+    return object;
+  }
+
   // Load preview model
   async function loadPreviewModel(filePath, loadToken) {
-    return new Promise(async (resolve, reject) => {
-      if (loadToken !== previewLoadToken) {
-        reject(new Error('Preview cancelled'));
-        return;
-      }
-      const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
-      const ext = pathForExt.split('.').pop().toLowerCase();
-      const fileType = document.getElementById('preview-file-type');
-      
-      fileType.textContent = `Type: ${ext.toUpperCase()}`;
-      console.log('Loading model type:', ext);
+    const ext = getPreviewExtension(filePath);
+    const fileType = document.getElementById('preview-file-type');
 
-      // Only STL and 3MF support 3D preview; show message for other types
-      if (ext !== 'stl' && ext !== '3mf') {
-        reject(new Error('Preview not available for this file type. Only STL and 3MF models can be previewed in 3D.'));
-        return;
+    fileType.textContent = `Type: ${ext.toUpperCase()}`;
+    console.log('Loading model type:', ext);
+
+    if (ext !== 'stl' && ext !== '3mf') {
+      throw new Error('Preview not available for this file type. Only STL and 3MF models can be previewed in 3D.');
+    }
+
+    const object = await createPreviewObjectFromPath(filePath, loadToken);
+    previewModel = object;
+    previewScene.add(previewModel);
+    centerAndScaleModel(previewModel);
+    updateModelDimensions(previewModel);
+  }
+
+  const MAX_BUNDLE_PREVIEW_PARTS = 32;
+
+  async function openBundlePreview(groupRecord) {
+    const children = groupRecord?.children || [];
+    const previewable = children.filter((child) => child?.filePath && isPreviewableModelPath(child.filePath));
+    if (!previewable.length) {
+      alert('No STL or 3MF models in this bundle to preview.');
+      return;
+    }
+
+    const sorted = [...previewable].sort((a, b) =>
+      String(a.fileName || '').localeCompare(String(b.fileName || ''), undefined, { sensitivity: 'base' })
+    );
+    const toLoad = sorted.slice(0, MAX_BUNDLE_PREVIEW_PARTS);
+    const truncated = previewable.length > MAX_BUNDLE_PREVIEW_PARTS;
+
+    currentFilePath = null;
+    const loadToken = ++previewLoadToken;
+    const dialog = document.getElementById('preview-dialog');
+    if (!dialog) {
+      console.error('[Preview] preview-dialog element not found!');
+      return;
+    }
+
+    currentBundleGroupRecord = groupRecord;
+    hidePreviewSlicerMenu();
+
+    const modelName = document.getElementById('preview-model-name');
+    const loading = document.getElementById('preview-loading');
+    const fileType = document.getElementById('preview-file-type');
+    const dimensions = document.getElementById('preview-dimensions');
+    const groupLabel = groupRecord.groupLabel || 'Bundle';
+
+    modelName.textContent = groupLabel;
+    loading.style.display = 'flex';
+    if (loading.querySelector('p')) {
+      loading.querySelector('p').textContent = `Loading bundle preview (0/${toLoad.length})...`;
+    }
+    fileType.textContent = '';
+    dimensions.textContent = '';
+    updatePreviewSlicerButton();
+
+    dialog.showModal();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    initPreviewScene();
+
+    const root = new THREE.Group();
+    const placed = [];
+    let loadFailures = 0;
+
+    for (let i = 0; i < toLoad.length; i++) {
+      const child = toLoad[i];
+      const loadingText = loading.querySelector('p');
+      if (loadingText) {
+        loadingText.textContent =
+          `Loading bundle preview (${i + 1}/${toLoad.length})...\n${child.fileName || ''}`;
       }
 
       try {
-        if (ext === 'stl') {
-          // Load STL
-          if (!THREE.STLLoader) {
-            throw new Error('STLLoader not available');
-          }
-          
-          console.log('Creating STL loader...');
-          const loader = new THREE.STLLoader();
-          
-          // Read file data as ArrayBuffer
-          console.log('Reading STL file...');
-          const arrayBuffer = await window.electron.readModelFile(filePath);
-          if (loadToken !== previewLoadToken) {
-            reject(new Error('Preview cancelled'));
-            return;
-          }
-          console.log('STL file read, size:', arrayBuffer.byteLength, 'bytes');
-          validateSTLBuffer(arrayBuffer);
-          // Parse the STL data
-          console.log('Parsing STL data...');
-          const geometry = loader.parse(arrayBuffer);
-          console.log('STL parsed, geometry:', geometry);
-          
-          if (!geometry) {
-            throw new Error('Failed to parse STL geometry');
-          }
+        const obj = await createPreviewObjectFromPath(child.filePath, loadToken);
+        applyPartTint(obj, i, toLoad.length);
 
-          // Compute normals and bounding box
-          geometry.computeVertexNormals();
-          geometry.computeBoundingBox();
-          geometry.computeBoundingSphere();
-          console.log('Geometry computed - vertices:', geometry.attributes.position.count);
-          console.log('Geometry bounding box:', geometry.boundingBox);
-
-          // Create mesh with material
-          const material = new THREE.MeshStandardMaterial({
-            color: 0x4a9eff,
-            metalness: 0.3,
-            roughness: 0.6,
-            flatShading: false,
-            emissive: 0x002244,
-            emissiveIntensity: 0.2
-          });
-
-          previewModel = new THREE.Mesh(geometry, material);
-          previewScene.add(previewModel);
-          console.log('STL mesh added to scene, position:', previewModel.position);
-          console.log('Mesh in scene:', previewScene.children.includes(previewModel));
-
-          // Center and scale the model
-          centerAndScaleModel(previewModel);
-          updateModelDimensions(previewModel);
-          
-          resolve();
-
-        } else if (ext === '3mf') {
-          // Load 3MF via main-process worker for responsiveness
-          const loading = document.getElementById('preview-loading');
-          if (loading && loading.querySelector('p')) {
-            loading.querySelector('p').textContent =
-              'Loading 3MF file...\nThis could take time for larger files.';
-          }
-
-          preview3mfRequestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-          const json = await window.electron.parse3MFPreview(filePath, preview3mfRequestId);
-          if (loadToken !== previewLoadToken) {
-            reject(new Error('Preview cancelled'));
-            return;
-          }
-
-          if (!json) {
-            throw new Error('Failed to load 3MF file');
-          }
-
-          const objectLoader = new THREE.ObjectLoader();
-          const object = objectLoader.parse(json);
-          if (!object) {
-            throw new Error('Failed to parse 3MF preview');
-          }
-
-          // Ensure geometry has normals computed
-          object.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-              if (!child.geometry.attributes.normal || child.geometry.attributes.normal.count === 0) {
-                child.geometry.computeVertexNormals();
-              }
-            }
-          });
-
-          if (!hasColorData(object)) {
-            applyDefaultMetalMaterial(object);
-          } else {
-            ensureLitMaterials(object);
-          }
-
-          previewModel = object;
-          previewScene.add(previewModel);
-
-          centerAndScaleModel(previewModel);
-          updateModelDimensions(previewModel);
-
-          const meta = json.metadata || {};
-          if (meta.previewSimplified && meta.sourceTriangles && meta.keptTriangles) {
-            const note = document.getElementById('preview-simplified-note');
-            if (note) {
-              note.textContent =
-                `Simplified preview (${meta.keptTriangles.toLocaleString('en-US')} of ` +
-                `${meta.sourceTriangles.toLocaleString('en-US')} triangles)`;
-              note.style.display = 'inline';
-            }
-          } else {
-            const note = document.getElementById('preview-simplified-note');
-            if (note) note.style.display = 'none';
-          }
-
-          preview3mfRequestId = null;
-          resolve();
-
-        } else {
-          throw new Error(`Unsupported file type: ${ext}`);
-        }
-
+        const box = new THREE.Box3().setFromObject(obj);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        obj.position.sub(center);
+        placed.push({ obj, size });
       } catch (error) {
-        reject(error);
+        const message = error && error.message ? error.message : '';
+        if (message === 'Preview cancelled' || message.includes('Preview cancelled')) {
+          return;
+        }
+        console.warn('Bundle preview skipped:', child.filePath, error);
+        loadFailures++;
       }
+    }
+
+    if (loadToken !== previewLoadToken) return;
+
+    if (!placed.length) {
+      loading.innerHTML = `
+        <div style="color: #ff6b6b; text-align: center; padding: 20px; max-width: 500px;">
+          <p style="font-size: 18px; font-weight: 600; margin-bottom: 10px;">Could not load bundle preview</p>
+          <p style="font-size: 14px; line-height: 1.6;">No models in this bundle could be loaded for 3D preview.</p>
+          <button onclick="document.getElementById('preview-dialog').close()"
+                  style="margin-top: 20px; padding: 10px 20px; background: rgba(255,255,255,0.1);
+                         border: 1px solid rgba(255,255,255,0.2); border-radius: 8px;
+                         color: white; cursor: pointer; font-size: 14px;">
+            Close
+          </button>
+        </div>
+      `;
+      return;
+    }
+
+    const maxPartDim = Math.max(
+      ...placed.map((entry) => Math.max(entry.size.x, entry.size.y, entry.size.z)),
+      1
+    );
+    const cellSpacing = maxPartDim * 1.4;
+    const cols = Math.ceil(Math.sqrt(placed.length));
+
+    placed.forEach((entry, index) => {
+      const col = index % cols;
+      const row = Math.floor(index / cols);
+      entry.obj.position.x = col * cellSpacing;
+      entry.obj.position.z = -row * cellSpacing;
+      root.add(entry.obj);
     });
+
+    previewModel = root;
+    previewScene.add(previewModel);
+    centerAndScaleModel(previewModel);
+
+    const bundleKind = groupRecord.children?.[0]?.bundleKind === 'zip' ? 'ZIP' : 'Folder';
+    fileType.textContent = `${bundleKind} bundle • ${placed.length} model${placed.length === 1 ? '' : 's'}`;
+
+    const dimParts = [];
+    if (truncated) {
+      dimParts.push(`Showing first ${MAX_BUNDLE_PREVIEW_PARTS} of ${previewable.length} previewable models`);
+    }
+    if (loadFailures) {
+      dimParts.push(`${loadFailures} model${loadFailures === 1 ? '' : 's'} failed to load`);
+    }
+    dimensions.textContent = dimParts.join(' • ');
+
+    loading.style.display = 'none';
+    updatePreviewSlicerButton();
+  }
+
+  function getPreviewSlicerFilePaths() {
+    if (currentFilePath && !currentFilePath.startsWith('url::')) {
+      return [currentFilePath];
+    }
+    if (currentBundleGroupRecord?.children?.length) {
+      return currentBundleGroupRecord.children
+        .map((child) => child?.filePath)
+        .filter((filePath) => filePath && isPreviewableModelPath(filePath) && !filePath.startsWith('url::'));
+    }
+    return [];
+  }
+
+  function updatePreviewSlicerButton() {
+    const button = document.getElementById('preview-send-to-slicer');
+    if (!button) return;
+
+    const paths = getPreviewSlicerFilePaths();
+    button.disabled = paths.length === 0;
+    if (paths.length === 0) {
+      button.title = 'No local model to send to slicer';
+    } else if (paths.length === 1) {
+      button.title = 'Open this model in your slicer';
+    } else {
+      button.title = `Open ${paths.length} models in your slicer`;
+    }
+  }
+
+  function hidePreviewSlicerMenu() {
+    const menu = document.getElementById('preview-slicer-menu');
+    if (!menu) return;
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+  }
+
+  function showPreviewSlicerMenu(slicers, filePaths) {
+    const menu = document.getElementById('preview-slicer-menu');
+    if (!menu) return;
+
+    menu.innerHTML = '';
+    slicers.forEach((slicer) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'preview-slicer-menu-item';
+      item.textContent = slicer.name;
+      item.title = slicer.path || slicer.name;
+      item.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        hidePreviewSlicerMenu();
+        await sendPreviewToSlicer(slicer, filePaths);
+      });
+      menu.appendChild(item);
+    });
+    menu.classList.remove('hidden');
+  }
+
+  async function sendPreviewToSlicer(slicer, filePaths) {
+    if (!window.electron?.openFileInSlicer) {
+      alert('Send to slicer is not available in this mode.');
+      return;
+    }
+
+    try {
+      const result = await window.electron.openFileInSlicer({
+        filePaths,
+        slicerId: slicer.id,
+        slicerName: slicer.name
+      });
+      if (result?.success) {
+        console.log('[Preview] Sent to slicer:', slicer.name, result);
+      }
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      alert(`Could not send to slicer:\n${message}`);
+    }
+  }
+
+  async function loadConfiguredSlicers() {
+    let slicers = [];
+    try {
+      if (typeof window.electron?.getSlicers === 'function') {
+        slicers = await window.electron.getSlicers();
+      }
+    } catch (error) {
+      console.error('[Preview] Error loading slicers:', error);
+    }
+
+    if (Array.isArray(slicers) && slicers.length === 1 && Array.isArray(slicers[0])) {
+      slicers = slicers[0];
+    }
+
+    slicers = (Array.isArray(slicers) ? slicers : []).filter(
+      (slicer) => slicer && slicer.name && slicer.path
+    );
+
+    if (slicers.length) return slicers;
+
+    try {
+      const legacyPath = await window.electron?.getSetting?.('slicerPath');
+      if (legacyPath) {
+        return [{ id: null, name: 'Slicer', path: legacyPath }];
+      }
+    } catch (error) {
+      console.error('[Preview] Error loading legacy slicer path:', error);
+    }
+
+    return [];
+  }
+
+  async function handlePreviewSendToSlicer() {
+    const filePaths = getPreviewSlicerFilePaths();
+    if (!filePaths.length) return;
+
+    hidePreviewSlicerMenu();
+
+    const slicers = await loadConfiguredSlicers();
+
+    if (!slicers.length) {
+      const configure = confirm('No slicer configured. Open Slicer Settings now?');
+      if (configure && typeof window.openSlicerSettings === 'function') {
+        await window.openSlicerSettings();
+      }
+      return;
+    }
+
+    if (slicers.length === 1) {
+      await sendPreviewToSlicer(slicers[0], filePaths);
+      return;
+    }
+
+    showPreviewSlicerMenu(slicers, filePaths);
   }
 
   // Center and scale model to fit in view
@@ -845,6 +1124,9 @@ console.log('[Preview] preview.js script loaded');
     cleanupPreviewScene();
     dialog.close();
     currentFilePath = null;
+    currentBundleGroupRecord = null;
+    hidePreviewSlicerMenu();
+    updatePreviewSlicerButton();
   }
 
   // Initialize when DOM is ready

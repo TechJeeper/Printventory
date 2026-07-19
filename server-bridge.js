@@ -380,6 +380,7 @@
     'getModelsWithDefaultThumbnails': 'get-models-with-default-thumbnails',
     'fetchMakerWorldPage': 'fetch-makerworld-page',
     'getSlicers': 'get-slicers',
+    'openFileInSlicer': 'open-file-in-slicer',
     'saveSlicer': 'save-slicer',
     'deleteSlicer': 'delete-slicer',
     'clearAndSaveSlicers': 'clear-and-save-slicers',

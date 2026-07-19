@@ -28,6 +28,7 @@
     "discord:latest-builds:init": "node scripts/publish-beta-release.js --discord-init",
     "postinstall": "electron-builder install-app-deps",
     "test": "playwright test",
+    "test:bundle": "node bundle-keys.test.js",
     "test:full": "playwright test full-app-e2e.spec.js"
   },
   "author": "TechJeeper Designs",
@@ -108,6 +109,7 @@
     },
     "files": [
       "main.js",
+      "bundle-keys.js",
       "preload.js",
       "renderer.js",
       "index.html",
