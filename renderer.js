@@ -8083,7 +8083,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   
     try {
       scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+      camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
   
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     scene.add(ambientLight);
@@ -11890,12 +11890,24 @@ async function toggleModelSelection(fileElement, filePath) {
 // This duplicate has been removed to use the enhanced version that checks for embedded images
 
 function fitCameraToObject(camera, object, scene, renderer) {
-  const boundingBox = new THREE.Box3().setFromObject(scene);
+  // Orient first, then measure — otherwise large flat STLs (e.g. 400×420×4 plates)
+  // get framed for the wrong bbox and often land past the camera far plane.
+  object.rotation.x = -Math.PI / 2;
+  object.updateMatrixWorld(true);
+
+  const boundingBox = new THREE.Box3().setFromObject(object);
   const size = boundingBox.getSize(new THREE.Vector3());
   const center = boundingBox.getCenter(new THREE.Vector3());
 
-  // Position camera to fit object
-  const maxDim = Math.max(size.x, size.y, size.z);
+  if (Number.isFinite(center.x) && Number.isFinite(center.y) && Number.isFinite(center.z)) {
+    object.position.sub(center);
+    object.updateMatrixWorld(true);
+  }
+
+  const fittedBox = new THREE.Box3().setFromObject(object);
+  const fittedSize = fittedBox.getSize(new THREE.Vector3());
+  const maxDim = Math.max(fittedSize.x, fittedSize.y, fittedSize.z, 1e-3);
+
   const fov = camera.fov * (Math.PI / 180);
   const tanHalfFov = Math.tan(fov / 2);
   let cameraZ =
@@ -11903,17 +11915,54 @@ function fitCameraToObject(camera, object, scene, renderer) {
       ? Math.abs(maxDim / 2 / tanHalfFov) * 1.5
       : 5;
   if (!Number.isFinite(cameraZ) || cameraZ <= 0) cameraZ = 5;
-  if (!Number.isFinite(center.x)) center.set(0, 0, 0);
 
-  // Update camera position to view from front-top instead of bottom
+  // Camera sits on the (z,z,z) diagonal — keep far plane beyond that distance.
+  const cameraDistance = cameraZ * Math.sqrt(3);
+  camera.near = Math.max(0.01, cameraDistance / 1000);
+  camera.far = Math.max(10000, cameraDistance * 20);
+  camera.updateProjectionMatrix();
+
   camera.position.set(cameraZ, cameraZ, cameraZ);
-  camera.lookAt(center);
+  camera.lookAt(0, 0, 0);
 
-  // Rotate the model to correct orientation
-  object.rotation.x = -Math.PI / 2; // Rotate 90 degrees around X axis
-  
-  // Update the scene
   renderer.render(scene, camera);
+}
+
+/** True when a thumbnail data-URL is effectively empty (transparent / clipped render). */
+function isMostlyEmptyThumbnailDataUrl(dataUrl) {
+  return new Promise((resolve) => {
+    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image')) {
+      resolve(true);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = Math.min(64, img.width || 64);
+        const h = Math.min(64, img.height || 64);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) {
+          resolve(false);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        const pixels = ctx.getImageData(0, 0, w, h).data;
+        let opaque = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (pixels[i + 3] > 12) opaque += 1;
+        }
+        // Less than 0.5% opaque pixels ≈ blank (model clipped or failed).
+        resolve(opaque < w * h * 0.005);
+      } catch (error) {
+        resolve(false);
+      }
+    };
+    img.onerror = () => resolve(true);
+    img.src = dataUrl;
+  });
 }
 
 function handleContextLost(event) {
@@ -13256,7 +13305,8 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
   try {
     renderer.setSize(250, 250);
     scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+    // Match preview.js far plane — large plates (400mm+) put the camera well past 1000.
+    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
 
     renderer.setClearColor(0x000000, 0);
     
@@ -13319,7 +13369,22 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     fitCameraToObject(camera, model, scene, renderer);
     renderer.render(scene, camera);
 
-    const imgData = renderer.domElement.toDataURL('image/png');
+    let imgData = renderer.domElement.toDataURL('image/png');
+    if (await isMostlyEmptyThumbnailDataUrl(imgData)) {
+      // One retry with a wider framing — common for large flat STLs that were clipped.
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z, 1e-3);
+      const cameraZ = maxDim * 2.5;
+      const cameraDistance = cameraZ * Math.sqrt(3);
+      camera.near = Math.max(0.01, cameraDistance / 1000);
+      camera.far = Math.max(20000, cameraDistance * 20);
+      camera.updateProjectionMatrix();
+      camera.position.set(cameraZ, cameraZ * 0.7, cameraZ);
+      camera.lookAt(0, 0, 0);
+      renderer.render(scene, camera);
+      imgData = renderer.domElement.toDataURL('image/png');
+    }
 
     const img = document.createElement('img');
     img.src = imgData;
@@ -18061,15 +18126,49 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   // When grid data omits thumbnail blobs, fetch full thumbnail list async (detailed + preview).
   if (model.filePath) {
     if (view === 'detailed' || view === 'preview') {
-      window.electron.getAllThumbnails(model.filePath).then(allThumbs => {
-        if (!allThumbs || allThumbs.length === 0) return;
-        const validFetched = allThumbs.filter(
+      window.electron.getAllThumbnails(model.filePath).then(async (allThumbs) => {
+        const validFetched = (allThumbs || []).filter(
           (t) => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')
         );
-        if (validFetched.length === 0) return;
+        const firstThumb = validFetched[0];
+        const firstIsEmpty = firstThumb ? await isMostlyEmptyThumbnailDataUrl(firstThumb) : true;
+
+        // Large flat STLs often saved a clipped transparent PNG (far plane was 1000).
+        // Treat those as missing so the render queue regenerates a real thumb.
+        if (!firstThumb || firstIsEmpty) {
+          if (!pendingThumbnails.has(model.filePath) && model.filePath) {
+            pendingThumbnails.add(model.filePath);
+            renderQueue.push({
+              filePath: model.filePath,
+              container: thumbnailContainer,
+              thumbPriority,
+              resolve: async (thumbnail) => {
+                pendingThumbnails.delete(model.filePath);
+                if (!thumbnail || thumbnail === '3d.png') return;
+                if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
+                model.thumbnail = thumbnail;
+                model.hasThumbnail = true;
+                try {
+                  await window.electron.saveThumbnail(model.filePath, thumbnail);
+                } catch (e) { /* ignore */ }
+                if (img.isConnected) img.src = thumbnail;
+                // Folder/ZIP group cards may still show the old clipped blank — refresh them.
+                invalidateGroupThumbnailCache();
+                if (window._groupThumbRefreshTimer) clearTimeout(window._groupThumbRefreshTimer);
+                window._groupThumbRefreshTimer = setTimeout(() => {
+                  window._groupThumbRefreshTimer = null;
+                  const grid = document.querySelector('.file-grid');
+                  if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
+                }, 250);
+              }
+            });
+            if (typeof processRenderQueue === 'function') processRenderQueue();
+          }
+          return;
+        }
 
         if (img.src.includes('3d.png') || !currentThumbnail) {
-          img.src = validFetched[0];
+          img.src = firstThumb;
         }
 
         if (validFetched.length > 1 && thumbnailContainer.isConnected) {
@@ -18085,10 +18184,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         // Silently fail - not critical
       });
     } else if (view === 'list' && !currentThumbnail && hasThumbnailFlag) {
-      window.electron.getThumbnail(model.filePath).then(thumb => {
-        if (thumb && thumb !== '3d.png') {
-          img.src = thumb;
-        }
+      window.electron.getThumbnail(model.filePath).then(async (thumb) => {
+        if (!thumb || thumb === '3d.png') return;
+        if (await isMostlyEmptyThumbnailDataUrl(thumb)) return;
+        img.src = thumb;
       }).catch(e => {
         // Silently fail
       });
@@ -19410,6 +19509,41 @@ const bundleExpandedGroups = new Set();
 let groupThumbnailPreferencesLoaded = false;
 let groupThumbnailPreferencesLoading = null;
 const groupThumbnailPreferences = {};
+/** Survives virtual-grid card recycle so folder/ZIP icons don't flash 3d.png forever. */
+const groupThumbnailCache = new Map();
+
+function childHasStoredThumbnail(child) {
+  if (!child) return false;
+  if (getPrimaryThumbnailFromString(child.thumbnail)) return true;
+  return Boolean(child.hasThumbnail) && Number(child.hasThumbnail) !== 0;
+}
+
+function rememberGroupThumbnails(groupKey, thumbnails) {
+  if (!groupKey) return;
+  const valid = (thumbnails || []).filter((t) => t && t !== '3d.png');
+  if (valid.length === 0) return;
+  groupThumbnailCache.set(groupKey, valid.slice(0, MAX_GROUP_CAROUSEL_THUMBNAILS));
+}
+
+function getCachedGroupThumbnails(groupKey) {
+  if (!groupKey || !groupThumbnailCache.has(groupKey)) return [];
+  return groupThumbnailCache.get(groupKey).slice();
+}
+
+function invalidateGroupThumbnailCache(groupKey = null) {
+  if (groupKey) groupThumbnailCache.delete(groupKey);
+  else groupThumbnailCache.clear();
+}
+
+async function filterNonEmptyThumbnails(thumbs) {
+  const out = [];
+  for (const t of thumbs || []) {
+    if (!t || t === '3d.png') continue;
+    if (await isMostlyEmptyThumbnailDataUrl(t)) continue;
+    out.push(t);
+  }
+  return out;
+}
 
 async function loadGroupThumbnailPreferences() {
   if (groupThumbnailPreferencesLoaded) return;
@@ -19663,21 +19797,31 @@ function buildParentModelLayoutRows(displayRecords, columns, view, itemHeight, p
   return { rows, totalHeight };
 }
 
+/** Cap group-card carousels so large folders don't become 1/500+ counters. */
+const MAX_GROUP_CAROUSEL_THUMBNAILS = 12;
+/** Cap the manage-thumbnails picker; one primary image per child is enough. */
+const MAX_GROUP_MANAGE_THUMBNAILS = 48;
+
+function getPrimaryThumbnailFromString(thumbnailString) {
+  if (!thumbnailString || thumbnailString === '3d.png') return null;
+  const primary = String(thumbnailString)
+    .split('::')
+    .find((t) => t && t !== '3d.png');
+  return primary || null;
+}
+
 function getParentModelThumbnails(children, groupKey = '') {
   const thumbnails = [];
   const seen = new Set();
 
-  (children || []).forEach(child => {
-    if (!child.thumbnail || child.thumbnail === '3d.png') return;
-    String(child.thumbnail)
-      .split('::')
-      .filter(t => t && t !== '3d.png')
-      .forEach(t => {
-        if (seen.has(t)) return;
-        seen.add(t);
-        thumbnails.push(t);
-      });
-  });
+  // One primary thumbnail per child — not every embedded 3MF image.
+  for (const child of children || []) {
+    if (thumbnails.length >= MAX_GROUP_CAROUSEL_THUMBNAILS) break;
+    const primary = getPrimaryThumbnailFromString(child.thumbnail);
+    if (!primary || seen.has(primary)) continue;
+    seen.add(primary);
+    thumbnails.push(primary);
+  }
 
   const preferred = groupThumbnailPreferences[groupKey];
   if (preferred) {
@@ -19685,6 +19829,11 @@ function getParentModelThumbnails(children, groupKey = '') {
     if (preferredIndex > 0) {
       thumbnails.splice(preferredIndex, 1);
       thumbnails.unshift(preferred);
+    } else if (preferredIndex < 0 && preferred !== '3d.png') {
+      thumbnails.unshift(preferred);
+      if (thumbnails.length > MAX_GROUP_CAROUSEL_THUMBNAILS) {
+        thumbnails.length = MAX_GROUP_CAROUSEL_THUMBNAILS;
+      }
     }
   }
 
@@ -19762,74 +19911,111 @@ function updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, th
   updateBadge();
 }
 
-async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, children) {
-  if (!window.electron) return;
+async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, children, groupKey = '') {
+  if (!window.electron || !thumbnailWrap) return;
 
-  const parseThumbnailString = (thumbnailString) => {
-    if (!thumbnailString || thumbnailString === '3d.png') return [];
-    if (!thumbnailString.includes('::')) return [thumbnailString];
-    return thumbnailString.split('::').filter(Boolean);
+  const generation = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  thumbnailWrap.dataset.hydrateGen = generation;
+  const isStale = () =>
+    thumbnailWrap.dataset.hydrateGen !== generation || !thumbnailWrap.isConnected;
+
+  const applyThumbs = async (thumbs, { paint = true } = {}) => {
+    const valid = await filterNonEmptyThumbnails(thumbs);
+    if (valid.length === 0) return false;
+    rememberGroupThumbnails(groupKey, valid);
+    if (paint && !isStale()) {
+      updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, valid);
+    }
+    return true;
   };
 
-  const thumbnails = getParentModelThumbnails(children);
-  const seen = new Set(thumbnails);
-  const candidates = (children || []).filter(child => child.filePath);
-
-  if (thumbnails.length > 0) {
-    updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails);
+  // Grid rows omit thumbnail blobs — prefer cache, then any inline data, then IPC.
+  // Drop clipped/transparent leftovers from the old far-plane bug.
+  let thumbnails = await filterNonEmptyThumbnails(getCachedGroupThumbnails(groupKey));
+  if (thumbnails.length === 0) {
+    invalidateGroupThumbnailCache(groupKey);
+    thumbnails = await filterNonEmptyThumbnails(
+      getParentModelThumbnails(children, groupKey)
+    );
   }
+  const seen = new Set(thumbnails);
+  if (thumbnails.length > 0) {
+    await applyThumbs(thumbnails);
+  }
+  if (thumbnails.length >= MAX_GROUP_CAROUSEL_THUMBNAILS) return;
 
-  for (const child of candidates) {
+  const candidates = (children || []).filter((child) => child.filePath);
+  const withStored = candidates.filter((c) => childHasStoredThumbnail(c));
+  const withoutStored = candidates.filter((c) => !childHasStoredThumbnail(c));
+  const ordered = withStored.concat(withoutStored);
+
+  const fetchPrimaryForChild = async (child) => {
+    const tryThumb = async (value) => {
+      const primary = getPrimaryThumbnailFromString(value) ||
+        (value && value !== '3d.png' ? value : null);
+      if (!primary) return null;
+      if (await isMostlyEmptyThumbnailDataUrl(primary)) return null;
+      return primary;
+    };
+
+    const inline = await tryThumb(child.thumbnail);
+    if (inline) return inline;
     try {
-      // First fallback: pull full model record and parse thumbnail blob directly.
+      if (window.electron.getThumbnail) {
+        const single = await window.electron.getThumbnail(child.filePath);
+        const primary = await tryThumb(single);
+        if (primary) return primary;
+      }
       if (window.electron.getModel) {
         const fullModel = await window.electron.getModel(child.filePath);
-        const directThumbnails = parseThumbnailString(fullModel?.thumbnail).filter(t => t && t !== '3d.png');
-        directThumbnails.forEach(t => {
-          if (seen.has(t)) return;
-          seen.add(t);
-          thumbnails.push(t);
-        });
-      }
-
-      const childThumbnails = window.electron.getAllThumbnails
-        ? await window.electron.getAllThumbnails(child.filePath)
-        : [];
-      let validChildThumbnails = (childThumbnails || [])
-        .filter(t => t && t !== '3d.png')
-      
-      if (validChildThumbnails.length === 0 && window.electron.getThumbnail) {
-        const singleThumbnail = await window.electron.getThumbnail(child.filePath);
-        if (singleThumbnail && singleThumbnail !== '3d.png') {
-          validChildThumbnails = [singleThumbnail];
-        }
-      }
-
-      validChildThumbnails.forEach(t => {
-        if (seen.has(t)) return;
-        seen.add(t);
-        thumbnails.push(t);
-      });
-
-      if (thumbnails.length > 0) {
-        updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails);
+        return tryThumb(fullModel?.thumbnail);
       }
     } catch (error) {
-      // Best-effort only; group cards can render with the placeholder while thumbnails load.
+      // Best-effort
+    }
+    return null;
+  };
+
+  const firstWave = ordered.slice(0, Math.min(6, MAX_GROUP_CAROUSEL_THUMBNAILS));
+  if (firstWave.length > 0) {
+    const results = await Promise.all(firstWave.map((child) => fetchPrimaryForChild(child)));
+    if (isStale()) return;
+    for (const primary of results) {
+      if (!primary || seen.has(primary)) continue;
+      seen.add(primary);
+      thumbnails.push(primary);
+      if (thumbnails.length >= MAX_GROUP_CAROUSEL_THUMBNAILS) break;
+    }
+    if (thumbnails.length > 0) {
+      await applyThumbs(thumbnails);
     }
   }
+  if (thumbnails.length >= MAX_GROUP_CAROUSEL_THUMBNAILS || isStale()) return;
 
-  // Last-resort fallback: render a thumbnail from the first child model directly.
-  // This mirrors the model-card behavior when database thumbnails are missing.
-  if (thumbnails.length === 0 && candidates.length > 0 && typeof renderModelToPNG === 'function') {
+  for (const child of ordered.slice(firstWave.length)) {
+    if (isStale()) return;
+    if (thumbnails.length >= MAX_GROUP_CAROUSEL_THUMBNAILS) break;
+    const primary = await fetchPrimaryForChild(child);
+    if (!primary || seen.has(primary)) continue;
+    seen.add(primary);
+    thumbnails.push(primary);
+    await applyThumbs(thumbnails);
+  }
+
+  if (!isStale() && thumbnails.length > 0) {
+    await applyThumbs(thumbnails);
+    return;
+  }
+
+  if (!isStale() && thumbnails.length === 0 && candidates.length > 0 && typeof renderModelToPNG === 'function') {
     try {
       const tempContainer = document.createElement('div');
       const rendered = await renderModelToPNG(candidates[0].filePath, tempContainer, null);
-      if (rendered && rendered !== '3d.png') {
+      if (isStale()) return;
+      if (rendered && rendered !== '3d.png' && !(await isMostlyEmptyThumbnailDataUrl(rendered))) {
         thumbnails.push(rendered);
-        updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, thumbnails);
+        await applyThumbs(thumbnails);
         if (window.electron.saveThumbnail) {
-          // Persist so future renders can use DB-backed thumbnails.
           await window.electron.saveThumbnail(candidates[0].filePath, rendered);
         }
       }
@@ -19840,34 +20026,34 @@ async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, ch
 }
 
 async function collectThumbnailsForGroup(groupRecord) {
-  const parseThumbnailString = (thumbnailString) => {
-    if (!thumbnailString || thumbnailString === '3d.png') return [];
-    if (!thumbnailString.includes('::')) return [thumbnailString];
-    return thumbnailString.split('::').filter(Boolean);
-  };
-
   const thumbnails = [];
   const seen = new Set();
   const addThumb = (thumb) => {
-    if (!thumb || thumb === '3d.png' || seen.has(thumb)) return;
+    if (!thumb || thumb === '3d.png' || seen.has(thumb)) return false;
+    if (thumbnails.length >= MAX_GROUP_MANAGE_THUMBNAILS) return false;
     seen.add(thumb);
     thumbnails.push(thumb);
+    return true;
   };
 
   for (const child of (groupRecord.children || [])) {
-    (parseThumbnailString(child.thumbnail) || []).forEach(addThumb);
+    if (thumbnails.length >= MAX_GROUP_MANAGE_THUMBNAILS) break;
+
+    // One representative image per child for the picker.
+    const inlinePrimary = getPrimaryThumbnailFromString(child.thumbnail);
+    if (inlinePrimary) {
+      addThumb(inlinePrimary);
+      continue;
+    }
+
     try {
-      if (window.electron?.getModel) {
-        const full = await window.electron.getModel(child.filePath);
-        (parseThumbnailString(full?.thumbnail) || []).forEach(addThumb);
-      }
-      if (window.electron?.getAllThumbnails) {
-        const all = await window.electron.getAllThumbnails(child.filePath);
-        (all || []).forEach(addThumb);
-      }
       if (window.electron?.getThumbnail) {
         const single = await window.electron.getThumbnail(child.filePath);
-        addThumb(single);
+        if (addThumb(getPrimaryThumbnailFromString(single) || single)) continue;
+      }
+      if (window.electron?.getModel) {
+        const full = await window.electron.getModel(child.filePath);
+        addThumb(getPrimaryThumbnailFromString(full?.thumbnail));
       }
     } catch (error) {
       // keep collecting from remaining children
@@ -19880,6 +20066,11 @@ async function collectThumbnailsForGroup(groupRecord) {
     if (preferredIndex > 0) {
       thumbnails.splice(preferredIndex, 1);
       thumbnails.unshift(preferred);
+    } else if (preferredIndex < 0 && preferred !== '3d.png') {
+      thumbnails.unshift(preferred);
+      if (thumbnails.length > MAX_GROUP_MANAGE_THUMBNAILS) {
+        thumbnails.length = MAX_GROUP_MANAGE_THUMBNAILS;
+      }
     }
   }
 
@@ -20099,6 +20290,7 @@ async function showManageGroupThumbnailsModal(groupRecord) {
 
     const setAsActive = async () => {
       groupThumbnailPreferences[groupRecord.groupKey] = thumbnail;
+      rememberGroupThumbnails(groupRecord.groupKey, [thumbnail, ...getCachedGroupThumbnails(groupRecord.groupKey)]);
       await saveGroupThumbnailPreferences();
       const container = document.querySelector('.file-grid');
       if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
@@ -20254,9 +20446,15 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     thumbnailWrap.appendChild(groupBadge);
   }
 
-  const groupThumbnails = getParentModelThumbnails(groupRecord.children, groupRecord.groupKey);
-  updateParentModelGroupThumbnailCarousel(thumbnailWrap, thumbnailImg, groupThumbnails);
-  hydrateParentModelGroupThumbnails(thumbnailWrap, thumbnailImg, groupRecord.children);
+  // Grid queries omit thumbnail blobs on children — use cache so icons survive card recycle.
+  let groupThumbnails = getCachedGroupThumbnails(groupRecord.groupKey);
+  if (groupThumbnails.length === 0) {
+    groupThumbnails = getParentModelThumbnails(groupRecord.children, groupRecord.groupKey);
+  }
+  if (groupThumbnails.length > 0) {
+    updateParentModelGroupThumbnailCarousel(thumbnailWrap, thumbnailImg, groupThumbnails);
+  }
+  hydrateParentModelGroupThumbnails(thumbnailWrap, thumbnailImg, groupRecord.children, groupRecord.groupKey);
 
   const details = document.createElement('div');
   details.className = 'parent-model-group-details';
@@ -20291,13 +20489,15 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   titleRow.appendChild(title);
 
   const printedCount = groupRecord.children.filter(child => Boolean(child.printed)).length;
+  const childCount = groupRecord.children.length;
   const meta = document.createElement('div');
   meta.className = 'parent-model-group-meta';
   if (groupRecord?.groupKind === 'bundle') {
     const kindLabel = bundleKind === 'zip' ? 'zip archive' : 'folder';
-    meta.textContent = `${groupRecord.children.length} part${groupRecord.children.length === 1 ? '' : 's'} • ${kindLabel} • ${printedCount}/${groupRecord.children.length} printed • right-click Preview for 3D`;
+    meta.textContent = `${childCount} part${childCount === 1 ? '' : 's'} • ${kindLabel} • ${printedCount}/${childCount} printed`;
+    meta.title = 'Right-click for Preview and more options';
   } else {
-    meta.textContent = `${groupRecord.children.length} model${groupRecord.children.length === 1 ? '' : 's'} • ${printedCount}/${groupRecord.children.length} printed`;
+    meta.textContent = `${childCount} model${childCount === 1 ? '' : 's'} • ${printedCount}/${childCount} printed`;
   }
 
   details.appendChild(titleRow);

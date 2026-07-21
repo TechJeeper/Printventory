@@ -100,7 +100,7 @@ RUN rm -rf node_modules/better-sqlite3/build || true && \
     npx electron-builder install-app-deps
 
 # Copy application files
-COPY main.js preload.js renderer.js index.html styles.css preview-wall.css ./
+COPY main.js bundle-keys.js preload.js renderer.js index.html styles.css preview-wall.css ./
 COPY server-bridge.js scan-worker.js parse-worker.js ./
 COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
 COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js thumbnail-compress.js ./
@@ -110,7 +110,7 @@ COPY *.png *.jpg *.bmp ./
 COPY guide/ ./guide/
 
 # Fail the build if required app modules were omitted from COPY above
-RUN for f in thumbnail-compress.js threemf-mesh-extract.js; do \
+RUN for f in bundle-keys.js thumbnail-compress.js threemf-mesh-extract.js; do \
       test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
     done
 

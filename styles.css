@@ -478,6 +478,16 @@ button:disabled {
   font-size: 0.92rem;
 }
 
+/* `.model-details div` adds 10px under every nested div — reset for bundle panel. */
+.bundle-details div {
+  margin-bottom: 0;
+}
+
+.bundle-details > .form-group,
+.bundle-details > .bundle-details-stats {
+  margin-bottom: 12px;
+}
+
 .bundle-details-path-row {
   display: flex;
   gap: 8px;
@@ -1592,6 +1602,22 @@ main {
 .parent-model-group-meta {
   color: rgba(255, 255, 255, 0.72);
   font-size: 12px;
+  line-height: 1.35;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parent-model-group-detailed .parent-model-group-meta,
+.parent-model-group-preview .parent-model-group-meta {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-align: center;
+  padding: 0 4px;
+  box-sizing: border-box;
 }
 
 .parent-model-group-preview .parent-model-group-meta {

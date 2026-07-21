@@ -4,6 +4,17 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.10] - 2026-07-21
+
+### Fixed
+
+- Folder/ZIP group cards no longer aggregate every child thumbnail into a runaway `1/539`-style carousel; carousel is capped (12), uses one primary image per part, and hydrates without per-child badge updates or `getAllThumbnails` storms (also speeds up startup on large libraries).
+- Bundle group card meta text no longer appends the long “right-click Preview” hint inline; overflow is clipped cleanly in list/detailed/preview layouts.
+- Bundle details sidebar spacing no longer inherits the blanket `.model-details div` margin on every nested element.
+- Folder/ZIP group **icons** no longer stay stuck on the generic `3d.png` placeholder: grid rows omit thumbnail blobs, so groups now prioritize `hasThumbnail` children, fetch the first wave in parallel, and cache results across virtual-grid recycles (fixes blank zip/folder icons and reduces long startup churn).
+- Large flat STLs (e.g. ~400mm plates) no longer save blank/transparent grid thumbnails: thumbnail camera far plane now matches preview, framing centers after orientation, and clipped empty thumbs are detected and regenerated.
+- Docker image now includes `bundle-keys.js` (required for folder/ZIP bundle grouping in server mode).
+
 ## [2.1.9] - 2026-07-19
 
 ### Fixed
