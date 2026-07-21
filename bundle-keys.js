@@ -1,5 +1,6 @@
 /**
- * Derive folder / zip bundle identity from a model filePath.
+ * Derive zip bundle identity from a model filePath.
+ * Folder/directory siblings are not bundled — only archive entries (path.zip::entry).
  * Shared by main process (scan, save) and tests.
  */
 const path = require('path');
@@ -29,17 +30,7 @@ function deriveBundleFromFilePath(filePath) {
     };
   }
 
-  const dir = path.dirname(filePath);
-  const normalizedDir = normalizePath(dir);
-  if (!normalizedDir || normalizedDir === '.' || normalizedDir === '/') {
-    return empty;
-  }
-  const label = path.basename(normalizedDir) || normalizedDir;
-  return {
-    bundleKey: `folder:${normalizedDir.toLowerCase()}`,
-    bundleLabel: label,
-    bundleKind: 'folder',
-  };
+  return empty;
 }
 
 module.exports = {

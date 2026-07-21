@@ -1493,30 +1493,36 @@ function deriveBundleFieldsForModel(model) {
   if (!filePath || filePath.startsWith('url::')) {
     return { bundleKey: '', bundleLabel: '', bundleKind: '' };
   }
-  if (filePath.includes('::')) {
-    const zipPath = filePath.split('::')[0];
-    const normalized = normalizePathForComparison(zipPath).toLowerCase();
-    const parts = normalized.split('/').filter(Boolean);
-    const label = parts.length ? parts[parts.length - 1] : zipPath;
-    return { bundleKey: `zip:${normalized}`, bundleLabel: label, bundleKind: 'zip' };
-  }
-  const normalized = normalizePathForComparison(filePath);
-  const parts = normalized.split('/').filter(Boolean);
-  if (parts.length < 2) {
+  // Only ZIP archive entries are bundled; plain directory siblings stay individual.
+  if (!filePath.includes('::')) {
     return { bundleKey: '', bundleLabel: '', bundleKind: '' };
   }
-  parts.pop();
-  const dir = parts.join('/').toLowerCase();
-  const label = parts[parts.length - 1] || dir;
-  return { bundleKey: `folder:${dir}`, bundleLabel: label, bundleKind: 'folder' };
+  const zipPath = filePath.split('::')[0];
+  const normalized = normalizePathForComparison(zipPath).toLowerCase();
+  const parts = normalized.split('/').filter(Boolean);
+  const label = parts.length ? parts[parts.length - 1] : zipPath;
+  return { bundleKey: `zip:${normalized}`, bundleLabel: label, bundleKind: 'zip' };
+}
+
+function isZipBundleModel(model) {
+  const kind = String(model?.bundleKind || '').trim().toLowerCase();
+  if (kind === 'zip') return true;
+  if (kind === 'folder') return false;
+  const key = String(model?.bundleKey || '').trim().toLowerCase();
+  if (key.startsWith('zip:')) return true;
+  if (key.startsWith('folder:')) return false;
+  const filePath = model?.filePath || '';
+  return Boolean(filePath.includes('::') && !filePath.startsWith('url::'));
 }
 
 function getBundleGroupLabel(model) {
+  if (!isZipBundleModel(model)) return '';
   if (model?.bundleLabel) return String(model.bundleLabel).trim();
   return deriveBundleFieldsForModel(model).bundleLabel;
 }
 
 function getBundleGroupKey(model) {
+  if (!isZipBundleModel(model)) return '';
   if (model?.bundleKey) return String(model.bundleKey).trim().toLowerCase();
   return deriveBundleFieldsForModel(model).bundleKey;
 }

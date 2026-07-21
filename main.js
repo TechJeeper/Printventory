@@ -2193,7 +2193,7 @@ function migrateRatingFavoriteColumns() {
   }
 }
 
-/** Folder / zip bundle columns for grouped browsing. */
+/** Zip bundle columns for grouped browsing (folder siblings are not bundled). */
 function migrateBundleColumns() {
   try {
     console.log('Checking for bundle column migration...');
@@ -2211,6 +2211,17 @@ function migrateBundleColumns() {
       }
     }
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_bundlekey ON models(bundleKey)').run();
+
+    // Clear legacy folder bundles — only ZIP archives should group via bundle fields.
+    const cleared = db.prepare(`
+      UPDATE models
+      SET bundleKey = NULL, bundleLabel = NULL, bundleKind = NULL
+      WHERE bundleKind = 'folder'
+         OR (bundleKey IS NOT NULL AND lower(bundleKey) LIKE 'folder:%')
+    `).run();
+    if (cleared.changes > 0) {
+      console.log(`Cleared folder bundle fields for ${cleared.changes} model(s)`);
+    }
 
     const rows = db.prepare(
       "SELECT id, filePath FROM models WHERE bundleKey IS NULL OR bundleKey = ''"

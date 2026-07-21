@@ -14,12 +14,12 @@ function test(name, fn) {
   }
 }
 
-test('folder bundle from sibling STLs', () => {
+test('directory siblings are not bundled', () => {
   const stem = deriveBundleFromFilePath('/Downloads/flower-model/stem.stl');
   const petal = deriveBundleFromFilePath('/Downloads/flower-model/petal.stl');
-  assert.strictEqual(stem.bundleKind, 'folder');
-  assert.strictEqual(stem.bundleLabel, 'flower-model');
-  assert.strictEqual(stem.bundleKey, petal.bundleKey);
+  assert.strictEqual(stem.bundleKind, '');
+  assert.strictEqual(stem.bundleKey, '');
+  assert.strictEqual(petal.bundleKey, '');
 });
 
 test('zip bundle from archive entry', () => {
