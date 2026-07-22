@@ -1848,13 +1848,15 @@ if (!gotTheLock) {
       applyDockerEnvSettingIfNeeded('stlHome', process.env.STL_HOME);
       applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
 
-      // Clear leftover zip-extract temps from prior runs (OS temp only)
-      try {
-        ensureExtractTempDir();
-        await cleanupExtractTempDirectory({ maxAgeMs: 0 });
-      } catch (tempCleanupErr) {
-        console.warn('Extract temp cleanup on startup failed:', tempCleanupErr.message);
-      }
+      // Clear leftover zip-extract temps off the critical path (can readdir a busy OS temp)
+      setImmediate(() => {
+        try {
+          ensureExtractTempDir();
+        } catch (_) { /* ignore */ }
+        cleanupExtractTempDirectory({ maxAgeMs: 0, includeLegacyOsTempRoot: false }).catch((tempCleanupErr) => {
+          console.warn('Extract temp cleanup on startup failed:', tempCleanupErr.message);
+        });
+      });
 
       // Server mode: start HTTP server and create hidden window for IPC
       if (isServerMode) {
@@ -2212,6 +2214,15 @@ function migrateBundleColumns() {
     }
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_bundlekey ON models(bundleKey)').run();
 
+    // After the one-shot zip-only migration, skip the heavy folder-clear + backfill work.
+    // New scans/saves already persist bundle fields; remaining NULL keys are intentional for non-zips.
+    const migrationDone = db.prepare(
+      'SELECT value FROM settings WHERE key = ?'
+    ).get('bundleMigrationZipOnlyComplete')?.value;
+    if (migrationDone === '1') {
+      return true;
+    }
+
     // Clear legacy folder bundles — only ZIP archives should group via bundle fields.
     const cleared = db.prepare(`
       UPDATE models
@@ -2223,9 +2234,14 @@ function migrateBundleColumns() {
       console.log(`Cleared folder bundle fields for ${cleared.changes} model(s)`);
     }
 
-    const rows = db.prepare(
-      "SELECT id, filePath FROM models WHERE bundleKey IS NULL OR bundleKey = ''"
-    ).all();
+    // Only backfill zip entries still missing keys. Non-zip models correctly stay NULL;
+    // selecting all NULL rows re-wrote the whole library on every cold start.
+    const rows = db.prepare(`
+      SELECT id, filePath FROM models
+      WHERE (bundleKey IS NULL OR bundleKey = '')
+        AND instr(filePath, '::') > 0
+        AND filePath NOT LIKE 'url::%'
+    `).all();
     if (rows.length > 0) {
       const update = db.prepare(
         'UPDATE models SET bundleKey = ?, bundleLabel = ?, bundleKind = ? WHERE id = ?'
@@ -2233,12 +2249,18 @@ function migrateBundleColumns() {
       const backfill = db.transaction(() => {
         for (const row of rows) {
           const bundle = deriveBundleFromFilePath(row.filePath);
-          update.run(bundle.bundleKey || null, bundle.bundleLabel || null, bundle.bundleKind || null, row.id);
+          if (!bundle.bundleKey) continue;
+          update.run(bundle.bundleKey, bundle.bundleLabel || null, bundle.bundleKind || null, row.id);
         }
       });
       backfill();
-      console.log(`Backfilled bundle fields for ${rows.length} model(s)`);
+      console.log(`Backfilled bundle fields for ${rows.length} zip model(s)`);
     }
+
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('bundleMigrationZipOnlyComplete', '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run();
     return true;
   } catch (error) {
     console.error('Error migrating bundle columns:', error);
@@ -7630,7 +7652,11 @@ function scheduleExtractTempCleanupMany(filePaths, delayMs = EXTRACT_TEMP_SLICER
 }
 
 /** Remove leftover extract temps (startup / quit). Optionally only files older than maxAgeMs. */
-async function cleanupExtractTempDirectory({ maxAgeMs = 0 } = {}) {
+async function cleanupExtractTempDirectory({
+  maxAgeMs = 0,
+  // Full OS TEMP readdir is slow on busy machines — skip on cold start; still run on quit.
+  includeLegacyOsTempRoot = true,
+} = {}) {
   const now = Date.now();
   const dirs = new Set([getExtractTempDir(), path.join(getOsTempRoot(), EXTRACT_TEMP_DIR_NAME)]);
   try {
@@ -7664,8 +7690,10 @@ async function cleanupExtractTempDirectory({ maxAgeMs = 0 } = {}) {
   for (const dir of dirs) {
     await sweepDir(dir);
   }
-  // Legacy flat printventory_* files written directly under OS temp
-  await sweepDir(getOsTempRoot());
+  // Legacy flat printventory_* files written directly under OS temp (quit / explicit only)
+  if (includeLegacyOsTempRoot) {
+    await sweepDir(getOsTempRoot());
+  }
 }
 
 // Helper function to extract model from zip to temp file or specified destination

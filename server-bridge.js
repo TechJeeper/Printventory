@@ -56,15 +56,104 @@
   const maxReconnectAttempts = 5;
   const pendingRequests = new Map();
   let requestIdCounter = 0;
+  let connectInFlight = false;
 
   // Promise that resolves when WebSocket connects (so first load doesn't run before bridge is ready)
   let connectionReadyResolve;
-  const connectionReady = new Promise(function(resolve) {
+  let connectionReady = new Promise(function(resolve) {
     connectionReadyResolve = resolve;
   });
   window.electron.whenConnected = function() {
     return connectionReady;
   };
+
+  function resetConnectionReady() {
+    connectionReady = new Promise(function(resolve) {
+      connectionReadyResolve = resolve;
+    });
+  }
+
+  function markConnected(socket) {
+    console.log('WebSocket connected to Printventory server');
+    console.log('[Bridge] WebSocket readyState after open:', socket ? socket.readyState : ws?.readyState);
+    reconnectAttempts = 0;
+    connectInFlight = false;
+    if (connectionReadyResolve) {
+      connectionReadyResolve();
+      connectionReadyResolve = null;
+    }
+  }
+
+  // Wait for an open socket instead of a fixed short timeout (remote Docker often needs >500ms).
+  // Also tolerates brief close/reconnect cycles (e.g. container OOM restart) within the timeout window.
+  function ensureConnected(timeoutMs) {
+    timeoutMs = typeof timeoutMs === 'number' ? timeoutMs : 15000;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    connect();
+    return new Promise(function(resolve, reject) {
+      let settled = false;
+      let pollTimer = null;
+      const deadline = Date.now() + timeoutMs;
+      const timer = setTimeout(function() {
+        finish(function() {
+          reject(new Error('WebSocket connection failed'));
+        });
+      }, timeoutMs);
+
+      function finish(fn) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (pollTimer) clearTimeout(pollTimer);
+        if (ws) {
+          ws.removeEventListener('open', onOpen);
+        }
+        fn();
+      }
+      function onOpen() {
+        finish(resolve);
+      }
+      function attachToCurrentSocket() {
+        if (settled) return;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          finish(resolve);
+          return;
+        }
+        if (ws) {
+          ws.removeEventListener('open', onOpen);
+          ws.addEventListener('open', onOpen);
+        }
+      }
+      function poll() {
+        if (settled) return;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          finish(resolve);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          finish(function() {
+            reject(new Error('WebSocket connection failed'));
+          });
+          return;
+        }
+        if (reconnectAttempts >= maxReconnectAttempts && (!ws || ws.readyState === WebSocket.CLOSED)) {
+          finish(function() {
+            reject(new Error('WebSocket connection unavailable'));
+          });
+          return;
+        }
+        // Keep trying connect while waiting (no-ops if already connecting/open)
+        connect();
+        attachToCurrentSocket();
+        pollTimer = setTimeout(poll, 250);
+      }
+
+      attachToCurrentSocket();
+      pollTimer = setTimeout(poll, 250);
+    });
+  }
 
   // Define send() method - will be enhanced when WebSocket connects
   let sendFunction = function(channel, ...args) {
@@ -147,20 +236,29 @@
   
   function connect() {
     try {
+      // Avoid stacking sockets: concurrent makeIpcCall used to overwrite `ws` while CONNECTING,
+      // which produced "connected" logs with readyState 0 and spurious "connection failed" errors.
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      if (connectInFlight) {
+        return;
+      }
+      connectInFlight = true;
       console.log('[Bridge] Attempting WebSocket connection to:', wsUrl);
       ws = new WebSocket(wsUrl);
+      const socket = ws;
       
-      ws.onopen = () => {
-        console.log('WebSocket connected to Printventory server');
-        console.log('[Bridge] WebSocket readyState after open:', ws.readyState);
-        reconnectAttempts = 0;
-        if (connectionReadyResolve) {
-          connectionReadyResolve();
-          connectionReadyResolve = null;
+      socket.onopen = () => {
+        if (ws !== socket) {
+          // Stale socket; a newer connect() replaced us.
+          try { socket.close(); } catch (e) { /* ignore */ }
+          return;
         }
+        markConnected(socket);
       };
       
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
         console.log('[Bridge] Received WebSocket message:', event.data.substring(0, 200));
         try {
           const data = JSON.parse(event.data);
@@ -236,19 +334,31 @@
         }
       };
       
-      ws.onerror = (error) => {
+      socket.onerror = (error) => {
         console.error('[Bridge] WebSocket error:', error);
+        if (ws === socket) {
+          connectInFlight = false;
+        }
       };
       
-      ws.onclose = (event) => {
+      socket.onclose = (event) => {
         console.log('[Bridge] WebSocket disconnected. Code:', event.code, 'Reason:', event.reason, 'Clean:', event.wasClean);
-        if (reconnectAttempts < maxReconnectAttempts) {
-          reconnectAttempts++;
-          console.log('[Bridge] Reconnect attempt', reconnectAttempts, 'in', 1000 * reconnectAttempts, 'ms');
-          setTimeout(connect, 1000 * reconnectAttempts);
+        if (ws === socket) {
+          connectInFlight = false;
+          ws = null;
+          // Allow future whenConnected() callers to wait for reconnect
+          if (!connectionReadyResolve) {
+            resetConnectionReady();
+          }
+          if (reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            console.log('[Bridge] Reconnect attempt', reconnectAttempts, 'in', 1000 * reconnectAttempts, 'ms');
+            setTimeout(connect, 1000 * reconnectAttempts);
+          }
         }
       };
     } catch (error) {
+      connectInFlight = false;
       console.error('Error connecting WebSocket:', error);
     }
   }
@@ -257,24 +367,15 @@
   function makeIpcCall(channel, ...args) {
     console.log('[Bridge] makeIpcCall:', channel, 'args:', args?.length);
     
-    // If WebSocket is not connected, try to connect
+    // If WebSocket is not connected, wait for open (or reconnect) instead of failing after 500ms
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.log('[Bridge] WebSocket not open, state:', ws?.readyState, 'reconnectAttempts:', reconnectAttempts);
-      if (reconnectAttempts < maxReconnectAttempts) {
-        connect();
-        // Wait a bit for connection
-        return new Promise((resolve, reject) => {
-          setTimeout(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              makeIpcCall(channel, ...args).then(resolve).catch(reject);
-            } else {
-              reject(new Error('WebSocket connection failed'));
-            }
-          }, 500);
-        });
-      } else {
+      if (reconnectAttempts >= maxReconnectAttempts && (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING)) {
         return Promise.reject(new Error('WebSocket connection unavailable'));
       }
+      return ensureConnected().then(function() {
+        return makeIpcCall(channel, ...args);
+      });
     }
     
     const id = `req_${++requestIdCounter}_${Date.now()}`;
