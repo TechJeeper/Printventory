@@ -3056,6 +3056,19 @@ function applyPathMetadataFromSegments(scanRootPath, filePaths) {
   }
 }
 
+/** Find a zip central-directory entry; normalize \ vs / (Windows vs zip standard). */
+function findZipEntry(entries, entryPath) {
+  if (!entries || !entryPath) return null;
+  if (entries[entryPath]) return entries[entryPath];
+  const normalized = entryPath.replace(/\\/g, '/');
+  if (entries[normalized]) return entries[normalized];
+  for (const entry of Object.values(entries)) {
+    if (!entry || entry.isDirectory) continue;
+    if (String(entry.name || '').replace(/\\/g, '/') === normalized) return entry;
+  }
+  return null;
+}
+
 // Helper function to check if a zip entry exists
 async function checkZipEntryExists(zipPath, entryPath) {
   try {
@@ -3064,9 +3077,12 @@ async function checkZipEntryExists(zipPath, entryPath) {
     }
     const StreamZip = require('node-stream-zip');
     const zip = new StreamZip.async({ file: zipPath });
-    const entries = await zip.entries();
-    await zip.close();
-    return entries[entryPath] !== undefined;
+    try {
+      const entries = await zip.entries();
+      return findZipEntry(entries, entryPath) != null;
+    } finally {
+      await zip.close();
+    }
   } catch (error) {
     console.error(`Error checking zip entry existence for ${zipPath}::${entryPath}:`, error);
     return false;
@@ -10034,15 +10050,53 @@ const openFileInSlicerHandler = async (event, options = {}) => {
 ipcMain.handle('open-file-in-slicer', openFileInSlicerHandler);
 ipcHandlerRegistry.set('open-file-in-slicer', openFileInSlicerHandler);
 
-ipcMain.handle('get-file-stats', async (event, filePath) => {
+const getFileStatsHandler = async (event, filePath) => {
   try {
+    // URL-only models (Chrome extension) have no local file
+    if (isUrlModel(filePath)) {
+      return { size: 0, mtimeMs: 0 };
+    }
+
+    // Virtual zip paths: archive.zip::entry/path.stl — cannot fs.stat the combined path
+    const pathInfo = parseZipPath(filePath);
+    if (pathInfo.isZipEntry) {
+      if (!fs.existsSync(pathInfo.zipPath)) {
+        const err = new Error(`ENOENT: no such file or directory, stat '${pathInfo.zipPath}'`);
+        err.code = 'ENOENT';
+        throw err;
+      }
+      const StreamZip = require('node-stream-zip');
+      const zip = new StreamZip.async({ file: pathInfo.zipPath });
+      try {
+        const entries = await zip.entries();
+        const entry = findZipEntry(entries, pathInfo.entryPath);
+        if (!entry) {
+          const err = new Error(
+            `ENOENT: no such file or directory, zip entry '${pathInfo.entryPath}' in '${pathInfo.zipPath}'`
+          );
+          err.code = 'ENOENT';
+          throw err;
+        }
+        const mtimeMs = entry.time ? Number(entry.time) : 0;
+        return {
+          size: entry.size,
+          mtime: mtimeMs ? new Date(mtimeMs) : new Date(0),
+          mtimeMs
+        };
+      } finally {
+        await zip.close();
+      }
+    }
+
     const stats = await fs.promises.stat(filePath);
     return stats;
   } catch (error) {
     console.error(`Error getting file stats for ${filePath}:`, error);
     throw error;
   }
-});
+};
+ipcMain.handle('get-file-stats', getFileStatsHandler);
+ipcHandlerRegistry.set('get-file-stats', getFileStatsHandler);
 
 // IPC handler for executing commands on client machine (for server mode Electron clients)
 // Note: In server mode, browser clients receive this as an event and handle it in renderer.js
