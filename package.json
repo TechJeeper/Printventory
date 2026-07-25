@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.1.13",
+  "version": "2.1.14",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {

@@ -4,6 +4,16 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.14] - 2026-07-25
+
+### Fixed
+
+- Fixed failed thumbnail regeneration
+
+### Changed
+
+- Prepare for 2.2 Public Release
+
 ## [2.1.13] - 2026-07-22
 
 ### Fixed

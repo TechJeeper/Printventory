@@ -1026,6 +1026,100 @@ function generateCorruptedPlaceholder() {
   }
 }
 
+/** True for failure art that must not be persisted (keeps hasThumbnail=0 so Docker can retry). */
+function isFailurePlaceholderThumbnail(thumb) {
+  if (!thumb || thumb === '3d.png') return true;
+  if (typeof thumb !== 'string' || !thumb.startsWith('data:image')) return false;
+  try {
+    if (thumb === generateCorruptedPlaceholder()) return true;
+    // Bulk-gen used to save typed STL/3MF/OBJ placeholders "to prevent future attempts"
+    for (const ext of ['stl', '3mf', 'obj']) {
+      if (thumb === generateTypedPlaceholder(ext)) return true;
+    }
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
+/**
+ * Primary thumbnail cache for grid cells (path -> data URL | null).
+ * Grid must never call getAllThumbnails — only the default thumb for visible rows.
+ * Cap keeps memory bounded for huge libraries.
+ */
+const PRIMARY_THUMBNAIL_CACHE = new Map();
+const PRIMARY_THUMBNAIL_CACHE_MAX = 800;
+
+function normalizeThumbCacheKey(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  return typeof normalizePathForComparison === 'function'
+    ? normalizePathForComparison(filePath)
+    : filePath.replace(/\\/g, '/').toLowerCase();
+}
+
+function getCachedPrimaryThumbnail(filePath) {
+  const key = normalizeThumbCacheKey(filePath);
+  if (!key || !PRIMARY_THUMBNAIL_CACHE.has(key)) return undefined;
+  return PRIMARY_THUMBNAIL_CACHE.get(key);
+}
+
+function setCachedPrimaryThumbnail(filePath, thumb) {
+  const key = normalizeThumbCacheKey(filePath);
+  if (!key) return;
+  if (PRIMARY_THUMBNAIL_CACHE.size >= PRIMARY_THUMBNAIL_CACHE_MAX && !PRIMARY_THUMBNAIL_CACHE.has(key)) {
+    const oldest = PRIMARY_THUMBNAIL_CACHE.keys().next().value;
+    PRIMARY_THUMBNAIL_CACHE.delete(oldest);
+  }
+  PRIMARY_THUMBNAIL_CACHE.set(key, thumb || null);
+}
+
+function invalidatePrimaryThumbnailCache(filePath = null) {
+  if (!filePath) {
+    PRIMARY_THUMBNAIL_CACHE.clear();
+    return;
+  }
+  PRIMARY_THUMBNAIL_CACHE.delete(normalizeThumbCacheKey(filePath));
+}
+
+/** Load only the default/primary thumbnail for a grid cell (never getAllThumbnails). */
+async function fetchPrimaryThumbnailForGrid(filePath) {
+  if (!filePath || !window.electron?.getThumbnail) return null;
+  const cached = getCachedPrimaryThumbnail(filePath);
+  if (cached !== undefined) return cached;
+  try {
+    const thumb = await window.electron.getThumbnail(filePath);
+    const valid =
+      thumb &&
+      thumb !== '3d.png' &&
+      typeof thumb === 'string' &&
+      thumb.startsWith('data:image') &&
+      !isFailurePlaceholderThumbnail(thumb)
+        ? thumb
+        : null;
+    if (valid && typeof isMostlyEmptyThumbnailDataUrl === 'function') {
+      if (await isMostlyEmptyThumbnailDataUrl(valid)) {
+        setCachedPrimaryThumbnail(filePath, null);
+        return null;
+      }
+    }
+    setCachedPrimaryThumbnail(filePath, valid);
+    return valid;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Only persist real renders — never corrupted/typed failure art. */
+async function saveThumbnailIfReal(filePath, thumbnail) {
+  if (!filePath || !thumbnail || thumbnail === '3d.png') return false;
+  if (isFailurePlaceholderThumbnail(thumbnail)) return false;
+  if (typeof isMostlyEmptyThumbnailDataUrl === 'function' && await isMostlyEmptyThumbnailDataUrl(thumbnail)) {
+    return false;
+  }
+  await window.electron.saveThumbnail(filePath, thumbnail);
+  invalidatePrimaryThumbnailCache(filePath);
+  setCachedPrimaryThumbnail(filePath, thumbnail);
+  return true;
+}
+
 async function loadModel(filePath, options = {}) {
   if (filePath && filePath.startsWith('url::')) {
     return null;
@@ -4809,10 +4903,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.updateScanStlHomeButtonVisibility().catch(() => {});
   }
 
-  // Adjust concurrency limits for server/Docker mode
+  // Docker/server: keep concurrency low — high parallelism + 30s IPC timeouts caused mass
+  // "corrupted"/STL placeholders that then got persisted as permanent thumbs.
   if (serverMode) {
-    MAX_CONCURRENT_RENDERS = 10;
-    console.log('Server mode detected: Increased MAX_CONCURRENT_RENDERS to', MAX_CONCURRENT_RENDERS);
+    MAX_CONCURRENT_RENDERS = 3;
+    MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
+    console.log('Server mode detected: Capped MAX_CONCURRENT_RENDERS to', MAX_CONCURRENT_RENDERS);
   }
 
   if (serverMode) {
@@ -5322,6 +5418,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (allModels.length > 0) {
                  // Purge existing thumbnails to force regeneration
                 await window.electron.purgeThumbnails();
+                invalidatePrimaryThumbnailCache();
                 
                 // Regenerate thumbnails for all models
                 await generateThumbnailsForModels(allModels);
@@ -7211,6 +7308,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
       if (userChoice === 'Yes') {
         await window.electron.purgeThumbnails();
+        invalidatePrimaryThumbnailCache();
         await generateThumbnailsForModels(allModels);
         isRegeneratingThumbnails = false;
         await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
@@ -7468,6 +7566,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Handle thumbnail deleted event - refresh grid to show updated thumbnail
   window.electron.on('thumbnail-deleted', async (data) => {
+    if (data?.filePath) invalidatePrimaryThumbnailCache(data.filePath);
     if (data && data.filePath) {
       // Use a small delay to ensure database write is complete
       setTimeout(async () => {
@@ -9821,24 +9920,18 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
         
-        // For 3MF files, try to get thumbnail from database if not found in model.thumbnail
-        // Load asynchronously to avoid blocking
+        // For 3MF files, try to get primary thumbnail from database if not found in model.thumbnail
+        // Load asynchronously to avoid blocking — never getAllThumbnails for a single display slot
         (async () => {
           if (!thumbnailSrc && model.filePath && model.filePath.toLowerCase().endsWith('.3mf')) {
             try {
-              const allThumbnails = await window.electron.getAllThumbnails(model.filePath);
-              if (allThumbnails && allThumbnails.length > 0) {
-                // Filter out invalid thumbnails and use the first valid one
-                const validThumbs = allThumbnails.filter(t => 
-                  t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')
-                );
-                if (validThumbs.length > 0) {
-                  thumbnailSrc = validThumbs[0];
-                  thumbnailImg.src = thumbnailSrc;
-                  thumbnailImg.style.width = '100%';
-                  thumbnailImg.style.height = '100%';
-                  thumbnailImg.style.objectFit = 'cover';
-                }
+              const primary = await fetchPrimaryThumbnailForGrid(model.filePath);
+              if (primary) {
+                thumbnailSrc = primary;
+                thumbnailImg.src = thumbnailSrc;
+                thumbnailImg.style.width = '100%';
+                thumbnailImg.style.height = '100%';
+                thumbnailImg.style.objectFit = 'cover';
               }
             } catch (e) {
               console.log('Could not fetch 3MF thumbnail from database:', e);
@@ -11256,13 +11349,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
 
           // 3. Validate and fallback to default if necessary (STL/3MF only reach here)
-          if (!thumbnail || typeof thumbnail !== 'string' || !thumbnail.startsWith('data:image')) {
+          if (!thumbnail || typeof thumbnail !== 'string' || !thumbnail.startsWith('data:image') || isFailurePlaceholderThumbnail(thumbnail)) {
             thumbnail = '3d.png';
           }
 
-          // 4. Save whatever thumbnail we ended up with (3MF multi-image already persisted in step 1)
-          if (!saved3mfEmbedsViaBatch) {
+          // 4. Save real renders only — never lock in failure placeholders
+          if (!saved3mfEmbedsViaBatch && thumbnail !== '3d.png') {
             await window.electron.saveThumbnail(model.filePath, thumbnail);
+          } else if (!saved3mfEmbedsViaBatch) {
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
           }
           
           // 5. Calculate and save hash during thumbnail generation (file is already being read)
@@ -11282,10 +11377,9 @@ document.addEventListener('DOMContentLoaded', async () => {
           
         } catch (error) {
           console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
-          // Try to save a typed placeholder or default to prevent future attempts
+          // Do not persist typed STL/3MF placeholders — that blocks retries (common on Docker timeouts).
           try {
-            const fallback = EXTENSIONS_VALID_FOR_LIBRARY.has('.' + fileExt) ? generateTypedPlaceholder(fileExt) : '3d.png';
-            await window.electron.saveThumbnail(model.filePath, fallback);
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
           } catch (saveError) {
             console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
           }
@@ -13305,7 +13399,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     img.alt = 'WebGL unavailable';
     container.innerHTML = '';
     container.appendChild(img);
-    return corruptedDataUrl;
+    return null;
   }
 
   try {
@@ -13411,7 +13505,8 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
     img.alt = 'Model may be corrupted';
     container.innerHTML = '';
     container.appendChild(img);
-    return corruptedDataUrl;
+    // Return null so callers do not persist failure art as a "real" thumbnail.
+    return null;
   } finally {
     // Cleanup code that uses model
     if (model) {
@@ -15986,7 +16081,12 @@ async function generateThumbnail(file) {
     
     // Call renderModelToPNG directly instead of renderThumbnail
     const thumbnail = await renderModelToPNG(filePath, tempContainer, null);
-    
+
+    if (!thumbnail || isFailurePlaceholderThumbnail(thumbnail)) {
+      // Leave as default so hasThumbnail stays false and Docker can retry later.
+      return '3d.png';
+    }
+
     await window.electron.saveThumbnail(filePath, thumbnail);
     
     // Calculate and save hash during thumbnail generation (file is already being read)
@@ -17739,9 +17839,10 @@ document.addEventListener('DOMContentLoaded', () => {
 // ==================== NEW CODE: Virtual Grid Implementation ====================
 
 /**
- * Grid queries omit the full `thumbnail` blob (only hasThumbnail is sent), so multi-image
- * models are discovered asynchronously via getAllThumbnails. This upgrades a detailed
- * card from a plain image to the left/right carousel + count badge.
+ * Grid queries omit the full `thumbnail` blob (only hasThumbnail is sent).
+ * Cards load the primary thumb via getThumbnail for visible rows only.
+ * getAllThumbnails is reserved for Manage Thumbnails / explicit carousel upgrade —
+ * never for every grid cell (libraries can be 100k+ models).
  */
 function upgradeGridItemToThumbnailCarousel(thumbnailContainer, model, validThumbnails, thumbSize, parseThumbnails) {
   const fileItem = thumbnailContainer.closest('.file-item');
@@ -18102,12 +18203,19 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   // Parse thumbnails from model.thumbnail if available
   // The model.thumbnail should contain all thumbnails separated by ::
   const thumbnailString = model.thumbnail;
-  const hasThumbnailFlag = !!model.hasThumbnail;
+  let hasThumbnailFlag = !!model.hasThumbnail;
   
   const allThumbnails = thumbnailString ? parseThumbnails(thumbnailString) : [];
   let hasMultipleThumbnails = allThumbnails.length > 1;
   const currentThumbnailIndex = 0; // Start with first thumbnail (default)
   let currentThumbnail = allThumbnails.length > 0 ? allThumbnails[currentThumbnailIndex] : null;
+
+  // Stuck Docker failure art (corrupted / typed STL) must not block regeneration.
+  if (currentThumbnail && isFailurePlaceholderThumbnail(currentThumbnail)) {
+    currentThumbnail = null;
+    hasThumbnailFlag = false;
+    hasMultipleThumbnails = false;
+  }
   
   // Add image element right away to reserve space
   const img = document.createElement('img');
@@ -18129,75 +18237,50 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     thumbnailContainer.appendChild(newStatusEl);
   }
 
-  // When grid data omits thumbnail blobs, fetch full thumbnail list async (detailed + preview).
-  if (model.filePath) {
-    if (view === 'detailed' || view === 'preview') {
-      window.electron.getAllThumbnails(model.filePath).then(async (allThumbs) => {
-        const validFetched = (allThumbs || []).filter(
-          (t) => t && t !== '3d.png' && t.length > 0 && t.startsWith('data:image')
-        );
-        const firstThumb = validFetched[0];
-        const firstIsEmpty = firstThumb ? await isMostlyEmptyThumbnailDataUrl(firstThumb) : true;
+  // Visible-row thumbnail hydrate: primary only (getThumbnail). Virtual scroll already
+  // limits createModelItem to on-screen (+buffer) rows — never fetch all thumbs for the grid.
+  if (model.filePath && !currentThumbnail && hasThumbnailFlag) {
+    fetchPrimaryThumbnailForGrid(model.filePath).then(async (thumb) => {
+      if (!img.isConnected) return;
 
-        // Large flat STLs often saved a clipped transparent PNG (far plane was 1000).
-        // Treat those as missing so the render queue regenerates a real thumb.
-        if (!firstThumb || firstIsEmpty) {
-          if (!pendingThumbnails.has(model.filePath) && model.filePath) {
-            pendingThumbnails.add(model.filePath);
-            renderQueue.push({
-              filePath: model.filePath,
-              container: thumbnailContainer,
-              thumbPriority,
-              resolve: async (thumbnail) => {
-                pendingThumbnails.delete(model.filePath);
-                if (!thumbnail || thumbnail === '3d.png') return;
-                if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
-                model.thumbnail = thumbnail;
-                model.hasThumbnail = true;
-                try {
-                  await window.electron.saveThumbnail(model.filePath, thumbnail);
-                } catch (e) { /* ignore */ }
-                if (img.isConnected) img.src = thumbnail;
-                // Folder/ZIP group cards may still show the old clipped blank — refresh them.
-                invalidateGroupThumbnailCache();
-                if (window._groupThumbRefreshTimer) clearTimeout(window._groupThumbRefreshTimer);
-                window._groupThumbRefreshTimer = setTimeout(() => {
-                  window._groupThumbRefreshTimer = null;
-                  const grid = document.querySelector('.file-grid');
-                  if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
-                }, 250);
-              }
-            });
-            if (typeof processRenderQueue === 'function') processRenderQueue();
-          }
-          return;
-        }
-
-        if (img.src.includes('3d.png') || !currentThumbnail) {
-          img.src = firstThumb;
-        }
-
-        if (validFetched.length > 1 && thumbnailContainer.isConnected) {
-          upgradeGridItemToThumbnailCarousel(
-            thumbnailContainer,
-            model,
-            validFetched,
-            thumbSize,
-            parseThumbnails
-          );
-        }
-      }).catch(e => {
-        // Silently fail - not critical
-      });
-    } else if (view === 'list' && !currentThumbnail && hasThumbnailFlag) {
-      window.electron.getThumbnail(model.filePath).then(async (thumb) => {
-        if (!thumb || thumb === '3d.png') return;
-        if (await isMostlyEmptyThumbnailDataUrl(thumb)) return;
+      if (thumb) {
         img.src = thumb;
-      }).catch(e => {
-        // Silently fail
+        model.thumbnail = thumb;
+        model.hasThumbnail = true;
+        return;
+      }
+
+      // Flagged as having a thumb but empty/clipped — queue a re-render (detailed/preview).
+      if (view !== 'detailed' && view !== 'preview') return;
+      if (pendingThumbnails.has(model.filePath)) return;
+      pendingThumbnails.add(model.filePath);
+      renderQueue.push({
+        filePath: model.filePath,
+        container: thumbnailContainer,
+        thumbPriority,
+        resolve: async (thumbnail) => {
+          pendingThumbnails.delete(model.filePath);
+          if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) return;
+          if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
+          model.thumbnail = thumbnail;
+          model.hasThumbnail = true;
+          invalidatePrimaryThumbnailCache(model.filePath);
+          setCachedPrimaryThumbnail(model.filePath, thumbnail);
+          try {
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+          } catch (e) { /* ignore */ }
+          if (img.isConnected) img.src = thumbnail;
+          invalidateGroupThumbnailCache();
+          if (window._groupThumbRefreshTimer) clearTimeout(window._groupThumbRefreshTimer);
+          window._groupThumbRefreshTimer = setTimeout(() => {
+            window._groupThumbRefreshTimer = null;
+            const grid = document.querySelector('.file-grid');
+            if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
+          }, 250);
+        }
       });
-    }
+      if (typeof processRenderQueue === 'function') processRenderQueue();
+    }).catch(() => { /* not critical */ });
   }
 
   // In detailed or preview view with multiple thumbnails, wrap in navigation container
@@ -18398,20 +18481,34 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         resolve: async (thumbnail) => {
           // Remove from pending set first
           pendingThumbnails.delete(model.filePath);
-          
-          // Check if model already has multiple thumbnails (from 3MF images)
-          // If so, don't overwrite with single thumbnail
-          const existingThumbs = await window.electron.getAllThumbnails(model.filePath);
-          if (existingThumbs && existingThumbs.length > 1) {
-            // Update model in memory with existing thumbnails
-            const modelData = await window.electron.getModel(model.filePath);
-            if (modelData && modelData.thumbnail) {
-              model.thumbnail = modelData.thumbnail;
+
+          // Never persist failure placeholders — leave retryable (hasThumbnail=0 via 3d.png).
+          if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+            if (thumbnail && isFailurePlaceholderThumbnail(thumbnail)) {
+              // Show failure in this cell only; do not write to DB.
+              const imgEl = thumbnailContainer.querySelector('img');
+              if (imgEl) imgEl.src = thumbnail;
             }
+            return;
+          }
+          if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
+          
+          // Check if model already has multiple thumbnails (from 3MF images).
+          // Prefer getModel over getAllThumbnails so the grid path never loads every blob list.
+          const modelData = await window.electron.getModel(model.filePath);
+          const existingRaw = modelData?.thumbnail || '';
+          const existingMulti = typeof existingRaw === 'string' && existingRaw.includes('::')
+            ? existingRaw.split('::').filter((t) => t && t !== '3d.png' && t.startsWith('data:image'))
+            : [];
+          if (existingMulti.length > 1) {
+            model.thumbnail = existingRaw;
+            model.hasThumbnail = true;
+            setCachedPrimaryThumbnail(model.filePath, existingMulti[0]);
           } else {
-            // Update model in memory
             model.thumbnail = thumbnail;
-            // Save to database
+            model.hasThumbnail = true;
+            invalidatePrimaryThumbnailCache(model.filePath);
+            setCachedPrimaryThumbnail(model.filePath, thumbnail);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
           }
 
@@ -19520,13 +19617,14 @@ const groupThumbnailCache = new Map();
 
 function childHasStoredThumbnail(child) {
   if (!child) return false;
-  if (getPrimaryThumbnailFromString(child.thumbnail)) return true;
+  const primary = getPrimaryThumbnailFromString(child.thumbnail);
+  if (primary && !isFailurePlaceholderThumbnail(primary)) return true;
   return Boolean(child.hasThumbnail) && Number(child.hasThumbnail) !== 0;
 }
 
 function rememberGroupThumbnails(groupKey, thumbnails) {
   if (!groupKey) return;
-  const valid = (thumbnails || []).filter((t) => t && t !== '3d.png');
+  const valid = (thumbnails || []).filter((t) => t && t !== '3d.png' && !isFailurePlaceholderThumbnail(t));
   if (valid.length === 0) return;
   groupThumbnailCache.set(groupKey, valid.slice(0, MAX_GROUP_CAROUSEL_THUMBNAILS));
 }
@@ -19544,7 +19642,7 @@ function invalidateGroupThumbnailCache(groupKey = null) {
 async function filterNonEmptyThumbnails(thumbs) {
   const out = [];
   for (const t of thumbs || []) {
-    if (!t || t === '3d.png') continue;
+    if (!t || t === '3d.png' || isFailurePlaceholderThumbnail(t)) continue;
     if (await isMostlyEmptyThumbnailDataUrl(t)) continue;
     out.push(t);
   }
@@ -19959,7 +20057,7 @@ async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, ch
     const tryThumb = async (value) => {
       const primary = getPrimaryThumbnailFromString(value) ||
         (value && value !== '3d.png' ? value : null);
-      if (!primary) return null;
+      if (!primary || isFailurePlaceholderThumbnail(primary)) return null;
       if (await isMostlyEmptyThumbnailDataUrl(primary)) return null;
       return primary;
     };
@@ -19967,7 +20065,10 @@ async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, ch
     const inline = await tryThumb(child.thumbnail);
     if (inline) return inline;
     try {
-      if (window.electron.getThumbnail) {
+      if (typeof fetchPrimaryThumbnailForGrid === 'function') {
+        const single = await fetchPrimaryThumbnailForGrid(child.filePath);
+        if (single) return single;
+      } else if (window.electron.getThumbnail) {
         const single = await window.electron.getThumbnail(child.filePath);
         const primary = await tryThumb(single);
         if (primary) return primary;
@@ -20018,7 +20119,7 @@ async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, ch
       const tempContainer = document.createElement('div');
       const rendered = await renderModelToPNG(candidates[0].filePath, tempContainer, null);
       if (isStale()) return;
-      if (rendered && rendered !== '3d.png' && !(await isMostlyEmptyThumbnailDataUrl(rendered))) {
+      if (rendered && rendered !== '3d.png' && !isFailurePlaceholderThumbnail(rendered) && !(await isMostlyEmptyThumbnailDataUrl(rendered))) {
         thumbnails.push(rendered);
         await applyThumbs(thumbnails);
         if (window.electron.saveThumbnail) {

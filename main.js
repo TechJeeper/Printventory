@@ -458,10 +458,18 @@ let contextMenuRequestIdCounter = 0;
 // This allows us to directly invoke handlers without going through the renderer
 const ipcHandlerRegistry = new Map();
 
+// Auto-register every ipcMain.handle into the WebSocket registry.
+// Without this, Docker/server-mode falls back to executeJavaScript on the hidden
+// window for unregistered channels (e.g. getThumbnail) — which hangs/times out.
+const _ipcMainHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => {
+  ipcHandlerRegistry.set(channel, handler);
+  return _ipcMainHandle(channel, handler);
+};
+
 // Helper function to register IPC handlers and add them to the registry
 function registerIpcHandler(channel, handler) {
   ipcMain.handle(channel, handler);
-  ipcHandlerRegistry.set(channel, handler);
 }
 
 // UNC Path Validation Functions
@@ -1102,11 +1110,53 @@ ${bridgeCode}
     console.log('WebSocket client connected');
     wsClients.add(ws);
 
+    // Bound concurrent IPC work per client. Unbounded Promise.all-style floods
+    // (tens of thousands of getThumbnail calls) otherwise stall past client timeouts.
+    const MAX_WS_IPC_CONCURRENT = 24;
+    let wsIpcInFlight = 0;
+    const wsIpcWaiters = [];
+    const wsIpcDebug = process.env.PRINTVENTORY_WS_IPC_DEBUG === '1';
+
+    function acquireWsIpcSlot() {
+      if (wsIpcInFlight < MAX_WS_IPC_CONCURRENT) {
+        wsIpcInFlight++;
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        wsIpcWaiters.push(resolve);
+      });
+    }
+
+    function releaseWsIpcSlot() {
+      const next = wsIpcWaiters.shift();
+      if (next) {
+        next();
+      } else {
+        wsIpcInFlight = Math.max(0, wsIpcInFlight - 1);
+      }
+    }
+
     ws.on('message', async (message) => {
+      let parsed;
       try {
-        const data = JSON.parse(message.toString());
-        const { id, channel, args, type } = data;
-        
+        parsed = JSON.parse(message.toString());
+      } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+        try {
+          ws.send(JSON.stringify({ type: 'error', error: error.message }));
+        } catch (_) { /* ignore */ }
+        return;
+      }
+
+      const { id, channel, args, type } = parsed;
+
+      // Fire-and-forget sends / special events: handle immediately (no IPC slot).
+      const isFireAndForget = type === 'send' || (type === 'event' && channel === 'puter-ai-chat-response');
+      if (!isFireAndForget) {
+        await acquireWsIpcSlot();
+      }
+
+      try {
         // Handle puter-ai-chat-response events from WebSocket clients (server mode)
         if (type === 'event' && channel === 'puter-ai-chat-response') {
           const [requestId, result] = args || [];
@@ -1178,27 +1228,6 @@ ${bridgeCode}
           return; // Don't try to handle as IPC call
         }
 
-        // Create a mock event object for IPC handlers
-        const mockEvent = {
-          sender: {
-            send: (eventChannel, ...eventArgs) => {
-              // Broadcast event to all WebSocket clients in server mode
-              if (isServerMode && global.broadcastEvent) {
-                global.broadcastEvent(eventChannel, ...eventArgs);
-              } else {
-                // Send event back via WebSocket to this specific client
-                ws.send(JSON.stringify({
-                  type: 'event',
-                  channel: eventChannel,
-                  args: eventArgs
-                }));
-              }
-            }
-          },
-          // Add wsClient for server mode so createPuterIPCHandler can use it
-          wsClient: isServerMode ? ws : null
-        };
-
         // Call IPC handlers directly instead of through hidden window
         // This is more reliable and faster
         try {
@@ -1230,13 +1259,15 @@ ${bridgeCode}
             try {
               // Ensure args is a flat array (handle nested arrays from JSON parsing)
               let flatArgs = args || [];
-              console.log('[WebSocket] Handler found for channel:', channel, 'Raw args:', args, 'Args length:', args?.length, 'Args type:', typeof args);
+              if (wsIpcDebug) {
+                console.log('[WebSocket] Handler found for channel:', channel, 'Raw args:', args, 'Args length:', args?.length, 'Args type:', typeof args);
+              }
               if (flatArgs.length === 1 && Array.isArray(flatArgs[0])) {
                 // If args is [ [arg1, arg2] ], unwrap it to [arg1, arg2]
-                console.log('[WebSocket] Unwrapping nested array');
+                if (wsIpcDebug) console.log('[WebSocket] Unwrapping nested array');
                 flatArgs = flatArgs[0];
               }
-              console.log('[WebSocket] Calling handler with flatArgs:', flatArgs, 'Length:', flatArgs.length);
+              if (wsIpcDebug) console.log('[WebSocket] Calling handler with flatArgs:', flatArgs, 'Length:', flatArgs.length);
               const result = await handler(mockEvent, ...flatArgs);
               
               // Convert ArrayBuffer to base64 for WebSocket transmission
@@ -1364,10 +1395,16 @@ ${bridgeCode}
         }
       } catch (error) {
         console.error('Error handling WebSocket message:', error);
-        ws.send(JSON.stringify({
-          type: 'error',
-          error: error.message
-        }));
+        try {
+          ws.send(JSON.stringify({
+            type: 'error',
+            error: error.message
+          }));
+        } catch (_) { /* ignore */ }
+      } finally {
+        if (!isFireAndForget) {
+          releaseWsIpcSlot();
+        }
       }
     });
 
@@ -1773,6 +1810,8 @@ function scheduleBackgroundHashGeneration(reason) {
   if (!isServerMode) return;
   if (isGeneratingHashes || isHashGenerationScheduled) return;
   isHashGenerationScheduled = true;
+  // Defer well past first paint / initial thumb wave so UNC I/O is not contended at cold start.
+  const delayMs = reason === 'startup' ? 45000 : 500;
   setTimeout(async () => {
     if (isGeneratingHashes) {
       isHashGenerationScheduled = false;
@@ -1786,7 +1825,7 @@ function scheduleBackgroundHashGeneration(reason) {
     } finally {
       isHashGenerationScheduled = false;
     }
-  }, 500);
+  }, delayMs);
 }
 
 // IPC handler to expose server mode
@@ -2085,6 +2124,7 @@ function initializeDatabase() {
     migrateIsNewColumn();
     migrateRatingFavoriteColumns();
     migrateBundleColumns();
+    clearFailurePlaceholderThumbnails();
     
     // Create index for dateAdded after migration (in case it was just added)
     db.prepare('CREATE INDEX IF NOT EXISTS idx_models_dateadded ON models(dateAdded)').run();
@@ -2264,6 +2304,42 @@ function migrateBundleColumns() {
     return true;
   } catch (error) {
     console.error('Error migrating bundle columns:', error);
+    return false;
+  }
+}
+
+/**
+ * One-shot: clear tiny data-URL thumbs left by Docker/server load failures.
+ * Failure placeholders (typed "STL" / "Model may be corrupted") are ~2–8KB data URLs;
+ * real WebGL renders are almost always larger. Resetting to 3d.png clears hasThumbnail
+ * so the grid can regenerate.
+ */
+function clearFailurePlaceholderThumbnails() {
+  try {
+    const done = db.prepare(
+      'SELECT value FROM settings WHERE key = ?'
+    ).get('failurePlaceholderThumbCleanupComplete')?.value;
+    if (done === '1') return true;
+
+    console.log('Clearing likely failure-placeholder thumbnails (one-shot)...');
+    const cleared = db.prepare(`
+      UPDATE models
+      SET thumbnail = '3d.png'
+      WHERE thumbnail IS NOT NULL
+        AND thumbnail LIKE 'data:image%'
+        AND length(thumbnail) < 12000
+    `).run();
+    if (cleared.changes > 0) {
+      console.log(`Reset ${cleared.changes} small data-URL thumbnail(s) to 3d.png for regeneration`);
+    }
+
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('failurePlaceholderThumbCleanupComplete', '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run();
+    return true;
+  } catch (error) {
+    console.error('Error clearing failure-placeholder thumbnails:', error);
     return false;
   }
 }
@@ -7701,8 +7777,17 @@ async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
   try {
     const StreamZip = require('node-stream-zip');
     const zip = new StreamZip.async({ file: zipPath });
-    const entryData = await zip.entryData(entryPath);
-    await zip.close();
+    let entryData;
+    try {
+      const entries = await zip.entries();
+      const entry = findZipEntry(entries, entryPath);
+      if (!entry) {
+        throw new Error(`Zip entry not found: ${entryPath}`);
+      }
+      entryData = await zip.entryData(entry.name || entryPath);
+    } finally {
+      await zip.close();
+    }
     
     if (destinationPath) {
       // Extract to specified destination, preserving directory structure
@@ -8921,8 +9006,8 @@ async function calculateMissingHashesInternal(event) {
     }
 
     // Process files in parallel with concurrency limit
-    // Lower concurrency in Docker/Server mode for network files to avoid overwhelming the file system
-    const concurrencyLimit = isServerMode ? 20 : 50;
+    // Keep Docker/server concurrency low — high parallelism + thumb renders saturates UNC/CIFS.
+    const concurrencyLimit = isServerMode ? 4 : 50;
     
     // Helper function to calculate hash with retry and timeout
     const calculateFileHashWithRetry = async (filePath, maxRetries = 2) => {

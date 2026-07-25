@@ -56,6 +56,33 @@
   const maxReconnectAttempts = 5;
   const pendingRequests = new Map();
   let requestIdCounter = 0;
+  // Cap in-flight IPC so a grid flood (thousands of getThumbnail calls) cannot
+  // stampede the server / blow the 30s timeout window. Extra calls wait in FIFO.
+  const MAX_IPC_IN_FLIGHT = 32;
+  let ipcInFlight = 0;
+  const ipcWaitQueue = [];
+  const BRIDGE_DEBUG = (typeof window !== 'undefined' && window.PRINTVENTORY_BRIDGE_DEBUG === true);
+
+  function acquireIpcSlot() {
+    return new Promise(function(resolve) {
+      if (ipcInFlight < MAX_IPC_IN_FLIGHT) {
+        ipcInFlight++;
+        resolve();
+        return;
+      }
+      ipcWaitQueue.push(resolve);
+    });
+  }
+
+  function releaseIpcSlot() {
+    var next = ipcWaitQueue.shift();
+    if (next) {
+      // Transfer the slot to the next waiter (inFlight unchanged).
+      next();
+    } else {
+      ipcInFlight = Math.max(0, ipcInFlight - 1);
+    }
+  }
   let connectInFlight = false;
 
   // Promise that resolves when WebSocket connects (so first load doesn't run before bridge is ready)
@@ -259,14 +286,16 @@
       };
       
       socket.onmessage = (event) => {
-        console.log('[Bridge] Received WebSocket message:', event.data.substring(0, 200));
+        if (BRIDGE_DEBUG) {
+          console.log('[Bridge] Received WebSocket message:', String(event.data).substring(0, 200));
+        }
         try {
           const data = JSON.parse(event.data);
           
           if (data.type === 'result') {
             const pending = pendingRequests.get(data.id);
             if (pending) {
-              console.log('[Bridge] Resolving pending request:', data.id);
+              if (BRIDGE_DEBUG) console.log('[Bridge] Resolving pending request:', data.id);
               
               // Convert base64 ArrayBuffer back to ArrayBuffer if needed
               let result = data.result;
@@ -280,19 +309,19 @@
                 result = bytes.buffer;
               }
               
-              pending.resolve(result);
               pendingRequests.delete(data.id);
+              pending.resolve(result);
             }
           } else if (data.type === 'error') {
             const pending = pendingRequests.get(data.id);
             if (pending) {
-              console.log('[Bridge] Rejecting pending request:', data.id, data.error);
-              pending.reject(new Error(data.error));
+              if (BRIDGE_DEBUG) console.log('[Bridge] Rejecting pending request:', data.id, data.error);
               pendingRequests.delete(data.id);
+              pending.reject(new Error(data.error));
             }
           } else if (data.type === 'event') {
             // Handle events (like 'refresh-grid', 'scan-progress', etc.)
-            console.log('[Bridge] Received event:', data.channel, 'with args:', data.args);
+            if (BRIDGE_DEBUG) console.log('[Bridge] Received event:', data.channel, 'with args:', data.args);
             const eventListeners = window._electronEventListeners || {};
             const listeners = eventListeners[data.channel] || [];
             console.log('[Bridge] Found', listeners.length, 'listener(s) for channel:', data.channel);
@@ -365,11 +394,11 @@
   
   // Helper function to make IPC calls via WebSocket
   function makeIpcCall(channel, ...args) {
-    console.log('[Bridge] makeIpcCall:', channel, 'args:', args?.length);
+    if (BRIDGE_DEBUG) console.log('[Bridge] makeIpcCall:', channel, 'args:', args?.length);
     
     // If WebSocket is not connected, wait for open (or reconnect) instead of failing after 500ms
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.log('[Bridge] WebSocket not open, state:', ws?.readyState, 'reconnectAttempts:', reconnectAttempts);
+      if (BRIDGE_DEBUG) console.log('[Bridge] WebSocket not open, state:', ws?.readyState, 'reconnectAttempts:', reconnectAttempts);
       if (reconnectAttempts >= maxReconnectAttempts && (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING)) {
         return Promise.reject(new Error('WebSocket connection unavailable'));
       }
@@ -377,28 +406,62 @@
         return makeIpcCall(channel, ...args);
       });
     }
-    
-    const id = `req_${++requestIdCounter}_${Date.now()}`;
-    console.log('[Bridge] Sending WebSocket message:', { id, channel, argsLength: args?.length });
-    
-    return new Promise((resolve, reject) => {
-      pendingRequests.set(id, { resolve, reject });
-      
-      ws.send(JSON.stringify({
-        id,
-        channel,
-        args
-      }));
-      
-      // test-ai-config can take longer when using Puter (captcha, network)
-      var timeoutMs = (channel === 'test-ai-config') ? 60000 : 30000;
-      setTimeout(function() {
-        if (pendingRequests.has(id)) {
+
+    // Heavy file IPC needs longer timeouts in Docker (UNC/CIFS + base64 over WS).
+    // Default 30s caused mass read-model-file timeouts → "corrupted"/STL placeholders.
+    var heavyIpcChannels = {
+      'read-model-file': 180000,
+      'extract-model-from-zip': 180000,
+      'get-file-stats': 120000,
+      'calculate-file-hash': 300000,
+      'scan-directory': 600000,
+      'test-ai-config': 60000
+    };
+    var timeoutMs = heavyIpcChannels[channel] || 30000;
+
+    // Queue until a slot is free, then start the per-call timeout (queue wait does not burn it).
+    return acquireIpcSlot().then(function() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        releaseIpcSlot();
+        return makeIpcCall(channel, ...args);
+      }
+
+      const id = `req_${++requestIdCounter}_${Date.now()}`;
+      if (BRIDGE_DEBUG) console.log('[Bridge] Sending WebSocket message:', { id, channel, argsLength: args?.length });
+
+      return new Promise(function(resolve, reject) {
+        var settled = false;
+        function settle(fn, value) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
           pendingRequests.delete(id);
-          console.error('[Bridge] IPC call timeout:', channel, 'id:', id);
-          reject(new Error('IPC call timeout: ' + channel));
+          releaseIpcSlot();
+          fn(value);
         }
-      }, timeoutMs);
+
+        var timer = setTimeout(function() {
+          if (pendingRequests.has(id)) {
+            console.error('[Bridge] IPC call timeout:', channel, 'id:', id);
+            settle(reject, new Error('IPC call timeout: ' + channel));
+          }
+        }, timeoutMs);
+
+        pendingRequests.set(id, {
+          resolve: function(result) { settle(resolve, result); },
+          reject: function(err) { settle(reject, err); }
+        });
+
+        try {
+          ws.send(JSON.stringify({
+            id: id,
+            channel: channel,
+            args: args
+          }));
+        } catch (sendErr) {
+          settle(reject, sendErr);
+        }
+      });
     });
   }
   
