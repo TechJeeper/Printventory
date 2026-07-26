@@ -342,6 +342,7 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
   const mergedOptions = { ...DEFAULT_OPTIONS, ...options };
   const maxTags = mergedOptions.maxTags || DEFAULT_OPTIONS.maxTags;
   const useJsonResponse = mergedOptions.useJsonResponse || false;
+  const mimeType = mergedOptions.mimeType || 'image/png';
 
   // Use custom prompt from settings if set; otherwise build from options. Always append JSON response instructions.
   let basePrompt;
@@ -365,8 +366,8 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
         await delay(delayMs);
         console.log(`Attempting to generate tags with Puter model: ${model || "gpt-5-nano"} (attempt ${attempt + 1}/${maxRetries})`);
         
-        // Convert base64 to data URL for puter
-        const imageUrl = `data:image/png;base64,${base64Image}`;
+        // Convert base64 to data URL for puter (mime from stored thumb; often jpeg after compress)
+        const imageUrl = `data:${mimeType};base64,${base64Image}`;
         
         // Call puter via IPC (prompt already includes filename context)
         let responseContent = await puterIPC(prompt, imageUrl, model || 'gpt-5-nano');
@@ -433,7 +434,7 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
           role: "user",
           content: [
             { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: "data:image/png;base64," + base64Image } }
+            { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Image}` } }
           ]
         }],
         model: model || (isGemini ? "gemini-2.5-flash" : "gpt-4o-mini"),

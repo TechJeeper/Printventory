@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.1.14",
+  "version": "2.1.15",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -114,6 +114,8 @@
       "index.html",
       "styles.css",
       "preview-wall.css",
+      "thumbnail-progress.css",
+      "thumbnail-progress.js",
       "logo.png",
       "dup.png",
       "roulette.png",

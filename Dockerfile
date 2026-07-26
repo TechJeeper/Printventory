@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y \
     python3 \
     # Xvfb for headless display support
     xvfb \
+    # Session bus so Electron/Chromium stops spamming dbus connection errors
+    dbus \
     # Chromium dependencies for Puppeteer
     chromium \
     chromium-sandbox \
@@ -100,7 +102,7 @@ RUN rm -rf node_modules/better-sqlite3/build || true && \
     npx electron-builder install-app-deps
 
 # Copy application files
-COPY main.js bundle-keys.js preload.js renderer.js index.html styles.css preview-wall.css ./
+COPY main.js bundle-keys.js preload.js renderer.js index.html styles.css preview-wall.css thumbnail-progress.css thumbnail-progress.js ./
 COPY server-bridge.js scan-worker.js parse-worker.js ./
 COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
 COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js thumbnail-compress.js ./
@@ -122,10 +124,11 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV DISPLAY=:99
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-# Disable dconf to prevent warnings in headless Docker environment
+# Disable dconf / dbus fatal warnings in headless Docker (session bus started in entrypoint)
 ENV DCONF_DISABLE=1
 ENV GIO_USE_VFS=local
 ENV GIO_USE_VOLUME_MONITOR=unix
+ENV DBUS_FATAL_WARNINGS=0
 
 # Expose port 5000
 EXPOSE 5000

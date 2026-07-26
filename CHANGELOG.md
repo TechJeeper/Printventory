@@ -4,6 +4,20 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.15] - 2026-07-25
+
+### Added
+
+- Show a modal progress bar for Regenerate Thumbnails and Generate Missing Thumbnails (including purge/load phases).
+
+### Fixed
+
+- Docker Fixes
+
+### Changed
+
+- Prepare for 2.2 Public Release
+
 ## [2.1.14] - 2026-07-25
 
 ### Fixed

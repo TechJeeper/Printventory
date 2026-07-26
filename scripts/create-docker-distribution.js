@@ -38,6 +38,8 @@ const filesToCopy = [
   'favicon.ico',
   'styles.css',
   'preview-wall.css',
+  'thumbnail-progress.css',
+  'thumbnail-progress.js',
   'server-bridge.js',
   'scan-worker.js',
   'parse-worker.js',

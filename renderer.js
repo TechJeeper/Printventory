@@ -5416,6 +5416,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             const allModels = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
             
             if (allModels.length > 0) {
+                window.ThumbnailProgress?.show({
+                  title: 'Regenerate Thumbnails',
+                  phase: 'Clearing existing thumbnails...',
+                  cancellable: false
+                });
                  // Purge existing thumbnails to force regeneration
                 await window.electron.purgeThumbnails();
                 invalidatePrimaryThumbnailCache();
@@ -7307,6 +7312,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         ['Yes', 'No']
       );
       if (userChoice === 'Yes') {
+        window.ThumbnailProgress?.show({
+          title: 'Regenerate Thumbnails',
+          phase: 'Clearing existing thumbnails...',
+          cancellable: false
+        });
         await window.electron.purgeThumbnails();
         invalidatePrimaryThumbnailCache();
         await generateThumbnailsForModels(allModels);
@@ -7320,6 +7330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (error) {
       console.error('Error regenerating thumbnails:', error);
       isRegeneratingThumbnails = false;
+      window.ThumbnailProgress?.hide();
       await window.electron.showMessage('Error', 'Failed to regenerate thumbnails: ' + error.message);
     }
   };
@@ -7354,13 +7365,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
       
       if (userChoice === 'Yes') {
+        const progress = window.ThumbnailProgress;
+        progress?.show({
+          title: 'Generate Missing Thumbnails',
+          phase: 'Loading model details...',
+          total: modelsWithoutThumbs.length,
+          cancellable: false
+        });
+
         // Get full model data for the models without thumbnails
         const fullModels = [];
+        let loadedCount = 0;
         for (const model of modelsWithoutThumbs) {
           const fullModel = await window.electron.getModel(model.filePath);
           if (fullModel) {
             fullModels.push(fullModel);
           }
+          loadedCount++;
+          progress?.update(loadedCount, modelsWithoutThumbs.length);
         }
         
         // Generate thumbnails for models without them
@@ -7379,6 +7401,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (error) {
       console.error('Error generating missing thumbnails:', error);
       isThumbnailDialogShowing = false;
+      window.ThumbnailProgress?.hide();
       await window.electron.showMessage('Error', 'Failed to generate missing thumbnails: ' + error.message);
     }
   };
@@ -11239,6 +11262,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Check if progress elements exist before proceeding
     const hasProgressUI = progressSection && activeProgressBar && activeProgressText;
     
+    const overlay = window.ThumbnailProgress;
+
     totalThumbnailsToGenerate = models.length;
     generatedThumbnailsCount = 0;
     let isCancelled = false;
@@ -11266,6 +11291,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         activeProgressBar.style.width = '0%';
         activeProgressText.textContent = `Processing 0/${totalThumbnailsToGenerate} (0%)`;
+      }
+
+      if (overlay) {
+        overlay.show({ title: 'Generating Thumbnails', total: totalThumbnailsToGenerate });
+        overlay.update(0, totalThumbnailsToGenerate, `Generating thumbnails for ${totalThumbnailsToGenerate} model${totalThumbnailsToGenerate === 1 ? '' : 's'}...`);
+        overlay.onCancel(handleStopClick);
       }
       
       // Process models in parallel with concurrency control for better performance
@@ -11393,6 +11424,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             activeProgressBar.style.width = `${progress}%`;
             activeProgressText.textContent = `Processing ${processedCount}/${totalThumbnailsToGenerate} (${progress}%)`;
           }
+          if (overlay && !isCancelled) {
+            overlay.update(processedCount, totalThumbnailsToGenerate);
+          }
         }
       };
       
@@ -11428,6 +11462,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         activeProgressBar.style.width = '100%';
         activeProgressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
       }
+      if (overlay && !isCancelled) {
+        overlay.update(totalThumbnailsToGenerate, totalThumbnailsToGenerate);
+      }
       
     } catch (error) {
       console.error('Error in thumbnail generation:', error);
@@ -11437,6 +11474,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         setTimeout(() => {
              progressSection.classList.add('hidden');
         }, 2000);
+      }
+      if (overlay) {
+        overlay.complete(isCancelled ? 'Stopped.' : 'Finished.');
       }
     }
   }
@@ -11772,7 +11812,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       item.style.width = `${containerWidth / columns - 20}px`; // 20px for margins
       
       // Set selection state from global Set
-      if (selectedModels.has(model.filePath)) {
+      if (isInSelectedModels(model.filePath)) {
         item.classList.add('selected');
       }
       
@@ -11963,7 +12003,7 @@ async function toggleModelSelection(fileElement, filePath) {
       }
     } else {
       // Add selection to the clicked item
-      selectedModels.add(filePath);
+      addToSelectedModels(filePath);
       
       // Only select this specific element, not all elements with the same filePath
       fileElement.classList.add('selected');
@@ -11973,13 +12013,13 @@ async function toggleModelSelection(fileElement, filePath) {
     }
   } else {
     // Multi-select mode
-    if (fileElement.classList.contains('selected')) {
+    if (fileElement.classList.contains('selected') || isInSelectedModels(filePath)) {
       // Deselect
-      selectedModels.delete(filePath);
+      removeFromSelectedModels(filePath);
       fileElement.classList.remove('selected');
     } else {
       // Select
-      selectedModels.add(filePath);
+      addToSelectedModels(filePath);
       fileElement.classList.add('selected');
     }
     await updateSelectedCount(); // This will clear form fields if selection is now 0
@@ -13748,7 +13788,11 @@ function syncSelectedModelsWithDOM() {
 
 // Update the click handler for file items to use the new showMultiEditPanel function
 async function handleFileClick(event, filePath) {
-  if (event.ctrlKey || event.metaKey) {
+  // In multi-edit mode, plain clicks toggle selection (Ctrl/Cmd also toggles).
+  // Outside multi-edit mode, only Ctrl/Cmd enters multi-select; plain click is single-select.
+  const multiToggle = isMultiSelectMode || event.ctrlKey || event.metaKey;
+
+  if (multiToggle) {
     event.preventDefault();
     const fileItem = event.currentTarget;
     const button = document.getElementById('edit-mode-toggle');
@@ -16512,6 +16556,31 @@ window.electron.on('hash-generation-complete', async (result) => {
   }
 });
 
+// Resolve which file path(s) a context menu should operate on.
+// If the right-clicked item is part of a multi-selection, use the whole selection.
+function resolveContextMenuFilePaths(clickedFilePath) {
+  // Prefer live DOM selection so we don't miss visually selected items if the Set desynced
+  if (typeof syncSelectedModelsWithDOM === 'function') {
+    syncSelectedModelsWithDOM();
+  }
+
+  const selected = Array.from(selectedModels).filter(Boolean);
+  const clickedSelected = clickedFilePath && isInSelectedModels(clickedFilePath);
+
+  if (selected.length > 1 && clickedSelected) {
+    return selected;
+  }
+
+  // Multi-edit mode with a selection: operate on all selected even if the click
+  // target path format differs slightly from the Set entry.
+  if (isMultiSelectMode && selected.length > 1) {
+    return selected;
+  }
+
+  if (clickedFilePath) return [clickedFilePath];
+  return selected.length ? selected : [];
+}
+
 function addThumbnailMenuButton(thumbnailContainer, filePath) {
   if (!thumbnailContainer || !filePath) return;
   if (thumbnailContainer.querySelector('.thumbnail-menu-button')) return;
@@ -16530,9 +16599,10 @@ function addThumbnailMenuButton(thumbnailContainer, filePath) {
     const y = rect.bottom;
 
     try {
-      const menuResult = isMultiSelectMode && selectedModels.size > 1
-        ? await window.electron.showContextMenu(Array.from(selectedModels))
-        : await window.electron.showContextMenu(filePath);
+      const paths = resolveContextMenuFilePaths(filePath);
+      const menuResult = paths.length > 1
+        ? await window.electron.showContextMenu(paths)
+        : await window.electron.showContextMenu(paths[0] || filePath);
 
       if (menuResult && menuResult.type === 'html-menu') {
         showHtmlContextMenu(menuResult, x, y, { showClose: true });
@@ -16567,11 +16637,12 @@ function addContextMenuHandler(fileElement, filePath) {
     const x = e.clientX;
     const y = e.clientY;
     
-    // If multi-edit mode is active and more than one model is selected,
-    // send the entire selection. Otherwise, use the single filePath.
-    const menuResult = isMultiSelectMode && selectedModels.size > 1
-      ? await window.electron.showContextMenu(Array.from(selectedModels))
-      : await window.electron.showContextMenu(filePath);
+    // If the right-clicked item is part of a multi-selection, operate on all selected.
+    // Otherwise use the single right-clicked file.
+    const paths = resolveContextMenuFilePaths(filePath);
+    const menuResult = paths.length > 1
+      ? await window.electron.showContextMenu(paths)
+      : await window.electron.showContextMenu(paths[0] || filePath);
     
     // Check if server returned HTML menu data (server mode via browser)
     if (menuResult && menuResult.type === 'html-menu') {

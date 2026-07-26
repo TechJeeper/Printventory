@@ -38,6 +38,25 @@ export DISPLAY=:99
 export DCONF_DISABLE=1
 export GIO_USE_VFS=local
 export GIO_USE_VOLUME_MONITOR=unix
+# Chromium treats missing/invalid DBUS as ERROR spam; provide a private session bus
+export DBUS_FATAL_WARNINGS=0
+
+# Start a private D-Bus session bus (containers have no system/session bus by default).
+# Harmless without it, but silences ERROR:dbus/* noise from Electron/Chromium.
+mkdir -p /tmp/dbus
+rm -f /tmp/dbus/bus
+if command -v dbus-daemon >/dev/null 2>&1; then
+  DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address --address=unix:path=/tmp/dbus/bus 2>/dev/null) || true
+  if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    export DBUS_SESSION_BUS_ADDRESS
+    echo "D-Bus session started at $DBUS_SESSION_BUS_ADDRESS"
+  else
+    unset DBUS_SESSION_BUS_ADDRESS
+    echo "Warning: dbus-daemon failed to start; Chromium may log dbus connection errors"
+  fi
+else
+  unset DBUS_SESSION_BUS_ADDRESS
+fi
 
 # Ensure config directory exists with proper permissions
 mkdir -p /root/.config/Printventory

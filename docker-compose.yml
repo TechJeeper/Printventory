@@ -36,10 +36,11 @@ services:
       - DISPLAY=:99
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-      # Disable dconf to prevent warnings in headless Docker environment
+      # Disable dconf / dbus fatal warnings in headless Docker (session bus started in entrypoint)
       - DCONF_DISABLE=1
       - GIO_USE_VFS=local
       - GIO_USE_VOLUME_MONITOR=unix
+      - DBUS_FATAL_WARNINGS=0
       # Preview parsing memory controls (override defaults when needed).
       # Keep worker memory well below the container/host RAM budget — OOM kills the whole
       # Electron process and drops all WebSocket clients (browser shows "WebSocket connection failed").

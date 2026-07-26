@@ -7,6 +7,7 @@
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="preview-wall.css">
+  <link rel="stylesheet" href="thumbnail-progress.css">
   <script src="vendor/three.min.js"></script>
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
@@ -948,18 +949,6 @@
       </div>
     </dialog>
     
-    <!-- Add progress dialog for thumbnail generation -->
-    <dialog id="thumbnail-progress-dialog" class="modal">
-      <div class="progress-container">
-        <h3>Generating Thumbnails</h3>
-        <p>Please wait while thumbnails are being generated...</p>
-        <div class="progress-bar-container">
-          <div id="thumbnail-progress-bar" class="progress-bar"></div>
-        </div>
-        <p id="thumbnail-progress-text">0 / 0</p>
-      </div>
-    </dialog>
-
     <!-- Preview Model Dialog -->
     <dialog id="preview-dialog" class="modal preview-modal">
       <div class="preview-container">
@@ -1551,6 +1540,23 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       <button id="continue-anyways" onclick="document.getElementById('loading-overlay').style.display='none'"><strong>CONTINUE ANYWAYS</strong><br><i>MAY IMPACT PERFORMANCE</i></button>
     </div>
   </div>
+
+  <!-- Progress overlay for thumbnail regeneration / missing thumbnail generation -->
+  <div id="thumbnail-progress-overlay" class="tp-overlay" role="dialog" aria-modal="true" aria-labelledby="thumbnail-progress-title" hidden>
+    <div class="tp-panel">
+      <h3 class="tp-title" id="thumbnail-progress-title">Generating Thumbnails</h3>
+      <p class="tp-phase" id="thumbnail-progress-phase">Preparing...</p>
+      <div class="tp-track" id="thumbnail-progress-track">
+        <div class="tp-fill" id="thumbnail-progress-fill"></div>
+      </div>
+      <div class="tp-meta">
+        <span id="thumbnail-progress-count"></span>
+        <span id="thumbnail-progress-percent"></span>
+      </div>
+      <button type="button" class="tp-cancel" id="thumbnail-progress-cancel">Stop</button>
+    </div>
+  </div>
+
   <script>
     document.addEventListener('DOMContentLoaded', function() {
       document.getElementById("dup-button").addEventListener("click", function() {
@@ -1593,6 +1599,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       }, 5000);
     });
   </script>
+  <script src="thumbnail-progress.js"></script>
   <script src="preview.js"></script>
   <script src="query-builder.js"></script>
   <script src="search.js"></script>

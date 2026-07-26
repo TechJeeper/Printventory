@@ -1257,17 +1257,16 @@ ${bridgeCode}
           if (handler) {
             // Call the handler directly - much faster and more reliable
             try {
-              // Ensure args is a flat array (handle nested arrays from JSON parsing)
-              let flatArgs = args || [];
+              // args is already the list of handler parameters after `event`
+              // (e.g. showContextMenu([p1,p2,p3]) → args = [[p1,p2,p3]]).
+              // Do NOT unwrap a sole nested array — that turns an intentional
+              // array argument into separate params and only the first is kept
+              // (broke multi-select Generate Tags / context menu).
+              const flatArgs = args || [];
               if (wsIpcDebug) {
                 console.log('[WebSocket] Handler found for channel:', channel, 'Raw args:', args, 'Args length:', args?.length, 'Args type:', typeof args);
+                console.log('[WebSocket] Calling handler with flatArgs:', flatArgs, 'Length:', flatArgs.length);
               }
-              if (flatArgs.length === 1 && Array.isArray(flatArgs[0])) {
-                // If args is [ [arg1, arg2] ], unwrap it to [arg1, arg2]
-                if (wsIpcDebug) console.log('[WebSocket] Unwrapping nested array');
-                flatArgs = flatArgs[0];
-              }
-              if (wsIpcDebug) console.log('[WebSocket] Calling handler with flatArgs:', flatArgs, 'Length:', flatArgs.length);
               const result = await handler(mockEvent, ...flatArgs);
               
               // Convert ArrayBuffer to base64 for WebSocket transmission
@@ -4857,6 +4856,24 @@ function getDefaultThumbnail(thumbnailString, defaultIndex = 0) {
   return thumbnails[index];
 }
 
+/** First stored thumbnail as { base64, mimeType } for AI tagging (handles multi-thumb `::` joins). */
+function getThumbnailImagePayload(thumbnailString) {
+  const thumb = getDefaultThumbnail(thumbnailString);
+  if (!thumb || typeof thumb !== 'string' || !thumb.startsWith('data:image')) {
+    return null;
+  }
+  const commaIndex = thumb.indexOf(',');
+  if (commaIndex === -1) return null;
+  const header = thumb.slice(0, commaIndex);
+  const base64 = thumb.slice(commaIndex + 1).replace(/\s/g, '');
+  if (!base64) return null;
+  const mimeMatch = header.match(/^data:([^;]+)/i);
+  return {
+    base64,
+    mimeType: (mimeMatch && mimeMatch[1]) || 'image/png'
+  };
+}
+
 function addThumbnailToModel(thumbnailString, newThumbnail) {
   if (!newThumbnail) return thumbnailString;
   const thumbnails = parseThumbnails(thumbnailString);
@@ -6634,16 +6651,23 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                   }
                 }
               } else {
-                // Extract the base64 data from the thumbnail data URL
-                const base64Data = model.thumbnail.split(',')[1];
+                // Use default thumb only — multi-thumb strings are joined with `::`
+                const imagePayload = getThumbnailImagePayload(model.thumbnail);
                 
-                if (!base64Data) {
+                if (!imagePayload) {
                   console.error(`Invalid thumbnail format for ${filePath}`);
                   failureCount++;
                 } else {
                   try {
                     // Generate tags using the thumbnail image
-                    tags = await aitagging.generateTagsForImage(base64Data, settings.aiModel, tagOptions, 2000, 5, filePath);
+                    tags = await aitagging.generateTagsForImage(
+                      imagePayload.base64,
+                      settings.aiModel,
+                      { ...tagOptions, mimeType: imagePayload.mimeType },
+                      2000,
+                      5,
+                      filePath
+                    );
                     successCount++;
                   } catch (error) {
                     console.error(`Error generating tags for ${filePath}:`, error);
@@ -9816,18 +9840,23 @@ ipcMain.handle('generate-tags', async (event, filePath) => {
       }
     }
     
-    // Extract the base64 data from the thumbnail data URL
-    // The thumbnail is stored as a data URL like: data:image/png;base64,BASE64_DATA
-    const base64Data = model.thumbnail.split(',')[1];
+    // Use default thumb only — multi-thumb strings are joined with `::`
+    const imagePayload = getThumbnailImagePayload(model.thumbnail);
     
-    if (!base64Data) {
+    if (!imagePayload) {
       console.error('Invalid thumbnail format');
       return []; // Return empty tags instead of throwing
     }
     
     try {
-      // Generate tags using the thumbnail image which is already in PNG format
-      const tags = await aitagging.generateTagsForImage(base64Data, settings.aiModel, tagOptions, 2000, 5, filePath);
+      const tags = await aitagging.generateTagsForImage(
+        imagePayload.base64,
+        settings.aiModel,
+        { ...tagOptions, mimeType: imagePayload.mimeType },
+        2000,
+        5,
+        filePath
+      );
       return tags;
     } catch (error) {
       console.error('Error generating tags:', error);
