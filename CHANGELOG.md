@@ -4,6 +4,33 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.17] - 2026-08-02
+
+### Fixed
+
+- Server mode: 3MF preview rendered blank (0×0×0 mm) because WebSocket JSON mangled Float32Array/Uint32Array geometry buffers (#72).
+- Docker/server mode: scrolling the grid into models without thumbnails no longer floods `get3MFImages` / WebGL work — prune off-screen queue jobs, cap queue size, fetch only top-scoring compressed 3MF images, and quiet verbose extract logs.
+- Docker: suppress Chromium `ERROR:dbus` / “Failed to connect to the bus” log spam (start system bus when possible; filter remaining noise).
+- Docker: Generate Missing Thumbnails OOM (V8) — stream path chunks, concurrency 1, pause grid WebGL while bulk job runs, expose GC / cap heap under 4g container limit.
+- Docker NVIDIA passthrough was ignored because the entrypoint always forced SwiftShader; hardware path now used when a device is detected (requires `NVIDIA_DRIVER_CAPABILITIES` including `graphics`).
+- Server mode reported a hardcoded app version `1.22.5` (log/About); now uses `package.json` via `get-app-version`.
+- Docker: V8 heap no longer hard-capped at 3072MB — auto-scales from the container cgroup limit (or 8192 when unlimited); override with `PRINTVENTORY_MAX_OLD_SPACE_MB`.
+
+### Added
+
+- System Report: show Client GPU (browser WebGL) and Server/App GPU (nvidia-smi + Electron renderer / GL backend).
+- Docker: auto-select NVIDIA WebGL when a GPU is present (`PRINTVENTORY_GPU=auto|nvidia|swiftshader`); otherwise SwiftShader.
+
+### Changed
+
+- Preparing for 2.2 Public
+
+## [2.1.16] - 2026-07-27
+
+### Changed
+
+- Docker/server mode: Generate Missing and Regenerate Thumbnails now run in the container (hidden Electron + SwiftShader WebGL) so progress continues when the browser tab is unfocused.
+
 ## [2.1.15] - 2026-07-25
 
 ### Added

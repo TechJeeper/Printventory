@@ -95,7 +95,9 @@ const earlyEventChannels = [
   'open-settings', 'open-guide', 'open-about', 'open-keyboard-shortcuts',
   'open-server-mode-info',
   'puter-ai-chat-request',
-  'tags-generated', 'start-single-tag-generation', 'start-batch-tag-generation', 'batch-tag-generation-complete'
+  'tags-generated', 'start-single-tag-generation', 'start-batch-tag-generation', 'batch-tag-generation-complete',
+  'thumbnail-job-progress', 'thumbnail-job-complete', 'thumbnail-job-error',
+  'run-server-thumbnail-job', 'cancel-server-thumbnail-job'
 ];
 earlyEventChannels.forEach(function(channel) {
   window.electron.on(channel, function() {
@@ -245,6 +247,10 @@ window.confirmPurgeModelsFromDialog = async function confirmPurgeModelsFromDialo
 
 // DeDup Easy: select all but one per group; keep archived (ZIP) when present (early for Docker/server)
 window.dedupEasyFromDialog = function dedupEasyFromDialog() {
+  if (typeof window.applyDedupEasySelection === 'function' && window._dedupVirtualState?.groups?.length) {
+    window.applyDedupEasySelection();
+    return;
+  }
   const dialog = document.getElementById('dedup-dialog');
   if (!dialog) return;
   const groups = dialog.querySelectorAll('.duplicate-group');
@@ -257,18 +263,47 @@ window.dedupEasyFromDialog = function dedupEasyFromDialog() {
       const checkbox = row.querySelector('input[type="checkbox"]');
       if (!checkbox || checkbox.disabled) return;
       checkbox.checked = row !== keeperRow;
+      // Keep virtual selection in sync when falling back to DOM
+      const fp = checkbox.getAttribute('data-filepath');
+      if (fp && window._dedupVirtualState?.selectedPaths) {
+        if (checkbox.checked) window._dedupVirtualState.selectedPaths.add(fp);
+        else window._dedupVirtualState.selectedPaths.delete(fp);
+      }
     });
   });
 };
 
 // DeDup Clear: uncheck all (early for Docker/server)
 window.dedupClearFromDialog = function dedupClearFromDialog() {
+  if (typeof window.clearDedupSelection === 'function' && window._dedupVirtualState) {
+    window.clearDedupSelection();
+    return;
+  }
   const dialog = document.getElementById('dedup-dialog');
   if (!dialog) return;
+  if (window._dedupVirtualState?.selectedPaths) {
+    window._dedupVirtualState.selectedPaths.clear();
+  }
   dialog.querySelectorAll('.duplicate-file input[type="checkbox"]:not(:disabled)').forEach(function(cb) {
     cb.checked = false;
   });
 };
+
+// Free large dedup payloads when the dialog closes (register early — DOMContentLoaded may abort before late listeners)
+document.addEventListener('DOMContentLoaded', function() {
+  const dedupDialog = document.getElementById('dedup-dialog');
+  if (!dedupDialog || dedupDialog.dataset.dedupTeardownBound === '1') return;
+  dedupDialog.dataset.dedupTeardownBound = '1';
+  dedupDialog.addEventListener('close', function() {
+    if (typeof window.teardownDedupVirtualList === 'function') {
+      window.teardownDedupVirtualList();
+    } else {
+      window._dedupVirtualState = null;
+    }
+    const groupsEl = dedupDialog.querySelector('.duplicate-groups');
+    if (groupsEl) groupsEl.innerHTML = '';
+  });
+});
 
 // Backup/Restore/Export/Import: early-exposed for Docker/server button clicks
 window.createBackupFromDialog = async function createBackupFromDialog() {
@@ -848,6 +883,23 @@ let RENDER_DELAY_BACKGROUND = 750;
 /** When the queue has only off-screen work, cap parallel WebGL thumbs (foreground uses MAX_CONCURRENT_RENDERS). */
 let MAX_CONCURRENT_RENDERS_BACKGROUND = 2;
 let pendingThumbnails = new Set(); // Track files currently being rendered
+/** Soft cap so fast scrolling cannot enqueue thousands of 3MF extract/WebGL jobs. */
+const RENDER_QUEUE_SOFT_CAP = 120;
+
+function enqueueRenderTask(task) {
+  if (!task || !task.filePath) return false;
+  pruneDisconnectedRenderTasks();
+  if (renderQueue.length >= RENDER_QUEUE_SOFT_CAP) {
+    // Drop lowest-priority (usually off-screen) tasks first.
+    renderQueue.sort((a, b) => (a.thumbPriority ?? 1e9) - (b.thumbPriority ?? 1e9));
+    while (renderQueue.length >= RENDER_QUEUE_SOFT_CAP) {
+      const dropped = renderQueue.pop();
+      if (dropped?.filePath) pendingThumbnails.delete(dropped.filePath);
+    }
+  }
+  renderQueue.push(task);
+  return true;
+}
 
 function isLowPriorityThumbnailTask(task) {
   const p = task?.thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
@@ -860,6 +912,11 @@ function renderQueueHasOnlyLowPriorityWork() {
 }
 
 function effectiveMaxConcurrentRenders() {
+  // While a Docker/server bulk thumb job runs in the hidden window, pause grid
+  // WebGL renders so scrolling does not OOM the shared Electron process.
+  if (window._serverBulkThumbnailJobActive) {
+    return 0;
+  }
   return renderQueueHasOnlyLowPriorityWork()
     ? Math.min(MAX_CONCURRENT_RENDERS, MAX_CONCURRENT_RENDERS_BACKGROUND)
     : MAX_CONCURRENT_RENDERS;
@@ -895,7 +952,22 @@ function refreshThumbnailQueuePriorities() {
   }
 }
 
+function pruneDisconnectedRenderTasks() {
+  if (renderQueue.length === 0) return 0;
+  let removed = 0;
+  for (let i = renderQueue.length - 1; i >= 0; i--) {
+    const task = renderQueue[i];
+    if (task?.container && !task.container.isConnected) {
+      if (task.filePath) pendingThumbnails.delete(task.filePath);
+      renderQueue.splice(i, 1);
+      removed++;
+    }
+  }
+  return removed;
+}
+
 function dequeueNextRenderTask() {
+  pruneDisconnectedRenderTasks();
   if (renderQueue.length === 0) return null;
   if (renderQueue.length === 1) return renderQueue.shift();
   let minIdx = 0;
@@ -3081,10 +3153,415 @@ let isCheckingForHashes = false;
 let isThumbnailDialogShowing = false;
 // Flag to prevent multiple regenerate thumbnails dialogs from showing
 let isRegeneratingThumbnails = false;
+
+// Active browser-side waiter for a server/Docker bulk thumbnail job
+let activeServerThumbnailJobWaiter = null;
+
+function isServerThumbnailWorkerContext() {
+  if (typeof window.electron?.isServerThumbnailWorker !== 'function') {
+    return Promise.resolve(false);
+  }
+  return window.electron.isServerThumbnailWorker().catch(() => false);
+}
+
+function showBackgroundThumbnailProgress(text, percent) {
+  const progressSection = document.getElementById('progress-section');
+  const progressContainer = document.getElementById('progress-container');
+  const renderProgressContainer = document.getElementById('render-progress-container');
+  const renderProgressBar = document.getElementById('render-progress-bar');
+  const renderProgressText = document.getElementById('render-progress-text');
+  const stopButton = document.getElementById('stop-thumbnail-generation');
+  if (!progressSection || !renderProgressBar || !renderProgressText) return;
+
+  progressSection.classList.remove('hidden');
+  if (renderProgressContainer) renderProgressContainer.classList.remove('hidden');
+  if (progressContainer) progressContainer.classList.add('hidden');
+  renderProgressBar.style.width = `${Math.max(0, Math.min(100, percent || 0))}%`;
+  renderProgressText.textContent = text || 'Generating thumbnails in background...';
+  if (stopButton) {
+    stopButton.style.display = 'block';
+    stopButton.onclick = () => {
+      window.electron.cancelServerThumbnailJob().catch((err) => {
+        console.warn('Failed to cancel background thumbnail job:', err);
+      });
+      renderProgressText.textContent = 'Stopping...';
+      stopButton.disabled = true;
+    };
+    stopButton.disabled = false;
+  }
+}
+
+function hideBackgroundThumbnailProgress() {
+  const progressSection = document.getElementById('progress-section');
+  const renderProgressContainer = document.getElementById('render-progress-container');
+  const stopButton = document.getElementById('stop-thumbnail-generation');
+  if (stopButton) {
+    stopButton.style.display = 'none';
+    stopButton.onclick = null;
+    stopButton.disabled = false;
+  }
+  if (renderProgressContainer) renderProgressContainer.classList.add('hidden');
+  if (progressSection) {
+    const progressContainer = document.getElementById('progress-container');
+    const scanVisible = progressContainer && !progressContainer.classList.contains('hidden');
+    if (!scanVisible) progressSection.classList.add('hidden');
+  }
+}
+
+async function refreshGridAfterBackgroundThumbnailJob() {
+  try {
+    if (typeof invalidatePrimaryThumbnailCache === 'function') {
+      invalidatePrimaryThumbnailCache();
+    }
+    const sortSelect = document.getElementById('sort-select');
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch();
+    } else if (typeof renderFiles === 'function') {
+      const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+      await renderFiles(models);
+    }
+  } catch (err) {
+    console.warn('Failed to refresh grid after background thumbnail job:', err);
+  }
+}
+
+/**
+ * Browser clients in server mode: start a server-side job and mirror progress locally.
+ * Desktop / non-server: returns null so callers fall back to local generation.
+ * Resolves early with { backgrounded: true } if the user moves the job to the sidebar.
+ */
+async function startAndWatchServerThumbnailJob(mode, title) {
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  const isWorker = await isServerThumbnailWorkerContext();
+  if (!serverMode || isWorker || typeof window.electron.startServerThumbnailJob !== 'function') {
+    return null;
+  }
+
+  if (activeServerThumbnailJobWaiter) {
+    throw new Error('A thumbnail job is already running');
+  }
+
+  const jobMode = mode === 'all' ? 'all' : 'missing';
+  const overlay = window.ThumbnailProgress;
+  const jobTitle = title || (jobMode === 'all' ? 'Regenerate Thumbnails' : 'Generate Missing Thumbnails');
+
+  return new Promise(async (resolve, reject) => {
+    const waiter = {
+      resolve,
+      reject,
+      settled: false,
+      backgrounded: false,
+      mode: jobMode,
+      title: jobTitle,
+      lastProcessed: 0,
+      lastTotal: 0
+    };
+    activeServerThumbnailJobWaiter = waiter;
+    window._serverBulkThumbnailJobActive = true;
+
+    overlay?.show({
+      title: jobTitle,
+      phase: 'Starting on server...',
+      cancellable: true,
+      allowBackground: true
+    });
+    overlay?.onCancel(() => {
+      window.electron.cancelServerThumbnailJob().catch((err) => {
+        console.warn('Failed to cancel server thumbnail job:', err);
+      });
+    });
+    overlay?.onBackground(() => {
+      if (!activeServerThumbnailJobWaiter || activeServerThumbnailJobWaiter !== waiter) return;
+      waiter.backgrounded = true;
+      const total = waiter.lastTotal || 0;
+      const processed = waiter.lastProcessed || 0;
+      const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+      const label = total > 0
+        ? `${jobTitle}: ${processed}/${total} (${percent}%)`
+        : `${jobTitle}: running in background...`;
+      showBackgroundThumbnailProgress(label, percent);
+      overlay.hide();
+      if (!waiter.settled) {
+        waiter.settled = true;
+        waiter.resolve({ backgrounded: true, mode: jobMode });
+      }
+    });
+
+    try {
+      const start = await window.electron.startServerThumbnailJob({ mode: jobMode });
+      if (!start || !start.success) {
+        activeServerThumbnailJobWaiter = null;
+        window._serverBulkThumbnailJobActive = false;
+        hideBackgroundThumbnailProgress();
+        overlay?.hide();
+        reject(new Error((start && start.error) || 'Failed to start server thumbnail job'));
+        return;
+      }
+    } catch (err) {
+      activeServerThumbnailJobWaiter = null;
+      window._serverBulkThumbnailJobActive = false;
+      hideBackgroundThumbnailProgress();
+      overlay?.hide();
+      reject(err);
+    }
+  });
+}
+
+window._electronRealEventHandlers['thumbnail-job-progress'] = function(payload) {
+  window._serverBulkThumbnailJobActive = true;
+  const waiter = activeServerThumbnailJobWaiter;
+  if (!waiter || !payload) return;
+
+  if (typeof payload.processed === 'number') waiter.lastProcessed = payload.processed;
+  if (typeof payload.total === 'number') waiter.lastTotal = payload.total;
+
+  if (waiter.backgrounded) {
+    const total = waiter.lastTotal || 0;
+    const processed = waiter.lastProcessed || 0;
+    const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+    const label = total > 0
+      ? `${waiter.title}: ${processed}/${total} (${percent}%)`
+      : (payload.phase || `${waiter.title}: running in background...`);
+    showBackgroundThumbnailProgress(label, percent);
+    return;
+  }
+
+  const overlay = window.ThumbnailProgress;
+  if (!overlay) return;
+  if (payload.phase) overlay.setPhase(payload.phase);
+  if (typeof payload.total === 'number' && payload.total > 0) {
+    overlay.update(payload.processed || 0, payload.total, payload.phase);
+  } else if (payload.phase) {
+    overlay.setIndeterminate(true);
+    overlay.setPhase(payload.phase);
+  }
+};
+if (window._electronPendingEvents['thumbnail-job-progress']) {
+  window._electronPendingEvents['thumbnail-job-progress'].forEach((args) => {
+    window._electronRealEventHandlers['thumbnail-job-progress'].apply(null, args);
+  });
+  delete window._electronPendingEvents['thumbnail-job-progress'];
+}
+
+window._electronRealEventHandlers['thumbnail-job-complete'] = function(result) {
+  const waiter = activeServerThumbnailJobWaiter;
+  activeServerThumbnailJobWaiter = null;
+  window._serverBulkThumbnailJobActive = false;
+  const wasBackgrounded = !!(waiter && waiter.backgrounded);
+
+  hideBackgroundThumbnailProgress();
+  if (typeof processRenderQueue === 'function' && renderQueue.length > 0) {
+    setTimeout(() => processRenderQueue(), 100);
+  }
+
+  if (wasBackgrounded) {
+    const cancelled = !!(result && result.cancelled);
+    refreshGridAfterBackgroundThumbnailJob();
+    window.electron.showMessage(
+      waiter.title || 'Thumbnails',
+      cancelled ? 'Thumbnail generation stopped.' : 'Thumbnail generation finished.'
+    ).catch(() => {});
+    return;
+  }
+
+  if (!waiter || waiter.settled) return;
+  waiter.settled = true;
+  const overlay = window.ThumbnailProgress;
+  overlay?.complete(result && result.cancelled ? 'Stopped.' : 'Finished.');
+  waiter.resolve(result || { success: true });
+};
+if (window._electronPendingEvents['thumbnail-job-complete']) {
+  window._electronPendingEvents['thumbnail-job-complete'].forEach((args) => {
+    window._electronRealEventHandlers['thumbnail-job-complete'].apply(null, args);
+  });
+  delete window._electronPendingEvents['thumbnail-job-complete'];
+}
+
+window._electronRealEventHandlers['thumbnail-job-error'] = function(payload) {
+  const waiter = activeServerThumbnailJobWaiter;
+  activeServerThumbnailJobWaiter = null;
+  window._serverBulkThumbnailJobActive = false;
+  const wasBackgrounded = !!(waiter && waiter.backgrounded);
+
+  hideBackgroundThumbnailProgress();
+  window.ThumbnailProgress?.hide();
+  if (typeof processRenderQueue === 'function' && renderQueue.length > 0) {
+    setTimeout(() => processRenderQueue(), 100);
+  }
+
+  const message = (payload && payload.error) || 'Server thumbnail job failed';
+  if (wasBackgrounded) {
+    window.electron.showMessage('Error', message).catch(() => {});
+    return;
+  }
+
+  if (!waiter || waiter.settled) return;
+  waiter.settled = true;
+  waiter.reject(new Error(message));
+};
+if (window._electronPendingEvents['thumbnail-job-error']) {
+  window._electronPendingEvents['thumbnail-job-error'].forEach((args) => {
+    window._electronRealEventHandlers['thumbnail-job-error'].apply(null, args);
+  });
+  delete window._electronPendingEvents['thumbnail-job-error'];
+}
+
+// Hidden Electron window (--server): WebGL bulk thumbnail worker.
+// Registered at top level so it still initializes if later DOMContentLoaded paths return early (e.g. TOS).
+(function initServerThumbnailWorkerEarly() {
+  const cancelRef = { cancelled: false };
+  let workerBusy = false;
+
+  async function waitForGenerateThumbnailsForModels(timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || 60000);
+    while (typeof window.generateThumbnailsForModels !== 'function') {
+      if (Date.now() > deadline) {
+        throw new Error('Thumbnail generator not ready in server worker window');
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return window.generateThumbnailsForModels;
+  }
+
+  window._electronRealEventHandlers['cancel-server-thumbnail-job'] = function() {
+    cancelRef.cancelled = true;
+  };
+  if (window._electronPendingEvents['cancel-server-thumbnail-job']) {
+    window._electronPendingEvents['cancel-server-thumbnail-job'].forEach((args) => {
+      window._electronRealEventHandlers['cancel-server-thumbnail-job'].apply(null, args);
+    });
+    delete window._electronPendingEvents['cancel-server-thumbnail-job'];
+  }
+
+  window._electronRealEventHandlers['run-server-thumbnail-job'] = async function(payload) {
+    const isWorker = await isServerThumbnailWorkerContext();
+    if (!isWorker) return;
+    if (workerBusy) {
+      console.warn('[Server thumbnails] Ignoring job; worker already busy');
+      return;
+    }
+
+    const mode = payload && payload.mode === 'all' ? 'all' : 'missing';
+    workerBusy = true;
+    cancelRef.cancelled = false;
+    window._serverBulkThumbnailJobActive = true;
+
+    try {
+      const generateThumbnailsForModels = await waitForGenerateThumbnailsForModels();
+
+      // Path-only worklist — never preload thousands of full model rows (OOM on large libs).
+      let filePaths = [];
+      if (mode === 'missing') {
+        const without = await window.electron.getModelsWithoutThumbnails();
+        filePaths = (without || []).map((m) => m.filePath).filter(Boolean);
+      } else if (typeof window.electron.getAllModelReferences === 'function') {
+        const refs = await window.electron.getAllModelReferences();
+        filePaths = (refs || []).map((m) => m.filePath).filter(Boolean);
+      } else {
+        const all = await window.electron.getAllModels('date-desc', 0);
+        filePaths = (all || []).map((m) => m.filePath).filter(Boolean);
+      }
+
+      const total = filePaths.length;
+      await window.electron.reportServerThumbnailProgress({
+        phase: total ? `Generating thumbnails for ${total} models...` : 'Nothing to generate',
+        processed: 0,
+        total,
+        mode
+      });
+
+      if (cancelRef.cancelled) {
+        await window.electron.reportServerThumbnailComplete({ cancelled: true, mode, count: 0 });
+        return;
+      }
+
+      if (!total) {
+        await window.electron.reportServerThumbnailComplete({ cancelled: false, mode, count: 0 });
+        return;
+      }
+
+      // Small chunks keep peak RAM low; concurrency 1 avoids shared-WebGL races + OOM.
+      const CHUNK_SIZE = 25;
+      let cancelled = false;
+      for (let offset = 0; offset < filePaths.length; offset += CHUNK_SIZE) {
+        if (cancelRef.cancelled) {
+          cancelled = true;
+          break;
+        }
+        const chunkPaths = filePaths.slice(offset, offset + CHUNK_SIZE);
+        const chunkModels = chunkPaths.map((filePath) => ({ filePath, hash: '' }));
+        const result = await generateThumbnailsForModels(chunkModels, {
+          headless: true,
+          maxConcurrent: 1,
+          cancelRef,
+          mode,
+          skipHash: true,
+          progressOffset: offset,
+          progressTotal: total,
+          title: mode === 'all' ? 'Regenerate Thumbnails' : 'Generate Missing Thumbnails'
+        });
+        if (result && result.cancelled) {
+          cancelled = true;
+          break;
+        }
+        // Drop chunk references before next batch; yield so V8 can GC.
+        chunkModels.length = 0;
+        chunkPaths.length = 0;
+        await new Promise((r) => setTimeout(r, 50));
+        if (typeof gc === 'function') {
+          try { gc(); } catch (_) { /* ignore */ }
+        }
+      }
+
+      await window.electron.reportServerThumbnailComplete({
+        cancelled: cancelled || cancelRef.cancelled,
+        mode,
+        count: total
+      });
+    } catch (error) {
+      console.error('[Server thumbnails] Worker job failed:', error);
+      try {
+        await window.electron.reportServerThumbnailError({ message: error.message || String(error) });
+      } catch (reportErr) {
+        console.error('[Server thumbnails] Failed to report error:', reportErr);
+      }
+    } finally {
+      workerBusy = false;
+      cancelRef.cancelled = false;
+      window._serverBulkThumbnailJobActive = false;
+    }
+  };
+  if (window._electronPendingEvents['run-server-thumbnail-job']) {
+    window._electronPendingEvents['run-server-thumbnail-job'].forEach((args) => {
+      window._electronRealEventHandlers['run-server-thumbnail-job'].apply(null, args);
+    });
+    delete window._electronPendingEvents['run-server-thumbnail-job'];
+  }
+
+  isServerThumbnailWorkerContext().then((isWorker) => {
+    if (isWorker) {
+      console.log('[Server thumbnails] Hidden window worker handlers registered');
+    }
+  }).catch(() => {});
+})();
 // Flag to prevent multiple DeDup delete confirmations from showing
 let isDeletingDuplicates = false;
 
 const DEDUP_PREVIEW_CONCURRENCY = 4;
+/** Fixed row height matches .duplicate-group (150px preview + padding/border). */
+const DEDUP_ITEM_HEIGHT = 171;
+const DEDUP_OVERSCAN = 6;
+
+/** Normalize IPC payload: new array form, or legacy hash→files object. */
+function normalizeDuplicateGroups(duplicates) {
+  if (!duplicates) return [];
+  if (Array.isArray(duplicates)) {
+    return duplicates.filter((g) => g && Array.isArray(g.files) && g.files.length > 1);
+  }
+  return Object.entries(duplicates)
+    .filter(([, files]) => Array.isArray(files) && files.length > 1)
+    .map(([hash, files]) => ({ hash, files }));
+}
 
 function setDuplicatePreviewPlaceholder(previewEl) {
   previewEl.innerHTML = `
@@ -3094,9 +3571,10 @@ function setDuplicatePreviewPlaceholder(previewEl) {
   `;
 }
 
-async function loadDuplicateGroupPreview(previewEl, filePath) {
+async function loadDuplicateGroupPreview(previewEl, filePath, generation) {
   try {
     const thumbnail = await window.electron.getThumbnail(filePath);
+    if (generation != null && window._dedupVirtualState?.previewGeneration !== generation) return;
     if (thumbnail && thumbnail !== '3d.png' && thumbnail.trim() !== '') {
       const img = document.createElement('img');
       img.src = thumbnail;
@@ -3105,6 +3583,7 @@ async function loadDuplicateGroupPreview(previewEl, filePath) {
       return;
     }
     const rendered = await renderModelToPNG(filePath, previewEl);
+    if (generation != null && window._dedupVirtualState?.previewGeneration !== generation) return;
     if (rendered) {
       const img = document.createElement('img');
       img.src = rendered;
@@ -3114,23 +3593,264 @@ async function loadDuplicateGroupPreview(previewEl, filePath) {
       previewEl.innerHTML = '<div class="error-message">No preview available</div>';
     }
   } catch (error) {
+    if (generation != null && window._dedupVirtualState?.previewGeneration !== generation) return;
     console.error('Error loading duplicate preview:', error);
     previewEl.innerHTML = '<div class="error-message">No preview available</div>';
   }
 }
 
-function loadDuplicatePreviewsInBackground(tasks) {
+function loadDuplicatePreviewsInBackground(tasks, generation) {
   if (!tasks.length) return;
   let next = 0;
   const worker = async () => {
     while (next < tasks.length) {
+      if (generation != null && window._dedupVirtualState?.previewGeneration !== generation) return;
       const task = tasks[next++];
-      await loadDuplicateGroupPreview(task.preview, task.filePath);
+      await loadDuplicateGroupPreview(task.preview, task.filePath, generation);
     }
   };
   const workerCount = Math.min(DEDUP_PREVIEW_CONCURRENCY, tasks.length);
   Promise.all(Array.from({ length: workerCount }, () => worker()))
     .catch((err) => console.error('Error loading dedup previews:', err));
+}
+
+function createDuplicateGroupElement(group, selectedPaths) {
+  const groupEl = document.createElement('div');
+  groupEl.className = 'duplicate-group';
+  groupEl.dataset.hash = group.hash || '';
+
+  const preview = document.createElement('div');
+  preview.className = 'duplicate-preview';
+  setDuplicatePreviewPlaceholder(preview);
+
+  const filesList = document.createElement('div');
+  filesList.className = 'duplicate-files';
+
+  const header = document.createElement('div');
+  header.className = 'duplicate-header';
+  header.textContent = `${group.files.length} duplicate files found`;
+  filesList.appendChild(header);
+
+  group.files.forEach((file) => {
+    const fileDiv = document.createElement('div');
+    fileDiv.className = 'duplicate-file';
+
+    const isZipEntry = file.filePath.includes('::');
+    if (isZipEntry) {
+      fileDiv.classList.add('zip-entry');
+    }
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.setAttribute('data-filepath', file.filePath);
+
+    if (isZipEntry) {
+      checkbox.disabled = true;
+      checkbox.title = 'Cannot delete files inside ZIP archives';
+    } else {
+      checkbox.checked = selectedPaths.has(file.filePath);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          selectedPaths.add(file.filePath);
+        } else {
+          selectedPaths.delete(file.filePath);
+        }
+        updateDedupSelectionCount();
+      });
+    }
+
+    const filePath = document.createElement('span');
+    filePath.className = 'duplicate-file-path';
+
+    if (isZipEntry) {
+      const zipBadge = document.createElement('span');
+      zipBadge.className = 'zip-entry-badge';
+      zipBadge.textContent = 'ZIP';
+      zipBadge.title = 'Model in ZIP archive (cannot be deleted)';
+      filePath.appendChild(zipBadge);
+
+      const pathText = document.createElement('span');
+      pathText.textContent = file.filePath;
+      filePath.appendChild(pathText);
+    } else {
+      filePath.textContent = file.filePath;
+    }
+
+    const fileSize = document.createElement('span');
+    fileSize.className = 'duplicate-file-size';
+    fileSize.textContent = formatFileSize(file.size);
+
+    fileDiv.appendChild(checkbox);
+    fileDiv.appendChild(filePath);
+    fileDiv.appendChild(fileSize);
+    filesList.appendChild(fileDiv);
+  });
+
+  groupEl.appendChild(preview);
+  groupEl.appendChild(filesList);
+  return { groupEl, preview, filePath: group.files[0]?.filePath };
+}
+
+function updateDedupSelectionCount() {
+  const state = window._dedupVirtualState;
+  if (!state) return;
+  const countEl = state.container?.querySelector('.dedup-virtual-summary .dedup-selection-count');
+  if (countEl) {
+    const n = state.selectedPaths.size;
+    countEl.textContent = n > 0 ? ` · ${n} selected` : '';
+  }
+}
+
+function applyDedupEasySelection() {
+  const state = window._dedupVirtualState;
+  if (!state?.groups?.length) return;
+  state.selectedPaths.clear();
+  for (const group of state.groups) {
+    const files = group.files || [];
+    if (files.length === 0) continue;
+    const zipFile = files.find((f) => f.filePath.includes('::'));
+    const keeperPath = zipFile ? zipFile.filePath : files[0].filePath;
+    for (const file of files) {
+      if (file.filePath.includes('::')) continue;
+      if (file.filePath !== keeperPath) {
+        state.selectedPaths.add(file.filePath);
+      }
+    }
+  }
+  renderDedupVirtualWindow(true);
+  updateDedupSelectionCount();
+}
+window.applyDedupEasySelection = applyDedupEasySelection;
+
+function clearDedupSelection() {
+  const state = window._dedupVirtualState;
+  if (!state) return;
+  state.selectedPaths.clear();
+  renderDedupVirtualWindow(true);
+  updateDedupSelectionCount();
+}
+window.clearDedupSelection = clearDedupSelection;
+
+function teardownDedupVirtualList() {
+  const state = window._dedupVirtualState;
+  if (!state) return;
+  if (state.container && state.scrollHandler) {
+    state.container.removeEventListener('scroll', state.scrollHandler);
+  }
+  if (state.rafId) {
+    cancelAnimationFrame(state.rafId);
+  }
+  state.previewGeneration = (state.previewGeneration || 0) + 1;
+  window._dedupVirtualState = null;
+}
+window.teardownDedupVirtualList = teardownDedupVirtualList;
+
+function renderDedupVirtualWindow(force) {
+  const state = window._dedupVirtualState;
+  if (!state?.container || !state.groups) return;
+
+  const container = state.container;
+  const scrollTop = container.scrollTop;
+  const viewportH = container.clientHeight || 300;
+  const total = state.groups.length;
+
+  let startIdx = Math.max(0, Math.floor(scrollTop / DEDUP_ITEM_HEIGHT) - DEDUP_OVERSCAN);
+  let endIdx = Math.min(total, Math.ceil((scrollTop + viewportH) / DEDUP_ITEM_HEIGHT) + DEDUP_OVERSCAN);
+
+  if (!force && state.lastStart === startIdx && state.lastEnd === endIdx) return;
+  state.lastStart = startIdx;
+  state.lastEnd = endIdx;
+
+  // Bump generation so in-flight previews for scrolled-away rows are abandoned
+  state.previewGeneration = (state.previewGeneration || 0) + 1;
+  const generation = state.previewGeneration;
+
+  let spacer = container.querySelector('.dedup-virtual-spacer');
+  let content = container.querySelector('.dedup-virtual-content');
+  let summary = container.querySelector('.dedup-virtual-summary');
+
+  if (!spacer || !content) {
+    container.innerHTML = '';
+    summary = document.createElement('div');
+    summary.className = 'dedup-virtual-summary';
+    summary.style.cssText = 'padding:8px 10px;color:#888;font-size:0.85rem;position:sticky;top:0;background:inherit;z-index:1;';
+    summary.innerHTML = `<span class="dedup-group-count"></span><span class="dedup-selection-count"></span>`;
+
+    spacer = document.createElement('div');
+    spacer.className = 'dedup-virtual-spacer';
+    spacer.style.position = 'relative';
+
+    content = document.createElement('div');
+    content.className = 'dedup-virtual-content';
+    content.style.position = 'absolute';
+    content.style.top = '0';
+    content.style.left = '0';
+    content.style.right = '0';
+
+    container.appendChild(summary);
+    container.appendChild(spacer);
+    spacer.appendChild(content);
+  }
+
+  const countEl = summary.querySelector('.dedup-group-count');
+  if (countEl) {
+    countEl.textContent = `${total.toLocaleString()} duplicate group${total === 1 ? '' : 's'}`;
+  }
+  updateDedupSelectionCount();
+
+  const totalHeight = total * DEDUP_ITEM_HEIGHT;
+  spacer.style.height = `${totalHeight}px`;
+  spacer.style.position = 'relative';
+
+  content.style.position = 'absolute';
+  content.style.top = '0';
+  content.style.left = '0';
+  content.style.right = '0';
+  content.style.transform = `translateY(${startIdx * DEDUP_ITEM_HEIGHT}px)`;
+  content.innerHTML = '';
+
+  const previewTasks = [];
+  for (let i = startIdx; i < endIdx; i++) {
+    const built = createDuplicateGroupElement(state.groups[i], state.selectedPaths);
+    built.groupEl.style.minHeight = `${DEDUP_ITEM_HEIGHT - 1}px`;
+    built.groupEl.style.boxSizing = 'border-box';
+    content.appendChild(built.groupEl);
+    if (built.filePath) {
+      previewTasks.push({ preview: built.preview, filePath: built.filePath });
+    }
+  }
+
+  loadDuplicatePreviewsInBackground(previewTasks, generation);
+}
+
+function setupDedupVirtualList(container, groups) {
+  teardownDedupVirtualList();
+
+  window._dedupVirtualState = {
+    container,
+    groups,
+    selectedPaths: new Set(),
+    previewGeneration: 0,
+    lastStart: -1,
+    lastEnd: -1,
+    rafId: 0,
+    scrollHandler: null
+  };
+
+  const onScroll = () => {
+    const state = window._dedupVirtualState;
+    if (!state) return;
+    if (state.rafId) return;
+    state.rafId = requestAnimationFrame(() => {
+      state.rafId = 0;
+      renderDedupVirtualWindow(false);
+    });
+  };
+
+  window._dedupVirtualState.scrollHandler = onScroll;
+  container.addEventListener('scroll', onScroll, { passive: true });
+  container.scrollTop = 0;
+  renderDedupVirtualWindow(true);
 }
 
 // Add or update the loadDuplicateFiles function
@@ -3377,6 +4097,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
     const duplicateGroups = dialog.querySelector('.duplicate-groups');
     
     // Show loading indicator and open dialog immediately so the UI is not blocked by preview work
+    teardownDedupVirtualList();
     duplicateGroups.innerHTML = `
       <div style="text-align: center; padding: 40px; color: #888;">
         <div style="display: inline-block; width: 40px; height: 40px; border: 4px solid #333; border-top-color: #4a9eff; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px;"></div>
@@ -3429,130 +4150,51 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
     `;
     
     // Load duplicates with the includeZip parameter
-    const duplicates = await window.electron.getDuplicates(includeZip);
+    const duplicatesRaw = await window.electron.getDuplicates(includeZip);
+    const groups = normalizeDuplicateGroups(duplicatesRaw);
     const isGeneratingHashes = await window.electron.isGeneratingHashes();
-    console.log('Loaded duplicates:', duplicates);
-    console.log('Is generating hashes:', isGeneratingHashes);
-    console.log('Include zip:', includeZip);
+    console.log(`Loaded ${groups.length} duplicate groups (includeZip=${includeZip}, generatingHashes=${isGeneratingHashes})`);
     
-    // Clear loading message; previews load in the background after the list is shown
-    duplicateGroups.innerHTML = '';
-    const previewTasks = [];
-    
-    // Show warning if hashes are being generated
-    if (isGeneratingHashes) {
-      const warningDiv = document.createElement('div');
-      warningDiv.className = 'hash-generation-warning';
-      warningDiv.innerHTML = `
-        <div style="background-color: #fff3cd; color: #856404; padding: 10px; margin-bottom: 15px; border-radius: 4px; border: 1px solid #ffeeba;">
-          <strong>Note:</strong> Hash generation is currently running in the background. 
-          Additional duplicate files may be found once the process completes.
-        </div>
-      `;
-      duplicateGroups.appendChild(warningDiv);
+    // Show and setup delete button
+    const deleteButton = dialog.querySelector('#delete-selected');
+    if (deleteButton) {
+      deleteButton.style.display = groups.length === 0 ? 'none' : '';
+      deleteButton.replaceWith(deleteButton.cloneNode(true));
+      const newDeleteButton = dialog.querySelector('#delete-selected');
+      if (newDeleteButton && groups.length > 0) {
+        newDeleteButton.addEventListener('click', handleDeleteSelected);
+      }
     }
-    
-    if (!duplicates || Object.keys(duplicates).length === 0) {
-      duplicateGroups.innerHTML += `
+
+    if (groups.length === 0) {
+      teardownDedupVirtualList();
+      let emptyHtml = '';
+      if (isGeneratingHashes) {
+        emptyHtml += `
+          <div class="hash-generation-warning" style="background-color: #fff3cd; color: #856404; padding: 10px; margin-bottom: 15px; border-radius: 4px; border: 1px solid #ffeeba;">
+            <strong>Note:</strong> Hash generation is currently running in the background. 
+            Additional duplicate files may be found once the process completes.
+          </div>
+        `;
+      }
+      emptyHtml += `
         <div style="text-align: center; padding: 20px; color: #888;">
           No duplicate models found
         </div>
       `;
-      const deleteButton = dialog.querySelector('#delete-selected');
-      if (deleteButton) {
-        deleteButton.style.display = 'none';
-      }
+      duplicateGroups.innerHTML = emptyHtml;
     } else {
-      console.log(`Found ${Object.keys(duplicates).length} duplicate groups`);
-      
-      // Show and setup delete button
-      const deleteButton = dialog.querySelector('#delete-selected');
-      if (deleteButton) {
-        deleteButton.style.display = '';
-        // Remove any existing click listeners by cloning
-        deleteButton.replaceWith(deleteButton.cloneNode(true));
-        // Get the new button reference
-        const newDeleteButton = dialog.querySelector('#delete-selected');
-        // Add click handler - showDuplicateFiles will also set this, but that's okay
-        // The flag in handleDeleteSelected will prevent multiple confirmations
-        newDeleteButton.addEventListener('click', handleDeleteSelected);
+      setupDedupVirtualList(duplicateGroups, groups);
+      if (isGeneratingHashes) {
+        const warningDiv = document.createElement('div');
+        warningDiv.className = 'hash-generation-warning';
+        warningDiv.style.cssText = 'background-color:#fff3cd;color:#856404;padding:10px;margin-bottom:8px;border-radius:4px;border:1px solid #ffeeba;';
+        warningDiv.innerHTML = `
+          <strong>Note:</strong> Hash generation is currently running in the background. 
+          Additional duplicate files may be found once the process completes.
+        `;
+        duplicateGroups.insertBefore(warningDiv, duplicateGroups.firstChild);
       }
-      
-      // Create groups for each set of duplicates
-      for (const [hash, files] of Object.entries(duplicates)) {
-        const group = document.createElement('div');
-        group.className = 'duplicate-group';
-        
-        const preview = document.createElement('div');
-        preview.className = 'duplicate-preview';
-        setDuplicatePreviewPlaceholder(preview);
-        previewTasks.push({ preview, filePath: files[0].filePath });
-        
-        // Add files list
-        const filesList = document.createElement('div');
-        filesList.className = 'duplicate-files';
-        
-        // Add header with count
-        const header = document.createElement('div');
-        header.className = 'duplicate-header';
-        header.textContent = `${files.length} duplicate files found`;
-        filesList.appendChild(header);
-        
-        // Add each file
-        files.forEach(file => {
-          const fileDiv = document.createElement('div');
-          fileDiv.className = 'duplicate-file';
-          
-          // Check if this is a ZIP entry
-          const isZipEntry = file.filePath.includes('::');
-          if (isZipEntry) {
-            fileDiv.classList.add('zip-entry');
-          }
-          
-          const checkbox = document.createElement('input');
-          checkbox.type = 'checkbox';
-          checkbox.setAttribute('data-filepath', file.filePath);
-          
-          // Disable checkbox for ZIP entries
-          if (isZipEntry) {
-            checkbox.disabled = true;
-            checkbox.title = 'Cannot delete files inside ZIP archives';
-          }
-          
-          const filePath = document.createElement('span');
-          filePath.className = 'duplicate-file-path';
-          
-          // Add ZIP badge indicator if it's a ZIP entry
-          if (isZipEntry) {
-            const zipBadge = document.createElement('span');
-            zipBadge.className = 'zip-entry-badge';
-            zipBadge.textContent = 'ZIP';
-            zipBadge.title = 'Model in ZIP archive (cannot be deleted)';
-            filePath.appendChild(zipBadge);
-            
-            const pathText = document.createElement('span');
-            pathText.textContent = file.filePath;
-            filePath.appendChild(pathText);
-          } else {
-            filePath.textContent = file.filePath;
-          }
-          
-          const fileSize = document.createElement('span');
-          fileSize.className = 'duplicate-file-size';
-          fileSize.textContent = formatFileSize(file.size);
-          
-          fileDiv.appendChild(checkbox);
-          fileDiv.appendChild(filePath);
-          fileDiv.appendChild(fileSize);
-          filesList.appendChild(fileDiv);
-        });
-        
-        group.appendChild(preview);
-        group.appendChild(filesList);
-        duplicateGroups.appendChild(group);
-      }
-
-      loadDuplicatePreviewsInBackground(previewTasks);
     }
 
     if (!refreshOnly && !dialog.open) {
@@ -3564,6 +4206,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
     // Reset flags in case of error
     isHashDialogShowing = false;
     isCheckingForHashes = false;
+    teardownDedupVirtualList();
     // In refreshOnly mode (e.g. after delete), don't show error dialog so user stays in de-dupe list
     if (!refreshOnly) {
       await window.electron.showMessage('Error', 'Failed to load duplicate files');
@@ -3808,6 +4451,11 @@ async function showManageThumbnailsModal(filePath) {
 // Update the checkTermsOfService function to return a promise
 async function checkTermsOfService() {
   try {
+    // Hidden server worker has no interactive UI; never block init on TOS.
+    if (await isServerThumbnailWorkerContext()) {
+      return true;
+    }
+
     let tosAccepted = await window.electron.getSetting('tosAcceptedDate');
     const termsDialog = document.getElementById('terms-of-service-dialog');
     const acceptButton = document.getElementById('accept-terms');
@@ -4159,12 +4807,99 @@ async function initializeAboutDialog() {
   }
 }
 
+function escapeSystemReportHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatServerGpuReport(serverGpu) {
+  if (!serverGpu) {
+    return { statusText: '✗ Unavailable', statusColor: '#f44336', details: 'No response from getGpuInfo.' };
+  }
+  if (serverGpu.error) {
+    return {
+      statusText: '✗ Error',
+      statusColor: '#f44336',
+      details: escapeSystemReportHtml(serverGpu.error)
+    };
+  }
+
+  const lines = [];
+  const backend = serverGpu.glBackend || 'unknown';
+  const backendLabel = backend === 'swiftshader'
+    ? 'SwiftShader (CPU / software WebGL)'
+    : (backend === 'nvidia' ? 'NVIDIA hardware WebGL (requested)' : backend);
+  lines.push(`<div><strong>GL backend:</strong> ${escapeSystemReportHtml(backendLabel)}</div>`);
+
+  if (serverGpu.activeRenderer) {
+    lines.push(`<div><strong>Electron WebGL renderer:</strong> ${escapeSystemReportHtml(serverGpu.activeRenderer)}</div>`);
+  }
+
+  if (serverGpu.nvidia && serverGpu.nvidia.available && Array.isArray(serverGpu.nvidia.gpus)) {
+    lines.push('<div style="margin-top:0.5rem;"><strong>nvidia-smi:</strong></div>');
+    serverGpu.nvidia.gpus.forEach((gpu) => {
+      lines.push(
+        `<div style="margin-left:0.5rem;">` +
+        `[${escapeSystemReportHtml(gpu.index)}] ${escapeSystemReportHtml(gpu.name)}` +
+        ` — driver ${escapeSystemReportHtml(gpu.driverVersion)}` +
+        `, mem ${escapeSystemReportHtml(gpu.memoryUsedMiB)}/${escapeSystemReportHtml(gpu.memoryTotalMiB)} MiB` +
+        `, util ${escapeSystemReportHtml(gpu.utilizationPercent)}%` +
+        `</div>`
+      );
+    });
+  } else if (serverGpu.nvidia && serverGpu.nvidia.message) {
+    lines.push(`<div><strong>nvidia-smi:</strong> ${escapeSystemReportHtml(serverGpu.nvidia.message)}</div>`);
+  }
+
+  if (serverGpu.nvidiaVisibleDevices) {
+    lines.push(`<div><strong>NVIDIA_VISIBLE_DEVICES:</strong> ${escapeSystemReportHtml(serverGpu.nvidiaVisibleDevices)}</div>`);
+  }
+  if (serverGpu.nvidiaDriverCapabilities) {
+    lines.push(`<div><strong>NVIDIA_DRIVER_CAPABILITIES:</strong> ${escapeSystemReportHtml(serverGpu.nvidiaDriverCapabilities)}</div>`);
+  } else if (serverGpu.serverMode) {
+    lines.push('<div><strong>NVIDIA_DRIVER_CAPABILITIES:</strong> <em>unset</em></div>');
+  }
+
+  if (Array.isArray(serverGpu.warnings) && serverGpu.warnings.length) {
+    lines.push('<div style="margin-top:0.5rem;color:#ffb74d;"><strong>Warnings:</strong></div>');
+    serverGpu.warnings.forEach((w) => {
+      lines.push(`<div style="margin-left:0.5rem;color:#ffb74d;">• ${escapeSystemReportHtml(w)}</div>`);
+    });
+  }
+
+  let statusText = '✗ Not Detected';
+  let statusColor = '#f44336';
+  if (serverGpu.usingSwiftShader && serverGpu.available) {
+    statusText = serverGpu.nvidia?.available
+      ? '⚠ Host NVIDIA visible — WebGL on SwiftShader'
+      : '✓ SwiftShader (software)';
+    statusColor = serverGpu.nvidia?.available ? '#ff9800' : '#4caf50';
+  } else if (serverGpu.available && !serverGpu.usingSwiftShader) {
+    statusText = '✓ Hardware GPU in use';
+    statusColor = '#4caf50';
+  } else if (serverGpu.nvidia?.available) {
+    statusText = '⚠ NVIDIA visible — WebGL status unknown';
+    statusColor = '#ff9800';
+  }
+
+  return {
+    statusText,
+    statusColor,
+    details: lines.join('') || 'No additional information available.'
+  };
+}
+
 async function initializeSystemReport() {
   try {
     const loadingEl = document.getElementById('system-report-loading');
     const contentEl = document.getElementById('system-report-content');
-    const gpuDetectedEl = document.getElementById('gpu-detected');
-    const gpuDetailsEl = document.getElementById('gpu-details');
+    const clientGpuDetectedEl = document.getElementById('client-gpu-detected') || document.getElementById('gpu-detected');
+    const clientGpuDetailsEl = document.getElementById('client-gpu-details') || document.getElementById('gpu-details');
+    const serverGpuDetectedEl = document.getElementById('server-gpu-detected');
+    const serverGpuDetailsEl = document.getElementById('server-gpu-details');
     const filesystemResultEl = document.getElementById('filesystem-result');
     const filesystemDetailsEl = document.getElementById('filesystem-details');
     const databaseResultEl = document.getElementById('database-result');
@@ -4174,39 +4909,63 @@ async function initializeSystemReport() {
     if (loadingEl) loadingEl.style.display = 'block';
     if (contentEl) contentEl.style.display = 'none';
     
-    // Check GPU/WebGL support (client-side)
-    let gpuDetected = false;
-    let gpuInfo = '';
+    // Client GPU / WebGL (this browser)
+    let clientGpuDetected = false;
+    let clientGpuInfo = '';
     try {
       const canvas = document.createElement('canvas');
       const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
       
       if (gl) {
-        gpuDetected = true;
+        clientGpuDetected = true;
         const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
         if (debugInfo) {
           const vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
           const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-          gpuInfo = `Vendor: ${vendor}<br>Renderer: ${renderer}`;
+          clientGpuInfo = `Vendor: ${escapeSystemReportHtml(vendor)}<br>Renderer: ${escapeSystemReportHtml(renderer)}`;
         } else {
-          gpuInfo = 'WebGL is available but detailed GPU information is not accessible.';
+          clientGpuInfo = 'WebGL is available but detailed GPU information is not accessible.';
         }
       } else {
-        gpuDetected = false;
-        gpuInfo = 'WebGL is not available. 3D rendering may be limited or unavailable.';
+        clientGpuDetected = false;
+        clientGpuInfo = 'WebGL is not available. 3D rendering may be limited or unavailable.';
       }
     } catch (error) {
-      gpuDetected = false;
-      gpuInfo = `Error detecting GPU: ${error.message}`;
+      clientGpuDetected = false;
+      clientGpuInfo = `Error detecting GPU: ${escapeSystemReportHtml(error.message)}`;
     }
     
-    // Update GPU status
-    if (gpuDetectedEl) {
-      gpuDetectedEl.textContent = gpuDetected ? '✓ Detected' : '✗ Not Detected';
-      gpuDetectedEl.style.color = gpuDetected ? '#4caf50' : '#f44336';
+    if (clientGpuDetectedEl) {
+      clientGpuDetectedEl.textContent = clientGpuDetected ? '✓ Detected' : '✗ Not Detected';
+      clientGpuDetectedEl.style.color = clientGpuDetected ? '#4caf50' : '#f44336';
     }
-    if (gpuDetailsEl) {
-      gpuDetailsEl.innerHTML = gpuInfo || 'No additional information available.';
+    if (clientGpuDetailsEl) {
+      clientGpuDetailsEl.innerHTML = clientGpuInfo || 'No additional information available.';
+    }
+
+    // Server / Electron-process GPU (Docker thumbnail worker or desktop app)
+    if (serverGpuDetectedEl || serverGpuDetailsEl) {
+      try {
+        const serverGpu = typeof window.electron.getGpuInfo === 'function'
+          ? await window.electron.getGpuInfo()
+          : null;
+        const formatted = formatServerGpuReport(serverGpu);
+        if (serverGpuDetectedEl) {
+          serverGpuDetectedEl.textContent = formatted.statusText;
+          serverGpuDetectedEl.style.color = formatted.statusColor;
+        }
+        if (serverGpuDetailsEl) {
+          serverGpuDetailsEl.innerHTML = formatted.details;
+        }
+      } catch (error) {
+        if (serverGpuDetectedEl) {
+          serverGpuDetectedEl.textContent = '✗ Error';
+          serverGpuDetectedEl.style.color = '#f44336';
+        }
+        if (serverGpuDetailsEl) {
+          serverGpuDetailsEl.innerHTML = escapeSystemReportHtml(error.message);
+        }
+      }
     }
     
     // Run file system benchmark
@@ -4910,6 +5669,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
     console.log('Server mode detected: Capped MAX_CONCURRENT_RENDERS to', MAX_CONCURRENT_RENDERS);
   }
+  // Hidden worker window must not run grid WebGL at all (bulk job owns the GPU/CPU).
+  if (await isServerThumbnailWorkerContext()) {
+    MAX_CONCURRENT_RENDERS = 0;
+    MAX_CONCURRENT_RENDERS_BACKGROUND = 0;
+    window._serverBulkThumbnailJobActive = true;
+    console.log('[Server thumbnails] Worker window: grid thumbnail renders disabled');
+  }
 
   if (serverMode) {
     const sidebar = document.querySelector('.sidebar');
@@ -5416,6 +6182,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             const allModels = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
             
             if (allModels.length > 0) {
+                const serverJob = await startAndWatchServerThumbnailJob('all', 'Regenerate Thumbnails');
+                if (serverJob) {
+                  if (serverJob.backgrounded || serverJob.cancelled) {
+                    return;
+                  }
+                  invalidatePrimaryThumbnailCache();
+                  await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+                  const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+                  await renderFiles(models);
+                  return;
+                }
+
                 window.ThumbnailProgress?.show({
                   title: 'Regenerate Thumbnails',
                   phase: 'Clearing existing thumbnails...',
@@ -6780,6 +7558,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('dedup-easy-button')?.addEventListener('click', () => window.dedupEasyFromDialog());
   document.getElementById('dedup-clear-button')?.addEventListener('click', () => window.dedupClearFromDialog());
 
+  // Free large dedup payloads when the dialog closes
+  document.getElementById('dedup-dialog')?.addEventListener('close', () => {
+    teardownDedupVirtualList();
+    const groupsEl = document.querySelector('#dedup-dialog .duplicate-groups');
+    if (groupsEl) groupsEl.innerHTML = '';
+  });
+
   document.getElementById('tag-manager-fullscreen-toggle')?.addEventListener('click', () => {
     const dialog = document.getElementById('tag-manager-dialog');
     const btn = document.getElementById('tag-manager-fullscreen-toggle');
@@ -7298,6 +8083,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   window._electronRealEventHandlers['regenerate-thumbnails'] = async function() {
     if (isRegeneratingThumbnails) return;
+    // Hidden server worker ignores UI events; it only runs run-server-thumbnail-job.
+    if (await isServerThumbnailWorkerContext()) return;
     try {
       const sortSelect = document.getElementById('sort-select');
       const allModels = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
@@ -7312,6 +8099,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         ['Yes', 'No']
       );
       if (userChoice === 'Yes') {
+        const serverJob = await startAndWatchServerThumbnailJob('all', 'Regenerate Thumbnails');
+        if (serverJob) {
+          isRegeneratingThumbnails = false;
+          if (serverJob.backgrounded || serverJob.cancelled) {
+            return;
+          }
+          await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+          invalidatePrimaryThumbnailCache();
+          const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+          await renderFiles(models);
+          return;
+        }
+
         window.ThumbnailProgress?.show({
           title: 'Regenerate Thumbnails',
           phase: 'Clearing existing thumbnails...',
@@ -7346,6 +8146,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (isThumbnailDialogShowing) {
       return; // Exit early if dialog is already showing
     }
+    if (await isServerThumbnailWorkerContext()) return;
     
     try {
       // Get models without thumbnails (NULL, empty, or default '3d.png')
@@ -7365,6 +8166,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
       
       if (userChoice === 'Yes') {
+        const serverJob = await startAndWatchServerThumbnailJob('missing', 'Generate Missing Thumbnails');
+        if (serverJob) {
+          isThumbnailDialogShowing = false;
+          if (serverJob.backgrounded || serverJob.cancelled) {
+            return;
+          }
+          await window.electron.showMessage('Success', 'Thumbnail generation completed successfully.');
+          invalidatePrimaryThumbnailCache();
+          const sortSelect = document.getElementById('sort-select');
+          const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+          await renderFiles(models);
+          return;
+        }
+
         const progress = window.ThumbnailProgress;
         progress?.show({
           title: 'Generate Missing Thumbnails',
@@ -11237,13 +12052,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Add function for generating thumbnails for multiple models
-  async function generateThumbnailsForModels(models) {
+  async function generateThumbnailsForModels(models, options = {}) {
+    const headless = !!options.headless;
+    const cancelRef = options.cancelRef || null;
+    const skipHash = !!options.skipHash;
+    const progressOffset = typeof options.progressOffset === 'number' ? options.progressOffset : 0;
+    const progressTotal = typeof options.progressTotal === 'number' ? options.progressTotal : models.length;
     console.log(`[DEBUG] generateThumbnailsForModels: Starting thumbnail generation for ${models.length} models.`);
     
     // Check if we're in server mode (Docker typically runs in server mode)
-    // Higher concurrency in server/Docker mode to compensate for slower file operations
+    // Hidden worker must stay at concurrency 1 (shared WebGL + SwiftShader RAM).
     const serverMode = await window.electron.isServerMode().catch(() => false);
-    const maxConcurrentThumbnails = serverMode ? 10 : 3; // Higher concurrency in server/Docker mode
+    const isWorker = await isServerThumbnailWorkerContext();
+    const maxConcurrentThumbnails = typeof options.maxConcurrent === 'number'
+      ? options.maxConcurrent
+      : (isWorker || headless ? 1 : (serverMode ? 3 : 3));
     
     // New progress UI elements (Sidebar)
     const progressSection = document.getElementById('progress-section');
@@ -11260,20 +12083,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     const activeProgressText = renderProgressText;
     
     // Check if progress elements exist before proceeding
-    const hasProgressUI = progressSection && activeProgressBar && activeProgressText;
+    const hasProgressUI = !headless && progressSection && activeProgressBar && activeProgressText;
     
-    const overlay = window.ThumbnailProgress;
+    const overlay = headless ? null : window.ThumbnailProgress;
 
-    totalThumbnailsToGenerate = models.length;
-    generatedThumbnailsCount = 0;
+    totalThumbnailsToGenerate = progressTotal;
+    generatedThumbnailsCount = progressOffset;
     let isCancelled = false;
+    let processedInBatch = 0;
+
+    const reportHeadlessProgress = async (processed, total, phase) => {
+      if (!headless || typeof window.electron.reportServerThumbnailProgress !== 'function') return;
+      try {
+        await window.electron.reportServerThumbnailProgress({
+          processed,
+          total,
+          phase: phase || `Processing ${processed}/${total}`,
+          mode: options.mode || null
+        });
+      } catch (err) {
+        console.warn('[Server thumbnails] progress report failed:', err);
+      }
+    };
 
     // Handle stop button
     const handleStopClick = () => {
         isCancelled = true;
+        if (cancelRef) cancelRef.cancelled = true;
         if (activeProgressText) activeProgressText.textContent = 'Stopping...';
     };
-    if (stopButton) {
+    if (stopButton && !headless) {
         // Remove existing listener if any (to avoid duplicates)
         stopButton.replaceWith(stopButton.cloneNode(true));
         const newStopButton = document.getElementById('stop-thumbnail-generation');
@@ -11290,13 +12129,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (progressContainer) progressContainer.classList.add('hidden'); 
         
         activeProgressBar.style.width = '0%';
-        activeProgressText.textContent = `Processing 0/${totalThumbnailsToGenerate} (0%)`;
+        activeProgressText.textContent = `Processing ${progressOffset}/${progressTotal} (0%)`;
       }
 
       if (overlay) {
-        overlay.show({ title: 'Generating Thumbnails', total: totalThumbnailsToGenerate });
-        overlay.update(0, totalThumbnailsToGenerate, `Generating thumbnails for ${totalThumbnailsToGenerate} model${totalThumbnailsToGenerate === 1 ? '' : 's'}...`);
+        overlay.show({ title: options.title || 'Generating Thumbnails', total: progressTotal });
+        overlay.update(progressOffset, progressTotal, `Generating thumbnails for ${progressTotal} model${progressTotal === 1 ? '' : 's'}...`);
         overlay.onCancel(handleStopClick);
+      }
+
+      if (progressOffset === 0) {
+        await reportHeadlessProgress(0, progressTotal, `Generating thumbnails for ${progressTotal} model${progressTotal === 1 ? '' : 's'}...`);
       }
       
       // Process models in parallel with concurrency control for better performance
@@ -11314,7 +12157,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (fileExt !== 'stl' && fileExt !== '3mf' && fileExt !== 'obj' && fileExt !== 'svg') {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
-            if (!model.hash || model.hash === '') {
+            if (!skipHash && (!model.hash || model.hash === '')) {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
             return;
@@ -11335,7 +12178,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               thumbnail = generateTypedPlaceholder('svg');
             }
             await window.electron.saveThumbnail(model.filePath, thumbnail);
-            if (!model.hash || model.hash === '') {
+            if (!skipHash && (!model.hash || model.hash === '')) {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
             return;
@@ -11391,8 +12234,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             await window.electron.saveThumbnail(model.filePath, '3d.png');
           }
           
-          // 5. Calculate and save hash during thumbnail generation (file is already being read)
-          if (!model.hash || model.hash === '') {
+          // 5. Hash during bulk jobs is optional (extra I/O / memory); skip in Docker headless.
+          if (!skipHash && (!model.hash || model.hash === '')) {
             try {
               await window.electron.calculateFileHash(model.filePath);
             } catch (hashError) {
@@ -11400,11 +12243,8 @@ document.addEventListener('DOMContentLoaded', async () => {
               // Continue even if hash calculation fails
             }
           }
-          
-          // Force cleanup after each model
-          if (typeof deepCleanThreeResources === 'function') {
-            deepCleanThreeResources();
-          }
+
+          thumbnail = null;
           
         } catch (error) {
           console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
@@ -11415,23 +12255,44 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
           }
         } finally {
-          processedCount++;
-          generatedThumbnailsCount = processedCount;
+          processedInBatch++;
+          processedCount = processedInBatch;
+          const absoluteProcessed = progressOffset + processedInBatch;
+          generatedThumbnailsCount = absoluteProcessed;
           
           // Update progress
           if (hasProgressUI) {
-            const progress = Math.floor((processedCount / totalThumbnailsToGenerate) * 100);
+            const progress = Math.floor((absoluteProcessed / progressTotal) * 100);
             activeProgressBar.style.width = `${progress}%`;
-            activeProgressText.textContent = `Processing ${processedCount}/${totalThumbnailsToGenerate} (${progress}%)`;
+            activeProgressText.textContent = `Processing ${absoluteProcessed}/${progressTotal} (${progress}%)`;
           }
           if (overlay && !isCancelled) {
-            overlay.update(processedCount, totalThumbnailsToGenerate);
+            overlay.update(absoluteProcessed, progressTotal);
+          }
+          if (!isCancelled) {
+            await reportHeadlessProgress(absoluteProcessed, progressTotal);
+          }
+
+          // Between models: yield + occasional soft GC. Avoid forceContextLoss every
+          // model (expensive and races if concurrency > 1).
+          if (maxConcurrentThumbnails === 1) {
+            await new Promise((r) => setTimeout(r, 25));
+            if (processedInBatch % 15 === 0 && typeof deepCleanThreeResources === 'function') {
+              deepCleanThreeResources();
+              await new Promise((r) => setTimeout(r, 50));
+            } else if (typeof gc === 'function' && processedInBatch % 5 === 0) {
+              try { gc(); } catch (_) { /* ignore */ }
+            }
           }
         }
       };
       
       // Process models with concurrency control
-      while (modelQueue.length > 0 && !isCancelled) {
+      while (modelQueue.length > 0 && !isCancelled && !(cancelRef && cancelRef.cancelled)) {
+        if (cancelRef && cancelRef.cancelled) {
+          isCancelled = true;
+          break;
+        }
         // Fill up to max concurrent thumbnails
         while (activePromises.size < maxConcurrentThumbnails && modelQueue.length > 0) {
           const model = modelQueue.shift();
@@ -11441,9 +12302,9 @@ document.addEventListener('DOMContentLoaded', async () => {
           activePromises.add(promise);
         }
 
-        if (hasProgressUI && totalThumbnailsToGenerate > 0) {
-          const done = Math.min(generatedThumbnailsCount, totalThumbnailsToGenerate);
-          activeProgressText.textContent = `Processing ${done}/${totalThumbnailsToGenerate} (${activePromises.size} active)`;
+        if (hasProgressUI && progressTotal > 0) {
+          const done = Math.min(generatedThumbnailsCount, progressTotal);
+          activeProgressText.textContent = `Processing ${done}/${progressTotal} (${activePromises.size} active)`;
         }
         
         // Wait for at least one promise to complete before continuing
@@ -11457,17 +12318,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         await Promise.all(Array.from(activePromises));
       }
 
-      // Update final progress
-      if (hasProgressUI && !isCancelled) {
-        activeProgressBar.style.width = '100%';
-        activeProgressText.textContent = `Completed ${totalThumbnailsToGenerate}/${totalThumbnailsToGenerate} (100%)`;
+      if (cancelRef && cancelRef.cancelled) {
+        isCancelled = true;
       }
-      if (overlay && !isCancelled) {
-        overlay.update(totalThumbnailsToGenerate, totalThumbnailsToGenerate);
+
+      // Update final progress
+      const finalProcessed = progressOffset + processedInBatch;
+      if (hasProgressUI && !isCancelled && finalProcessed >= progressTotal) {
+        activeProgressBar.style.width = '100%';
+        activeProgressText.textContent = `Completed ${progressTotal}/${progressTotal} (100%)`;
+      }
+      if (overlay && !isCancelled && finalProcessed >= progressTotal) {
+        overlay.update(progressTotal, progressTotal);
+      }
+      if (!isCancelled && finalProcessed >= progressTotal) {
+        await reportHeadlessProgress(progressTotal, progressTotal, 'Finished.');
       }
       
     } catch (error) {
       console.error('Error in thumbnail generation:', error);
+      if (headless) throw error;
     } finally {
       // Hide progress section after a short delay
       if (hasProgressUI) {
@@ -11479,6 +12349,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         overlay.complete(isCancelled ? 'Stopped.' : 'Finished.');
       }
     }
+
+    return { cancelled: isCancelled, count: models.length };
+  }
+
+  window.generateThumbnailsForModels = generateThumbnailsForModels;
+
+  // Hidden Docker worker: once the generator exists, skip the rest of this UI init path
+  // (virtual grid / library load) so it does not compete for RAM with bulk thumbs.
+  if (await isServerThumbnailWorkerContext()) {
+    console.log('[Server thumbnails] Worker window: generateThumbnails ready; skipping remaining UI init');
+    document.body?.classList.add('server-thumbnail-worker');
+    return;
   }
 
   // Add these constants at the top of the file (if not already present)
@@ -13110,6 +13992,10 @@ async function renderFile(file, container, skipThumbnail = false) {
 }
 
 async function processRenderQueue() {
+  if (window._serverBulkThumbnailJobActive) {
+    // Drain only after the bulk job ends; do not start WebGL work meanwhile.
+    return;
+  }
   if (isProcessingQueue || renderQueue.length === 0 || activeRenders >= effectiveMaxConcurrentRenders()) {
     return;
   }
@@ -13139,7 +14025,7 @@ async function processRenderQueue() {
             task.reject(error);
           } else {
             // Retry once after longer delay
-            setTimeout(() => renderQueue.push(task), 2000);
+            setTimeout(() => enqueueRenderTask(task), 2000);
           }
         } finally {
           activeRenders--;
@@ -13293,16 +14179,29 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
   
   if (fileExtension === '3mf') {
     try {
-      const images = await window.electron.get3MFImages(filePath);
+      // Scroll hydrate only needs a few top-scoring plate/cover images.
+      // Fetching every embedded PNG over the WebSocket bridge OOMs Docker on large libraries.
+      const images = await window.electron.get3MFImages(filePath, {
+        maxImages: 3,
+        quiet: true
+      });
+      // Cell scrolled away while we extracted — abandon (will re-queue if it returns).
+      if (container && !container.isConnected) {
+        return null;
+      }
       if (images && images.length > 0) {
         // Add all images to model's thumbnails at once using batch function
         let result = null;
         try {
           result = await window.electron.addMultipleThumbnails(filePath, images);
-          
+          if (container && !container.isConnected) {
+            return images[0];
+          }
+
           // After adding thumbnails, update the model in memory if we can find it
           if (result && result.success) {
-            const allThumbs = await window.electron.getAllThumbnails(filePath);
+            // Prefer the images we already have — avoid a second full getAllThumbnails WS round-trip.
+            const allThumbs = images;
             
             // Update the model object in memory if we can find it
             // This will help when the item is re-rendered
@@ -15838,13 +16737,15 @@ async function populateLicenseFilter() {
 }
 
 async function showDuplicateFiles(duplicates) {
-  console.log('Showing duplicate files:', duplicates);
+  const groups = normalizeDuplicateGroups(duplicates);
+  console.log('Showing duplicate files:', groups.length, 'groups');
   const duplicateGroups = document.querySelector('.duplicate-groups');
-  duplicateGroups.innerHTML = '';
+  if (!duplicateGroups) return;
 
   // Check if there are any duplicates
-  if (Object.keys(duplicates).length === 0) {
-    // Create and show "no duplicates" message
+  if (groups.length === 0) {
+    teardownDedupVirtualList();
+    duplicateGroups.innerHTML = '';
     const messageDiv = document.createElement('div');
     messageDiv.style.textAlign = 'center';
     messageDiv.style.padding = '20px';
@@ -15852,7 +16753,6 @@ async function showDuplicateFiles(duplicates) {
     messageDiv.textContent = 'No duplicate models found';
     duplicateGroups.appendChild(messageDiv);
 
-    // Hide the delete button since there's nothing to delete
     const deleteButton = document.querySelector('.dialog-buttons #delete-selected');
     if (deleteButton) {
       deleteButton.style.display = 'none';
@@ -15860,111 +16760,19 @@ async function showDuplicateFiles(duplicates) {
     return;
   }
 
-  // Show delete button if it was previously hidden
   const deleteButton = document.querySelector('.dialog-buttons #delete-selected');
   if (deleteButton) {
     deleteButton.style.display = '';
-  }
-
-  // Rest of the existing code for showing duplicates
-  for (const [hash, files] of Object.entries(duplicates)) {
-    const group = document.createElement('div');
-    group.className = 'duplicate-group';
-    
-    // Add preview container
-    const preview = document.createElement('div');
-    preview.className = 'duplicate-preview';
-    
-    // Try to render the first file's thumbnail
-    try {
-      const thumbnail = await renderModelToPNG(files[0].filePath, preview);
-      if (thumbnail) {
-        const img = document.createElement('img');
-        img.src = thumbnail;
-        preview.innerHTML = '';
-        preview.appendChild(img);
-      }
-    } catch (error) {
-      console.error('Error rendering preview:', error);
-      preview.innerHTML = '<div class="error-message">Error loading preview</div>';
-    }
-    
-    const filesList = document.createElement('div');
-    filesList.className = 'duplicate-files';
-    
-    const header = document.createElement('div');
-    header.className = 'duplicate-group-header';
-    header.innerHTML = `<span class="duplicate-count">${files.length} duplicates found</span>`;
-    filesList.appendChild(header);
-    
-    files.forEach((file) => {
-      const fileDiv = document.createElement('div');
-      fileDiv.className = 'duplicate-file';
-      
-      // Check if this is a ZIP entry
-      const isZipEntry = file.filePath.includes('::');
-      if (isZipEntry) {
-        fileDiv.classList.add('zip-entry');
-      }
-      
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.setAttribute('data-filepath', file.filePath);
-      
-      // Disable checkbox for ZIP entries
-      if (isZipEntry) {
-        checkbox.disabled = true;
-        checkbox.title = 'Cannot delete files inside ZIP archives';
-      }
-      
-      const filePath = document.createElement('span');
-      filePath.className = 'duplicate-file-path';
-      
-      // Add ZIP badge indicator if it's a ZIP entry
-      if (isZipEntry) {
-        const zipBadge = document.createElement('span');
-        zipBadge.className = 'zip-entry-badge';
-        zipBadge.textContent = 'ZIP';
-        zipBadge.title = 'Model in ZIP archive (cannot be deleted)';
-        filePath.appendChild(zipBadge);
-        
-        const pathText = document.createElement('span');
-        pathText.textContent = file.filePath;
-        filePath.appendChild(pathText);
-      } else {
-        filePath.textContent = file.filePath;
-      }
-      
-      const fileSize = document.createElement('span');
-      fileSize.className = 'duplicate-file-size';
-      fileSize.textContent = formatFileSize(file.size);
-      
-      fileDiv.appendChild(checkbox);
-      fileDiv.appendChild(filePath);
-      fileDiv.appendChild(fileSize);
-      filesList.appendChild(fileDiv);
-    });
-    
-    group.appendChild(preview);
-    group.appendChild(filesList);
-    duplicateGroups.appendChild(group);
-  }
-
-  // Set up delete handler - remove old handler first to prevent duplicates
-  if (deleteButton) {
-    // Remove any existing onclick handler
     deleteButton.onclick = null;
-    // Remove any existing event listeners by cloning
     const newButton = deleteButton.cloneNode(true);
     deleteButton.parentNode.replaceChild(newButton, deleteButton);
-    // Set handler on the new button
     const finalDeleteButton = document.querySelector('.dialog-buttons #delete-selected');
     if (finalDeleteButton) {
       finalDeleteButton.onclick = handleDeleteSelected;
     }
-  } else {
-    console.error('Delete button not found!');
   }
+
+  setupDedupVirtualList(duplicateGroups, groups);
 }
 
 async function handleDeleteSelected() {
@@ -15976,16 +16784,23 @@ async function handleDeleteSelected() {
     return;
   }
 
-  const selectedFiles = Array.from(
-    document.querySelectorAll('.duplicate-file input[type="checkbox"]:checked')
-  )
-    .map(checkbox => checkbox.getAttribute('data-filepath'))
-    .filter(filePath => {
-      // Filter out ZIP entries as a safeguard (they should already be disabled)
-      return !filePath.includes('::');
-    });
+  // Prefer virtual-list selection (covers off-screen groups); fall back to DOM checkboxes
+  let selectedFiles;
+  if (window._dedupVirtualState?.selectedPaths) {
+    selectedFiles = Array.from(window._dedupVirtualState.selectedPaths).filter(
+      (filePath) => filePath && !filePath.includes('::')
+    );
+  } else {
+    selectedFiles = Array.from(
+      document.querySelectorAll('.duplicate-file input[type="checkbox"]:checked')
+    )
+      .map(checkbox => checkbox.getAttribute('data-filepath'))
+      .filter(filePath => {
+        return filePath && !filePath.includes('::');
+      });
+  }
 
-  console.log('Selected files:', selectedFiles);
+  console.log('Selected files:', selectedFiles.length);
 
   if (selectedFiles.length === 0) {
     await window.electron.showMessage('No Selection', 'Please select files to delete');
@@ -17073,6 +17888,10 @@ function initializeListButtons() {
 // First, declare all initialization functions outside of any event listeners
 async function initializeApp() {
   try {
+    if (await isServerThumbnailWorkerContext()) {
+      console.log('[Server thumbnails] Worker window: skipping initializeApp');
+      return;
+    }
     // Load saved sort preference before initializing search
     const savedSortOption = await window.electron.getSetting('sortOption');
     const sortSelect = document.getElementById('sort-select');
@@ -18325,7 +19144,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       if (view !== 'detailed' && view !== 'preview') return;
       if (pendingThumbnails.has(model.filePath)) return;
       pendingThumbnails.add(model.filePath);
-      renderQueue.push({
+      enqueueRenderTask({
         filePath: model.filePath,
         container: thumbnailContainer,
         thumbPriority,
@@ -18541,11 +19360,14 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
   // Only queue if it doesn't have a thumbnail string AND the flag is false
   if (!currentThumbnail && !hasThumbnailFlag) {
-    // Queue thumbnail generation if not already pending
-    if (!pendingThumbnails.has(model.filePath)) {
+    // During Docker bulk Generate Missing / Regenerate, skip grid WebGL queues —
+    // scrolling must not compete with the hidden-window job (OOM).
+    if (window._serverBulkThumbnailJobActive) {
+      // keep placeholder; job will fill thumbs server-side
+    } else if (!pendingThumbnails.has(model.filePath)) {
       pendingThumbnails.add(model.filePath);
 
-      renderQueue.push({
+      enqueueRenderTask({
         filePath: model.filePath,
         container: thumbnailContainer,
         thumbPriority,
@@ -21127,6 +21949,10 @@ function renderVirtualGrid(models) {
             item.remove();
           }
         });
+        // Drop queued thumbnail work for cells that scrolled off-screen so
+        // Docker/server mode does not keep extracting 3MF images / WebGL-rendering them.
+        pruneDisconnectedRenderTasks();
+        refreshThumbnailQueuePriorities();
 
         const findExistingLayoutItem = (layoutKey) => {
           return Array.from(virtualContent.children).find(item => item.dataset.layoutKey === layoutKey) || null;

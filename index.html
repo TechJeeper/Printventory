@@ -547,8 +547,8 @@
             </label>
           </div>
           <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
-            <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group (keeps archived/ZIP copy when present)">Easy</button>
-            <button type="button" id="dedup-clear-button" class="modal-fullscreen-toggle" title="Clear all selections">Clear</button>
+            <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group (keeps archived/ZIP copy when present)" onclick="if(typeof window.dedupEasyFromDialog==='function')window.dedupEasyFromDialog()">Easy</button>
+            <button type="button" id="dedup-clear-button" class="modal-fullscreen-toggle" title="Clear all selections" onclick="if(typeof window.dedupClearFromDialog==='function')window.dedupClearFromDialog()">Clear</button>
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
             <button type="button" id="dedup-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleDedupFullscreen==='function')window.toggleDedupFullscreen()">Full Screen</button>
             <button type="button" id="close-dedup" onclick="document.getElementById('dedup-dialog')?.close()">Close</button>
@@ -1484,12 +1484,23 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             </div>
             <div id="system-report-content" style="display: none;">
               <div class="system-report-section" style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
-                <h3 style="margin-top: 0; margin-bottom: 0.75rem; font-size: 1.1rem;">GPU Detection (WebGL)</h3>
-                <div id="gpu-status" style="margin-bottom: 0.5rem;">
+                <h3 style="margin-top: 0; margin-bottom: 0.75rem; font-size: 1.1rem;">Client GPU (this browser)</h3>
+                <p style="font-size: 0.85rem; color: #888; margin: 0 0 0.75rem 0;">Used for interactive 3D previews in the UI.</p>
+                <div id="client-gpu-status" style="margin-bottom: 0.5rem;">
                   <span style="font-weight: bold;">Status: </span>
-                  <span id="gpu-detected">Checking...</span>
+                  <span id="client-gpu-detected">Checking...</span>
                 </div>
-                <div id="gpu-details" style="font-size: 0.9rem; color: #aaa; margin-top: 0.5rem;"></div>
+                <div id="client-gpu-details" style="font-size: 0.9rem; color: #aaa; margin-top: 0.5rem;"></div>
+              </div>
+
+              <div class="system-report-section" style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
+                <h3 style="margin-top: 0; margin-bottom: 0.75rem; font-size: 1.1rem;">Server / App GPU</h3>
+                <p style="font-size: 0.85rem; color: #888; margin: 0 0 0.75rem 0;">Used for Docker/server thumbnail jobs (hidden Electron worker). In desktop mode this is the local app process.</p>
+                <div id="server-gpu-status" style="margin-bottom: 0.5rem;">
+                  <span style="font-weight: bold;">Status: </span>
+                  <span id="server-gpu-detected">Checking...</span>
+                </div>
+                <div id="server-gpu-details" style="font-size: 0.9rem; color: #aaa; margin-top: 0.5rem;"></div>
               </div>
 
               <div class="system-report-section" style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
@@ -1553,7 +1564,10 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
         <span id="thumbnail-progress-count"></span>
         <span id="thumbnail-progress-percent"></span>
       </div>
-      <button type="button" class="tp-cancel" id="thumbnail-progress-cancel">Stop</button>
+      <div class="tp-actions">
+        <button type="button" class="tp-background" id="thumbnail-progress-background" hidden>Background</button>
+        <button type="button" class="tp-cancel" id="thumbnail-progress-cancel">Stop</button>
+      </div>
     </div>
   </div>
 

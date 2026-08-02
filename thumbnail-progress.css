@@ -78,25 +78,37 @@
   font-variant-numeric: tabular-nums;
 }
 
+.tp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 /* The global `button` rule is display:flex/width:90% with no auto margins, which
-   pins the button to the left edge of the panel. Override to center it. */
-.tp-cancel {
+   pins the button to the left edge of the panel. Override for action buttons. */
+.tp-cancel,
+.tp-background {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: auto;
-  min-width: 150px;
-  margin: 18px auto 0;
-  padding: 9px 26px;
+  min-width: 130px;
+  margin: 0;
+  padding: 9px 22px;
   border: none;
   border-radius: 999px;
-  background: linear-gradient(135deg, #ff6b6b 0%, #ff3b30 100%);
   color: #fff;
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   box-shadow: none;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.tp-cancel {
+  background: linear-gradient(135deg, #ff6b6b 0%, #ff3b30 100%);
 }
 
 .tp-cancel:hover:not(:disabled) {
@@ -105,7 +117,19 @@
   box-shadow: 0 6px 18px rgba(255, 59, 48, 0.35);
 }
 
-.tp-cancel:disabled {
+.tp-background {
+  background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.tp-background:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: linear-gradient(135deg, #5a6578 0%, #3d4758 100%);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.tp-cancel:disabled,
+.tp-background:disabled {
   opacity: 0.5;
   cursor: default;
 }

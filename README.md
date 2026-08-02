@@ -52,9 +52,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent feature additions and migration note
 ### Pre-built Releases
 
 Download the latest release for your platform:
-- **Windows**: `Printventory-Setup-1.22.5.exe` (NSIS installer)
+- **Windows**: `Printventory-Setup-2.1.17.exe` (NSIS installer)
 - **macOS**: Universal binary (Intel and Apple Silicon) DMG
-- **Linux/Docker**: `printventory-docker-1.22.5.zip` (Docker distribution package)
+- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.1.17.zip`)
 
 ### Data Storage
 
@@ -400,6 +400,32 @@ Then run:
 ```bash
 docker compose up -d
 ```
+
+#### NVIDIA GPU (optional)
+
+Server-side thumbnail jobs render with WebGL inside the container. By default the image uses **SwiftShader** (CPU). To use a host NVIDIA GPU:
+
+1. Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
+2. Pass the GPU into the container **and** enable the `graphics` driver capability (required for WebGL — `compute,utility` alone is not enough):
+
+```yaml
+services:
+  printventory:
+    image: printventory/printventory:latest
+    gpus: all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+      - PRINTVENTORY_GPU=auto   # or nvidia | swiftshader
+```
+
+3. Recreate the container (`docker compose up -d --force-recreate`), then open **Help → System Report**:
+   - **Client GPU** = your browser (previews)
+   - **Server / App GPU** = container WebGL backend + `nvidia-smi`
+
+If System Report still shows SwiftShader while `nvidia-smi` lists a card, `graphics` is usually missing from `NVIDIA_DRIVER_CAPABILITIES`, or the image predates GPU auto-detect.
+
+**Memory note:** Host RAM (e.g. 96GB) is not used automatically. Unraid/Compose often caps the container (or the image used to hard-cap V8 at 3GB). Raise the container memory limit and, if needed, set `PRINTVENTORY_MAX_OLD_SPACE_MB=8192` (or higher). Logs showing `OOM error in V8: Zone Allocation failed` are the V8 heap limit, not the host running out of RAM.
 
 #### Accessing the Server
 

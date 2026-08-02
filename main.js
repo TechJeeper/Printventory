@@ -88,6 +88,42 @@ function serializePreview3mfForDisk(json) {
     return value;
   });
 }
+
+// Typed arrays become { "0": n, "1": n, ... } under JSON.stringify, which
+// THREE.ObjectLoader treats as empty buffers. Convert to plain arrays so
+// server-mode WebSocket transport and disk/memory caches stay consistent.
+function normalizePreview3mfTypedArrays(json) {
+  if (!json || !Array.isArray(json.geometries)) return json;
+  for (const geometry of json.geometries) {
+    const data = geometry && geometry.data;
+    if (!data) continue;
+    if (data.attributes) {
+      for (const key of Object.keys(data.attributes)) {
+        const attr = data.attributes[key];
+        if (attr && attr.array != null && !Array.isArray(attr.array)) {
+          attr.array = ArrayBuffer.isView(attr.array)
+            ? Array.from(attr.array)
+            : Object.values(attr.array);
+        }
+      }
+    }
+    if (data.index && data.index.array != null && !Array.isArray(data.index.array)) {
+      data.index.array = ArrayBuffer.isView(data.index.array)
+        ? Array.from(data.index.array)
+        : Object.values(data.index.array);
+    }
+  }
+  return json;
+}
+
+function jsonStringifyForWs(payload) {
+  return JSON.stringify(payload, (_key, value) => {
+    if (ArrayBuffer.isView(value)) {
+      return Array.from(value);
+    }
+    return value;
+  });
+}
 const JSZip = require('jszip');
 const os = require('os');
 const https = require('https');
@@ -1240,7 +1276,7 @@ ${bridgeCode}
                   global.broadcastEvent(eventChannel, ...eventArgs);
                 } else {
                   // Send event back via WebSocket to this specific client
-                  ws.send(JSON.stringify({
+                  ws.send(jsonStringifyForWs({
                     type: 'event',
                     channel: eventChannel,
                     args: eventArgs
@@ -1288,7 +1324,7 @@ ${bridgeCode}
                 };
               }
               
-              ws.send(JSON.stringify({
+              ws.send(jsonStringifyForWs({
                 id,
                 type: 'result',
                 result: serializedResult
@@ -1375,7 +1411,7 @@ ${bridgeCode}
                 };
               }
               
-              ws.send(JSON.stringify({
+              ws.send(jsonStringifyForWs({
                 id,
                 type: 'result',
                 result: serializedResult
@@ -1420,7 +1456,7 @@ ${bridgeCode}
   
   // Broadcast events to all WebSocket clients
   function broadcastEvent(channel, ...args) {
-    const message = JSON.stringify({
+    const message = jsonStringifyForWs({
       type: 'event',
       channel,
       args
@@ -2640,11 +2676,23 @@ async function createWindow() {
         { type: 'separator' },
         {
           label: 'Regenerate Thumbnails',
-          click: () => mainWindow.webContents.send('regenerate-thumbnails')
+          click: () => {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('regenerate-thumbnails');
+            } else {
+              mainWindow.webContents.send('regenerate-thumbnails');
+            }
+          }
         },
         {
           label: 'Generate Missing Thumbnails',
-          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
+          click: () => {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('generate-missing-thumbnails');
+            } else {
+              mainWindow.webContents.send('generate-missing-thumbnails');
+            }
+          }
         },
         {
           label: 'Purge Models',
@@ -2857,11 +2905,23 @@ function createApplicationMenu() {
         { type: 'separator' },
         {
           label: 'Regenerate Thumbnails',
-          click: () => mainWindow.webContents.send('regenerate-thumbnails')
+          click: () => {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('regenerate-thumbnails');
+            } else {
+              mainWindow.webContents.send('regenerate-thumbnails');
+            }
+          }
         },
         {
           label: 'Generate Missing Thumbnails',
-          click: () => mainWindow.webContents.send('generate-missing-thumbnails')
+          click: () => {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('generate-missing-thumbnails');
+            } else {
+              mainWindow.webContents.send('generate-missing-thumbnails');
+            }
+          }
         },
         {
           label: 'Purge Models',
@@ -4703,6 +4763,109 @@ ipcMain.handle('purge-thumbnails', async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Server/Docker: bulk thumbnail jobs run in the hidden Electron window (WebGL),
+// so browser-tab focus throttling cannot stall Generate Missing / Regenerate.
+// ---------------------------------------------------------------------------
+let serverThumbnailJob = {
+  status: 'idle', // idle | running
+  mode: null,
+  cancelRequested: false
+};
+
+function broadcastThumbnailJobEvent(channel, payload) {
+  if (isServerMode && global.broadcastEvent) {
+    global.broadcastEvent(channel, payload);
+  }
+}
+
+function sendToThumbnailWorker(channel, ...args) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error('Server thumbnail worker window is not ready');
+  }
+  mainWindow.webContents.send(channel, ...args);
+}
+
+async function startServerThumbnailJobInternal(mode) {
+  if (!isServerMode) {
+    return { success: false, error: 'Not in server mode' };
+  }
+  if (serverThumbnailJob.status === 'running') {
+    return { success: false, error: 'A thumbnail job is already running' };
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { success: false, error: 'Server thumbnail worker window is not ready' };
+  }
+
+  const jobMode = mode === 'all' ? 'all' : 'missing';
+  serverThumbnailJob = { status: 'running', mode: jobMode, cancelRequested: false };
+
+  try {
+    if (jobMode === 'all') {
+      db.prepare('UPDATE models SET thumbnail = NULL').run();
+    }
+    sendToThumbnailWorker('run-server-thumbnail-job', { mode: jobMode });
+    broadcastThumbnailJobEvent('thumbnail-job-progress', {
+      phase: jobMode === 'all' ? 'Starting regeneration on server...' : 'Starting generation on server...',
+      processed: 0,
+      total: 0,
+      mode: jobMode
+    });
+    return { success: true, mode: jobMode };
+  } catch (error) {
+    serverThumbnailJob = { status: 'idle', mode: null, cancelRequested: false };
+    console.error('[Server thumbnails] Failed to start job:', error);
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+ipcMain.handle('start-server-thumbnail-job', async (_event, options) => {
+  const mode = options && options.mode === 'all' ? 'all' : 'missing';
+  return startServerThumbnailJobInternal(mode);
+});
+
+ipcMain.handle('cancel-server-thumbnail-job', async () => {
+  if (serverThumbnailJob.status !== 'running') {
+    return { success: false, error: 'No thumbnail job running' };
+  }
+  serverThumbnailJob.cancelRequested = true;
+  try {
+    sendToThumbnailWorker('cancel-server-thumbnail-job');
+  } catch (error) {
+    console.warn('[Server thumbnails] Cancel notify failed:', error.message);
+  }
+  return { success: true };
+});
+
+ipcMain.handle('report-server-thumbnail-progress', async (_event, progress) => {
+  broadcastThumbnailJobEvent('thumbnail-job-progress', progress || {});
+  return true;
+});
+
+ipcMain.handle('report-server-thumbnail-complete', async (_event, result) => {
+  serverThumbnailJob = { status: 'idle', mode: null, cancelRequested: false };
+  broadcastThumbnailJobEvent('thumbnail-job-complete', result || {});
+  if (global.broadcastEvent) {
+    global.broadcastEvent('refresh-grid');
+  }
+  return true;
+});
+
+ipcMain.handle('report-server-thumbnail-error', async (_event, errorInfo) => {
+  serverThumbnailJob = { status: 'idle', mode: null, cancelRequested: false };
+  const message = (errorInfo && (errorInfo.message || errorInfo.error)) || String(errorInfo || 'Thumbnail job failed');
+  broadcastThumbnailJobEvent('thumbnail-job-error', { error: message });
+  return true;
+});
+
+ipcMain.handle('get-server-thumbnail-job-status', async () => {
+  return {
+    status: serverThumbnailJob.status,
+    mode: serverThumbnailJob.mode,
+    cancelRequested: !!serverThumbnailJob.cancelRequested
+  };
+});
+
 // Update the shouldSkipDirectory function
 function shouldSkipDirectory(dirName) {
   // Skip directories named __MACOSX (case-insensitive)
@@ -5775,18 +5938,131 @@ ipcMain.handle('get-stats', async () => {
   }
 });
 
-// System Report handlers
+// System Report: server / Electron-process GPU (client WebGL is detected in the browser)
+async function collectServerGpuInfo() {
+  const { execFile } = require('child_process');
+  const { promisify } = require('util');
+  const execFileAsync = promisify(execFile);
+
+  const glBackend = process.env.PRINTVENTORY_GL_BACKEND
+    || (process.argv.includes('--use-angle=swiftshader') ? 'swiftshader'
+      : (process.argv.some((a) => a.includes('vulkan') || a === '--use-gl=egl') ? 'nvidia' : 'unknown'));
+
+  const result = {
+    available: false,
+    serverMode: isServerMode,
+    glBackend,
+    nvidiaVisibleDevices: process.env.NVIDIA_VISIBLE_DEVICES || null,
+    nvidiaDriverCapabilities: process.env.NVIDIA_DRIVER_CAPABILITIES || null,
+    nvidia: null,
+    electronGpuInfo: null,
+    featureStatus: null,
+    activeRenderer: null,
+    usingSwiftShader: glBackend === 'swiftshader',
+    warnings: [],
+    error: null
+  };
+
+  // nvidia-smi (host GPU via nvidia-container-toolkit) — independent of WebGL backend
+  try {
+    const { stdout } = await execFileAsync(
+      'nvidia-smi',
+      [
+        '--query-gpu=index,name,driver_version,memory.total,memory.used,utilization.gpu',
+        '--format=csv,noheader,nounits'
+      ],
+      { timeout: 5000, windowsHide: true }
+    );
+    const gpus = String(stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(',').map((p) => p.trim());
+        return {
+          index: parts[0] || '',
+          name: parts[1] || '',
+          driverVersion: parts[2] || '',
+          memoryTotalMiB: parts[3] || '',
+          memoryUsedMiB: parts[4] || '',
+          utilizationPercent: parts[5] || ''
+        };
+      });
+    if (gpus.length) {
+      result.nvidia = { available: true, gpus };
+      result.available = true;
+    } else {
+      result.nvidia = { available: false, message: 'nvidia-smi returned no GPUs' };
+    }
+  } catch (nvidiaErr) {
+    result.nvidia = {
+      available: false,
+      message: nvidiaErr && nvidiaErr.code === 'ENOENT'
+        ? 'nvidia-smi not found (no NVIDIA toolkit device mount)'
+        : (nvidiaErr.message || String(nvidiaErr))
+    };
+  }
+
+  if (result.nvidia?.available && result.nvidiaDriverCapabilities) {
+    const caps = `,${result.nvidiaDriverCapabilities},`;
+    if (!caps.includes(',graphics,') && !caps.includes(',all,')) {
+      result.warnings.push(
+        "NVIDIA_DRIVER_CAPABILITIES is missing 'graphics' — WebGL cannot use the GPU (need e.g. graphics,compute,utility)."
+      );
+    }
+  }
+
+  // Chromium/Electron GPU process view (what thumbnail WebGL actually sees)
+  try {
+    if (app.isReady()) {
+      const [gpuInfo, featureStatus] = await Promise.all([
+        app.getGPUInfo('complete').catch(() => app.getGPUInfo('basic')),
+        Promise.resolve().then(() => app.getGPUFeatureStatus())
+      ]);
+      result.electronGpuInfo = gpuInfo || null;
+      result.featureStatus = featureStatus || null;
+
+      const aux = gpuInfo && gpuInfo.auxAttributes ? gpuInfo.auxAttributes : null;
+      const glRenderer = (aux && (aux.glRenderer || aux.gl_renderer)) || null;
+      const gpuDevice = Array.isArray(gpuInfo?.gpuDevice) ? gpuInfo.gpuDevice[0] : null;
+      const deviceString = gpuDevice
+        ? [gpuDevice.vendorString, gpuDevice.deviceString].filter(Boolean).join(' ')
+        : null;
+
+      result.activeRenderer = glRenderer || deviceString || null;
+      if (result.activeRenderer) result.available = true;
+
+      const rendererLower = String(result.activeRenderer || '').toLowerCase();
+      if (rendererLower.includes('swiftshader') || rendererLower.includes('llvmpipe')) {
+        result.usingSwiftShader = true;
+        if (result.nvidia?.available) {
+          result.warnings.push(
+            'Host NVIDIA GPU is visible, but Electron WebGL is still on software rendering (SwiftShader/llvmpipe). Check PRINTVENTORY_GL_BACKEND and NVIDIA_DRIVER_CAPABILITIES=graphics.'
+          );
+        }
+      } else if (result.activeRenderer && glBackend === 'nvidia') {
+        result.usingSwiftShader = false;
+      }
+    }
+  } catch (electronGpuErr) {
+    result.warnings.push(`Electron GPU info unavailable: ${electronGpuErr.message || electronGpuErr}`);
+  }
+
+  if (isServerMode && glBackend === 'swiftshader') {
+    result.warnings.push(
+      'Container is using SwiftShader (CPU WebGL). Set PRINTVENTORY_GPU=nvidia (or auto with a working NVIDIA device) to attempt hardware WebGL.'
+    );
+  }
+
+  return result;
+}
+
 ipcMain.handle('get-gpu-info', async () => {
   try {
-    // GPU detection is primarily client-side (WebGL), but we can return basic info
-    // The actual WebGL detection will be done in the renderer
-    return {
-      available: true, // Will be checked client-side
-      message: 'GPU detection is performed client-side via WebGL'
-    };
+    return await collectServerGpuInfo();
   } catch (error) {
     console.error('Error getting GPU info:', error);
-    return { available: false, error: error.message };
+    return { available: false, serverMode: isServerMode, error: error.message };
   }
 });
 
@@ -8141,13 +8417,21 @@ async function extract3MFMetadata(filePath) {
   }
 }
 
-ipcMain.handle('get3MFImages', async (event, filePath) => {
+ipcMain.handle('get3MFImages', async (event, filePath, options = {}) => {
   if (isUrlModel(filePath)) return [];
   // Skip files located in __MACOSX directories
   if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
-    console.log('Skipping file from __MACOSX directory:', filePath);
     return [];
   }
+
+  const opts = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+  const verbose = opts.verbose === true || process.env.PRINTVENTORY_DEBUG_3MF === '1';
+  const maxImagesRaw = Number(opts.maxImages);
+  const maxImages = Number.isFinite(maxImagesRaw) && maxImagesRaw > 0
+    ? Math.min(Math.floor(maxImagesRaw), 250)
+    : 250;
+  const compress = opts.compress !== false;
+  const log = (...args) => { if (verbose) console.log(...args); };
   
   // Check if this is a zip entry
   const pathInfo = parseZipPath(filePath);
@@ -8155,7 +8439,6 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   
   // Skip macOS resource-fork entries (._*) - not valid 3MF
   if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
-    console.log('Skipping macOS resource-fork entry (not a 3MF):', pathInfo.entryPath);
     return [];
   }
   
@@ -8170,7 +8453,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
   }
   
   try {
-    console.log('Starting to process 3MF file:', actualFilePath);
+    log('Starting to process 3MF file:', actualFilePath);
     
     // Check if file exists
     if (!fs.existsSync(actualFilePath)) {
@@ -8180,7 +8463,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     
     const data = await fs.promises.readFile(actualFilePath);
     if (!isLikelyValidZipBuffer(data)) {
-      console.log('Skipping non-ZIP or too-small file (e.g. macOS ._ file):', actualFilePath, 'size:', data.length);
+      log('Skipping non-ZIP or too-small file (e.g. macOS ._ file):', actualFilePath, 'size:', data.length);
       return [];
     }
     
@@ -8192,29 +8475,31 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     } catch (zipError) {
       const msg = zipError && zipError.message ? zipError.message : String(zipError);
       if (/end of central directory|not a zip/i.test(msg)) {
-        console.log('Invalid or truncated ZIP/3MF, skipping:', actualFilePath);
+        log('Invalid or truncated ZIP/3MF, skipping:', actualFilePath);
       } else {
         console.error('Error loading 3MF as ZIP:', zipError);
       }
       return [];
     }
-    console.log('Zip contents loaded successfully');
+    log('Zip contents loaded successfully');
     
     // Log all files in the 3MF
-    console.log('\nContents of 3MF file:', actualFilePath);
-    console.log('Number of files in archive:', Object.keys(contents.files).length);
-    console.log('All files in archive:');
-    Object.keys(contents.files).forEach(filename => {
-      const file = contents.files[filename];
-      console.log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
-    });
+    log('\nContents of 3MF file:', actualFilePath);
+    log('Number of files in archive:', Object.keys(contents.files).length);
+    if (verbose) {
+      log('All files in archive:');
+      Object.keys(contents.files).forEach(filename => {
+        const file = contents.files[filename];
+        log(' -', filename, file.dir ? '(directory)' : `(${file._data ? file._data.length : 0} bytes)`);
+      });
+    }
     
     // Parse 3dmodel.model XML file to extract metadata
     try {
       const modelXmlFile = find3dModelZipEntry(contents);
       
       if (modelXmlFile && !modelXmlFile.dir) {
-        console.log('Found 3dmodel.model file, parsing metadata...');
+        log('Found 3dmodel.model file, parsing metadata...');
         const xmlContent = await modelXmlFile.async('string');
         const parsedMetadata = parse3MFModelXML(xmlContent);
         
@@ -8223,7 +8508,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
         
         // Update database if we found any metadata
         if (filteredMetadata.designer || filteredMetadata.parentModel || filteredMetadata.notes || filteredMetadata.license) {
-          console.log('Parsed metadata from 3dmodel.model:', filteredMetadata);
+          log('Parsed metadata from 3dmodel.model:', filteredMetadata);
           
           // Use original filePath for database lookup (not actualFilePath which might be a temp file)
           const dbFilePath = filePath;
@@ -8233,7 +8518,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
           
           // If model doesn't exist, create it (similar to add-multiple-thumbnails handler)
           if (!existingModel) {
-            console.log('Model not found in database, creating entry with metadata...');
+            log('Model not found in database, creating entry with metadata...');
             const fileName = path.basename(dbFilePath);
             // Handle zip entry paths - extract just the entry name
             const finalFileName = dbFilePath.includes('::') 
@@ -8254,7 +8539,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
               dateAdded
             );
             
-            console.log(`Created model entry for ${dbFilePath} with metadata`);
+            log(`Created model entry for ${dbFilePath} with metadata`);
           } else {
             // Model exists - only update fields that are empty/null in the database
             const updates = {};
@@ -8294,16 +8579,16 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
                 WHERE filePath = ?
               `);
               updateStmt.run(...values);
-              console.log(`Updated model metadata for ${dbFilePath}:`, updates);
+              log(`Updated model metadata for ${dbFilePath}:`, updates);
             } else {
-              console.log('Model already has values for all metadata fields, skipping update');
+              log('Model already has values for all metadata fields, skipping update');
             }
           }
         } else {
-          console.log('No metadata found in 3dmodel.model file');
+          log('No metadata found in 3dmodel.model file');
         }
       } else {
-        console.log('3dmodel.model file not found in 3MF archive');
+        log('3dmodel.model file not found in 3MF archive');
       }
     } catch (metadataError) {
       console.warn('Error parsing 3MF metadata (continuing with thumbnail extraction):', metadataError);
@@ -8389,7 +8674,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     };
 
     // Scan all images in the archive
-    console.log('\nScanning all images in 3MF archive...');
+    log('\nScanning all images in 3MF archive...');
     const allImages = [];
 
     for (const [path, file] of Object.entries(contents.files)) {
@@ -8397,7 +8682,7 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
         // Try to get uncompressed size if available, otherwise 0
         const size = (file._data && file._data.uncompressedSize) || 0;
         const score = calculateScore(path, size);
-        console.log(`Found image: ${path} (Score: ${score})`);
+        log(`Found image: ${path} (Score: ${score})`);
 
         allImages.push({
           path,
@@ -8411,25 +8696,31 @@ ipcMain.handle('get3MFImages', async (event, filePath) => {
     allImages.sort((a, b) => b.score - a.score);
 
     // Extract images in priority order. Cap avoids huge photo dumps blowing IPC + DB row size.
-    const MAX_3MF_IMAGES_TO_EXTRACT = 250;
+    const MAX_3MF_IMAGES_TO_EXTRACT = maxImages;
     const imageFiles = [];
     const toExtract = allImages.slice(0, MAX_3MF_IMAGES_TO_EXTRACT);
     if (allImages.length > MAX_3MF_IMAGES_TO_EXTRACT) {
-      console.warn(
+      log(
         `3MF has ${allImages.length} image entries; extracting ${MAX_3MF_IMAGES_TO_EXTRACT} highest-priority (memory / DB safety cap).`
       );
     }
 
     for (const imgObj of toExtract) {
-      console.log(`Extracting: ${imgObj.path} (Score: ${imgObj.score})`);
+      log(`Extracting: ${imgObj.path} (Score: ${imgObj.score})`);
       const imageData = await imgObj.file.async('base64');
       const mimeType = getMimeType(imgObj.path);
-      imageFiles.push(`data:image/${mimeType};base64,${imageData}`);
+      let dataUrl = `data:image/${mimeType};base64,${imageData}`;
+      if (compress) {
+        try {
+          dataUrl = compressDataUrl(dataUrl) || dataUrl;
+        } catch (_) { /* keep original */ }
+      }
+      imageFiles.push(dataUrl);
     }
     
-    console.log('\nExtracted total images:', imageFiles.length);
+    log('\nExtracted total images:', imageFiles.length);
     if (imageFiles.length === 0) {
-      console.log('No images found in 3MF file. Expected under Auxiliaries/ (any subfolder), 3D/Textures/, or 3D/Texture/.');
+      log('No images found in 3MF file. Expected under Auxiliaries/ (any subfolder), 3D/Textures/, or 3D/Texture/.');
     }
     return imageFiles.length > 0 ? imageFiles : [];
   } catch (error) {
@@ -8592,7 +8883,7 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
     if (shouldCleanup && actualFilePath !== filePath) {
       try { await fs.promises.unlink(actualFilePath); } catch {}
     }
-    return cached;
+    return normalizePreview3mfTypedArrays(cached);
   }
 
   // Disk cache
@@ -8602,7 +8893,7 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
       const cacheStat = await fs.promises.stat(cachePath);
       if (cacheStat.size <= PREVIEW_3MF_MAX_DISK_CACHE_MB * 1024 * 1024) {
         const cachedJson = await fs.promises.readFile(cachePath, 'utf8');
-        const parsed = JSON.parse(cachedJson);
+        const parsed = normalizePreview3mfTypedArrays(JSON.parse(cachedJson));
         preview3mfCache.set(cacheKey, parsed);
         trimPreview3mfMemoryCache();
         if (shouldCleanup && actualFilePath !== filePath) {
@@ -8663,7 +8954,7 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
         }
 
         if (cacheKey) {
-          preview3mfCache.set(cacheKey, json);
+          preview3mfCache.set(cacheKey, normalizePreview3mfTypedArrays(json));
           trimPreview3mfMemoryCache();
           if (cachePath) {
             try {
@@ -8678,7 +8969,7 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
           }
         }
 
-        resolve(json);
+        resolve(normalizePreview3mfTypedArrays(json));
       });
     };
 
@@ -8931,44 +9222,57 @@ const getDuplicatesHandler = async (event, includeZip = false) => {
   let lastError;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      // Get all models with their hashes - explicitly filter out NULL and empty strings
-      const models = db.prepare(`
-        SELECT filePath, fileName, hash, size 
-        FROM models 
-        WHERE hash IS NOT NULL 
-          AND hash != '' 
+      // Only fetch rows whose hash has 2+ distinct paths (avoids loading every unique model into memory).
+      // Zip entries use "archive::entry" paths — exclude them unless includeZip is true.
+      const zipClause = includeZip ? '' : " AND instr(filePath, '::') = 0";
+      const rows = db.prepare(`
+        SELECT filePath, fileName, hash, size
+        FROM models
+        WHERE hash IS NOT NULL
+          AND hash != ''
           AND LENGTH(TRIM(hash)) > 0
+          ${zipClause}
+          AND hash IN (
+            SELECT hash
+            FROM models
+            WHERE hash IS NOT NULL
+              AND hash != ''
+              AND LENGTH(TRIM(hash)) > 0
+              ${zipClause}
+            GROUP BY hash
+            HAVING COUNT(DISTINCT filePath) > 1
+          )
+        ORDER BY hash, filePath
       `).all();
 
-      // Filter out zip entries if includeZip is false
-      const filteredModels = includeZip
-        ? models
-        : models.filter(model => !model.filePath.includes('::'));
+      // Group by hash; dedupe by filePath (DB can have duplicate rows for the same path)
+      const groupsByHash = new Map();
+      for (const row of rows) {
+        if (!row.hash || row.hash.trim() === '') continue;
+        let group = groupsByHash.get(row.hash);
+        if (!group) {
+          group = { hash: row.hash, files: [], seen: new Set() };
+          groupsByHash.set(row.hash, group);
+        }
+        if (group.seen.has(row.filePath)) continue;
+        group.seen.add(row.filePath);
+        // Omit redundant per-file hash to keep IPC payload lean for large libraries
+        group.files.push({
+          filePath: row.filePath,
+          fileName: row.fileName,
+          size: row.size
+        });
+      }
 
-      // Group by hash to find duplicates - dedupe by filePath so each path appears once per group
-      // (avoids double entries when DB has duplicate rows or in Server/Docker fallback path)
-      const seenByHash = new Map();
-      const duplicates = filteredModels.reduce((acc, model) => {
-        if (!model.hash || model.hash.trim() === '') return acc;
-        if (!acc[model.hash]) acc[model.hash] = [];
-        const key = model.hash;
-        const seen = seenByHash.get(key) || new Set();
-        if (seen.has(model.filePath)) return acc;
-        seen.add(model.filePath);
-        seenByHash.set(key, seen);
-        acc[model.hash].push(model);
-        return acc;
-      }, {});
+      const duplicateGroups = [];
+      for (const group of groupsByHash.values()) {
+        if (group.files.length > 1) {
+          duplicateGroups.push({ hash: group.hash, files: group.files });
+        }
+      }
 
-      // Filter out unique files (groups with only one file)
-      const duplicateGroups = Object.entries(duplicates)
-        .filter(([hash, files]) => files.length > 1)
-        .reduce((acc, [hash, files]) => {
-          acc[hash] = files;
-          return acc;
-        }, {});
-
-      console.log('Found duplicate groups:', Object.keys(duplicateGroups).length);
+      console.log('Found duplicate groups:', duplicateGroups.length);
+      // Array of { hash, files } — leaner than a hash-keyed object for large result sets
       return duplicateGroups;
     } catch (error) {
       lastError = error;

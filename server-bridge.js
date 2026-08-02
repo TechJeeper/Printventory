@@ -18,6 +18,14 @@
     console.log('[Bridge] Detected Electron window context (preload.js), skipping bridge initialization');
     return;
   }
+
+  // Browser clients are never the server-side WebGL thumbnail worker.
+  if (!window.electron) {
+    window.electron = {};
+  }
+  window.electron.isServerThumbnailWorker = function() {
+    return Promise.resolve(false);
+  };
   
   // CRITICAL: Initialize window.electron immediately, before anything else
   // This prevents "Cannot read properties of undefined" errors
@@ -412,6 +420,7 @@
     var heavyIpcChannels = {
       'read-model-file': 180000,
       'extract-model-from-zip': 180000,
+      'get3MFImages': 120000,
       'get-file-stats': 120000,
       'calculate-file-hash': 300000,
       'scan-directory': 600000,
@@ -505,6 +514,9 @@
     'getAppVersion': 'get-app-version',
     'checkCollectUsage': 'check-collect-usage',
     'purgeThumbnails': 'purge-thumbnails',
+    'startServerThumbnailJob': 'start-server-thumbnail-job',
+    'cancelServerThumbnailJob': 'cancel-server-thumbnail-job',
+    'getServerThumbnailJobStatus': 'get-server-thumbnail-job-status',
     'trackEvent': 'track-event',
     'showMessage': 'show-message',
     'showMessageBox': 'show-message-box',
@@ -836,13 +848,11 @@
     window.electron.send('pong');
   };
   
-  // Special methods that don't map directly to IPC channels
+  // isServerMode is always true in the browser bridge (this file only loads in server mode).
+  // getAppVersion uses methodToChannel -> IPC get-app-version (package.json), not a hardcoded string.
+  
   window.electron.isServerMode = function() {
     return Promise.resolve(true);
-  };
-  
-  window.electron.getAppVersion = function() {
-    return Promise.resolve('1.22.5');
   };
   
   window.electron.invoke = function(channel, ...args) {

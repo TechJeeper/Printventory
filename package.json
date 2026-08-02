@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.1.15",
+  "version": "2.1.17",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -28,7 +28,8 @@
     "postinstall": "electron-builder install-app-deps",
     "test": "playwright test",
     "test:bundle": "node bundle-keys.test.js",
-    "test:full": "playwright test full-app-e2e.spec.js"
+    "test:full": "playwright test full-app-e2e.spec.js",
+    "test:dedup-stress": "node tests/dedup-stress-test.js"
   },
   "author": "TechJeeper Designs",
   "license": "MIT",

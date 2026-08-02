@@ -501,7 +501,9 @@ test.describe('Printventory full application E2E', () => {
     await window.waitForFunction(
       () => {
         const el = document.querySelector('#dedup-dialog .duplicate-groups');
-        return el && !el.textContent.includes('Loading duplicate files');
+        if (!el) return false;
+        const text = el.textContent || '';
+        return !text.includes('Loading duplicate files') && !text.includes('Analyzing duplicates');
       },
       { timeout: 120000 }
     );

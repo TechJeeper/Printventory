@@ -28,6 +28,28 @@ console.log('[Preview] preview.js script loaded');
     return message;
   }
 
+  // Server-mode WebSocket JSON turns Float32Array/Uint32Array into plain objects
+  // with numeric keys; ObjectLoader then builds empty buffers (0×0×0 preview).
+  function normalizePreview3mfGeometryArrays(json) {
+    if (!json || !Array.isArray(json.geometries)) return json;
+    for (const geometry of json.geometries) {
+      const data = geometry && geometry.data;
+      if (!data) continue;
+      if (data.attributes) {
+        for (const key of Object.keys(data.attributes)) {
+          const attr = data.attributes[key];
+          if (attr && attr.array != null && !Array.isArray(attr.array)) {
+            attr.array = Object.values(attr.array);
+          }
+        }
+      }
+      if (data.index && data.index.array != null && !Array.isArray(data.index.array)) {
+        data.index.array = Object.values(data.index.array);
+      }
+    }
+    return json;
+  }
+
   function resetPreviewLoadingUI() {
     const loading = document.getElementById('preview-loading');
     if (!loading) return;
@@ -603,6 +625,8 @@ console.log('[Preview] preview.js script loaded');
     if (!json) {
       throw new Error('Failed to load 3MF file');
     }
+
+    normalizePreview3mfGeometryArrays(json);
 
     const objectLoader = new THREE.ObjectLoader();
     const object = objectLoader.parse(json);

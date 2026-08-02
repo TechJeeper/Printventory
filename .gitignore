@@ -13,6 +13,8 @@ test-results/
 tests/test-results/
 tests/playwright-report/
 tests/test-user-data/
+tests/test-dedup-stress/
+tests/test-user-data-stress/
 tests/printventory.db
 app.log
 *.log

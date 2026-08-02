@@ -57,6 +57,14 @@ ipcRenderer.on = function(channel, ...args) {
 
 contextBridge.exposeInMainWorld('electron', {
   isServerMode: () => ipcRenderer.invoke('is-server-mode'),
+  // True only in the Electron hidden window while --server is active (not browser clients).
+  isServerThumbnailWorker: () => checkIsServerMode(),
+  startServerThumbnailJob: (options) => ipcRenderer.invoke('start-server-thumbnail-job', options || {}),
+  cancelServerThumbnailJob: () => ipcRenderer.invoke('cancel-server-thumbnail-job'),
+  reportServerThumbnailProgress: (progress) => ipcRenderer.invoke('report-server-thumbnail-progress', progress || {}),
+  reportServerThumbnailComplete: (result) => ipcRenderer.invoke('report-server-thumbnail-complete', result || {}),
+  reportServerThumbnailError: (errorInfo) => ipcRenderer.invoke('report-server-thumbnail-error', errorInfo || {}),
+  getServerThumbnailJobStatus: () => ipcRenderer.invoke('get-server-thumbnail-job-status'),
   loadDirectory: () => ipcRenderer.invoke('load-directory'),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   saveDirectory: (directoryPath) => ipcRenderer.invoke('save-directory', directoryPath),
@@ -150,9 +158,8 @@ contextBridge.exposeInMainWorld('electron', {
   onOpenThemeSettings: (callback) => ipcRenderer.on('open-theme-settings', callback),
   quitApp: () => ipcRenderer.invoke('quitApp'),
   onOpenPerformanceSettings: (callback) => ipcRenderer.on('open-performance-settings', callback),
-  get3MFImages: (filePath) => {
-    console.log('preload: get3MFImages called with:', filePath);
-    return ipcRenderer.invoke('get3MFImages', filePath);
+  get3MFImages: (filePath, options) => {
+    return ipcRenderer.invoke('get3MFImages', filePath, options);
   },
   get3MFSTL: (filePath) => {
     console.log('preload: get3MFSTL called with:', filePath);
@@ -258,6 +265,11 @@ contextBridge.exposeInMainWorld('electron', {
       'puter-ai-chat-request',
       'regenerate-thumbnails',
       'generate-missing-thumbnails',
+      'run-server-thumbnail-job',
+      'cancel-server-thumbnail-job',
+      'thumbnail-job-progress',
+      'thumbnail-job-complete',
+      'thumbnail-job-error',
       'thumbnail-deleted',
       'manage-thumbnails-request',
       'execute-client-command',

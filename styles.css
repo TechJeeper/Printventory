@@ -3611,6 +3611,25 @@ header {
   overflow-y: auto;
 }
 
+.dedup-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.dedup-virtual-content {
+  width: 100%;
+}
+
+.dedup-virtual-summary {
+  padding: 8px 10px;
+  color: #888;
+  font-size: 0.85rem;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--dialog-background, #1e1e1e);
+}
+
 /* Fullscreen toggle button for DeDup and Tag Manager modals */
 .modal-fullscreen-toggle {
   padding: 8px 16px;

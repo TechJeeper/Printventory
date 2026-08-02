@@ -4,7 +4,9 @@
   'use strict';
 
   let cancelHandler = null;
+  let backgroundHandler = null;
   let isCancelled = false;
+  let allowBackground = false;
 
   function el(id) {
     return document.getElementById(id);
@@ -21,7 +23,8 @@
       fill: el('thumbnail-progress-fill'),
       count: el('thumbnail-progress-count'),
       percent: el('thumbnail-progress-percent'),
-      cancel: el('thumbnail-progress-cancel')
+      cancel: el('thumbnail-progress-cancel'),
+      background: el('thumbnail-progress-background')
     };
   }
 
@@ -30,6 +33,13 @@
     ui.cancel.style.display = visible ? '' : 'none';
     ui.cancel.disabled = false;
     ui.cancel.textContent = 'Stop';
+  }
+
+  function setBackgroundVisible(ui, visible) {
+    if (!ui.background) return;
+    ui.background.hidden = !visible;
+    ui.background.disabled = false;
+    ui.background.textContent = 'Background';
   }
 
   const ThumbnailProgress = {
@@ -53,11 +63,14 @@
       if (reopening) {
         isCancelled = false;
         cancelHandler = null;
+        backgroundHandler = null;
       }
+      allowBackground = opts.allowBackground === true;
       // A caller that opened the overlay for an earlier phase keeps its title.
       if (reopening && opts.title && ui.title) ui.title.textContent = opts.title;
       if (ui.phase) ui.phase.textContent = opts.phase || '';
       setCancelVisible(ui, opts.cancellable !== false);
+      setBackgroundVisible(ui, allowBackground);
       ui.overlay.hidden = false;
 
       if (typeof opts.total === 'number') {
@@ -101,12 +114,23 @@
       if (ui) setCancelVisible(ui, !!cancelHandler);
     },
 
+    onBackground(handler) {
+      backgroundHandler = typeof handler === 'function' ? handler : null;
+      const ui = elements();
+      if (ui) setBackgroundVisible(ui, allowBackground && !!backgroundHandler);
+    },
+
     // Leaves the completion state on screen briefly so the user sees the result.
     complete(message, delayMs) {
       const ui = elements();
       if (!ui) return;
+      if (ui.overlay.hidden) {
+        this.hide();
+        return;
+      }
       if (message) this.setPhase(message);
       if (ui.cancel) ui.cancel.style.display = 'none';
+      setBackgroundVisible(ui, false);
       setTimeout(() => this.hide(), typeof delayMs === 'number' ? delayMs : 900);
     },
 
@@ -117,7 +141,10 @@
       ui.track.classList.remove('tp-indeterminate');
       ui.fill.style.width = '0%';
       cancelHandler = null;
+      backgroundHandler = null;
+      allowBackground = false;
       isCancelled = false;
+      setBackgroundVisible(ui, false);
     }
   };
 
@@ -128,9 +155,17 @@
       isCancelled = true;
       ui.cancel.disabled = true;
       ui.cancel.textContent = 'Stopping...';
+      if (ui.background) {
+        ui.background.disabled = true;
+      }
       ThumbnailProgress.setPhase('Stopping...');
       if (cancelHandler) cancelHandler();
     });
+    if (ui.background) {
+      ui.background.addEventListener('click', () => {
+        if (backgroundHandler) backgroundHandler();
+      });
+    }
   });
 
   window.ThumbnailProgress = ThumbnailProgress;

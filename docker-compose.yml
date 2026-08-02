@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   printventory:
+    image: printventory/printventory:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -15,6 +16,7 @@ services:
       # Server mode stores the SQLite DB at /root/.config/Printventory/data/printventory.db
       # (host path: ./data/data/printventory.db). Optional: PRINTVENTORY_DB_PATH to override.
       - ./data:/root/.config/Printventory
+      - C:/test_files:/mnt/test_files
       # Mount network shares for accessing files
       # For Windows Docker Desktop:
       # 1. Map network share to drive: net use Z: \\msi\folder1 /persistent:yes
@@ -47,10 +49,15 @@ services:
       # Recommend Docker Desktop / host RAM of 4GB+ for this container when scanning large libraries.
       - PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB=512
       - PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB=200
+      # GPU for server-side thumbnail WebGL: auto (default) | nvidia | swiftshader
+      # - PRINTVENTORY_GPU=auto
+      # V8 heap MB (optional). Default auto-scales from the container memory limit
+      # (or 8192 when unlimited). Raise if logs show "OOM error in V8: Zone Allocation".
+      # - PRINTVENTORY_MAX_OLD_SPACE_MB=8192
       # Optional: Set STL Home directory via environment variable (applied when unset in DB, or set
       # PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 to always apply env on every start — legacy behavior).
       # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
-      # - STL_HOME=/mnt/network-share/models
+      - STL_HOME=/mnt/test_files
       #
       # --- HTTPS (optional): TLS terminates in Printventory (no reverse proxy required) ---
       # Mount PEM files and point env vars at them. Browser uses https:// and wss:// automatically.
@@ -65,18 +72,35 @@ services:
     restart: unless-stopped
     # Give the container enough RAM. Under ~2G, hash/scan/preview work often OOMs Electron
     # (see "OOM error in V8: Zone Allocation failed"), which looks like WebSocket failures in the browser.
+    # Host RAM (e.g. 64–96GB) does not help if the *container* is capped low — raise this limit
+    # (and/or PRINTVENTORY_MAX_OLD_SPACE_MB). V8 heap auto-scales from the cgroup limit.
     # deploy:
     #   resources:
     #     limits:
     #       memory: 4G
     #     reservations:
     #       memory: 1G
-    mem_limit: 4g
+    mem_limit: 8g
     mem_reservation: 1g
+    # --- NVIDIA GPU (optional): needed for hardware WebGL thumbnail rendering ---
+    # Requires NVIDIA Container Toolkit on the host. 'graphics' capability is required for WebGL;
+    # compute/utility alone exposes nvidia-smi but Chromium cannot use the GPU.
+    # gpus: all
+    # environment additions:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+    #   - NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+    #   - PRINTVENTORY_GPU=auto
+    # Or Compose deploy syntax:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
 # Using bind mount instead of named volume for better control and persistence
 # Database is now stored in ./data directory on the host filesystem
 # volumes:
 #   printventory-data:
 #     driver: local
-
