@@ -356,7 +356,7 @@ docker run -d \
 
 #### Running with Docker Compose
 
-Create a `docker-compose.yml` file:
+Create a `docker-compose.yml` file (or use the one from the repo / distribution zip):
 
 ```yaml
 version: '3.8'
@@ -364,42 +364,101 @@ version: '3.8'
 services:
   printventory:
     image: printventory/printventory:latest
+    # Optional: build from source instead of pulling
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: printventory-server
     ports:
       - "5000:5000"
+      # HTTPS inside the container (optional — see TLS env vars below):
+      # - "443:5000"
     volumes:
-      # Persist database and application data to local directory
-      # Database is stored in ./data directory on the host filesystem
-      # This ensures data persists when the image is updated
+      # Persist DB and app data (host ./data → container config dir)
       - ./data:/root/.config/Printventory
-      
-      # Option 1: Mount Windows mapped drive (Windows Docker Desktop)
-      # First, map network share: net use Z: \\server\share /persistent:yes
-      # Then uncomment the line below and use /mnt/network-share in Printventory
+
+      # Mount model files (pick one). Use the *container* path in Printventory / STL_HOME.
+      # Windows mapped drive: net use Z: \\server\share /persistent:yes
       # - Z:/:/mnt/network-share:ro
-      
-      # Option 2: Mount Linux SMB/CIFS share (Linux host)
-      # First, mount on host: sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=pass
-      # Then uncomment the line below and use /mnt/network-share in Printventory
+      # Linux SMB/CIFS (mount on host first):
       # - /mnt/network-share:/mnt/network-share:ro
-      
-      # Option 3: Mount local directory (if files are on Docker host)
-      # Example: mount host /home/user/models to /mnt/models in container
-      # Then use /mnt/models in Printventory
+      # Local host directory:
       # - /home/user/models:/mnt/models:ro
+      # TLS certs (optional):
+      # - ./certs:/certs:ro
     environment:
-      # Optional: Set STL Home directory via environment variable
-      # This will automatically configure the STL Home setting in Printventory
-      # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
-      # The path must match a mounted volume in your Docker configuration
-      # - STL_HOME=/mnt/network-share/models
+      # Headless Chromium / Electron (set by the image; usually leave as-is)
+      - DISPLAY=:99
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      - DCONF_DISABLE=1
+      - GIO_USE_VFS=local
+      - GIO_USE_VOLUME_MONITOR=unix
+      - DBUS_FATAL_WARNINGS=0
+
+      # Auto-configure STL Home (must match a mounted volume)
+      # - STL_HOME=/mnt/models
+
+      # Preview / memory tuning (optional)
+      # - PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB=512
+      # - PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB=200
+      # - PRINTVENTORY_MAX_OLD_SPACE_MB=8192
+
+      # Server-side thumbnail GPU: auto (default) | nvidia | swiftshader
+      # - PRINTVENTORY_GPU=auto
+
+      # HTTPS in-container (optional). Mount PEMs and point these at them:
+      # - PRINTVENTORY_TLS_CERT=/certs/fullchain.pem
+      # - PRINTVENTORY_TLS_KEY=/certs/privkey.pem
+      # - PRINTVENTORY_TLS_CA=/certs/chain.pem
+
+      # NVIDIA (only when using a host GPU — see section below)
+      # - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
     restart: unless-stopped
+    # Container memory (host RAM is unused if this is too low)
+    mem_limit: 8g
+    mem_reservation: 1g
+    # NVIDIA GPU passthrough (uncomment with NVIDIA_* env vars above)
+    # gpus: all
 ```
 
 Then run:
 ```bash
 docker compose up -d
 ```
+
+##### Docker Compose options explained
+
+| Option | What it does |
+|--------|----------------|
+| `image` | Image to run (`printventory/printventory:latest` or a version tag). |
+| `build` | Build from the local `Dockerfile` instead of (or in addition to) pulling. |
+| `container_name` | Fixed container name (`printventory-server`) for easy `docker logs` / `docker exec`. |
+| `ports` | Maps host → container. `5000:5000` is HTTP. For in-container HTTPS you can map `443:5000` and set TLS env vars. |
+| `volumes` → `./data:...` | Persists the SQLite DB and app config on the host so updates/recreates keep your library. |
+| `volumes` → model mounts | Exposes host/network files inside the container. Always use the **container** path (e.g. `/mnt/models`) in the UI and in `STL_HOME`. `:ro` is read-only. |
+| `volumes` → `./certs:...` | Optional PEM directory for TLS when terminating HTTPS inside Printventory. |
+| `restart: unless-stopped` | Restarts the container after reboot or crash, unless you stopped it manually. |
+| `mem_limit` / `mem_reservation` | Caps / reserves container RAM. Recommend **4GB+** (8g in the example) for large libraries. Host RAM alone does not help if the container is capped low. |
+| `gpus: all` | Passes host NVIDIA GPUs into the container (requires NVIDIA Container Toolkit). |
+
+##### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `STL_HOME` | Sets the STL Home scan directory on start (Linux path inside the container). |
+| `PRINTVENTORY_ENV_OVERRIDES_SETTINGS` | Set to `1` to re-apply env settings on every start (legacy). By default, env fills unset DB settings only. |
+| `PRINTVENTORY_GPU` | Server thumbnail WebGL backend: `auto` (default), `nvidia`, or `swiftshader` (CPU). |
+| `PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB` | Memory budget for 3MF preview workers (keep below container RAM). |
+| `PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB` | Skip / limit very large 3MF files during preview. |
+| `PRINTVENTORY_MAX_OLD_SPACE_MB` | V8 heap size in MB. Defaults scale from the container memory limit; raise if logs show `OOM error in V8: Zone Allocation failed`. |
+| `PRINTVENTORY_DB_PATH` | Optional override for the SQLite DB path inside the container. |
+| `PRINTVENTORY_TLS_CERT` / `PRINTVENTORY_TLS_KEY` / `PRINTVENTORY_TLS_CA` | Enable HTTPS inside the container (browser uses `https://` and `wss://`). If you terminate TLS at Traefik/Caddy/nginx instead, leave these unset and configure WebSocket upgrade on the proxy. |
+| `NVIDIA_VISIBLE_DEVICES` | Which GPUs the container can see (`all` or a device index). |
+| `NVIDIA_DRIVER_CAPABILITIES` | Must include **`graphics`** for WebGL (`graphics,compute,utility`). `compute,utility` alone is enough for `nvidia-smi` but not Chromium. |
+
+**Memory note:** Host RAM (e.g. 96GB) is not used automatically. Unraid/Compose often caps the container. Raise `mem_limit` and, if needed, `PRINTVENTORY_MAX_OLD_SPACE_MB`. Logs showing `OOM error in V8: Zone Allocation failed` are the V8 heap limit, not the host running out of RAM.
 
 #### NVIDIA GPU (optional)
 
@@ -419,13 +478,23 @@ services:
       - PRINTVENTORY_GPU=auto   # or nvidia | swiftshader
 ```
 
+Alternative Swarm / `deploy` syntax (Compose V2 on a normal Docker Engine host should prefer `gpus: all` plus the env vars above — `deploy.devices` alone does not always enable `graphics`):
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+```
+
 3. Recreate the container (`docker compose up -d --force-recreate`), then open **Help → System Report**:
    - **Client GPU** = your browser (previews)
    - **Server / App GPU** = container WebGL backend + `nvidia-smi`
 
 If System Report still shows SwiftShader while `nvidia-smi` lists a card, `graphics` is usually missing from `NVIDIA_DRIVER_CAPABILITIES`, or the image predates GPU auto-detect.
-
-**Memory note:** Host RAM (e.g. 96GB) is not used automatically. Unraid/Compose often caps the container (or the image used to hard-cap V8 at 3GB). Raise the container memory limit and, if needed, set `PRINTVENTORY_MAX_OLD_SPACE_MB=8192` (or higher). Logs showing `OOM error in V8: Zone Allocation failed` are the V8 heap limit, not the host running out of RAM.
 
 #### Accessing the Server
 
