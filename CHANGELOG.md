@@ -4,6 +4,13 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.18] - 2026-08-03
+
+### Fixed
+
+- Desktop Scan Directory hung at `0 / N models` after 2.1.17: scroll-queue pruning treated scan dummy thumbnail containers as off-screen and discarded them (promises never resolved). Scan/batch jobs now keep detached tasks (`retainDetached`).
+- Docker NVIDIA: stop calling `forceContextLoss` during thumbnail recycle/cleanup (it restarted Chromium’s GPU process and flooded logs with Skia OOM / `CreateSharedImage` errors). Soft-dispose instead, disable GPU compositing in the entrypoint, cap NVIDIA WebGL concurrency to 1, and filter residual Chromium GPU-recovery stderr.
+
 ## [2.1.17] - 2026-08-02
 
 ### Fixed

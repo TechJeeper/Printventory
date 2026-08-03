@@ -51,6 +51,8 @@ services:
       - PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB=200
       # GPU for server-side thumbnail WebGL: auto (default) | nvidia | swiftshader
       # - PRINTVENTORY_GPU=auto
+      # ANGLE backend when using NVIDIA: vulkan (default) | gl | egl
+      # - PRINTVENTORY_ANGLE=vulkan
       # V8 heap MB (optional). Default auto-scales from the container memory limit
       # (or 8192 when unlimited). Raise if logs show "OOM error in V8: Zone Allocation".
       # - PRINTVENTORY_MAX_OLD_SPACE_MB=8192

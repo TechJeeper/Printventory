@@ -886,15 +886,35 @@ let pendingThumbnails = new Set(); // Track files currently being rendered
 /** Soft cap so fast scrolling cannot enqueue thousands of 3MF extract/WebGL jobs. */
 const RENDER_QUEUE_SOFT_CAP = 120;
 
+function dropRenderTask(task, reason) {
+  if (!task) return;
+  if (task.filePath) pendingThumbnails.delete(task.filePath);
+  // Scan/bulk waiters must not hang forever if a task is discarded.
+  if (typeof task.reject === 'function') {
+    try {
+      task.reject(new Error(reason || 'Render task dropped'));
+    } catch (_) { /* already settled */ }
+  }
+}
+
 function enqueueRenderTask(task) {
   if (!task || !task.filePath) return false;
   pruneDisconnectedRenderTasks();
   if (renderQueue.length >= RENDER_QUEUE_SOFT_CAP) {
     // Drop lowest-priority (usually off-screen) tasks first.
+    // Never soft-cap-drop scan/bulk jobs that intentionally use detached containers.
     renderQueue.sort((a, b) => (a.thumbPriority ?? 1e9) - (b.thumbPriority ?? 1e9));
     while (renderQueue.length >= RENDER_QUEUE_SOFT_CAP) {
-      const dropped = renderQueue.pop();
-      if (dropped?.filePath) pendingThumbnails.delete(dropped.filePath);
+      let dropIdx = -1;
+      for (let i = renderQueue.length - 1; i >= 0; i--) {
+        if (!renderQueue[i]?.retainDetached) {
+          dropIdx = i;
+          break;
+        }
+      }
+      if (dropIdx < 0) break;
+      const dropped = renderQueue.splice(dropIdx, 1)[0];
+      dropRenderTask(dropped, 'Render task dropped (queue soft cap)');
     }
   }
   renderQueue.push(task);
@@ -957,9 +977,12 @@ function pruneDisconnectedRenderTasks() {
   let removed = 0;
   for (let i = renderQueue.length - 1; i >= 0; i--) {
     const task = renderQueue[i];
+    // Scan / foreground batch thumbs use a detached dummy container on purpose.
+    // Only prune scroll-hydrate jobs whose grid cell left the DOM (2.1.17 Docker fix).
+    if (task?.retainDetached) continue;
     if (task?.container && !task.container.isConnected) {
-      if (task.filePath) pendingThumbnails.delete(task.filePath);
       renderQueue.splice(i, 1);
+      dropRenderTask(task, 'Render task pruned (cell scrolled off-screen)');
       removed++;
     }
   }
@@ -1490,7 +1513,8 @@ let sharedScene = null;
 let sharedCamera = null;
 let contextUseCount = 0;
 const MAX_CONTEXT_USES = 20; // Reset context after this many uses
-const MAX_CONTEXT_REUSE_COUNT = 100; // Add this missing constant
+const MAX_CONTEXT_REUSE_COUNT = 100; // Desktop default; server mode lowers this at init
+let maxContextReuseCount = MAX_CONTEXT_REUSE_COUNT;
 
 // Debounce total-count IPC: progressive library load calls updateModelCounts every chunk; one fetch is enough.
 let updateTotalCountDebounce = null;
@@ -5664,10 +5688,29 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Docker/server: keep concurrency low — high parallelism + 30s IPC timeouts caused mass
   // "corrupted"/STL placeholders that then got persisted as permanent thumbs.
+  // NVIDIA+ANGLE: parallel WebGL + compositor SharedImages tend to Skia-OOM the GPU process.
   if (serverMode) {
-    MAX_CONCURRENT_RENDERS = 3;
-    MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
-    console.log('Server mode detected: Capped MAX_CONCURRENT_RENDERS to', MAX_CONCURRENT_RENDERS);
+    let glBackend = 'unknown';
+    try {
+      const gpuInfo = typeof window.electron.getGpuInfo === 'function'
+        ? await window.electron.getGpuInfo()
+        : null;
+      glBackend = (gpuInfo && gpuInfo.glBackend) || 'unknown';
+    } catch (_) { /* ignore */ }
+    if (glBackend === 'nvidia') {
+      MAX_CONCURRENT_RENDERS = 1;
+      MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
+      maxContextReuseCount = 25;
+    } else {
+      MAX_CONCURRENT_RENDERS = 3;
+      MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
+      maxContextReuseCount = 40;
+    }
+    console.log(
+      'Server mode detected: Capped MAX_CONCURRENT_RENDERS to',
+      MAX_CONCURRENT_RENDERS,
+      `(glBackend=${glBackend}, contextReuse=${maxContextReuseCount})`
+    );
   }
   // Hidden worker window must not run grid WebGL at all (bulk job owns the GPU/CPU).
   if (await isServerThumbnailWorkerContext()) {
@@ -9147,22 +9190,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Add function for deep cleanup of Three.js resources
+  // Add function for deep cleanup of Three.js resources.
+  // Do NOT call forceContextLoss — that restarts Chromium's GPU process and floods
+  // Docker logs with Skia OOM / CreateSharedImage errors (especially NVIDIA+ANGLE).
   function deepCleanThreeResources() {
     if (sharedRenderer) {
-      sharedRenderer.forceContextLoss();
-      sharedRenderer.dispose();
+      try {
+        sharedRenderer.dispose();
+      } catch (_) { /* ignore */ }
       sharedRenderer = null;
     }
-    
+    if (sharedCanvas) {
+      try { sharedCanvas.remove(); } catch (_) { /* ignore */ }
+      sharedCanvas = null;
+    }
+    contextUseCount = 0;
+
     // Force garbage collection
     if (typeof gc === 'function') {
-      gc();
-      gc(); // Call twice to ensure full collection
+      try { gc(); } catch (_) { /* ignore */ }
     }
-    
+
     // Clear texture cache
-    THREE.Cache.clear();
+    if (typeof THREE !== 'undefined' && THREE.Cache) {
+      THREE.Cache.clear();
+    }
   }
 
   // NOTE: loadModel is now defined at top level (line ~50) - duplicate removed
@@ -12273,8 +12325,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             await reportHeadlessProgress(absoluteProcessed, progressTotal);
           }
 
-          // Between models: yield + occasional soft GC. Avoid forceContextLoss every
-          // model (expensive and races if concurrency > 1).
+          // Between models: yield + occasional soft GC. Soft dispose only —
+          // never forceContextLoss (restarts GPU process → Skia OOM log storms).
           if (maxConcurrentThumbnails === 1) {
             await new Promise((r) => setTimeout(r, 25));
             if (processedInBatch % 15 === 0 && typeof deepCleanThreeResources === 'function') {
@@ -13194,6 +13246,9 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         `[scan] Deferred ${filesNeedingThumbnails.length} thumbnails (threshold ${DEFER_SCAN_BATCH_THUMBNAILS_THRESHOLD}); lazy queue will render visible items.`
       );
     } else if (filesNeedingThumbnails.length > 0) {
+      console.log(
+        `[scan] Generating thumbnails for ${filesNeedingThumbnails.length} models (first: ${filesNeedingThumbnails[0].filePath})`
+      );
       let completedThumbnails = 0;
       const thumbnailProgressUpdate = (completed) => {
         if (!background) {
@@ -13305,10 +13360,12 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
                 thumbnail = await new Promise((resolve, reject) => {
                   renderQueue.push({
                     filePath: file.filePath,
-                    container: document.createElement('div'), // Dummy container
+                    container: document.createElement('div'), // Dummy container (not in DOM)
                     existingThumbnail: null,
                     resolve,
                     reject,
+                    // Must survive pruneDisconnectedRenderTasks — dummy is never isConnected.
+                    retainDetached: true,
                     thumbPriority: THUMB_PRIORITY_BACKGROUND
                   });
                   processRenderQueue();
@@ -14011,7 +14068,9 @@ async function processRenderQueue() {
 
       (async () => {
         try {
-          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail);
+          const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail, {
+            retainDetached: !!task.retainDetached
+          });
           task.resolve(result);
           // So progress bar stays in sync with visible thumbnails (scan and grid share the same queue)
           if (window._scanThumbnailProgress && typeof window._scanThumbnailProgress.onComplete === 'function') {
@@ -14078,12 +14137,12 @@ function getSharedRenderer() {
   if (sharedWebGLUnavailable) {
     throw new Error('Error creating WebGL context.');
   }
-  if (!sharedRenderer || contextUseCount >= MAX_CONTEXT_REUSE_COUNT) {
-    // Clean up existing resources before creating new ones
+  if (!sharedRenderer || contextUseCount >= maxContextReuseCount) {
+    // Soft recycle: dispose only. forceContextLoss restarts the GPU process and
+    // produces Skia OOM / CreateSharedImage stderr storms in Docker (NVIDIA).
     if (sharedRenderer) {
       try {
         sharedRenderer.dispose();
-        sharedRenderer.forceContextLoss();
       } catch (_) { /* ignore */ }
       sharedRenderer = null;
     }
@@ -14136,13 +14195,15 @@ function getSharedRenderer() {
         sharedCanvas.remove();
         sharedCanvas = null;
       }
+      contextUseCount = 0;
     }, false);
   }
   contextUseCount++;
   return sharedRenderer;
 }
 
-async function renderModelToPNG(filePath, container, existingThumbnail) {
+async function renderModelToPNG(filePath, container, existingThumbnail, options = {}) {
+  const retainDetached = !!(options && options.retainDetached);
   const startTime = Date.now();
   console.log(`[DEBUG] renderModelToPNG: Start rendering ${filePath}`);
   if (existingThumbnail) {
@@ -14186,7 +14247,8 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
         quiet: true
       });
       // Cell scrolled away while we extracted — abandon (will re-queue if it returns).
-      if (container && !container.isConnected) {
+      // Scan/batch jobs use a detached dummy container on purpose (retainDetached).
+      if (container && !container.isConnected && !retainDetached) {
         return null;
       }
       if (images && images.length > 0) {
@@ -14194,7 +14256,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail) {
         let result = null;
         try {
           result = await window.electron.addMultipleThumbnails(filePath, images);
-          if (container && !container.isConnected) {
+          if (container && !container.isConnected && !retainDetached) {
             return images[0];
           }
 
@@ -17626,7 +17688,15 @@ const RENDER_CONFIG = {
 // Add WebGL context loss handling
 window.addEventListener('webglcontextlost', (event) => {
   event.preventDefault();
+  try {
+    if (sharedRenderer) sharedRenderer.dispose();
+  } catch (_) { /* ignore */ }
   sharedRenderer = null;
+  if (sharedCanvas) {
+    try { sharedCanvas.remove(); } catch (_) { /* ignore */ }
+    sharedCanvas = null;
+  }
+  contextUseCount = 0;
 }, false);
 
 // Searchable list dialog functionality

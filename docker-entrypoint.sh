@@ -76,11 +76,14 @@ else
   unset DBUS_SYSTEM_BUS_ADDRESS
 fi
 
-# Drop remaining Chromium dbus ERROR spam from container logs (harmless in Docker).
-# Keep real app errors; only filter known dbus bus.cc / connection noise.
+# Drop Chromium noise that looks like app failures in Docker logs.
+# - dbus: headless containers have no real session/system bus
+# - gpu SharedImage / Skia OOM recovery: GPU process restart storms (esp. NVIDIA+ANGLE)
+# Keep real app/console errors; only filter known Chromium internal paths.
 filter_electron_stderr() {
-  # Avoid bash `case` globs with spaces (fragile under some shells); use grep.
-  grep -v --line-buffered -E 'ERROR:dbus/|Failed to connect to the bus:|Failed to connect to socket /run/dbus/' || true
+  grep -v --line-buffered -E \
+    'ERROR:dbus/|Failed to connect to the bus:|Failed to connect to socket /run/dbus/|ERROR:gpu/|ERROR:components/viz/service/gl/|Restarting GPU process due to unrecoverable error|SharedContextState context lost|CreateSharedImage: could not create backing|SharedImageStub: Unable to create shared image|GPU state invalid after WaitForGetOffsetInRange' \
+    || true
 }
 
 # Ensure config directory exists with proper permissions
@@ -142,22 +145,49 @@ if [ "$USE_NVIDIA" = "1" ]; then
 fi
 
 ELECTRON_GPU_ARGS=()
+# Headless thumbnails need WebGL, not GPU compositing of the (hidden) UI.
+# Compositor SharedImages are a common source of Skia OOM / CreateSharedImage spam.
+ELECTRON_GPU_ARGS+=(--disable-gpu-compositing)
+
 if [ "$USE_NVIDIA" = "1" ]; then
   export PRINTVENTORY_GL_BACKEND=nvidia
-  echo "GPU backend: NVIDIA hardware WebGL (PRINTVENTORY_GPU=${GPU_MODE})"
+  # ANGLE backend: vulkan (default, best nvidia-container-toolkit WebGL) | gl | egl
+  ANGLE_BACKEND="$(echo "${PRINTVENTORY_ANGLE:-vulkan}" | tr '[:upper:]' '[:lower:]')"
+  echo "GPU backend: NVIDIA hardware WebGL (PRINTVENTORY_GPU=${GPU_MODE}, PRINTVENTORY_ANGLE=${ANGLE_BACKEND})"
   if [ -n "$NVIDIA_HINT" ]; then
     echo "  Detected: $NVIDIA_HINT"
   fi
-  # ANGLE+Vulkan is the practical path for Chromium/Electron inside nvidia-container-toolkit.
-  ELECTRON_GPU_ARGS+=(
-    --use-gl=angle
-    --use-angle=vulkan
-    --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE
-    --disable-vulkan-surface
-    --ignore-gpu-blocklist
-    --enable-webgl
-    --disable-gpu-sandbox
-  )
+  case "$ANGLE_BACKEND" in
+    gl|opengl)
+      ELECTRON_GPU_ARGS+=(
+        --use-gl=angle
+        --use-angle=gl
+        --ignore-gpu-blocklist
+        --enable-webgl
+        --disable-gpu-sandbox
+      )
+      ;;
+    egl)
+      ELECTRON_GPU_ARGS+=(
+        --use-gl=egl
+        --ignore-gpu-blocklist
+        --enable-webgl
+        --disable-gpu-sandbox
+      )
+      ;;
+    vulkan|*)
+      # ANGLE+Vulkan is the practical path for Chromium/Electron inside nvidia-container-toolkit.
+      ELECTRON_GPU_ARGS+=(
+        --use-gl=angle
+        --use-angle=vulkan
+        --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE
+        --disable-vulkan-surface
+        --ignore-gpu-blocklist
+        --enable-webgl
+        --disable-gpu-sandbox
+      )
+      ;;
+  esac
 else
   export PRINTVENTORY_GL_BACKEND=swiftshader
   echo "GPU backend: SwiftShader software WebGL (PRINTVENTORY_GPU=${GPU_MODE})"
