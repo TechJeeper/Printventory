@@ -145,13 +145,20 @@ test.describe('Printventory full application E2E', () => {
 
   test('Sort: all sort options apply without error', async () => {
     await clearAllFilters(window);
+    await window.locator('.view-button[data-view="detailed"]').click();
+    await window.waitForTimeout(400);
     for (const option of SORT_OPTIONS) {
       await window.locator('#sort-select').selectOption(option);
       await applyFilters(window);
       const count = await getViewCount(window);
       expect(count).toBe(libraryTotal);
-      const firstName = await window.locator('.file-grid .file-name').first().textContent();
-      expect(firstName?.length).toBeGreaterThan(0);
+      // name-asc often paints parent-model groups first (no .file-name); accept either.
+      const firstCell = window.locator(
+        '.file-grid .file-name, .file-grid .parent-model-group-title'
+      ).first();
+      await expect(firstCell).toBeVisible({ timeout: 15000 });
+      const firstLabel = await firstCell.textContent();
+      expect(firstLabel?.trim().length).toBeGreaterThan(0);
     }
     await window.locator('#sort-select').selectOption('name-asc');
     await applyFilters(window);
@@ -484,7 +491,8 @@ test.describe('Printventory full application E2E', () => {
     for (const label of MULTI_CONTEXT_MENU_LABELS) {
       expect(labels).toContain(label);
     }
-    expect(labels).not.toContain('Preview');
+    // Multi-select now includes Preview (bundle/group preview when 2+ previewable files).
+    expect(labels).toContain('Preview');
     await dismissContextMenu(window);
     await exitMultiEditMode(window);
   });

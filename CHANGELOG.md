@@ -4,6 +4,15 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.19] - 2026-08-03
+
+### Fixed
+
+- Directory labels in Detailed/List/details now show the full parent path (including drive letter) instead of only the leaf folder name, so thumbdrive/USB scans are not confused with similarly named folders on other drives. Files in the root of a drive show as `E:\` (not a bare `E:`). Zip entries include the zip's on-disk location.
+- Grid thumbnail hydrate no longer logs `Failed to generate thumbnail` / `Render task pruned` when virtual-grid rebuilds or scroll drops off-screen queue jobs (expected). Also prevents a prune from clearing the pending slot while the same file is still mid-render, which could start duplicate concurrent loads.
+- On-screen models without thumbnails are re-queued after scroll prune / queue soft-cap. Virtual-grid was keeping recycled DOM cells and never calling `createModelItem` again, so visible placeholders could stay stuck on `3d.png` even though priority favors the viewport.
+- ZIP/folder group cards and Generate Missing Thumbnails no longer stay stuck on `3d.png`: detached `renderModelToPNG` callers now pass `retainDetached` so the post-load scroll-prune check does not abort after a successful load (regression from 2.1.17/2.1.18).
+
 ## [2.1.18] - 2026-08-03
 
 ### Fixed

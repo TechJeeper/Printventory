@@ -883,18 +883,134 @@ let RENDER_DELAY_BACKGROUND = 750;
 /** When the queue has only off-screen work, cap parallel WebGL thumbs (foreground uses MAX_CONCURRENT_RENDERS). */
 let MAX_CONCURRENT_RENDERS_BACKGROUND = 2;
 let pendingThumbnails = new Set(); // Track files currently being rendered
+/** Paths with an in-flight WebGL/extract job (dequeued). Kept separate so prune cannot clear pending and allow a duplicate concurrent render. */
+let activeThumbnailRenders = new Set();
 /** Soft cap so fast scrolling cannot enqueue thousands of 3MF extract/WebGL jobs. */
 const RENDER_QUEUE_SOFT_CAP = 120;
 
+function isBenignThumbnailDropError(error) {
+  const msg = (error && error.message) ? String(error.message) : String(error || '');
+  return /Render task pruned \(cell scrolled off-screen\)|Render task dropped \(queue soft cap\)/.test(msg)
+    || !!(error && error.benignThumbnailDrop);
+}
+
 function dropRenderTask(task, reason) {
   if (!task) return;
-  if (task.filePath) pendingThumbnails.delete(task.filePath);
+  // Only free the pending slot when nothing is actively rendering this path.
+  // Otherwise a virtual-grid rebuild can re-enqueue the same file mid-render.
+  if (task.filePath && !activeThumbnailRenders.has(task.filePath)) {
+    pendingThumbnails.delete(task.filePath);
+  }
   // Scan/bulk waiters must not hang forever if a task is discarded.
   if (typeof task.reject === 'function') {
     try {
-      task.reject(new Error(reason || 'Render task dropped'));
+      const err = new Error(reason || 'Render task dropped');
+      err.benignThumbnailDrop = true;
+      task.reject(err);
     } catch (_) { /* already settled */ }
   }
+  // Soft-cap / prune often leaves a still-visible cell on 3d.png — re-hydrate next frame.
+  scheduleVisibleThumbnailHydrate();
+}
+
+let _visibleThumbHydrateTimer = null;
+function scheduleVisibleThumbnailHydrate() {
+  if (_visibleThumbHydrateTimer != null) return;
+  _visibleThumbHydrateTimer = setTimeout(() => {
+    _visibleThumbHydrateTimer = null;
+    const grid = document.querySelector('.file-grid');
+    if (grid && typeof grid.renderVisibleItemsFn === 'function') {
+      try {
+        grid.renderVisibleItemsFn();
+      } catch (_) { /* ignore */ }
+    }
+  }, 50);
+}
+
+function findQueuedThumbnailTask(filePath) {
+  if (!filePath) return null;
+  for (let i = 0; i < renderQueue.length; i++) {
+    const task = renderQueue[i];
+    if (task && task.filePath === filePath && !task.retainDetached) return task;
+  }
+  return null;
+}
+
+/**
+ * Re-queue thumbnail work for an on-screen cell that still shows the placeholder.
+ * Virtual-grid keeps existing DOM nodes across scroll frames, so pruned/soft-capped
+ * jobs would otherwise never start again until the cell is destroyed and recreated.
+ */
+function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
+  if (window._serverBulkThumbnailJobActive) return false;
+  if (!itemEl || !model || !model.filePath) return false;
+  if (model.hasThumbnail) return false;
+
+  const thumbContainer = itemEl.querySelector('.thumbnail-container');
+  if (!thumbContainer) return false;
+  const img = thumbContainer.querySelector('img');
+  if (img && typeof img.src === 'string' && img.src.startsWith('data:image')) return false;
+
+  const queued = findQueuedThumbnailTask(model.filePath);
+  if (queued) {
+    queued.container = thumbContainer;
+    if (thumbPriority != null) queued.thumbPriority = thumbPriority;
+    pendingThumbnails.add(model.filePath);
+    return true;
+  }
+  if (activeThumbnailRenders.has(model.filePath)) {
+    pendingThumbnails.add(model.filePath);
+    return false;
+  }
+  // Stale pending bit (dropped while a race left the flag set)
+  if (pendingThumbnails.has(model.filePath)) {
+    pendingThumbnails.delete(model.filePath);
+  }
+
+  pendingThumbnails.add(model.filePath);
+  enqueueRenderTask({
+    filePath: model.filePath,
+    container: thumbContainer,
+    thumbPriority: thumbPriority != null ? thumbPriority : 0,
+    resolve: async (thumbnail) => {
+      pendingThumbnails.delete(model.filePath);
+      if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+        scheduleVisibleThumbnailHydrate();
+        return;
+      }
+      if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) {
+        scheduleVisibleThumbnailHydrate();
+        return;
+      }
+      model.thumbnail = thumbnail;
+      model.hasThumbnail = true;
+      invalidatePrimaryThumbnailCache(model.filePath);
+      setCachedPrimaryThumbnail(model.filePath, thumbnail);
+      try {
+        await window.electron.saveThumbnail(model.filePath, thumbnail);
+      } catch (_) { /* ignore */ }
+
+      const normalizedModelPath = normalizePathForComparison(model.filePath);
+      const allFileItems = document.querySelectorAll('.file-item');
+      for (const fileItem of allFileItems) {
+        const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
+        if (normalizePathForComparison(itemPath) !== normalizedModelPath) continue;
+        const liveImg = fileItem.querySelector('.thumbnail-container img');
+        if (liveImg) liveImg.src = thumbnail;
+        break;
+      }
+    },
+    reject: (error) => {
+      if (isBenignThumbnailDropError(error)) {
+        scheduleVisibleThumbnailHydrate();
+        return;
+      }
+      pendingThumbnails.delete(model.filePath);
+      console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
+      scheduleVisibleThumbnailHydrate();
+    }
+  });
+  return true;
 }
 
 function enqueueRenderTask(task) {
@@ -1567,6 +1683,54 @@ function normalizePathForComparison(path) {
     normalized = normalized.charAt(0).toUpperCase() + normalized.slice(1);
   }
   return normalized;
+}
+
+/**
+ * Full parent directory path for a model file (or zip file's folder for zip entries).
+ * Used for filtering and tooltips — always drive/UNC aware.
+ * Drive-root files (e.g. E:\model.stl) return "E:\" so the removable drive is obvious.
+ */
+function getParentDirectoryFullPath(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  if (filePath.startsWith('url::')) return '';
+  const pathForParent = filePath.includes('::') ? filePath.split('::')[0] : filePath;
+  const lastSlash = Math.max(pathForParent.lastIndexOf('\\'), pathForParent.lastIndexOf('/'));
+  if (lastSlash < 0) return '';
+  // Keep the trailing separator for Windows drive roots ("E:\file" → "E:\") and Unix root ("/file" → "/").
+  const parent = pathForParent.substring(0, lastSlash);
+  if (/^[A-Za-z]:$/i.test(parent)) {
+    return parent + (pathForParent[lastSlash] || '\\');
+  }
+  if (parent === '' && (pathForParent[lastSlash] === '/' || pathForParent[lastSlash] === '\\')) {
+    return pathForParent[lastSlash];
+  }
+  return parent;
+}
+
+/**
+ * Directory label shown in grid/list/details.
+ * Prefer the full parent path (includes drive letter) so removable-drive scans
+ * are not mistaken for similarly named folders on C:.
+ * Zip entries: "<zipParent>\<zipName> → <entryFolder>".
+ */
+function getDirectoryDisplayLabel(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  if (filePath.startsWith('url::')) return 'Open in browser';
+  if (filePath.includes('::')) {
+    const [zipPath, entryPath] = filePath.split('::');
+    const zipFileName = zipPath.split(/[/\\]/).pop() || zipPath;
+    const zipParent = getParentDirectoryFullPath(zipPath);
+    const entryDir = (entryPath || '').split(/[/\\]/).slice(0, -1).join('/') || 'root';
+    const sep = zipPath.includes('\\') ? '\\' : '/';
+    // Avoid double separators when zipParent is already a drive root ("E:\") or "/".
+    const zipLabel = zipParent
+      ? (zipParent.endsWith('\\') || zipParent.endsWith('/')
+          ? `${zipParent}${zipFileName}`
+          : `${zipParent}${sep}${zipFileName}`)
+      : zipFileName;
+    return `${zipLabel} → ${entryDir}`;
+  }
+  return getParentDirectoryFullPath(filePath);
 }
 
 /** Stable identity for grid rows: same file path = one row (handles duplicate DB ids). */
@@ -11586,10 +11750,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!filePath) {
         throw new Error("renderThumbnail: filePath is undefined");
       }
-      // Create a temporary container (not attached to DOM)
+      // Create a temporary container (not attached to DOM — retainDetached required)
       const tempContainer = document.createElement('div');
       // Call renderModelToPNG with the filePath; no existing thumbnail provided.
-      const thumbnail = await renderModelToPNG(filePath, tempContainer, null);
+      const thumbnail = await renderModelToPNG(filePath, tempContainer, null, {
+        retainDetached: true
+      });
       return thumbnail;
     } catch (error) {
       console.error("Error in renderThumbnail:", error);
@@ -13862,27 +14028,31 @@ async function renderFile(file, container, skipThumbnail = false) {
   fileName.appendChild(fileNameText);
   fileInfo.appendChild(fileName);
 
-  // For zip entries, show both zip file and entry path; for URL models show "Open in browser"
+  // For zip entries, show zip location on disk + entry folder; for URL models show "Open in browser"
   let parentDir;
   if (isUrlModel) {
     parentDir = 'Open in browser';
-  } else if (isZipEntry) {
-    const [zipPath, entryPath] = file.filePath.split('::');
-    const zipFileName = zipPath.split(/[/\\]/).pop();
-    parentDir = `${zipFileName} → ${entryPath.split(/[/\\]/).slice(0, -1).join('/') || 'root'}`;
   } else {
-    const parentDirArray = file.filePath.split(/[/\\]/).slice(-2, -1); // Keep this as an array for now
-    parentDir = parentDirArray[0]; // Get the string value from the array
+    parentDir = getDirectoryDisplayLabel(file.filePath);
   }
   
   const parentDirElement = document.createElement('div');
   parentDirElement.className = 'parent-directory';
-  parentDirElement.innerHTML = `
-      <span class="directory-label">${isUrlModel ? 'Source:' : 'Directory:'}</span> 
-      <a href="#" class="directory-link">${parentDir}</a>
-  `;
+  const dirLabel = document.createElement('span');
+  dirLabel.className = 'directory-label';
+  dirLabel.textContent = isUrlModel ? 'Source:' : 'Directory:';
+  const dirLink = document.createElement('a');
+  dirLink.href = '#';
+  dirLink.className = 'directory-link';
+  dirLink.textContent = parentDir || '';
+  if (parentDir && !isUrlModel) {
+    dirLink.title = getParentDirectoryFullPath(file.filePath) || parentDir;
+  }
+  parentDirElement.appendChild(dirLabel);
+  parentDirElement.appendChild(document.createTextNode(' '));
+  parentDirElement.appendChild(dirLink);
   
-  parentDirElement.querySelector('.directory-link')?.addEventListener('click', async (e) => {
+  dirLink.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
       // Hide any welcome or view library message.
@@ -14066,6 +14236,8 @@ async function processRenderQueue() {
       if (!task) break;
       activeRenders++;
 
+      if (task.filePath) activeThumbnailRenders.add(task.filePath);
+
       (async () => {
         try {
           const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail, {
@@ -14077,16 +14249,21 @@ async function processRenderQueue() {
             window._scanThumbnailProgress.onComplete();
           }
         } catch (error) {
-          console.error(`Render task failed: ${error.message}`);
+          if (!isBenignThumbnailDropError(error)) {
+            console.error(`Render task failed: ${error.message}`);
+          }
           const isWebGLHardFail = /Error creating WebGL context/i.test(error && error.message ? error.message : '');
           if (isWebGLHardFail) {
             // Do not requeue forever when the GPU/WebGL stack cannot create a context.
             task.reject(error);
+          } else if (isBenignThumbnailDropError(error)) {
+            if (typeof task.reject === 'function') task.reject(error);
           } else {
             // Retry once after longer delay
             setTimeout(() => enqueueRenderTask(task), 2000);
           }
         } finally {
+          if (task.filePath) activeThumbnailRenders.delete(task.filePath);
           activeRenders--;
           const pauseMs = isLowPriorityThumbnailTask(task) ? RENDER_DELAY_BACKGROUND : RENDER_DELAY;
           await new Promise(resolve => setTimeout(resolve, pauseMs));
@@ -14453,6 +14630,11 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
       ]);
     } finally {
       clearTimeout(timeoutId);
+    }
+
+    // Cell recycled / scrolled away during load — abandon; visible hydrate will re-queue.
+    if (container && !container.isConnected && !retainDetached) {
+      return null;
     }
 
     if (!model) {
@@ -16997,11 +17179,13 @@ async function generateThumbnail(file) {
       return '3d.png';
     }
 
-    // Create a temporary container for rendering
+    // Create a temporary container for rendering (not in DOM — retainDetached required)
     const tempContainer = document.createElement('div');
     
     // Call renderModelToPNG directly instead of renderThumbnail
-    const thumbnail = await renderModelToPNG(filePath, tempContainer, null);
+    const thumbnail = await renderModelToPNG(filePath, tempContainer, null, {
+      retainDetached: true
+    });
 
     if (!thumbnail || isFailurePlaceholderThumbnail(thumbnail)) {
       // Leave as default so hasThumbnail stays false and Docker can retry later.
@@ -19237,6 +19421,13 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
             const grid = document.querySelector('.file-grid');
             if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
           }, 250);
+        },
+        reject: (error) => {
+          // Benign prune/soft-cap: dropRenderTask already managed pending (and must not
+          // clear it while the same path is mid-render).
+          if (isBenignThumbnailDropError(error)) return;
+          pendingThumbnails.delete(model.filePath);
+          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
         }
       });
       if (typeof processRenderQueue === 'function') processRenderQueue();
@@ -19452,9 +19643,14 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
               const imgEl = thumbnailContainer.querySelector('img');
               if (imgEl) imgEl.src = thumbnail;
             }
+            // Cell may have been recycled mid-render — re-queue any still-visible placeholder.
+            scheduleVisibleThumbnailHydrate();
             return;
           }
-          if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
+          if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) {
+            scheduleVisibleThumbnailHydrate();
+            return;
+          }
           
           // Check if model already has multiple thumbnails (from 3MF images).
           // Prefer getModel over getAllThumbnails so the grid path never loads every blob list.
@@ -19543,13 +19739,23 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
           }
         },
         reject: (error) => {
-          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
+          // Benign prune/soft-cap: dropRenderTask already managed pending (and must not
+          // clear it while the same path is mid-render).
+          if (isBenignThumbnailDropError(error)) return;
           pendingThumbnails.delete(model.filePath);
+          console.error(`Failed to generate thumbnail for ${model.filePath}`, error);
         }
       });
 
       // Trigger queue processing
       processRenderQueue();
+    } else {
+      // Already pending — point the queued job at this cell (DOM may have been recycled).
+      const queued = findQueuedThumbnailTask(model.filePath);
+      if (queued) {
+        queued.container = thumbnailContainer;
+        queued.thumbPriority = thumbPriority;
+      }
     }
   }
 
@@ -19561,19 +19767,9 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     item.appendChild(thumbnailContainer);
   }
 
-  // Get parent directory from file path (needed for list view)
-  const getParentDirectory = (filePath) => {
-    if (!filePath) return '';
-    // Handle both Windows (\) and Unix (/) paths
-    const lastSlash = Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/'));
-    if (lastSlash <= 0) return '';
-    // Get the parent directory path
-    const parentPath = filePath.substring(0, lastSlash);
-    // Extract just the parent folder name (last segment of the path)
-    const parentFolderSlash = Math.max(parentPath.lastIndexOf('\\'), parentPath.lastIndexOf('/'));
-    return parentFolderSlash >= 0 ? parentPath.substring(parentFolderSlash + 1) : parentPath;
-  };
-  const parentDir = getParentDirectory(model.filePath);
+  // Parent directory label — full path including drive (not just leaf folder name)
+  const parentDir = getDirectoryDisplayLabel(model.filePath);
+  const parentDirFullPath = getParentDirectoryFullPath(model.filePath);
 
   // File info container - layout depends on view mode
   const fileInfo = document.createElement('div');
@@ -19746,9 +19942,9 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     directoryText.style.fontWeight = parentDir ? '500' : '400';
     directoryText.style.flex = '1';
     directoryText.style.minWidth = '0';
-    // Add tooltip for truncated directory names
+    // Add tooltip for truncated directory names (full path, including drive)
     if (parentDir) {
-      directoryText.setAttribute('title', parentDir);
+      directoryText.setAttribute('title', parentDirFullPath || parentDir);
     }
     
     // Add click handler to filter by directory
@@ -20187,10 +20383,15 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         directoryPart.style.alignItems = 'center';
         directoryPart.style.gap = '6px';
         directoryPart.style.cursor = 'pointer';
-        directoryPart.innerHTML = `
-          <span class="metadata-icon">📁</span>
-          <span class="metadata-value directory-link" title="${parentDir}">${parentDir}</span>
-        `;
+        const dirIcon = document.createElement('span');
+        dirIcon.className = 'metadata-icon';
+        dirIcon.textContent = '📁';
+        const dirValue = document.createElement('span');
+        dirValue.className = 'metadata-value directory-link';
+        dirValue.textContent = parentDir;
+        dirValue.title = parentDirFullPath || parentDir;
+        directoryPart.appendChild(dirIcon);
+        directoryPart.appendChild(dirValue);
         directoryPart.addEventListener('click', async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -21079,8 +21280,11 @@ async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, ch
 
   if (!isStale() && thumbnails.length === 0 && candidates.length > 0 && typeof renderModelToPNG === 'function') {
     try {
+      // Detached temp container — must retainDetached or post-load isConnected check aborts.
       const tempContainer = document.createElement('div');
-      const rendered = await renderModelToPNG(candidates[0].filePath, tempContainer, null);
+      const rendered = await renderModelToPNG(candidates[0].filePath, tempContainer, null, {
+        retainDetached: true
+      });
       if (isStale()) return;
       if (rendered && rendered !== '3d.png' && !isFailurePlaceholderThumbnail(rendered) && !(await isMostlyEmptyThumbnailDataUrl(rendered))) {
         thumbnails.push(rendered);
@@ -21726,6 +21930,8 @@ function renderVirtualGrid(models) {
     console.log('renderVirtualGrid: Models changed! Clearing container and re-rendering.');
     console.log('Current model count:', currentModels.length, 'New model count:', models.length);
     container.innerHTML = ''; // clear existing content
+    // Drop queued hydrate jobs whose cells were just destroyed (in-flight jobs keep pending).
+    pruneDisconnectedRenderTasks();
     
     // Add header for list view
     if (currentGridView === 'list') {
@@ -22133,20 +22339,6 @@ function renderVirtualGrid(models) {
             }
 
             const model = record.model;
-            if (existingItem) {
-              const existingFilePath = existingItem.getAttribute('data-filepath');
-              const normalizedExistingPath = normalizePathForComparison(existingFilePath);
-              const normalizedExpectedPath = normalizePathForComparison(model.filePath);
-              if (normalizedExistingPath === normalizedExpectedPath) {
-                applyParentGroupHighlightClasses(existingItem, record, recordIndex);
-                positionModelItem(existingItem, row, col);
-                syncModelNewBadge(existingItem, model);
-                continue;
-              }
-              existingItem.remove();
-            }
-
-            // Create new item — prioritize thumbnails for cells in/near the viewport
             const listHeaderOffset = currentGridView === 'list' ? 40 : 0;
             const itemContentY = listHeaderOffset + row.top;
             const thumbPriority = computeThumbPriorityForScroll(
@@ -22156,6 +22348,33 @@ function renderVirtualGrid(models) {
               layoutRowHeight,
               col
             );
+
+            if (existingItem) {
+              const existingFilePath = existingItem.getAttribute('data-filepath');
+              const normalizedExistingPath = normalizePathForComparison(existingFilePath);
+              const normalizedExpectedPath = normalizePathForComparison(model.filePath);
+              if (normalizedExistingPath === normalizedExpectedPath) {
+                applyParentGroupHighlightClasses(existingItem, record, recordIndex);
+                positionModelItem(existingItem, row, col);
+                syncModelNewBadge(existingItem, model);
+                // On-screen placeholders must re-enter the queue after prune/soft-cap;
+                // recycled DOM nodes skip createModelItem so nothing else would enqueue them.
+                if (thumbPriority < THUMB_PRIORITY_LOW_TIER_MIN) {
+                  ensureVisibleThumbnailQueued(existingItem, model, thumbPriority);
+                } else {
+                  const queued = findQueuedThumbnailTask(model.filePath);
+                  if (queued) {
+                    const tc = existingItem.querySelector('.thumbnail-container');
+                    if (tc) queued.container = tc;
+                    queued.thumbPriority = thumbPriority;
+                  }
+                }
+                continue;
+              }
+              existingItem.remove();
+            }
+
+            // Create new item — prioritize thumbnails for cells in/near the viewport
             const item = createModelItem(model, currentGridView, thumbPriority);
             item.dataset.index = String(recordIndex);
             item.dataset.layoutKey = record.key;
