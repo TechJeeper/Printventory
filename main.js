@@ -184,275 +184,97 @@ function getExtensionsForFileTypeFilter(fileTypeValue) {
   const entry = ADDITIONAL_FILE_TYPES_CATALOG.find(e => e.id === lower || e.extensions.some(ext => ext.slice(1) === lower));
   return entry ? entry.extensions : [`.${lower}`];
 }
-const ua = require('universal-analytics');
 const express = require('express');
 const WebSocket = require('ws');
 
-// Create an analytics wrapper for GA4
+// GoatCounter usage reporting (gated by CollectUsage setting)
+const GOATCOUNTER_ENDPOINT = 'https://printventory.goatcounter.com/count';
+
 const analytics = {
-  // Generate a session ID when the app starts
-  sessionId: crypto.randomUUID(),
-  
-  async sendGA4Event(clientId, name, params = {}) {
+  isUsageEnabled() {
+    if (!db || !db.prepare) return false;
     try {
-      // Check if usage collection is enabled
-      if (!db || !db.prepare) return; // Database not initialized yet
-      
       const collectUsage = db.prepare('SELECT value FROM settings WHERE key = ?').get('CollectUsage');
-      if (!collectUsage || collectUsage.value !== '1') {
+      return !!(collectUsage && collectUsage.value === '1');
+    } catch (error) {
+      console.error('Error checking CollectUsage for analytics:', error);
+      return false;
+    }
+  },
+
+  async sendHit({ path, title, event = false } = {}) {
+    try {
+      if (!this.isUsageEnabled()) {
         console.log('Usage tracking disabled, skipping analytics');
-        return;
+        return false;
       }
-      
-      console.log(`Tracking GA4 event: ${name} with params:`, params);
-      console.log(`App version being sent: ${version}`);
-      
-      // GA4 measurement ID and API secret
-      const measurementId = 'G-N4766Y9R11';
-      const apiSecret = 'JeeNztq1RkCitPAFqT25Qg';
-      
-      // Add session ID to all events
-      params.session_id = this.sessionId;
-      
-      // Add app_name parameter to identify this as an Electron app
-      params.app_name = 'Printventory';
-      
-      // Add engagement parameters for better real-time tracking
-      if (name === 'user_engagement') {
-        params.engagement_time_msec = params.engagement_time_msec || 30000;
-        params.session_engaged = true;
+
+      if (!path) {
+        console.warn('GoatCounter hit skipped: path is required');
+        return false;
       }
-      
-      // Get model count (library size) from database if not already provided in params
-      let modelCount = params.model_count;
-      if (modelCount === undefined) {
-        try {
-          const row = db.prepare("SELECT COUNT(*) AS total FROM models").get();
-          modelCount = row ? row.total : 0;
-        } catch (error) {
-          console.error('Error getting model count for analytics:', error);
-          // Continue with modelCount = 0 if query fails
-          modelCount = 0;
-        }
-      }
-      
-      // Ensure custom dimension parameters are set (matching custom dimensions: app_version, model_count, os_platform)
-      // These parameter names must match exactly the custom dimension parameter names in GA4
-      // GA4 requires numeric values for numeric custom dimensions, so ensure model_count is a number
-      if (params.app_version === undefined) {
-        params.app_version = version;
-      }
-      if (params.os_platform === undefined) {
-        params.os_platform = process.platform;
-      }
-      if (params.model_count === undefined) {
-        params.model_count = modelCount;
-      }
-      
-      // Ensure model_count is a number (GA4 custom dimensions may require specific types)
-      if (typeof params.model_count === 'string') {
-        params.model_count = parseInt(params.model_count, 10) || 0;
-      }
-      if (typeof params.model_count !== 'number') {
-        params.model_count = Number(params.model_count) || 0;
-      }
-      
-      // Prepare user properties for GA4 - these persist across events and enable version-based segmentation
-      // User-scoped custom dimensions MUST be sent as user_properties
-      // The property names must match the custom dimension parameter names exactly in GA4 (case-sensitive)
-      // GA4 user_properties format: { property_name: { value: property_value } }
-      const userProperties = {
-        app_version: { value: String(params.app_version) },      // Custom dimension: App Version (User-scoped)
-        os_platform: { value: String(params.os_platform) },      // Custom dimension: OS Platform (User-scoped)
-        model_count: { value: Number(params.model_count) },      // Custom dimension: Model Count (User-scoped) - must be number
-        os_version: { value: os.release() },
-        electron_version: { value: process.versions.electron },
-        node_version: { value: process.versions.node },
-        architecture: { value: process.arch }
-      };
-      
-      // Prepare the event data - following GA4 protocol exactly
-      const eventData = {
-        client_id: clientId,
-        user_id: clientId,
-        timestamp_micros: Date.now() * 1000, // Current time in microseconds
-        non_personalized_ads: true,
-        user_properties: userProperties,
-        events: [{
-          name,
-          params
-        }]
-      };
-      
-      // Convert to JSON
-      const postData = JSON.stringify(eventData);
-      
-      // Always use debug endpoint to see validation errors and ensure data is being received
-      // This helps troubleshoot issues with custom dimensions and event parameters
-      const isDebug = process.env.NODE_ENV === 'development' || process.env.GA4_DEBUG === 'true';
-      const baseEndpoint = isDebug ? '/debug/mp/collect' : '/mp/collect';
-      
-      // Build query string with measurement_id and api_secret
-      let queryString = `measurement_id=${measurementId}&api_secret=${apiSecret}`;
-      // Always add debug_mode for better visibility during troubleshooting
-      // Remove this in production if you want to reduce debug noise
-      if (isDebug) {
-        queryString += '&debug_mode=true'; // Enable debugView in Google Analytics
-      }
-      
-      // Prepare the request options
-      const options = {
-        hostname: 'www.google-analytics.com',
-        path: `${baseEndpoint}?${queryString}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(postData)
-        }
-      };
-      
-      // Log the full request for debugging
-      console.log('=== GA4 Analytics Event ===');
-      console.log('GA4 request URL:', `https://${options.hostname}${options.path}`);
-      console.log('GA4 debug mode enabled:', isDebug);
-      console.log('GA4 event name:', name);
-      console.log('GA4 custom dimensions (event params):', {
-        app_version: params.app_version,
-        os_platform: params.os_platform,
-        model_count: params.model_count
-      });
-      console.log('GA4 user properties (custom dimensions):', JSON.stringify(userProperties, null, 2));
-      console.log('GA4 client_id:', clientId);
-      console.log('GA4 measurement_id:', measurementId);
-      if (isDebug) {
-        console.log('⚠️  Using debug endpoint - check GA4 DebugView: https://analytics.google.com/');
-        console.log('   Navigate to: Admin > DebugView to see real-time event validation');
-      }
-      console.log('GA4 request body:', postData);
-      console.log('===========================');
-      
-      // Send the request
-      return new Promise((resolve, reject) => {
-        const req = https.request(options, (res) => {
-          let data = '';
-          
-          res.on('data', (chunk) => {
-            data += chunk;
-          });
-          
+
+      const url = new URL(GOATCOUNTER_ENDPOINT);
+      url.searchParams.set('p', path);
+      if (title) url.searchParams.set('t', title);
+      if (event) url.searchParams.set('e', 'true');
+      url.searchParams.set('rnd', String(Date.now()));
+
+      console.log(`Tracking GoatCounter ${event ? 'event' : 'pageview'}: ${path}${title ? ` (${title})` : ''}`);
+
+      return new Promise((resolve) => {
+        const req = https.get(url.toString(), {
+          headers: {
+            'User-Agent': `Printventory/${typeof version !== 'undefined' ? version : 'unknown'} (${process.platform})`
+          }
+        }, (res) => {
+          res.on('data', () => {});
           res.on('end', () => {
-            console.log(`GA4 response status: ${res.statusCode}`);
-            console.log(`GA4 response data: ${data}`);
-            
-            // Parse response to check for validation messages
-            try {
-              const responseData = JSON.parse(data);
-              if (responseData.validationMessages && responseData.validationMessages.length > 0) {
-                console.error('GA4 validation errors:', JSON.stringify(responseData.validationMessages, null, 2));
-                responseData.validationMessages.forEach((msg, idx) => {
-                  console.error(`  Validation ${idx + 1}: ${msg.description} (Field: ${msg.fieldPath})`);
-                });
-              }
-            } catch (parseError) {
-              // Response might not be JSON, that's okay
-            }
-            
             if (res.statusCode >= 200 && res.statusCode < 300) {
-              console.log('GA4 event sent successfully');
-              if (isDebug) {
-                console.log('Check GA4 DebugView for real-time event validation: https://analytics.google.com/');
-              }
+              console.log('GoatCounter hit sent successfully');
               resolve(true);
             } else {
-              console.error(`Error sending GA4 event: ${res.statusCode} ${data}`);
-              console.error('Check the response above for validation errors or API issues');
+              console.error(`Error sending GoatCounter hit: ${res.statusCode}`);
               resolve(false);
             }
           });
         });
-        
+
         req.on('error', (error) => {
-          console.error('Error sending GA4 event:', error);
-          reject(error);
+          console.error('Error sending GoatCounter hit:', error);
+          resolve(false);
         });
-        
-        req.write(postData);
-        req.end();
       });
     } catch (error) {
-      console.error('Error in sendGA4Event:', error);
+      console.error('Error in analytics.sendHit:', error);
       return false;
     }
   },
-  
-  async event(clientId, category, action, options = {}) {
+
+  async event(_clientId, category, action, options = {}) {
     try {
-      // Convert traditional event parameters to GA4 format
-      const params = {
-        event_category: category,
-        event_action: action,
-        event_label: options.evLabel || '',
-        value: options.evValue || 1
-      };
-      
-      console.log(`Tracking event: ${category} - ${action} - ${options.evLabel || ''}`);
-      
-      // Map to standard GA4 event names
-      // Using standard GA4 event names is important for proper reporting
-      let eventName = 'user_engagement';
-      
-      // Map common categories to standard GA4 event names
-      if (category === 'Application' && action === 'Start') {
-        eventName = 'app_start'; // Custom event for application start
-      } else if (category === 'Settings') {
-        eventName = 'settings_change'; // Custom event for settings changes
-      } else if (category === 'User Interaction') {
-        eventName = 'select_content'; // Standard GA4 event for user interactions
-      } else if (category === 'File') {
-        eventName = 'file_operation'; // Custom event for file operations
-      } else if (category === 'Error') {
-        eventName = 'app_exception'; // Custom event for error tracking
-      }
-      
-      // Send as GA4 event
-      await this.sendGA4Event(clientId, eventName, params);
-      
+      const label = options.evLabel || '';
+      const pathParts = [category, action].filter(Boolean).map(String);
+      const path = `/${pathParts.join('/')}`.replace(/\s+/g, '-');
+      const title = label
+        ? `${category} / ${action}: ${label}`
+        : `${category} / ${action}`;
+
+      console.log(`Tracking event: ${category} - ${action} - ${label}`);
+      await this.sendHit({ path, title, event: true });
       console.log('Analytics event sent');
     } catch (error) {
       console.error('Error in analytics.event:', error);
     }
   },
-  
-  async pageview(clientId, path, title) {
+
+  async pageview(_clientId, path, title) {
     try {
       console.log(`Tracking pageview: ${path} - ${title}`);
-      
-      // Send as GA4 screen_view event (standard GA4 event for apps)
-      await this.sendGA4Event(clientId, 'screen_view', {
-        screen_name: title,
-        screen_class: path
-      });
-      
+      await this.sendHit({ path: path || '/', title: title || 'Printventory' });
       console.log('Analytics pageview sent');
     } catch (error) {
       console.error('Error in analytics.pageview:', error);
-    }
-  },
-
-  async trackActiveUser(clientId) {
-    try {
-      console.log('Tracking active user');
-      
-      // Send a standard GA4 event for active users
-      // Using 'user_engagement' instead of 'first_visit' which is reserved
-      await this.sendGA4Event(clientId, 'user_engagement', {
-        engagement_time_msec: 30000,
-        session_engaged: true
-      });
-      
-      console.log('Active user tracked');
-    } catch (error) {
-      console.error('Error tracking active user:', error);
     }
   }
 };
@@ -10725,67 +10547,33 @@ function getDb() {
 // Add this function to track application usage
 async function trackAppUsage() {
   try {
-    // Get the persistent client ID
-    const clientId = getClientId();
-    
-    // Check if usage collection is enabled
-    const collectUsage = db.prepare('SELECT value FROM settings WHERE key = ?').get('CollectUsage');
-    
-    // Only track if CollectUsage is enabled (set to '1')
-    if (collectUsage && collectUsage.value === '1') {
-      console.log('Usage tracking enabled, sending analytics data');
-      
-      // Get model count (library size) from database for custom dimension
-      let modelCount = 0;
-      try {
-        const row = db.prepare("SELECT COUNT(*) AS total FROM models").get();
-        modelCount = row ? row.total : 0;
-      } catch (error) {
-        console.error('Error getting model count for startup tracking:', error);
-        // Continue with modelCount = 0 if query fails
-      }
-      
-      // Get OS platform
-      const osPlatform = process.platform;
-      
-      // Log the custom dimension values being sent on startup
-      console.log('Startup tracking - Custom dimensions:');
-      console.log(`  - OS Platform (os_platform): ${osPlatform}`);
-      console.log(`  - Printventory Version (app_version): ${version}`);
-      console.log(`  - Model Count (model_count): ${modelCount}`);
-      
-      // Track application start event
-      await analytics.event(clientId, 'Application', 'Start', {
-        evLabel: `Version ${version}`,
-        evValue: 1
-      });
-      
-      // Track active user
-      await analytics.trackActiveUser(clientId);
-      
-      // Send a custom app_open event with explicit custom dimension parameters
-      // These match the custom dimensions: App Version, Model Count, OS Platform
-      // Using 'app_open' as the event name (GA4 standard event for app launches)
-      await analytics.sendGA4Event(clientId, 'app_open', {
-        app_name: 'Printventory',
-        app_version: version,        // Custom dimension: App Version (User-scoped)
-        os_platform: osPlatform,     // Custom dimension: OS Platform (User-scoped)
-        model_count: modelCount,     // Custom dimension: Model Count (User-scoped)
-        // Add engagement time for better real-time tracking
-        engagement_time_msec: 1000
-      });
-      
-      // Set up a periodic ping to keep the user active in real-time analytics
-      // Send pings more frequently for better real-time tracking
-      setInterval(() => {
-        analytics.trackActiveUser(clientId);
-      }, 60000); // Send a ping every 60 seconds
-    } else {
+    if (!analytics.isUsageEnabled()) {
       console.log('Usage tracking disabled, skipping analytics');
+      return;
     }
+
+    console.log('Usage tracking enabled, sending analytics data');
+
+    let modelCount = 0;
+    try {
+      const row = db.prepare('SELECT COUNT(*) AS total FROM models').get();
+      modelCount = row ? row.total : 0;
+    } catch (error) {
+      console.error('Error getting model count for startup tracking:', error);
+    }
+
+    const osPlatform = process.platform;
+    console.log('Startup tracking:');
+    console.log(`  - OS Platform: ${osPlatform}`);
+    console.log(`  - Printventory Version: ${version}`);
+    console.log(`  - Model Count: ${modelCount}`);
+
+    await analytics.sendHit({
+      path: '/app/open',
+      title: `Printventory ${version} (${osPlatform}, ${modelCount} models)`
+    });
   } catch (error) {
     console.error('Error tracking app usage:', error);
-    // Don't throw the error - we don't want to disrupt the app if analytics fails
   }
 }
 

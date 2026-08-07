@@ -165,7 +165,6 @@
     "better-sqlite3": "^12.11.1",
     "chart.js": "^4.4.0",
     "dotenv": "^17.4.2",
-    "electron-google-analytics": "^1.0.2",
     "express": "^4.18.2",
     "fflate": "^0.8.1",
     "fs": "^0.0.1-security",
@@ -176,7 +175,6 @@
     "openai": "^6.9.1",
     "puppeteer": "^24.31.0",
     "three": "^0.181.2",
-    "universal-analytics": "^0.5.3",
     "ws": "^8.14.2",
     "xmldom": "^0.6.0"
   }

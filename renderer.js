@@ -4957,7 +4957,9 @@ async function collectUsageChangeHandler(e) {
   e.target.checked = verifiedValue === '1';
   
   // Toggle analytics based on the verified value
-  toggleAnalytics(verifiedValue === '1');
+  if (typeof window.toggleAnalytics === 'function') {
+    window.toggleAnalytics(verifiedValue === '1');
+  }
 }
 
 async function initializeAboutDialog() {
@@ -12279,50 +12281,53 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Add this function to handle enabling/disabling analytics
+  // GoatCounter usage reporting — only loads when CollectUsage is enabled
+  const GOATCOUNTER_ENDPOINT = 'https://printventory.goatcounter.com/count';
+  const GOATCOUNTER_SCRIPT_SRC = 'https://gc.zgo.at/count.js';
+  const GOATCOUNTER_SCRIPT_ID = 'goatcounter-script';
+
   function toggleAnalytics(enable) {
     console.log('Toggling analytics:', enable);
-    
-    const script1 = document.getElementById('analytics-script-1');
-    const script2 = document.getElementById('analytics-script-2');
 
-    if (!script1 || !script2) {
-      console.log('Analytics scripts not found in the DOM');
-      return;
-    }
+    const existing = document.getElementById(GOATCOUNTER_SCRIPT_ID);
 
     if (enable) {
-      // Enable analytics
-      console.log('Enabling analytics scripts');
-      script1.removeAttribute('disabled');
-      script2.removeAttribute('disabled');
-      
-      // Initialize analytics if it wasn't already
-      if (typeof gtag === 'undefined') {
-        const newScript = document.createElement('script');
-        newScript.async = true;
-        newScript.src = "https://www.googletagmanager.com/gtag/js?id=G-N4766Y9R11";
-        document.head.appendChild(newScript);
+      console.log('Enabling GoatCounter');
 
-        newScript.onload = () => {
-          window.dataLayer = window.dataLayer || [];
-          function gtag(){dataLayer.push(arguments);}
-          gtag('js', new Date());
-          gtag('config', 'G-N4766Y9R11');
-        };
+      const alreadyLoaded = existing && window.goatcounter && typeof window.goatcounter.count === 'function';
+      if (alreadyLoaded) {
+        window.goatcounter.allow_local = true;
+        try {
+          window.goatcounter.count();
+        } catch (e) {
+          console.warn('GoatCounter count() failed:', e);
+        }
+        return;
       }
+
+      // allow_local: Electron may load via file:// or localhost
+      // Replace (don't merge) so a prior disable stub cannot leave no_onload set
+      window.goatcounter = { allow_local: true };
+
+      if (existing) existing.remove();
+
+      const script = document.createElement('script');
+      script.id = GOATCOUNTER_SCRIPT_ID;
+      script.async = true;
+      script.setAttribute('data-goatcounter', GOATCOUNTER_ENDPOINT);
+      script.src = GOATCOUNTER_SCRIPT_SRC;
+      document.head.appendChild(script);
     } else {
-      // Disable analytics
-      console.log('Disabling analytics scripts');
-      script1.setAttribute('disabled', '');
-      script2.setAttribute('disabled', '');
-      
-      // Clear any existing analytics data
-      if (window.dataLayer) {
-        window.dataLayer = [];
-      }
+      console.log('Disabling GoatCounter');
+      if (existing) existing.remove();
+      // Neuter any already-loaded GoatCounter so further counts are no-ops
+      window.goatcounter = {
+        no_onload: true,
+        count: function () {}
+      };
     }
   }
+  window.toggleAnalytics = toggleAnalytics;
 
   // Add function for generating thumbnails for multiple models
   async function generateThumbnailsForModels(models, options = {}) {

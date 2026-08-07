@@ -6,6 +6,10 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [2.1.21] - 2026-08-07
 
+### Changed
+
+- Replaced Google Analytics (GA4) with GoatCounter for usage reporting. Still gated by **Enable Usage Reporting** in About.
+
 ### Fixed
 
 - First launch after install could leave Electron processes running with no visible window (kill in Task Manager, then relaunch worked). Main window now force-shows after a short timeout, second-instance focuses call `show()`, Chart.js/Fuse.js are vendored locally instead of blocking on a CDN, and UI load has a timeout with `file://` fallback.
