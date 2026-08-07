@@ -52,9 +52,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent feature additions and migration note
 ### Pre-built Releases
 
 Download the latest release for your platform:
-- **Windows**: `Printventory-Setup-2.1.20.exe` (NSIS installer)
+- **Windows**: `Printventory-Setup-2.1.21.exe` (NSIS installer)
 - **macOS**: Universal binary (Intel and Apple Silicon) DMG
-- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.1.20.zip`)
+- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.1.21.zip`)
 
 ### Data Storage
 

@@ -4,6 +4,12 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.21] - 2026-08-07
+
+### Fixed
+
+- First launch after install could leave Electron processes running with no visible window (kill in Task Manager, then relaunch worked). Main window now force-shows after a short timeout, second-instance focuses call `show()`, Chart.js/Fuse.js are vendored locally instead of blocking on a CDN, and UI load has a timeout with `file://` fallback.
+
 ## [2.1.20] - 2026-08-07
 
 ### Added

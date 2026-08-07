@@ -1905,8 +1905,11 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, commandLine, workingDirectory) => {
-    // Someone tried to run a second instance, we should focus our window.
-    if (mainWindow) {
+    // Someone tried to run a second instance — show + focus our window.
+    // Must call show(): a window created with show:false that never painted is
+    // not minimized, so restore()/focus() alone leave it invisible.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
@@ -2810,19 +2813,54 @@ async function createWindow() {
   // Register before loadURL — localhost static server can finish before await returns,
   // so attaching ready-to-show after loadURL misses the event and the window stays hidden.
   let mainWindowShown = false;
+  let forceShowTimer = null;
   const showMainWindowWhenReady = () => {
     if (mainWindowShown || !mainWindow || mainWindow.isDestroyed()) return;
     mainWindowShown = true;
+    if (forceShowTimer) {
+      clearTimeout(forceShowTimer);
+      forceShowTimer = null;
+    }
     mainWindow.show();
   };
   mainWindow.once('ready-to-show', showMainWindowWhenReady);
 
+  // Never leave a hidden window if load hangs (CDN, AV, network). Post-install
+  // users otherwise see processes in Task Manager with no GUI until they kill them.
+  forceShowTimer = setTimeout(() => {
+    if (!mainWindowShown) {
+      console.warn('[Electron UI] Forcing window show after load timeout');
+      showMainWindowWhenReady();
+    }
+  }, 3000);
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    console.error(`[Electron UI] did-fail-load (${errorCode}): ${errorDescription} url=${validatedURL}`);
+    // Don't navigate here — createWindow's catch already falls back to loadFile.
+    // Just ensure the window becomes visible so the user isn't stuck with a hidden process.
+    showMainWindowWhenReady();
+  });
+
   try {
     const uiPort = await startElectronUiServer();
-    await mainWindow.loadURL(`http://127.0.0.1:${uiPort}/`);
+    const loadUrl = `http://127.0.0.1:${uiPort}/`;
+    const LOAD_TIMEOUT_MS = 8000;
+    await Promise.race([
+      mainWindow.loadURL(loadUrl),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`UI load timed out after ${LOAD_TIMEOUT_MS}ms`)), LOAD_TIMEOUT_MS);
+      })
+    ]);
   } catch (err) {
-    console.error('[Electron UI] Failed to start localhost server, falling back to file://:', err);
-    await mainWindow.loadFile('index.html');
+    console.error('[Electron UI] Failed to load UI over localhost, falling back to file://:', err);
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await mainWindow.loadFile('index.html');
+      }
+    } catch (fileErr) {
+      console.error('[Electron UI] file:// fallback failed:', fileErr);
+    }
   }
 
   if (!mainWindowShown) {
