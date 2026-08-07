@@ -1290,6 +1290,24 @@ function invalidatePrimaryThumbnailCache(filePath = null) {
   PRIMARY_THUMBNAIL_CACHE.delete(normalizeThumbCacheKey(filePath));
 }
 
+/** Keep grid primary-thumb cache aligned with the DB default (first :: segment). */
+function syncPrimaryThumbnailCacheFromThumbnailString(filePath, thumbnailString) {
+  if (!filePath) return;
+  invalidatePrimaryThumbnailCache(filePath);
+  if (!thumbnailString || thumbnailString === '3d.png' || typeof thumbnailString !== 'string') {
+    setCachedPrimaryThumbnail(filePath, null);
+    return;
+  }
+  const parts = thumbnailString.includes('::')
+    ? thumbnailString.split('::').filter(
+        (t) => t && t !== '3d.png' && typeof t === 'string' && t.startsWith('data:image')
+      )
+    : thumbnailString.startsWith('data:image')
+      ? [thumbnailString]
+      : [];
+  setCachedPrimaryThumbnail(filePath, parts[0] || null);
+}
+
 /** Load only the default/primary thumbnail for a grid cell (never getAllThumbnails). */
 async function fetchPrimaryThumbnailForGrid(filePath) {
   if (!filePath || !window.electron?.getThumbnail) return null;
@@ -4409,9 +4427,11 @@ async function refreshGridModelAfterManageThumbnailsActiveChange(filePath) {
     const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
     const normalizedPath = normalizePathForComparison(filePath);
 
+    const updatedModel = await window.electron.getModel(filePath);
+    if (!updatedModel) return;
+    syncPrimaryThumbnailCacheFromThumbnailString(filePath, updatedModel.thumbnail);
+
     if (preservedDateAddedFilter) {
-      const updatedModel = await window.electron.getModel(filePath);
-      if (!updatedModel) return;
       if (updatedModel.dateAdded) {
         const modelDateAdded = new Date(updatedModel.dateAdded);
         const filterDate = new Date(preservedDateAddedFilter);
@@ -4436,9 +4456,6 @@ async function refreshGridModelAfterManageThumbnailsActiveChange(filePath) {
       }
       return;
     }
-
-    const updatedModel = await window.electron.getModel(filePath);
-    if (!updatedModel) return;
 
     const container = document.querySelector('.file-grid');
     for (const fileItem of document.querySelectorAll('.file-item')) {
@@ -7208,11 +7225,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Update total models
       document.getElementById('stats-total-models').textContent = stats.totalModels.toLocaleString();
       
-      // Update file types
+      // Update file types (count + disk usage)
       document.getElementById('stats-type-3mf').textContent = stats.fileTypes.threeMf.toLocaleString();
       document.getElementById('stats-type-stl').textContent = stats.fileTypes.stl.toLocaleString();
       const otherEl = document.getElementById('stats-type-other');
       if (otherEl) otherEl.textContent = (stats.fileTypes.other != null ? stats.fileTypes.other : 0).toLocaleString();
+
+      const threeMfBytesEl = document.getElementById('stats-type-3mf-bytes');
+      const stlBytesEl = document.getElementById('stats-type-stl-bytes');
+      const otherBytesEl = document.getElementById('stats-type-other-bytes');
+      const totalBytesEl = document.getElementById('stats-total-bytes');
+      if (threeMfBytesEl) threeMfBytesEl.textContent = `(${formatFileSize(stats.fileTypes.threeMfBytes || 0)})`;
+      if (stlBytesEl) stlBytesEl.textContent = `(${formatFileSize(stats.fileTypes.stlBytes || 0)})`;
+      if (otherBytesEl) otherBytesEl.textContent = `(${formatFileSize(stats.fileTypes.otherBytes || 0)})`;
+      if (totalBytesEl) totalBytesEl.textContent = formatFileSize(stats.totalBytes || 0);
       
       // Update archived models
       document.getElementById('stats-archived').textContent = stats.archivedModels.toLocaleString();
@@ -7280,7 +7306,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const value = context.parsed || 0;
                     const total = context.dataset.data.reduce((a, b) => a + b, 0);
                     const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
-                    return `${label}: ${value.toLocaleString()} (${percentage}%)`;
+                    const bytesByLabel = {
+                      '3MF': stats.fileTypes.threeMfBytes || 0,
+                      'STL': stats.fileTypes.stlBytes || 0,
+                      'Other': stats.fileTypes.otherBytes || 0
+                    };
+                    const bytes = bytesByLabel[label] || 0;
+                    return `${label}: ${value.toLocaleString()} (${percentage}%) · ${formatFileSize(bytes)}`;
                   }
                 }
               }
@@ -8470,6 +8502,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
           // Preserve dateAddedFilter if it's set (for new models view)
           const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
+
+          // Always refresh primary-thumb cache so exiting new mode / re-search shows the new default
+          const updatedModelEarly = await window.electron.getModel(data.filePath);
+          if (updatedModelEarly?.thumbnail) {
+            syncPrimaryThumbnailCacheFromThumbnailString(data.filePath, updatedModelEarly.thumbnail);
+          } else if (data.filePath) {
+            invalidatePrimaryThumbnailCache(data.filePath);
+          }
           
           // If dateAddedFilter is active, we should only update the specific item, not refresh the whole grid
           // This prevents clearing the filter when thumbnails are generated
@@ -8477,7 +8517,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.log('Thumbnail added while dateAddedFilter is active, updating item only');
             
             // First, verify the model was updated in the database
-            const updatedModel = await window.electron.getModel(data.filePath);
+            const updatedModel = updatedModelEarly;
             if (!updatedModel || !updatedModel.thumbnail) {
               return;
             }
@@ -8538,7 +8578,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           
           // If dateAddedFilter is NOT active, proceed with normal refresh behavior
           // First, verify the model was updated in the database
-          const updatedModel = await window.electron.getModel(data.filePath);
+          const updatedModel = updatedModelEarly;
           if (!updatedModel || !updatedModel.thumbnail) {
             return;
           }
@@ -8606,6 +8646,21 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
       }, 300); // Delay to ensure database write completes
+    }
+  });
+
+  // Keep primary-thumb cache aligned when default is changed (carousel / manage thumbnails)
+  window.electron.on('thumbnail-default-changed', async (data) => {
+    if (!data?.filePath) return;
+    try {
+      const updatedModel = await window.electron.getModel(data.filePath);
+      if (updatedModel?.thumbnail) {
+        syncPrimaryThumbnailCacheFromThumbnailString(data.filePath, updatedModel.thumbnail);
+      } else {
+        invalidatePrimaryThumbnailCache(data.filePath);
+      }
+    } catch (_) {
+      invalidatePrimaryThumbnailCache(data.filePath);
     }
   });
 
@@ -18983,11 +19038,36 @@ document.addEventListener('DOMContentLoaded', () => {
 // ==================== NEW CODE: Virtual Grid Implementation ====================
 
 /**
- * Grid queries omit the full `thumbnail` blob (only hasThumbnail is sent).
+ * Grid queries omit the full `thumbnail` blob (only hasThumbnail / hasMultipleThumbnails).
  * Cards load the primary thumb via getThumbnail for visible rows only.
- * getAllThumbnails is reserved for Manage Thumbnails / explicit carousel upgrade —
- * never for every grid cell (libraries can be 100k+ models).
+ * When hasMultipleThumbnails is set, upgrade to carousel via getAllThumbnails
+ * (detailed/preview only — never for every grid cell).
  */
+async function maybeUpgradeGridItemToCarousel(thumbnailContainer, model, thumbSize, parseThumbnails) {
+  if (!thumbnailContainer || !model?.filePath || !window.electron?.getAllThumbnails) return;
+  const fileItem = thumbnailContainer.closest('.file-item');
+  const isCarouselView =
+    fileItem &&
+    (fileItem.classList.contains('file-item-detailed') || fileItem.classList.contains('file-item-preview'));
+  if (!isCarouselView) return;
+  if (fileItem.querySelector('.thumbnail-nav-left')) return;
+  if (!model.hasMultipleThumbnails) return;
+  try {
+    const all = await window.electron.getAllThumbnails(model.filePath);
+    const valid = (all || []).filter(
+      (t) => t && typeof t === 'string' && t.length > 0 && t !== '3d.png' && t.startsWith('data:image')
+    );
+    if (valid.length < 2 || !thumbnailContainer.isConnected) return;
+    model.thumbnail = valid.join('::');
+    model.hasMultipleThumbnails = true;
+    model.hasThumbnail = true;
+    syncPrimaryThumbnailCacheFromThumbnailString(model.filePath, model.thumbnail);
+    upgradeGridItemToThumbnailCarousel(thumbnailContainer, model, valid, thumbSize, parseThumbnails);
+  } catch (_) {
+    /* not critical */
+  }
+}
+
 function upgradeGridItemToThumbnailCarousel(thumbnailContainer, model, validThumbnails, thumbSize, parseThumbnails) {
   const fileItem = thumbnailContainer.closest('.file-item');
   const isCarouselView =
@@ -19060,6 +19140,7 @@ function upgradeGridItemToThumbnailCarousel(thumbnailContainer, model, validThum
             if (updatedModel && updatedModel.thumbnail) {
               model.thumbnail = updatedModel.thumbnail;
               const reordered = parseThumbnails(updatedModel.thumbnail);
+              syncPrimaryThumbnailCacheFromThumbnailString(model.filePath, updatedModel.thumbnail);
               wrapper.dataset.thumbnails = JSON.stringify(reordered);
               wrapper.dataset.currentIndex = '0';
               if (wrapper._updateBadge) wrapper._updateBadge();
@@ -19346,11 +19427,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
   // Parse thumbnails from model.thumbnail if available
   // The model.thumbnail should contain all thumbnails separated by ::
+  // List queries omit the blob but may set hasMultipleThumbnails from SQL.
   const thumbnailString = model.thumbnail;
   let hasThumbnailFlag = !!model.hasThumbnail;
   
   const allThumbnails = thumbnailString ? parseThumbnails(thumbnailString) : [];
-  let hasMultipleThumbnails = allThumbnails.length > 1;
+  let hasMultipleThumbnails = allThumbnails.length > 1 || !!model.hasMultipleThumbnails;
   const currentThumbnailIndex = 0; // Start with first thumbnail (default)
   let currentThumbnail = allThumbnails.length > 0 ? allThumbnails[currentThumbnailIndex] : null;
 
@@ -19382,7 +19464,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   }
 
   // Visible-row thumbnail hydrate: primary only (getThumbnail). Virtual scroll already
-  // limits createModelItem to on-screen (+buffer) rows — never fetch all thumbs for the grid.
+  // limits createModelItem to on-screen (+buffer) rows — never fetch all thumbs for the grid
+  // unless hasMultipleThumbnails (then upgrade to carousel in detailed/preview).
   if (model.filePath && !currentThumbnail && hasThumbnailFlag) {
     fetchPrimaryThumbnailForGrid(model.filePath).then(async (thumb) => {
       if (!img.isConnected) return;
@@ -19391,6 +19474,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         img.src = thumb;
         model.thumbnail = thumb;
         model.hasThumbnail = true;
+        if ((view === 'detailed' || view === 'preview') && hasMultipleThumbnails) {
+          model.hasMultipleThumbnails = true;
+          await maybeUpgradeGridItemToCarousel(thumbnailContainer, model, thumbSize, parseThumbnails);
+        }
         return;
       }
 
@@ -19406,6 +19493,37 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
           pendingThumbnails.delete(model.filePath);
           if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) return;
           if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
+          // Late queue finish must not wipe a user-added / multi-image default.
+          try {
+            const existingModel = await window.electron.getModel(model.filePath);
+            const existingRaw = existingModel?.thumbnail || '';
+            const existingParts =
+              typeof existingRaw === 'string' && existingRaw.includes('::')
+                ? existingRaw.split('::').filter(
+                    (t) =>
+                      t &&
+                      t !== '3d.png' &&
+                      t.startsWith('data:image') &&
+                      !isFailurePlaceholderThumbnail(t)
+                  )
+                : existingRaw &&
+                    existingRaw !== '3d.png' &&
+                    existingRaw.startsWith('data:image') &&
+                    !isFailurePlaceholderThumbnail(existingRaw)
+                  ? [existingRaw]
+                  : [];
+            if (existingParts.length > 0) {
+              model.thumbnail = existingRaw;
+              model.hasThumbnail = true;
+              model.hasMultipleThumbnails = existingParts.length > 1;
+              syncPrimaryThumbnailCacheFromThumbnailString(model.filePath, existingRaw);
+              if (img.isConnected) img.src = existingParts[0];
+              if (existingParts.length > 1) {
+                await maybeUpgradeGridItemToCarousel(thumbnailContainer, model, thumbSize, parseThumbnails);
+              }
+              return;
+            }
+          } catch (_) { /* fall through to save */ }
           model.thumbnail = thumbnail;
           model.hasThumbnail = true;
           invalidatePrimaryThumbnailCache(model.filePath);
@@ -19432,11 +19550,22 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       });
       if (typeof processRenderQueue === 'function') processRenderQueue();
     }).catch(() => { /* not critical */ });
+  } else if (
+    model.filePath &&
+    currentThumbnail &&
+    hasMultipleThumbnails &&
+    allThumbnails.length < 2 &&
+    (view === 'detailed' || view === 'preview')
+  ) {
+    // List row had only the primary blob (or a single cached thumb) but SQL says multi —
+    // upgrade to carousel without waiting for a full re-fetch of the model.
+    model.hasMultipleThumbnails = true;
+    maybeUpgradeGridItemToCarousel(thumbnailContainer, model, thumbSize, parseThumbnails);
   }
 
   // In detailed or preview view with multiple thumbnails, wrap in navigation container
   let thumbnailWrapper = thumbnailContainer;
-  if ((view === 'detailed' || view === 'preview') && hasMultipleThumbnails) {
+  if ((view === 'detailed' || view === 'preview') && allThumbnails.length > 1) {
     thumbnailWrapper = document.createElement('div');
     thumbnailWrapper.className = 'thumbnail-wrapper';
     thumbnailWrapper.style.position = 'relative';
@@ -19555,6 +19684,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
                 model.thumbnail = updatedModel.thumbnail;
                 // Update the dataset with the new order (selected one moved to front)
                 const reorderedThumbs = parseThumbnails(updatedModel.thumbnail);
+                syncPrimaryThumbnailCacheFromThumbnailString(model.filePath, updatedModel.thumbnail);
                 wrapper.dataset.thumbnails = JSON.stringify(reorderedThumbs);
                 wrapper.dataset.currentIndex = '0'; // Reset to 0 since selected is now at front
                 // Update badge after reordering
@@ -19652,17 +19782,33 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
             return;
           }
           
-          // Check if model already has multiple thumbnails (from 3MF images).
+          // Check if model already has real thumbnail(s) (3MF embeds, user-added HueForge, etc.).
           // Prefer getModel over getAllThumbnails so the grid path never loads every blob list.
+          // Never clobber a single user-added image either — only write when there is no real thumb yet.
           const modelData = await window.electron.getModel(model.filePath);
           const existingRaw = modelData?.thumbnail || '';
           const existingMulti = typeof existingRaw === 'string' && existingRaw.includes('::')
-            ? existingRaw.split('::').filter((t) => t && t !== '3d.png' && t.startsWith('data:image'))
+            ? existingRaw.split('::').filter((t) => t && t !== '3d.png' && t.startsWith('data:image') && !isFailurePlaceholderThumbnail(t))
             : [];
-          if (existingMulti.length > 1) {
+          const existingSingle =
+            existingMulti.length === 0 &&
+            existingRaw &&
+            existingRaw !== '3d.png' &&
+            typeof existingRaw === 'string' &&
+            existingRaw.startsWith('data:image') &&
+            !isFailurePlaceholderThumbnail(existingRaw)
+              ? existingRaw
+              : null;
+          if (existingMulti.length > 0) {
             model.thumbnail = existingRaw;
             model.hasThumbnail = true;
-            setCachedPrimaryThumbnail(model.filePath, existingMulti[0]);
+            model.hasMultipleThumbnails = existingMulti.length > 1;
+            syncPrimaryThumbnailCacheFromThumbnailString(model.filePath, existingRaw);
+          } else if (existingSingle) {
+            model.thumbnail = existingSingle;
+            model.hasThumbnail = true;
+            model.hasMultipleThumbnails = false;
+            syncPrimaryThumbnailCacheFromThumbnailString(model.filePath, existingSingle);
           } else {
             model.thumbnail = thumbnail;
             model.hasThumbnail = true;
@@ -20303,13 +20449,11 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   
   // Only add metadata in detailed view
   if (view === 'detailed') {
-    // Optimized detailed view - more compact dimensions
-    // Reduced height and padding for better space utilization
     item.style.width = '300px';
-    item.style.height = '450px'; // Reduced from 540px
-    item.style.minHeight = '450px';
-    item.style.maxHeight = '450px';
-    item.style.padding = '10px'; // Reduced from 12px
+    item.style.height = '490px';
+    item.style.minHeight = '490px';
+    item.style.maxHeight = '490px';
+    item.style.padding = '16px 16px 0';
     item.style.boxSizing = 'border-box';
     item.style.display = 'flex';
     item.style.flexDirection = 'column';
@@ -20348,16 +20492,16 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       }
     }
     
-    // Ensure file info container only takes the space it needs
+    // File info fills remaining space above the engagement bar
     fileInfo.style.minHeight = '0';
-    fileInfo.style.flex = '0 0 auto'; // Don't grow, don't shrink, auto size - prevents overflow
+    fileInfo.style.flex = '1 1 auto';
     fileInfo.style.display = 'flex';
     fileInfo.style.flexDirection = 'column';
     fileInfo.style.justifyContent = 'flex-start';
-    fileInfo.style.gap = '4px'; // Slightly increased for better spacing
-    fileInfo.style.overflow = 'hidden';
-    fileInfo.style.padding = '0'; // Remove all padding
-    fileInfo.style.margin = '0'; // Remove all margin
+    fileInfo.style.gap = '4px';
+    fileInfo.style.overflow = 'visible';
+    fileInfo.style.padding = '0';
+    fileInfo.style.margin = '0';
     
     // Enable two-column grid layout for metadata
     metadataContainer.style.display = 'grid';
@@ -21401,7 +21545,7 @@ async function showBundleDetails(groupRecord) {
   const subtitleEl = document.getElementById('bundle-details-subtitle');
   const pathEl = document.getElementById('bundle-details-path');
   const statsEl = document.getElementById('bundle-details-stats');
-  const bodyEl = document.getElementById('bundle-contents-body');
+  const listEl = document.getElementById('bundle-contents-list');
 
   const kindLabel = bundleKind === 'zip' ? 'ZIP archive' : 'Folder bundle';
   if (titleEl) titleEl.textContent = groupLabel;
@@ -21420,43 +21564,31 @@ async function showBundleDetails(groupRecord) {
     `;
   }
 
-  if (bodyEl) {
-    bodyEl.innerHTML = '';
+  if (listEl) {
+    listEl.innerHTML = '';
     for (const child of children) {
-      const tr = document.createElement('tr');
-      tr.className = 'bundle-contents-row';
-      tr.title = 'Click for model details • double-click to preview';
-      const entryName = child.filePath?.includes('::')
+      const entryPath = child.filePath?.includes('::')
         ? (child.filePath.split('::')[1] || child.fileName)
-        : child.fileName;
-      const cells = [
-        entryName || '—',
-        child.size ? formatFileSize(child.size) : '—',
-        child.printed ? 'Yes' : 'No',
-        child.designer || '—',
-      ];
-      cells.forEach((text) => {
-        const td = document.createElement('td');
-        td.textContent = text;
-        tr.appendChild(td);
-      });
-      tr.addEventListener('click', (e) => {
+        : (child.fileName || child.filePath || '');
+      const displayName = String(entryPath).split(/[/\\]/).pop() || entryPath || '—';
+
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'bundle-contents-list-item';
+      btn.textContent = displayName;
+      btn.title = entryPath || displayName;
+      btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        bodyEl.querySelectorAll('.bundle-contents-row-active').forEach((row) => {
-          row.classList.remove('bundle-contents-row-active');
+        listEl.querySelectorAll('.bundle-contents-list-item.is-active').forEach((el) => {
+          el.classList.remove('is-active');
         });
-        tr.classList.add('bundle-contents-row-active');
+        btn.classList.add('is-active');
         if (child.filePath) showModelDetails(child.filePath);
       });
-      tr.addEventListener('dblclick', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (child.filePath && typeof window.openPreview === 'function') {
-          window.openPreview(child.filePath);
-        }
-      });
-      bodyEl.appendChild(tr);
+      li.appendChild(btn);
+      listEl.appendChild(li);
     }
   }
 
@@ -21469,41 +21601,6 @@ async function showBundleDetails(groupRecord) {
       }
     };
     showPathBtn.disabled = !containerPath;
-  }
-
-  const expandBtn = document.getElementById('bundle-details-expand-grid');
-  if (expandBtn) {
-    expandBtn.onclick = (e) => {
-      e.preventDefault();
-      const expandedSet =
-        groupRecord.groupKind === 'bundle'
-          ? bundleExpandedGroups
-          : groupRecord.groupKind === 'zip'
-            ? zipArchiveExpandedGroups
-            : parentModelExpandedGroups;
-      expandedSet.add(groupRecord.groupKey);
-      const grid = document.querySelector('.file-grid');
-      if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
-      else renderVirtualGrid(grid?.currentModels || []);
-    };
-  }
-
-  const previewBtn = document.getElementById('bundle-details-preview');
-  if (previewBtn) {
-    previewBtn.onclick = (e) => {
-      e.preventDefault();
-      if (typeof window.openBundlePreview === 'function') {
-        window.openBundlePreview(groupRecord);
-      }
-    };
-  }
-
-  const closeBtn = document.getElementById('bundle-details-close');
-  if (closeBtn) {
-    closeBtn.onclick = (e) => {
-      e.preventDefault();
-      hideBundleDetailsPanel();
-    };
   }
 
   panel.classList.remove('hidden');
@@ -21802,6 +21899,24 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     }
   };
 
+  const expandGroupAndShowDetails = () => {
+    const isBundle = groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+    if (isBundle) {
+      // Expand (don't toggle) so a single click both opens children and the details panel.
+      // Avoid expand→collapse from click+click before dblclick.
+      expandedSet.add(groupRecord.groupKey);
+      const container = document.querySelector('.file-grid');
+      if (container?.renderVisibleItemsFn) {
+        container.renderVisibleItemsFn();
+      } else {
+        renderVirtualGrid(container?.currentModels || []);
+      }
+      showBundleDetails(groupRecord);
+      return;
+    }
+    toggleGroup();
+  };
+
   chevron.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -21810,22 +21925,15 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
 
   item.addEventListener('click', (event) => {
     if (event.target.closest('.parent-model-group-chevron')) return;
+    if (event.target.closest('.model-engagement-bar')) return;
     event.preventDefault();
     event.stopPropagation();
-    toggleGroup();
-  });
-  item.addEventListener('dblclick', (event) => {
-    if (event.target.closest('.parent-model-group-chevron')) return;
-    if (groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip') {
-      event.preventDefault();
-      event.stopPropagation();
-      showBundleDetails(groupRecord);
-    }
+    expandGroupAndShowDetails();
   });
   item.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      toggleGroup();
+      expandGroupAndShowDetails();
     }
   });
   item.addEventListener('contextmenu', async (event) => {
@@ -22038,7 +22146,7 @@ function renderVirtualGrid(models) {
       currentGridView === 'preview' && previewTilePx != null
         ? { width: previewTilePx, height: previewTilePx, itemWidth: previewTilePx }
         : getPreviewTileDims(),
-    'detailed': { width: 300, height: 450, itemWidth: 300 }
+    'detailed': { width: 300, height: 490, itemWidth: 300 }
   };
 
   const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];

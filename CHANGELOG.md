@@ -4,6 +4,17 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.1.20] - 2026-08-07
+
+### Added
+
+- Stats panel shows total library disk usage and per-type byte sizes (3MF / STL / Other) alongside counts.
+- Grid multi-thumbnail carousel upgrades from list metadata (`hasMultipleThumbnails`) without loading full thumbnail blobs up front; default-thumbnail changes broadcast live so carousels stay in sync.
+
+### Changed
+
+- Bundle/archive details modal lists models instead of a contents table, with simpler layout and actions.
+
 ## [2.1.19] - 2026-08-03
 
 ### Fixed

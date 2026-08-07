@@ -318,25 +318,8 @@
       </div>
       <div class="bundle-details-stats" id="bundle-details-stats"></div>
       <div class="form-group">
-        <label>Contents</label>
-        <div class="bundle-contents-table-wrap">
-          <table class="bundle-contents-table" id="bundle-contents-table">
-            <thead>
-              <tr>
-                <th scope="col">File</th>
-                <th scope="col">Size</th>
-                <th scope="col">Printed</th>
-                <th scope="col">Designer</th>
-              </tr>
-            </thead>
-            <tbody id="bundle-contents-body"></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="bundle-details-actions">
-        <button type="button" id="bundle-details-preview">Open 3D preview</button>
-        <button type="button" id="bundle-details-expand-grid">Expand in grid</button>
-        <button type="button" id="bundle-details-close">Close</button>
+        <label>Models</label>
+        <ul id="bundle-contents-list" class="bundle-contents-list" aria-label="Models in archive"></ul>
       </div>
     </div>
     <dialog id="new-designer-dialog" class="modal">
@@ -1322,6 +1305,10 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                     <span class="stats-label-small">Archived:</span>
                     <span class="stats-value-small" id="stats-archived">0</span>
                   </div>
+                  <div class="stats-row-compact">
+                    <span class="stats-label-small">Disk Usage:</span>
+                    <span class="stats-value-small" id="stats-total-bytes">0 B</span>
+                  </div>
                 </div>
               </div>
               
@@ -1329,15 +1316,15 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                 <h3>Model Types</h3>
                 <div class="stats-row-compact">
                   <span class="stats-label-small">3MF:</span>
-                  <span class="stats-value-small" id="stats-type-3mf">0</span>
+                  <span class="stats-value-small"><span id="stats-type-3mf">0</span> <span class="stats-bytes" id="stats-type-3mf-bytes">(0 B)</span></span>
                 </div>
                 <div class="stats-row-compact">
                   <span class="stats-label-small">STL:</span>
-                  <span class="stats-value-small" id="stats-type-stl">0</span>
+                  <span class="stats-value-small"><span id="stats-type-stl">0</span> <span class="stats-bytes" id="stats-type-stl-bytes">(0 B)</span></span>
                 </div>
                 <div class="stats-row-compact">
                   <span class="stats-label-small">Other:</span>
-                  <span class="stats-value-small" id="stats-type-other">0</span>
+                  <span class="stats-value-small"><span id="stats-type-other">0</span> <span class="stats-bytes" id="stats-type-other-bytes">(0 B)</span></span>
                 </div>
                 <div class="chart-container-small">
                   <canvas id="file-type-chart"></canvas>

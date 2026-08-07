@@ -509,50 +509,58 @@ button:disabled {
   color: var(--text-muted, #bbb);
 }
 
-.bundle-contents-table-wrap {
-  max-height: 320px;
+.bundle-contents-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
   overflow: auto;
   border: 1px solid #444;
-  border-radius: 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.15);
 }
 
-.bundle-contents-table {
+.bundle-contents-list > li {
+  margin: 0;
+  padding: 0;
+}
+
+.bundle-contents-list-item {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
   width: 100%;
-  border-collapse: collapse;
-  font-size: 0.88rem;
-}
-
-.bundle-contents-table th,
-.bundle-contents-table td {
-  padding: 8px 10px;
-  text-align: left;
+  padding: 10px 12px;
   border-bottom: 1px solid #3a3a3a;
-}
-
-.bundle-contents-table th {
-  position: sticky;
-  top: 0;
-  background: #2a2a2a;
-  z-index: 1;
-}
-
-.bundle-contents-table tbody tr {
+  color: var(--text-color, #eee);
+  font-size: 0.9rem;
+  line-height: 1.35;
+  text-align: left;
   cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: static;
+  background: transparent;
+  box-shadow: none;
 }
 
-.bundle-contents-table tbody tr:hover {
+.bundle-contents-list-item::before {
+  display: none;
+}
+
+.bundle-contents-list-item:last-child {
+  border-bottom: none;
+}
+
+.bundle-contents-list-item:hover {
+  transform: none;
+  box-shadow: none;
   background: color-mix(in srgb, var(--accent-color, #4a9eff) 12%, transparent);
 }
 
-.bundle-contents-table tbody tr.bundle-contents-row-active {
+.bundle-contents-list-item.is-active {
   background: color-mix(in srgb, var(--accent-color, #4a9eff) 22%, transparent);
-}
-
-.bundle-details-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
 }
 
 .parent-model-group.bundle-details-active {
@@ -1399,8 +1407,8 @@ main {
 .parent-model-group.file-item-detailed {
   flex-direction: column;
   width: 300px;
-  height: 450px !important;
-  padding: 12px;
+  height: 490px !important;
+  padding: 12px 12px 0;
 }
 
 .parent-model-group.file-item-preview {
@@ -1797,12 +1805,12 @@ main {
 /* Detailed view - large thumbnail with full metadata - Optimized */
 .file-item-detailed {
   width: 300px;
-  height: 450px !important;
-  min-height: 450px !important;
-  max-height: 450px !important;
+  height: 490px !important;
+  min-height: 490px !important;
+  max-height: 490px !important;
   display: flex;
   flex-direction: column;
-  padding: 16px;
+  padding: 16px 16px 0;
   box-sizing: border-box;
   border-radius: 16px;
   overflow: hidden;
@@ -1873,15 +1881,15 @@ main {
   flex-direction: column;
   justify-content: flex-start;
   gap: 2px;
-  overflow: hidden;
+  overflow: visible;
   padding: 0 !important; /* Override all padding from other rules */
   margin: 0;
 }
 
 .file-item-detailed .file-details {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .model-engagement-bar {
@@ -1892,10 +1900,12 @@ main {
   margin-top: auto;
   margin-left: -16px;
   margin-right: -16px;
-  margin-bottom: -16px;
+  margin-bottom: 0;
   width: calc(100% + 32px);
+  flex: 0 0 auto;
   flex-shrink: 0;
-  padding: 12px 14px 10px;
+  min-height: 44px;
+  padding: 8px 14px 16px;
   box-sizing: border-box;
   border-top: none;
   background: linear-gradient(
@@ -1905,6 +1915,7 @@ main {
     rgba(0, 0, 0, 0.32) 100%
   );
   border-radius: 0 0 16px 16px;
+  overflow: visible;
 }
 
 .model-engagement-bar.is-group {
@@ -1953,8 +1964,15 @@ main {
 
 .model-star {
   font-size: 17px;
+  line-height: 1.25;
   color: rgba(255, 255, 255, 0.3);
   transition: color 0.2s ease, transform 0.15s ease;
+}
+
+/* Beat `.model-engagement-bar button { line-height: 1 }` from the reset above */
+.model-engagement-bar .model-star {
+  line-height: 1.25;
+  padding: 2px 1px;
 }
 
 .model-star.is-filled,
@@ -1965,11 +1983,12 @@ main {
 
 .model-favorite-btn {
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  min-width: 26px;
-  max-width: 26px;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  max-width: 28px;
   font-size: 16px;
+  line-height: 1;
   color: rgba(255, 255, 255, 0.5);
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.06);
@@ -1995,23 +2014,34 @@ main {
 .parent-model-group.file-item-detailed .model-engagement-bar {
   margin-left: -12px;
   margin-right: -12px;
-  margin-bottom: -12px;
+  margin-bottom: 0;
   width: calc(100% + 24px);
   border-radius: 0 0 16px 16px;
+  padding-bottom: 14px;
 }
 
 .file-item-detailed:not(.parent-model-group) .model-engagement-bar {
-  margin-left: -10px;
-  margin-right: -10px;
-  margin-bottom: -10px;
-  width: calc(100% + 20px);
+  margin-left: -16px;
+  margin-right: -16px;
+  margin-bottom: 0;
+  width: calc(100% + 32px);
+  padding-bottom: 16px;
+}
+
+/* Keep engagement bar visible; metadata can use natural height now that cards are taller */
+.file-item-detailed .file-info {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow: visible;
 }
 
 .file-item-detailed .file-details {
   margin: 0;
   padding: 0;
   border-top: none;
-  flex: 0 0 auto; /* Don't grow, don't shrink, auto size */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: visible;
 }
 
 .file-item-detailed .metadata-container {
@@ -2834,6 +2864,18 @@ header {
   display: flex;
   justify-content: center;
   margin-top: 20px;
+}
+
+/* Center close button in stats dialog */
+#stats-dialog .dialog-buttons {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+#stats-dialog .dialog-buttons button {
+  width: auto;
+  flex: 0 0 auto;
 }
 
 /* Center close button in manage thumbnails dialog */
@@ -5076,6 +5118,11 @@ header {
   font-size: 13px;
   font-weight: 600;
   text-align: right;
+}
+
+.stats-bytes {
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 500;
 }
 
 .stats-value-tiny {

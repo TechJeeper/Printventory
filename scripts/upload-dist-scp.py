@@ -18,9 +18,9 @@ port = int(cfg.get("port") or 22)
 remote_dir = cfg.get("path") or cfg.get("remote") or cfg.get("remotedir") or "."
 
 files = [Path(p) for p in sys.argv[1:]] or [
-    Path("dist/Printventory-Setup-2.1.19.exe"),
-    Path("dist/printventory-2.1.19.AppImage"),
-    Path("dist/printventory-2.1.19-universal.dmg"),
+    Path("dist/Printventory-Setup-2.1.20.exe"),
+    Path("dist/printventory-2.1.20.AppImage"),
+    Path("dist/printventory-2.1.20-universal.dmg"),
 ]
 
 for f in files:

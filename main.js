@@ -1821,12 +1821,32 @@ function loadThumbnailForModel(filePath) {
 
 const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind';
 
+/** List queries omit thumbnail blobs; these flags are computed without returning the column. */
+const MODEL_LIST_THUMB_FLAGS =
+  "CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail, " +
+  "CASE WHEN thumbnail IS NOT NULL AND INSTR(thumbnail, '::') > 0 THEN 1 ELSE 0 END AS hasMultipleThumbnails";
+const MODEL_LIST_THUMB_FLAGS_QUALIFIED =
+  "CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail, " +
+  "CASE WHEN models.thumbnail IS NOT NULL AND INSTR(models.thumbnail, '::') > 0 THEN 1 ELSE 0 END AS hasMultipleThumbnails";
+const MODEL_LIST_COLUMNS = `${MODEL_DETAIL_COLUMNS}, ${MODEL_LIST_THUMB_FLAGS}`;
+const MODEL_LIST_COLUMNS_QUALIFIED =
+  `models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, ${MODEL_LIST_THUMB_FLAGS_QUALIFIED}`;
+
+function applyThumbnailFlags(row) {
+  if (!row) return row;
+  const t = row.thumbnail;
+  row.hasThumbnail = !!(t && t !== '' && t !== '3d.png');
+  row.hasMultipleThumbnails = !!(t && typeof t === 'string' && t.includes('::'));
+  return row;
+}
+
 function getModelByFilePath(filePath, { includeThumbnail = false } = {}) {
   if (!db || !filePath) return null;
   const row = db.prepare(`SELECT ${MODEL_DETAIL_COLUMNS} FROM models WHERE filePath = ?`).get(filePath);
   if (!row) return null;
   if (includeThumbnail) {
     row.thumbnail = loadThumbnailForModel(filePath);
+    applyThumbnailFlags(row);
   }
   return row;
 }
@@ -1837,6 +1857,7 @@ function getModelById(modelId, { includeThumbnail = false } = {}) {
   if (!row) return null;
   if (includeThumbnail) {
     row.thumbnail = loadThumbnailForModel(row.filePath);
+    applyThumbnailFlags(row);
   }
   return row;
 }
@@ -3864,7 +3885,7 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
         break;
     }
 
-const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = MODEL_LIST_COLUMNS;
 
     let models;
     if (limit === 0) {
@@ -4548,7 +4569,7 @@ const getModelsFilteredHandler = async (event, filters) => {
         break;
     }
     
-const selectCols = "models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, CASE WHEN models.thumbnail IS NOT NULL AND models.thumbnail != '' AND models.thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = MODEL_LIST_COLUMNS_QUALIFIED;
 
     // Execute query (optional limit/offset for progressive load when clearing filters in Server/Docker)
     // SQLite requires LIMIT when using OFFSET; use a large limit when only offset is set
@@ -5879,10 +5900,11 @@ ipcMain.handle('get-stats', async () => {
     const totalModels = db.prepare('SELECT COUNT(*) as count FROM models').get();
     const totalCount = totalModels ? totalModels.count : 0;
 
-    // File type breakdown
-    const stlCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) LIKE '%.stl'").get();
-    const threeMfCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) LIKE '%.3mf'").get();
-    const otherCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE LOWER(fileName) NOT LIKE '%.stl' AND LOWER(fileName) NOT LIKE '%.3mf'").get();
+    // File type breakdown (count + disk usage)
+    const stlStats = db.prepare("SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as bytes FROM models WHERE LOWER(fileName) LIKE '%.stl'").get();
+    const threeMfStats = db.prepare("SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as bytes FROM models WHERE LOWER(fileName) LIKE '%.3mf'").get();
+    const otherStats = db.prepare("SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as bytes FROM models WHERE LOWER(fileName) NOT LIKE '%.stl' AND LOWER(fileName) NOT LIKE '%.3mf'").get();
+    const totalBytesRow = db.prepare('SELECT COALESCE(SUM(size), 0) as bytes FROM models').get();
     
     // Archived models (models inside ZIP files)
     const archivedCount = db.prepare("SELECT COUNT(*) as count FROM models WHERE filePath LIKE '%::%'").get();
@@ -5909,13 +5931,22 @@ ipcMain.handle('get-stats', async () => {
       if (totalCount === 0) return 0;
       return ((count / totalCount) * 100).toFixed(1);
     };
+
+    const stlBytes = stlStats ? stlStats.bytes : 0;
+    const threeMfBytes = threeMfStats ? threeMfStats.bytes : 0;
+    const otherBytes = otherStats ? otherStats.bytes : 0;
+    const totalBytes = totalBytesRow ? totalBytesRow.bytes : 0;
     
     return {
       totalModels: totalCount,
+      totalBytes,
       fileTypes: {
-        stl: stlCount ? stlCount.count : 0,
-        threeMf: threeMfCount ? threeMfCount.count : 0,
-        other: otherCount ? otherCount.count : 0
+        stl: stlStats ? stlStats.count : 0,
+        threeMf: threeMfStats ? threeMfStats.count : 0,
+        other: otherStats ? otherStats.count : 0,
+        stlBytes,
+        threeMfBytes,
+        otherBytes
       },
       archivedModels: archivedCount ? archivedCount.count : 0,
       percentages: {
@@ -9707,6 +9738,17 @@ ipcMain.handle('set-default-thumbnail', async (event, filePath, index) => {
     if (!thumbnail) return false;
     const updatedThumbnail = setDefaultThumbnailIndex(thumbnail, index);
     await saveThumbnail(filePath, updatedThumbnail);
+    const thumbs = parseThumbnails(updatedThumbnail);
+    const payload = {
+      filePath,
+      thumbnailCount: thumbs.length,
+      defaultChanged: true
+    };
+    if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent('thumbnail-default-changed', payload);
+    } else if (event && event.sender) {
+      event.sender.send('thumbnail-default-changed', payload);
+    }
     return true;
   } catch (error) {
     console.error('Error setting default thumbnail:', error);
@@ -10234,7 +10276,7 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
 // Add this new IPC handler to fetch models by directory
 ipcMain.handle('get-models-by-directory', async (event, directoryPath) => {
   try {
-const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = MODEL_LIST_COLUMNS;
     const models = db.prepare(`
       SELECT ${selectCols} FROM models
       WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
@@ -10250,7 +10292,7 @@ const selectCols = "id, filePath, fileName, designer, source, notes, printed, pa
 ipcMain.handle('get-models-page', async (event, { page, pageSize, sortOption }) => {
   try {
     const offset = (page - 1) * pageSize;
-const selectCols = "id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, CASE WHEN thumbnail IS NOT NULL AND thumbnail != '' AND thumbnail != '3d.png' THEN 1 ELSE 0 END AS hasThumbnail";
+const selectCols = MODEL_LIST_COLUMNS;
     const models = db.prepare(
       `SELECT ${selectCols} FROM models ORDER BY ${sortOption} LIMIT ? OFFSET ?`
     ).all(pageSize, offset);

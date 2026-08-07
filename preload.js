@@ -271,6 +271,7 @@ contextBridge.exposeInMainWorld('electron', {
       'thumbnail-job-complete',
       'thumbnail-job-error',
       'thumbnail-deleted',
+      'thumbnail-default-changed',
       'manage-thumbnails-request',
       'execute-client-command',
       'download-model',
