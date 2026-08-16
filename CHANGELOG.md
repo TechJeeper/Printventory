@@ -4,6 +4,21 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-16
+
+### Added
+
+- Folder and ZIP bundle grouping — models that share a parent folder or ZIP archive appear as a single card with a details panel
+- Bundle 3D preview — open every STL/3MF part in a folder or ZIP in one grid layout with per-part colors
+- Send to Slicer from preview — send the current model or entire bundle to your configured slicer (new instance on macOS)
+- Query Builder, new Preview view, and customizable list columns
+- New models tagged "New" until edited, parent-model grouping, LYS/LTY file support, and library disk-usage stats
+- Docker/server NVIDIA GPU support, in-container thumbnail generation, and thumbnail progress UI
+
+### Fixed
+
+- Bug fixes and performance optimization
+
 ## [2.1.21] - 2026-08-07
 
 ### Changed
