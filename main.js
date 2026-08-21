@@ -8043,9 +8043,10 @@ function getDarwinAppBundlePath(slicerPath) {
   return match ? match[1] : null;
 }
 
-function isPrusaFamilySlicer(slicerPath) {
+// PrusaSlicer / SuperSlicer / Slic3r accept --single-instance; Bambu / Orca / Snapmaker Orca reject it.
+function slicerSupportsSingleInstanceFlag(slicerPath) {
   const base = path.basename(String(slicerPath)).toLowerCase();
-  return /bambu|orca|prusa|superslicer|slic3r/.test(base);
+  return /prusa|superslicer|slic3r/.test(base) && !/bambu|orca/.test(base);
 }
 
 function buildSlicerLaunchCommand(slicerPath, modelPaths) {
@@ -8062,7 +8063,7 @@ function buildSlicerLaunchCommand(slicerPath, modelPaths) {
   }
 
   let command = escapeShellArg(slicerPath);
-  if (isPrusaFamilySlicer(slicerPath)) {
+  if (slicerSupportsSingleInstanceFlag(slicerPath)) {
     command += ' --single-instance=0';
   }
   return `${command} ${escapedPaths}`;

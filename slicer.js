@@ -3,6 +3,24 @@
 
 let slicerEntries = [];
 
+function suggestSlicerNameFromPath(slicerPath) {
+  const base = String(slicerPath || '').split(/[/\\]/).pop() || '';
+  const withoutExt = base.replace(/\.(exe|app|appimage|dmg)$/i, '');
+  const spaced = withoutExt.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!spaced) return '';
+  return spaced.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+function applySlicerPathToEntry(entryEl, filePath) {
+  if (!entryEl || !filePath) return;
+  const pathInput = entryEl.querySelector('.slicer-path');
+  const nameInput = entryEl.querySelector('.slicer-name');
+  if (pathInput) pathInput.value = filePath;
+  if (nameInput && !nameInput.value.trim()) {
+    nameInput.value = suggestSlicerNameFromPath(filePath);
+  }
+}
+
 async function createSlicerEntry(slicer = { name: '', path: '' }) {
   const template = document.getElementById('slicer-entry-template');
   if (!template) {
@@ -26,7 +44,7 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
   nameInput.dataset.originalValue = slicer.name || '';
   pathInput.dataset.originalValue = slicer.path || '';
   
-  // Always make both fields editable (never readonly) - users should be able to type manually
+  // Always make both fields editable (never readonly) - users should be able to type name before path
   nameInput.removeAttribute('readonly');
   nameInput.disabled = false;
   pathInput.removeAttribute('readonly');
@@ -39,6 +57,13 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
   if (serverMode) {
     pathInput.placeholder = 'Enter slicer path on your workstation';
   }
+
+  // If user pastes/types a path first, fill an empty name from the executable
+  pathInput.addEventListener('change', () => {
+    if (!nameInput.value.trim() && pathInput.value.trim()) {
+      nameInput.value = suggestSlicerNameFromPath(pathInput.value.trim());
+    }
+  });
   
   // Add browse button handler
   const browseButton = entry.querySelector('.browse-slicer-button');
@@ -74,11 +99,10 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
             }
           });
           
-          // Update only this entry's path
+          // Update only this entry's path (and name if still empty)
           if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
             const thisEntry = e.target.closest('.slicer-entry');
-            const thisPathInput = thisEntry.querySelector('.slicer-path');
-            thisPathInput.value = result.filePaths[0];
+            applySlicerPathToEntry(thisEntry, result.filePaths[0]);
           }
           return; // Successfully used Electron dialog
         }
@@ -112,14 +136,15 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
           // Try to get the full path
           // In Electron (even in server mode via webview), file.path might be available
           // In pure browser, we only get file.name due to security restrictions
+          const thisEntry = pathInput.closest('.slicer-entry');
           if (file.path) {
             // Electron provides the full path
-            pathInput.value = file.path;
+            applySlicerPathToEntry(thisEntry, file.path);
           } else {
             // Pure browser - we only have the filename
             // Show the filename and let user know they may need to complete the path
             const fileName = file.name;
-            pathInput.value = fileName;
+            applySlicerPathToEntry(thisEntry, fileName);
             
             // Show a helpful message
             const message = 'Browser security only provides the filename. ' +
@@ -141,7 +166,7 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
       // Add to DOM immediately
       document.body.appendChild(fileInput);
       
-      // Trigger click immediately (must be synchronous with user click for browser security)
+      // Trigger click immediately (must be synchronous with user event handler)
       // Try direct click first, then fallback to requestAnimationFrame if needed
       try {
         // Direct click - this must happen synchronously in the user event handler
@@ -185,11 +210,10 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
         }
       });
       
-      // Update only this entry's path
+      // Update only this entry's path (and name if still empty)
       if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
         const thisEntry = e.target.closest('.slicer-entry');
-        const thisPathInput = thisEntry.querySelector('.slicer-path');
-        thisPathInput.value = result.filePaths[0];
+        applySlicerPathToEntry(thisEntry, result.filePaths[0]);
       }
     }
   });
@@ -293,6 +317,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const entry = await createSlicerEntry();
     if (entry) {
       slicerList.appendChild(entry);
+      // Name is editable immediately — focus it so users can type before picking a path
+      const nameInput = entry.querySelector('.slicer-name');
+      if (nameInput) {
+        requestAnimationFrame(() => nameInput.focus());
+      }
     }
   });
   
@@ -316,4 +345,4 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   window.openSlicerSettings = openSlicerSettings;
-}); 
+});

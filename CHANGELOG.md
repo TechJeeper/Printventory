@@ -4,6 +4,13 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-08-21
+
+### Fixed
+
+- Fixed error in Slicer parameter — Open in Slicer no longer passes `--single-instance=0` to Bambu Studio / Orca / Snapmaker Orca (that flag is PrusaSlicer-only and caused "Invalid option --single-instance").
+- Slicer Settings name field is editable before choosing a path; browsing for an executable also suggests a name when the name is empty.
+
 ## [2.2.0] - 2026-08-16
 
 ### Added

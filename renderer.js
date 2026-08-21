@@ -12082,9 +12082,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     return match ? match[1] : null;
   }
 
-  function isPrusaFamilySlicerPath(slicerPath) {
+  // PrusaSlicer / SuperSlicer / Slic3r accept --single-instance; Bambu / Orca / Snapmaker Orca reject it.
+  function slicerSupportsSingleInstanceFlag(slicerPath) {
     const base = String(slicerPath).split(/[/\\]/).pop().toLowerCase();
-    return /bambu|orca|prusa|superslicer|slic3r/.test(base);
+    return /prusa|superslicer|slic3r/.test(base) && !/bambu|orca/.test(base);
   }
 
   function buildSlicerLaunchCommand(slicerPath, modelPaths) {
@@ -12095,7 +12096,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return `open -n -a ${escapeSlicerShellArg(appBundle)} --args ${escapedPaths}`;
     }
     let command = escapeSlicerShellArg(slicerPath);
-    if (isPrusaFamilySlicerPath(slicerPath)) {
+    if (slicerSupportsSingleInstanceFlag(slicerPath)) {
       command += ' --single-instance=0';
     }
     return `${command} ${escapedPaths}`;
@@ -12216,15 +12217,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   window._electronRealEventHandlers['open-slicer-settings'] = function() {
+    if (typeof window.openSlicerSettings === 'function') {
+      window.openSlicerSettings();
+      return;
+    }
     const dialog = document.getElementById('slicer-dialog');
     if (dialog) {
-      window.electron.getSetting('slicerPath')
-        .then(function(path) {
-          const input = document.getElementById('slicer-path');
-          if (input) input.value = path || '';
-          dialog.showModal();
-        })
-        .catch(function(err) { console.error('Error loading slicer path:', err); });
+      try { dialog.showModal(); } catch (err) { console.error('Error opening slicer settings:', err); }
     }
   };
   if (window._electronPendingEvents['open-slicer-settings']) {

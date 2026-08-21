@@ -6148,8 +6148,25 @@ header {
   border-radius: 4px;
 }
 
-.slicer-entry .form-group {
+.slicer-entry .form-group,
+.slicer-entry .slicer-entry-fields {
   margin-bottom: 0.5rem;
+  width: 100%;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.slicer-entry .slicer-field-label {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.75);
+  letter-spacing: 0.02em;
+}
+
+.slicer-entry .slicer-field-label + .slicer-name,
+.slicer-entry .slicer-field-label + .input-with-icon {
+  margin-bottom: 0.75rem;
 }
 
 .slicer-entry input {
@@ -6160,11 +6177,22 @@ header {
   border-radius: 4px;
   background-color: #444;
   color: #fff;
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+}
+
+/* Text name field — do not inherit select dropdown arrow from .form-group input */
+.slicer-entry input.slicer-name {
+  background-image: none !important;
+  padding-right: 16px !important;
+  cursor: text;
 }
 
 .slicer-entry .input-with-icon {
   position: relative;
   width: 100%;
+  z-index: 0;
 }
 
 .slicer-entry .input-with-icon input {

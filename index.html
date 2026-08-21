@@ -1612,14 +1612,16 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <!-- Add this template for slicer entries -->
   <template id="slicer-entry-template">
     <div class="slicer-entry">
-      <div class="form-group">
-        <input type="text" class="slicer-name" placeholder="Slicer Name" required>
+      <div class="form-group slicer-entry-fields">
+        <label class="slicer-field-label">Name</label>
+        <input type="text" class="slicer-name" placeholder="e.g. Orca Slicer" autocomplete="off">
+        <label class="slicer-field-label">Path</label>
         <div class="input-with-icon">
-          <input type="text" class="slicer-path" placeholder="Select slicer path...">
-          <button type="button" class="browse-slicer-button icon-button">
+          <input type="text" class="slicer-path" placeholder="Select slicer path..." autocomplete="off">
+          <button type="button" class="browse-slicer-button icon-button" title="Browse for slicer">
             <img src="file-icon.png" alt="Browse">
           </button>
-          <button type="button" class="remove-slicer-button icon-button">×</button>
+          <button type="button" class="remove-slicer-button icon-button" title="Remove slicer">×</button>
         </div>
       </div>
     </div>
