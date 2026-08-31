@@ -11,6 +11,7 @@ if (typeof DOMParser === 'undefined') {
 importScripts('vendor/worker-xmldom-queryselector-polyfill.js');
 importScripts('vendor/3MFLoader.js');
 importScripts('vendor/OBJLoader.js');
+importScripts('threemf-mesh-extract.js');
 
 function workerErrorMessage(error) {
   if (!error) return 'Unknown worker parse error';
@@ -61,9 +62,8 @@ self.onmessage = async function(e) {
       processObject(object, id);
     } else if (fileExtension === '3mf') {
       THREE.ThreeMFLoader.fflate = fflate;
-      const loader = new THREE.ThreeMFLoader();
       const buffer = modelBuffer instanceof ArrayBuffer ? modelBuffer : await fetchArrayBuffer(url);
-      const object = loader.parse(buffer);
+      const object = parse3mfDocument(buffer);
       processObject(object, id);
     } else if (fileExtension === 'obj') {
       const loader = new THREE.OBJLoader();
@@ -79,6 +79,87 @@ self.onmessage = async function(e) {
     self.postMessage({ id, success: false, error: workerErrorMessage(error) });
   }
 };
+
+const THUMBNAIL_3MF_TARGET_TRIANGLES = 200000;
+const FAST_3MF_XML_BYTES = 2 * 1024 * 1024;
+
+function decodeZipText(bytes) {
+  if (typeof THREE !== 'undefined' && THREE.LoaderUtils && typeof THREE.LoaderUtils.decodeText === 'function') {
+    return THREE.LoaderUtils.decodeText(bytes);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function zipKeys(zip) {
+  return zip ? Object.keys(zip) : [];
+}
+
+function shouldUseFast3mfExtract(zip) {
+  const names = zipKeys(zip);
+  const extract = self.ThreeMFMeshExtract;
+  if (extract && typeof extract.zipHasSplitModelParts === 'function' && extract.zipHasSplitModelParts(names)) {
+    return true;
+  }
+  let modelBytes = 0;
+  for (let i = 0; i < names.length; i++) {
+    if (!names[i].toLowerCase().endsWith('.model')) continue;
+    const part = zip[names[i]];
+    modelBytes += part && part.length ? part.length : 0;
+    if (modelBytes > FAST_3MF_XML_BYTES) return true;
+  }
+  return false;
+}
+
+function parse3mfFastFromZip(zip) {
+  const extract = self.ThreeMFMeshExtract;
+  if (!extract || typeof extract.extractAllMeshesFast !== 'function') {
+    throw new Error('3MF fast extractor is not available');
+  }
+  const names = zipKeys(zip);
+  const xmlParts = [];
+  for (let i = 0; i < names.length; i++) {
+    if (!names[i].toLowerCase().endsWith('.model')) continue;
+    xmlParts.push(decodeZipText(zip[names[i]]));
+  }
+  if (xmlParts.length === 0) {
+    throw new Error('No .model parts found in 3MF file');
+  }
+  const mesh = extract.extractAllMeshesFast(xmlParts, THUMBNAIL_3MF_TARGET_TRIANGLES);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+  if (mesh.indices && mesh.indices.length >= 3) {
+    geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
+  }
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function parse3mfWithThreeLoader(buffer) {
+  const loader = new THREE.ThreeMFLoader();
+  return loader.parse(buffer);
+}
+
+function parse3mfDocument(buffer) {
+  let zip = null;
+  try {
+    zip = fflate.unzipSync(new Uint8Array(buffer));
+  } catch (e) {
+    zip = null;
+  }
+
+  if (zip && shouldUseFast3mfExtract(zip)) {
+    return parse3mfFastFromZip(zip);
+  }
+
+  try {
+    return parse3mfWithThreeLoader(buffer);
+  } catch (error) {
+    if (zip) {
+      return parse3mfFastFromZip(zip);
+    }
+    throw error;
+  }
+}
 
 function processObject(object, id) {
   const geometries = [];

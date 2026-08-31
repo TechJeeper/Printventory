@@ -1242,6 +1242,13 @@
 
 					}
 
+					if ( ! build ) {
+
+						console.warn( 'THREE.3MFLoader: missing component object "' + component.objectId + '".' );
+						continue;
+
+					}
+
 					const object3D = build.clone(); // apply component transform
 
 					const transform = component.transform;
@@ -1264,6 +1271,14 @@
 
 				const objectData = modelData[ 'resources' ][ 'object' ][ objectId ];
 
+				// Production Extension: component objectid may live in another .model part
+				if ( ! objectData ) {
+
+					console.warn( 'THREE.3MFLoader: object "' + objectId + '" not found in current model part.' );
+					return;
+
+				}
+
 				if ( objectData[ 'mesh' ] ) {
 
 					const meshData = objectData[ 'mesh' ];
@@ -1275,6 +1290,13 @@
 				} else {
 
 					const compositeData = objectData[ 'components' ];
+					if ( ! compositeData ) {
+
+						objects[ objectData.id ] = new THREE.Group();
+						return;
+
+					}
+
 					objects[ objectData.id ] = getBuild( compositeData, objects, modelData, textureData, objectData, buildComposite );
 
 				}
@@ -1304,7 +1326,7 @@
 
 					}
 
-				} // start build
+				} // Mesh objects first so Production Extension composites can clone them
 
 
 				for ( let i = 0; i < modelsKeys.length; i ++ ) {
@@ -1316,6 +1338,27 @@
 					for ( let j = 0; j < objectIds.length; j ++ ) {
 
 						const objectId = objectIds[ j ];
+						const objectData = modelData[ 'resources' ][ 'object' ][ objectId ];
+						if ( objectData && objectData[ 'mesh' ] ) {
+
+							buildObject( objectId, objects, modelData, textureData );
+
+						}
+
+					}
+
+				}
+
+				for ( let i = 0; i < modelsKeys.length; i ++ ) {
+
+					const modelsKey = modelsKeys[ i ];
+					const modelData = modelsData[ modelsKey ];
+					const objectIds = Object.keys( modelData[ 'resources' ][ 'object' ] );
+
+					for ( let j = 0; j < objectIds.length; j ++ ) {
+
+						const objectId = objectIds[ j ];
+						if ( objects[ objectId ] ) continue;
 						buildObject( objectId, objects, modelData, textureData );
 
 					}

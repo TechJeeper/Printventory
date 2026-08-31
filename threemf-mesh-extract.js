@@ -7,16 +7,38 @@
  *
  * Oversized meshes are simplified with spatial vertex clustering (not
  * triangle stride), so previews stay solid instead of shredded.
+ *
+ * Works in Node (module.exports) and in the parse-worker (self.ThreeMFMeshExtract).
  */
+
+(function (root, factory) {
+  const exported = factory();
+  if (typeof module === 'object' && module.exports) {
+    module.exports = exported;
+  }
+  if (root) {
+    root.ThreeMFMeshExtract = exported;
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
+
+function readEnvInt(name, fallback) {
+  try {
+    if (typeof process !== 'undefined' && process.env && process.env[name] != null && process.env[name] !== '') {
+      const n = Number.parseInt(process.env[name], 10);
+      if (!Number.isNaN(n)) return n;
+    }
+  } catch (e) { /* worker / browser have no process */ }
+  return fallback;
+}
 
 const PREVIEW_3MF_TARGET_TRIANGLES = Math.max(
   100000,
-  Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_TARGET_TRIANGLES || '1000000', 10) || 1000000
+  readEnvInt('PRINTVENTORY_PREVIEW_3MF_TARGET_TRIANGLES', 1000000) || 1000000
 );
 
 const FAST_PATH_XML_BYTES = Math.max(
   512 * 1024,
-  Number.parseInt(process.env.PRINTVENTORY_PREVIEW_3MF_FAST_PATH_BYTES || String(2 * 1024 * 1024), 10) || 2 * 1024 * 1024
+  readEnvInt('PRINTVENTORY_PREVIEW_3MF_FAST_PATH_BYTES', 2 * 1024 * 1024) || 2 * 1024 * 1024
 );
 
 const MESH_BLOCK_RE = /<(?:\w+:)?mesh\b[^>]*>([\s\S]*?)<\/(?:\w+:)?mesh>/gi;
@@ -393,16 +415,61 @@ function shouldUseFastPath(modelXmlParts) {
   return false;
 }
 
-/** True when build items or components carry placement transforms. */
-function modelHasPlacementTransforms(modelXmlParts) {
-  const itemOrComponent = /<(?:\w+:)?(?:item|component)\b[^>]*\btransform\s*=\s*"/i;
+function countMeshesInXmlParts(modelXmlParts) {
+  const meshRe = /<(?:\w+:)?mesh\b/gi;
+  let count = 0;
   for (const xml of modelXmlParts) {
-    if (xml && itemOrComponent.test(xml)) return true;
+    if (!xml) continue;
+    meshRe.lastIndex = 0;
+    const matches = xml.match(meshRe);
+    if (matches) count += matches.length;
+  }
+  return count;
+}
+
+function isIdentityTransformAttr(transform) {
+  if (!transform || typeof transform !== 'string') return true;
+  const t = transform.trim().split(/\s+/).map(Number);
+  if (t.length < 12 || t.some((n) => Number.isNaN(n))) return false;
+  const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+  for (let i = 0; i < 12; i++) {
+    if (Math.abs(t[i] - identity[i]) > 1e-6) return false;
+  }
+  return true;
+}
+
+/**
+ * True when multiple meshes are placed with non-identity transforms.
+ * A single mesh with a plate-centering item transform does not need the DOM
+ * path — preview cameras center the model anyway (MeshyAI / Bambu 3MF).
+ */
+function modelHasPlacementTransforms(modelXmlParts) {
+  if (countMeshesInXmlParts(modelXmlParts) <= 1) return false;
+
+  const itemOrComponent = /<(?:\w+:)?(?:item|component)\b([^>]*)>/gi;
+  const transformAttr = /\btransform\s*=\s*"([^"]*)"/i;
+  for (const xml of modelXmlParts) {
+    if (!xml) continue;
+    itemOrComponent.lastIndex = 0;
+    let match;
+    while ((match = itemOrComponent.exec(xml)) !== null) {
+      const tm = (match[1] || '').match(transformAttr);
+      if (tm && !isIdentityTransformAttr(tm[1])) return true;
+    }
   }
   return false;
 }
 
-module.exports = {
+/** Bambu / Orca / MeshyAI: mesh lives in 3D/Objects/*.model (Production Extension). */
+function zipHasSplitModelParts(zipKeys) {
+  if (!zipKeys || !zipKeys.length) return false;
+  for (let i = 0; i < zipKeys.length; i++) {
+    if (/3D\/Objects\/[^/]+\.model$/i.test(zipKeys[i])) return true;
+  }
+  return false;
+}
+
+return {
   PREVIEW_3MF_TARGET_TRIANGLES,
   FAST_PATH_XML_BYTES,
   countTrianglesInXml,
@@ -410,5 +477,8 @@ module.exports = {
   extractAllMeshesFast,
   simplifyForPreview,
   shouldUseFastPath,
-  modelHasPlacementTransforms
+  modelHasPlacementTransforms,
+  zipHasSplitModelParts
 };
+
+});

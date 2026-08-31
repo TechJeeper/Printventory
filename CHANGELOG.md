@@ -4,6 +4,12 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-08-31
+
+### Fixed
+
+- MeshyAI and other Bambu Studio / Orca 3MF files now render thumbnails and 3D previews when the mesh is stored in a separate Production Extension part (`3D/Objects/*.model`) instead of failing with `Cannot read properties of undefined (reading 'mesh')`.
+
 ## [2.2.1] - 2026-08-21
 
 ### Fixed

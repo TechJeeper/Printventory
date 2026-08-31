@@ -14676,7 +14676,8 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     }
 
     // Add a timeout to prevent hanging indefinitely (e.g. on network shares or parsing errors)
-    const timeoutMs = 30000; // 30 seconds should be enough even for large models
+    // Split 3MF (MeshyAI / Bambu Production Extension) can be 100MB+ of XML.
+    const timeoutMs = fileExtension === '3mf' ? 120000 : 30000;
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error(`Loading model timed out after ${timeoutMs}ms`)), timeoutMs);
