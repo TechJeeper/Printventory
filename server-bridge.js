@@ -423,6 +423,8 @@
       'get3MFImages': 120000,
       'get-file-stats': 120000,
       'calculate-file-hash': 300000,
+      'generateMissingHashes': 600000,
+      'calculate-missing-hashes': 600000,
       'scan-directory': 600000,
       'test-ai-config': 60000
     };

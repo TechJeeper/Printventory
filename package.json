@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -110,6 +110,7 @@
     "files": [
       "main.js",
       "bundle-keys.js",
+      "zip-extract.js",
       "preload.js",
       "renderer.js",
       "index.html",

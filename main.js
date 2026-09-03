@@ -125,6 +125,12 @@ function jsonStringifyForWs(payload) {
   });
 }
 const JSZip = require('jszip');
+const {
+  extractZipEntryBuffer,
+  findZipEntry,
+  withZipFileLock,
+  isFragileZipError
+} = require('./zip-extract');
 const os = require('os');
 const https = require('https');
 const {
@@ -2941,35 +2947,29 @@ ipcMain.handle('open-file-dialog', async () => {
 async function calculateFileHash(filePath) {
   // Check if this is a zip entry
   const pathInfo = parseZipPath(filePath);
-  let actualFilePath = filePath;
-  let tempFilePath = null;
 
   if (pathInfo.isZipEntry) {
-    // For zip entries, extract to temp file first
+    // Hash zip entries from the extracted buffer — avoids temp files and extra I/O.
     try {
-      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
-      tempFilePath = actualFilePath;
-      debugLog(`Extracted zip entry to temp file for hashing: ${actualFilePath}`);
+      const zipPath = resolveReadableDiskPath(pathInfo.zipPath) || pathInfo.zipPath;
+      const entryData = await extractZipEntryBuffer(zipPath, pathInfo.entryPath);
+      const fileHash = crypto.createHash('md5').update(entryData).digest('hex');
+      debugLog(`Generated hash for ${filePath}: ${fileHash}`);
+      return fileHash;
     } catch (error) {
       console.error(`Error extracting zip entry for hashing: ${filePath}`, error);
       throw new Error(`Failed to extract zip entry for hashing: ${error.message}`);
     }
   }
 
+  const actualFilePath = resolveReadableDiskPath(filePath) || filePath;
+
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('md5');
     const stream = fs.createReadStream(actualFilePath);
-    
-      stream.on('error', err => {
+
+    stream.on('error', err => {
       console.error(`Error reading file for hashing: ${actualFilePath}`, err);
-      // Clean up temp file if it exists
-      if (tempFilePath && fs.existsSync(tempFilePath)) {
-        try {
-          fs.unlinkSync(tempFilePath);
-        } catch (unlinkErr) {
-          console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
-        }
-      }
       reject(err);
     });
 
@@ -2978,14 +2978,6 @@ async function calculateFileHash(filePath) {
         hash.update(chunk);
       } catch (err) {
         console.error(`Error updating hash for file: ${actualFilePath}`, err);
-        // Clean up temp file if it exists
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-          try {
-            fs.unlinkSync(tempFilePath);
-          } catch (unlinkErr) {
-            console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
-          }
-        }
         reject(err);
       }
     });
@@ -2994,27 +2986,9 @@ async function calculateFileHash(filePath) {
       try {
         const fileHash = hash.digest('hex');
         debugLog(`Generated hash for ${filePath}: ${fileHash}`);
-        
-        // Clean up temp file if it exists
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-          fs.unlink(tempFilePath, (err) => {
-            if (err) {
-              console.warn(`Failed to delete temp file: ${tempFilePath}`, err);
-            }
-          });
-        }
-        
         resolve(fileHash);
       } catch (err) {
         console.error(`Error generating final hash for file: ${filePath}`, err);
-        // Clean up temp file if it exists
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-          try {
-            fs.unlinkSync(tempFilePath);
-          } catch (unlinkErr) {
-            console.warn(`Failed to delete temp file: ${tempFilePath}`, unlinkErr);
-          }
-        }
         reject(err);
       }
     });
@@ -3094,33 +3068,22 @@ function applyPathMetadataFromSegments(scanRootPath, filePaths) {
   }
 }
 
-/** Find a zip central-directory entry; normalize \ vs / (Windows vs zip standard). */
-function findZipEntry(entries, entryPath) {
-  if (!entries || !entryPath) return null;
-  if (entries[entryPath]) return entries[entryPath];
-  const normalized = entryPath.replace(/\\/g, '/');
-  if (entries[normalized]) return entries[normalized];
-  for (const entry of Object.values(entries)) {
-    if (!entry || entry.isDirectory) continue;
-    if (String(entry.name || '').replace(/\\/g, '/') === normalized) return entry;
-  }
-  return null;
-}
-
 // Helper function to check if a zip entry exists
 async function checkZipEntryExists(zipPath, entryPath) {
   try {
     if (!fs.existsSync(zipPath)) {
       return false;
     }
-    const StreamZip = require('node-stream-zip');
-    const zip = new StreamZip.async({ file: zipPath });
-    try {
-      const entries = await zip.entries();
-      return findZipEntry(entries, entryPath) != null;
-    } finally {
-      await zip.close();
-    }
+    return await withZipFileLock(zipPath, async () => {
+      const StreamZip = require('node-stream-zip');
+      const zip = new StreamZip.async({ file: zipPath });
+      try {
+        const entries = await zip.entries();
+        return findZipEntry(entries, entryPath) != null;
+      } finally {
+        await zip.close();
+      }
+    });
   } catch (error) {
     console.error(`Error checking zip entry existence for ${zipPath}::${entryPath}:`, error);
     return false;
@@ -7792,6 +7755,77 @@ function isUrlModel(filePath) {
   return typeof filePath === 'string' && filePath.startsWith('url::');
 }
 
+function getLibraryRootPaths() {
+  const roots = [];
+  const add = (value) => {
+    if (value && typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed && !roots.includes(trimmed)) roots.push(trimmed);
+    }
+  };
+  add(process.env.STL_HOME);
+  try {
+    if (db) {
+      add(db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value);
+      add(db.prepare('SELECT value FROM settings WHERE key = ?').get('directoryPath')?.value);
+    }
+  } catch (_) { /* db not ready */ }
+  return roots;
+}
+
+// Windows-scanned libraries reused in Docker still store C:\... paths. Try the
+// stored path plus Linux mount equivalents derived from STL_HOME / directoryPath.
+function collectReadablePathCandidates(filePath) {
+  if (!filePath || typeof filePath !== 'string') return [];
+  const normalized = filePath.replace(/\\/g, '/');
+  const candidates = [];
+  const add = (p) => {
+    if (p && typeof p === 'string' && !candidates.includes(p)) candidates.push(p);
+  };
+  add(filePath);
+  add(normalized);
+
+  const win = normalized.match(/^([A-Za-z]):\/(.*)$/);
+  if (win) {
+    const drive = win[1].toLowerCase();
+    const rest = win[2];
+    add('/' + rest);
+    add('/mnt/' + rest);
+    add('/mnt/' + drive + '/' + rest);
+    for (const root of getLibraryRootPaths()) {
+      const rootNorm = String(root).replace(/\\/g, '/').replace(/\/$/, '');
+      if (!rootNorm) continue;
+      const rootBase = rootNorm.split('/').filter(Boolean).pop() || '';
+      const restParts = rest.split('/').filter(Boolean);
+      const idx = restParts.findIndex((p) => p.toLowerCase() === rootBase.toLowerCase());
+      if (idx >= 0) {
+        const relative = restParts.slice(idx + 1).join('/');
+        add(relative ? `${rootNorm}/${relative}` : rootNorm);
+      }
+    }
+  }
+  return candidates;
+}
+
+function resolveReadableDiskPath(diskPath) {
+  if (!diskPath || isUrlModel(diskPath)) return null;
+  for (const candidate of collectReadablePathCandidates(diskPath)) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch (_) { /* ignore invalid paths */ }
+  }
+  return null;
+}
+
+function resolveReadableModelPath(filePath) {
+  if (!filePath || isUrlModel(filePath)) return null;
+  const pathInfo = parseZipPath(filePath);
+  const diskPath = pathInfo.isZipEntry ? pathInfo.zipPath : filePath;
+  const resolved = resolveReadableDiskPath(diskPath);
+  if (!resolved) return null;
+  return pathInfo.isZipEntry ? `${resolved}::${pathInfo.entryPath}` : resolved;
+}
+
 // Helper function to parse zip path format
 function parseZipPath(filePath) {
   if (isUrlModel(filePath)) {
@@ -7965,40 +7999,23 @@ async function cleanupExtractTempDirectory({
 
 // Helper function to extract model from zip to temp file or specified destination
 async function extractModelFromZip(zipPath, entryPath, destinationPath = null) {
-  try {
-    const StreamZip = require('node-stream-zip');
-    const zip = new StreamZip.async({ file: zipPath });
-    let entryData;
-    try {
-      const entries = await zip.entries();
-      const entry = findZipEntry(entries, entryPath);
-      if (!entry) {
-        throw new Error(`Zip entry not found: ${entryPath}`);
-      }
-      entryData = await zip.entryData(entry.name || entryPath);
-    } finally {
-      await zip.close();
-    }
-    
-    if (destinationPath) {
-      // Extract to specified destination, preserving directory structure
-      const destPath = path.join(destinationPath, entryPath);
-      const destDir = path.dirname(destPath);
-      await fs.promises.mkdir(destDir, { recursive: true });
-      await fs.promises.writeFile(destPath, entryData);
-      return destPath;
-    } else {
-      // Always OS temp subdirectory — never adjacent to the zip / library
-      const tempDir = ensureExtractTempDir();
-      const fileName = path.basename(entryPath).replace(/[<>:"|?*]/g, '_');
-      const tempPath = path.join(tempDir, `${EXTRACT_TEMP_FILE_PREFIX}${Date.now()}_${fileName}`);
-      await fs.promises.writeFile(tempPath, entryData);
-      return tempPath;
-    }
-  } catch (error) {
-    console.error(`Error extracting ${entryPath} from ${zipPath}:`, error);
-    throw error;
+  const entryData = await extractZipEntryBuffer(zipPath, entryPath);
+
+  if (destinationPath) {
+    // Extract to specified destination, preserving directory structure
+    const destPath = path.join(destinationPath, entryPath);
+    const destDir = path.dirname(destPath);
+    await fs.promises.mkdir(destDir, { recursive: true });
+    await fs.promises.writeFile(destPath, entryData);
+    return destPath;
   }
+
+  // Always OS temp subdirectory — never adjacent to the zip / library
+  const tempDir = ensureExtractTempDir();
+  const fileName = path.basename(entryPath).replace(/[<>:"|?*]/g, '_');
+  const tempPath = path.join(tempDir, `${EXTRACT_TEMP_FILE_PREFIX}${Date.now()}_${fileName}`);
+  await fs.promises.writeFile(tempPath, entryData);
+  return tempPath;
 }
 
 async function resolveModelPathsForSlicer(filePaths) {
@@ -9087,13 +9104,8 @@ ipcMain.handle('extract-zip-archive', async (event, filePath, destinationPath) =
       throw new Error('Not a zip entry');
     }
     
-    const StreamZip = require('node-stream-zip');
-    const zip = new StreamZip.async({ file: pathInfo.zipPath });
-    
-    // Extract the specific entry
-    const entryData = await zip.entryData(pathInfo.entryPath);
-    await zip.close();
-    
+    const entryData = await extractZipEntryBuffer(pathInfo.zipPath, pathInfo.entryPath);
+
     // Create destination path preserving directory structure
     const destPath = path.join(destinationPath, pathInfo.entryPath);
     const destDir = path.dirname(destPath);
@@ -9179,24 +9191,57 @@ const getDuplicatesHandler = async (event, includeZip = false) => {
 ipcMain.handle('get-duplicates', getDuplicatesHandler);
 ipcHandlerRegistry.set('get-duplicates', getDuplicatesHandler);
 
+function countModelsNeedingHash({ includeSha256 = false } = {}) {
+  const hashClause = includeSha256
+    ? `(hash IS NULL OR hash = '' OR LENGTH(hash) = 64)`
+    : `(hash IS NULL OR hash = '')`;
+  const row = db.prepare(`
+    SELECT COUNT(*) as count FROM models
+    WHERE ${hashClause}
+      AND filePath NOT LIKE 'url::%'
+  `).get();
+  return row ? row.count : 0;
+}
+
+function emitHashGenerationProgress(event, payload) {
+  if (isServerMode && global.broadcastEvent) {
+    global.broadcastEvent('hash-generation-progress', payload);
+  } else if (event && event.sender) {
+    event.sender.send('hash-generation-progress', payload);
+  }
+}
+
+function emitHashGenerationComplete(event, payload) {
+  if (isServerMode && global.broadcastEvent) {
+    global.broadcastEvent('hash-generation-complete', payload);
+  } else if (event && event.sender) {
+    event.sender.send('hash-generation-complete', payload);
+  }
+}
+
 // Internal function to calculate missing hashes
 async function calculateMissingHashesInternal(event) {
+  if (isGeneratingHashes) {
+    return { alreadyRunning: true, calculated: 0, failed: 0, total: 0 };
+  }
   try {
     // Set hash generation state
     isGeneratingHashes = true;
 
-    // Get all models with missing hashes OR SHA256 hashes (64 hex chars) that need to be regenerated as MD5 (32 hex chars)
+    // Missing hashes, plus SHA256 (64 hex chars) that can be regenerated as MD5.
+    // SHA256 still groups duplicates correctly — conversion is best-effort.
     const modelsWithMissingHashes = db.prepare(`
-      SELECT filePath, fileName, size 
-      FROM models 
-      WHERE hash IS NULL OR hash = '' OR LENGTH(hash) = 64
+      SELECT filePath, fileName, size, hash
+      FROM models
+      WHERE (hash IS NULL OR hash = '' OR LENGTH(hash) = 64)
+        AND filePath NOT LIKE 'url::%'
     `).all();
 
     console.log(`Found ${modelsWithMissingHashes.length} models with missing or SHA256 hashes (need MD5)`);
 
     if (modelsWithMissingHashes.length === 0) {
       isGeneratingHashes = false;
-      return { calculated: 0, total: 0 };
+      return { calculated: 0, failed: 0, total: 0 };
     }
 
     console.log('Starting parallel hash calculation for', modelsWithMissingHashes.length, 'files');
@@ -9204,26 +9249,18 @@ async function calculateMissingHashesInternal(event) {
     let processedCount = 0;
     let successCount = 0;
     let failedCount = 0;
+    let skippedCount = 0;
+    let firstError = '';
     const updateHash = db.prepare('UPDATE models SET hash = ? WHERE filePath = ?');
+    const progressPayload = () => ({
+      processed: processedCount,
+      total: modelsWithMissingHashes.length,
+      success: successCount,
+      failed: failedCount,
+      skipped: skippedCount
+    });
 
-    // Send initial progress update
-    // In server mode, use broadcastEvent to send to all WebSocket clients
-    // In normal mode, use event.sender.send
-    if (isServerMode && global.broadcastEvent) {
-      global.broadcastEvent('hash-generation-progress', {
-        processed: 0,
-        total: modelsWithMissingHashes.length,
-        success: 0,
-        failed: 0
-      });
-    } else if (event && event.sender) {
-      event.sender.send('hash-generation-progress', {
-        processed: 0,
-        total: modelsWithMissingHashes.length,
-        success: 0,
-        failed: 0
-      });
-    }
+    emitHashGenerationProgress(event, progressPayload());
 
     // Process files in parallel with concurrency limit
     // Keep Docker/server concurrency low — high parallelism + thumb renders saturates UNC/CIFS.
@@ -9248,8 +9285,10 @@ async function calculateMissingHashesInternal(event) {
           const isRetryableError = error.code === 'ETIMEDOUT' || 
                                    error.code === 'ENOENT' || 
                                    error.code === 'EACCES' ||
+                                   error.code === 'Z_BUF_ERROR' ||
                                    error.message.includes('timeout') ||
-                                   error.message.includes('ENOTFOUND');
+                                   error.message.includes('ENOTFOUND') ||
+                                   isFragileZipError(error);
           
           if (attempt < maxRetries && isRetryableError) {
             console.warn(`Retry ${attempt + 1}/${maxRetries} for ${filePath}: ${error.message}`);
@@ -9265,75 +9304,43 @@ async function calculateMissingHashesInternal(event) {
 
     const processFile = async (model) => {
       try {
-        // Check if file exists (for regular files) or zip file exists (for zip entries)
-        const pathInfo = parseZipPath(model.filePath);
-        let fileExists = false;
+        const readablePath = resolveReadableModelPath(model.filePath);
+        const existingHash = model.hash && String(model.hash).trim();
+        const hasSha256 = existingHash && existingHash.length === 64;
 
-        if (pathInfo.isZipEntry) {
-          // For zip entries, check if the zip file exists
-          fileExists = fs.existsSync(pathInfo.zipPath);
-        } else {
-          // For regular files, check if the file exists
-          fileExists = fs.existsSync(model.filePath);
-        }
-
-        if (fileExists) {
+        if (readablePath) {
           try {
-            const hash = await calculateFileHashWithRetry(model.filePath);
+            const hash = await calculateFileHashWithRetry(readablePath);
             updateHash.run(hash, model.filePath);
             successCount++;
             console.log(`Hash calculated for: ${model.filePath} (${successCount} succeeded, ${failedCount} failed, ${processedCount + 1}/${modelsWithMissingHashes.length} total)`);
           } catch (hashError) {
-            failedCount++;
-            console.error(`Failed to calculate hash for ${model.filePath} after retries:`, hashError.message);
+            if (hasSha256) {
+              skippedCount++;
+              console.warn(`Keeping existing SHA256 hash; MD5 regeneration failed for ${model.filePath}: ${hashError.message}`);
+            } else {
+              failedCount++;
+              if (!firstError) firstError = hashError.message || String(hashError);
+              console.error(`Failed to calculate hash for ${model.filePath} after retries:`, hashError.message);
+            }
           }
+        } else if (hasSha256) {
+          skippedCount++;
+          console.warn(`Keeping existing SHA256 hash; file not readable: ${model.filePath}`);
         } else {
           console.warn(`File no longer exists: ${model.filePath}`);
           failedCount++;
+          if (!firstError) firstError = `File not found: ${model.filePath}`;
         }
         
         processedCount++;
-        
-        // Send progress update after each file
-        // In server mode, use broadcastEvent to send to all WebSocket clients
-        // In normal mode, use event.sender.send
-        if (isServerMode && global.broadcastEvent) {
-          global.broadcastEvent('hash-generation-progress', {
-            processed: processedCount,
-            total: modelsWithMissingHashes.length,
-            success: successCount,
-            failed: failedCount
-          });
-        } else if (event && event.sender) {
-          event.sender.send('hash-generation-progress', {
-            processed: processedCount,
-            total: modelsWithMissingHashes.length,
-            success: successCount,
-            failed: failedCount
-          });
-        }
+        emitHashGenerationProgress(event, progressPayload());
       } catch (error) {
         console.error(`Unexpected error processing ${model.filePath}:`, error);
         failedCount++;
+        if (!firstError) firstError = error.message || String(error);
         processedCount++;
-        
-        // In server mode, use broadcastEvent to send to all WebSocket clients
-        // In normal mode, use event.sender.send
-        if (isServerMode && global.broadcastEvent) {
-          global.broadcastEvent('hash-generation-progress', {
-            processed: processedCount,
-            total: modelsWithMissingHashes.length,
-            success: successCount,
-            failed: failedCount
-          });
-        } else if (event && event.sender) {
-          event.sender.send('hash-generation-progress', {
-            processed: processedCount,
-            total: modelsWithMissingHashes.length,
-            success: successCount,
-            failed: failedCount
-          });
-        }
+        emitHashGenerationProgress(event, progressPayload());
       }
     };
 
@@ -9345,26 +9352,23 @@ async function calculateMissingHashesInternal(event) {
 
     isGeneratingHashes = false;
 
-    console.log(`Hash generation complete: ${successCount} succeeded, ${failedCount} failed out of ${modelsWithMissingHashes.length} total`);
+    console.log(`Hash generation complete: ${successCount} succeeded, ${failedCount} failed, ${skippedCount} skipped out of ${modelsWithMissingHashes.length} total`);
 
-    if (isServerMode && global.broadcastEvent) {
-      global.broadcastEvent('hash-generation-complete', {
-        success: successCount,
-        failed: failedCount,
-        total: modelsWithMissingHashes.length
-      });
-    } else if (event && event.sender) {
-      event.sender.send('hash-generation-complete', {
-        success: successCount,
-        failed: failedCount,
-        total: modelsWithMissingHashes.length
-      });
-    }
+    const completePayload = {
+      success: successCount,
+      failed: failedCount,
+      skipped: skippedCount,
+      total: modelsWithMissingHashes.length,
+      firstError: firstError || undefined
+    };
+    emitHashGenerationComplete(event, completePayload);
 
     return { 
       calculated: successCount, 
       failed: failedCount,
-      total: modelsWithMissingHashes.length 
+      skipped: skippedCount,
+      total: modelsWithMissingHashes.length,
+      firstError: firstError || undefined
     };
   } catch (error) {
     isGeneratingHashes = false;
@@ -9383,30 +9387,35 @@ ipcMain.handle('generateMissingHashes', async (event) => {
   // Check if hash generation is already in progress
   if (isGeneratingHashes) {
     console.log('Hash generation already in progress, returning current status');
-    // Return a status indicating it's already running
-    // The caller should attach to existing progress events
-    const modelsWithMissingHashes = db.prepare(`
-      SELECT COUNT(*) as count 
-      FROM models 
-      WHERE hash IS NULL OR hash = '' OR LENGTH(hash) = 64
-    `).get();
-    return { 
-      alreadyRunning: true, 
-      total: modelsWithMissingHashes ? modelsWithMissingHashes.count : 0 
+    return {
+      alreadyRunning: true,
+      total: countModelsNeedingHash({ includeSha256: true })
     };
   }
-  return await calculateMissingHashesInternal(event);
+  const total = countModelsNeedingHash({ includeSha256: true });
+  if (total === 0) {
+    return { calculated: 0, failed: 0, total: 0 };
+  }
+  // Don't hold the WebSocket IPC slot for the entire hash run (default 30s timeout
+  // made Docker/server Dedup report that every hash failed).
+  calculateMissingHashesInternal(event).catch((error) => {
+    isGeneratingHashes = false;
+    console.error('Error calculating missing hashes:', error);
+    emitHashGenerationComplete(event, {
+      success: 0,
+      failed: total,
+      total,
+      firstError: error.message || String(error)
+    });
+  });
+  return { started: true, total };
 });
 
 // Add IPC handler to get count of models without hash
 ipcMain.handle('getModelsWithoutHash', async () => {
   try {
-    const result = db.prepare(`
-      SELECT COUNT(*) as count 
-      FROM models 
-      WHERE hash IS NULL OR hash = '' OR LENGTH(hash) = 64
-    `).get();
-    return result ? result.count : 0;
+    // SHA256 hashes already work for Dedup grouping — only prompt when hash is empty.
+    return countModelsNeedingHash({ includeSha256: false });
   } catch (error) {
     console.error('Error getting models without hash:', error);
     return 0;
@@ -10414,27 +10423,29 @@ const getFileStatsHandler = async (event, filePath) => {
         err.code = 'ENOENT';
         throw err;
       }
-      const StreamZip = require('node-stream-zip');
-      const zip = new StreamZip.async({ file: pathInfo.zipPath });
-      try {
-        const entries = await zip.entries();
-        const entry = findZipEntry(entries, pathInfo.entryPath);
-        if (!entry) {
-          const err = new Error(
-            `ENOENT: no such file or directory, zip entry '${pathInfo.entryPath}' in '${pathInfo.zipPath}'`
-          );
-          err.code = 'ENOENT';
-          throw err;
+      return await withZipFileLock(pathInfo.zipPath, async () => {
+        const StreamZip = require('node-stream-zip');
+        const zip = new StreamZip.async({ file: pathInfo.zipPath });
+        try {
+          const entries = await zip.entries();
+          const entry = findZipEntry(entries, pathInfo.entryPath);
+          if (!entry) {
+            const err = new Error(
+              `ENOENT: no such file or directory, zip entry '${pathInfo.entryPath}' in '${pathInfo.zipPath}'`
+            );
+            err.code = 'ENOENT';
+            throw err;
+          }
+          const mtimeMs = entry.time ? Number(entry.time) : 0;
+          return {
+            size: entry.size,
+            mtime: mtimeMs ? new Date(mtimeMs) : new Date(0),
+            mtimeMs
+          };
+        } finally {
+          await zip.close();
         }
-        const mtimeMs = entry.time ? Number(entry.time) : 0;
-        return {
-          size: entry.size,
-          mtime: mtimeMs ? new Date(mtimeMs) : new Date(0),
-          mtimeMs
-        };
-      } finally {
-        await zip.close();
-      }
+      });
     }
 
     const stats = await fs.promises.stat(filePath);
@@ -10880,13 +10891,18 @@ async function saveModel(modelData) {
         throw new Error('ZIP archives are disabled. Enable "Include zipped models" in Settings to add .zip files.');
       }
       // List STL/3MF entries and save each as zipPath::entryPath (same as scan)
-      const StreamZip = require('node-stream-zip');
       if (!fs.existsSync(filePath)) {
         throw new Error(`ZIP file not found: ${filePath}`);
       }
-      const zip = new StreamZip.async({ file: filePath });
-      const entries = await zip.entries();
-      await zip.close();
+      const entries = await withZipFileLock(filePath, async () => {
+        const StreamZip = require('node-stream-zip');
+        const zip = new StreamZip.async({ file: filePath });
+        try {
+          return await zip.entries();
+        } finally {
+          await zip.close();
+        }
+      });
       const modelExts = getSupportedExtensionsForLibrary(db);
       const toAdd = Object.values(entries).filter(
         (e) => !e.isDirectory

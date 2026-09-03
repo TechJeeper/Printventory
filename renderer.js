@@ -4059,6 +4059,28 @@ function setupDedupVirtualList(container, groups) {
   renderDedupVirtualWindow(true);
 }
 
+function hashGenerationFailedMessage(result) {
+  const hint = result.firstError
+    ? ` ${result.firstError}`
+    : ' This may be due to network issues or file access problems.';
+  if (result.failed === result.total) {
+    return `All file hashes failed to generate.${hint}`;
+  }
+  return `${result.failed} out of ${result.total} file hashes failed to generate. Some duplicates may not be detected.`;
+}
+
+function notifyHashGenerationFailures(result) {
+  if (!result || !(result.failed > 0)) return;
+  const failedMsg = hashGenerationFailedMessage(result);
+  if (result.failed === result.total) {
+    setTimeout(async () => {
+      await window.electron.showMessage('Warning', failedMsg);
+    }, 600);
+  } else {
+    console.warn(failedMsg);
+  }
+}
+
 // Add or update the loadDuplicateFiles function
 // refreshOnly: when true, only refresh duplicate-groups content and do not call showModal() (dialog stays open)
 async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
@@ -4129,19 +4151,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           };
           
           const completionListener = (result) => {
-            if (result && result.failed > 0) {
-              const failedMsg = result.failed === result.total 
-                ? 'All file hashes failed to generate. This may be due to network issues or file access problems.'
-                : `${result.failed} out of ${result.total} file hashes failed to generate. Some duplicates may not be detected.`;
-              
-              if (result.failed === result.total) {
-                setTimeout(async () => {
-                  await window.electron.showMessage('Warning', failedMsg);
-                }, 600);
-              } else {
-                console.warn(failedMsg);
-              }
-            }
+            notifyHashGenerationFailures(result);
           };
           
           window.electron.onHashGenerationProgress(progressListener);
@@ -4214,22 +4224,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           
           // Set up completion listener to handle success/failure counts
           const completionListener = (result) => {
-            if (result && result.failed > 0) {
-              // Some hashes failed - show informative message but don't treat as error
-              const failedMsg = result.failed === result.total 
-                ? 'All file hashes failed to generate. This may be due to network issues or file access problems.'
-                : `${result.failed} out of ${result.total} file hashes failed to generate. Some duplicates may not be detected.`;
-              
-              // Only show error dialog if ALL hashes failed
-              if (result.failed === result.total) {
-                setTimeout(async () => {
-                  await window.electron.showMessage('Warning', failedMsg);
-                }, 600);
-              } else {
-                // Show non-blocking notification for partial failures
-                console.warn(failedMsg);
-              }
-            }
+            notifyHashGenerationFailures(result);
           };
           
           // Listen for completion event
@@ -4261,6 +4256,10 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
             if (result && result.alreadyRunning) {
               console.log('Hash generation was already running, attached to existing process');
               // Progress listener is already set up, just wait for updates
+              return;
+            }
+
+            if (result && result.started) {
               return;
             }
             

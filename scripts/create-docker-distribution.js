@@ -32,6 +32,8 @@ const filesToCopy = [
   'package.json',
   'package-lock.json',
   'main.js',
+  'bundle-keys.js',
+  'zip-extract.js',
   'preload.js',
   'renderer.js',
   'index.html',

@@ -4,6 +4,13 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-09-03
+
+### Fixed
+
+- Nested `.3mf` models inside ZIP archives no longer fail hash generation with `Invalid local header` / `unexpected end of file`. Zip extraction is serialized per archive and falls back to fflate/JSZip when `node-stream-zip` cannot read an entry.
+- Docker/server Dedup no longer reports that every file hash failed when models already have SHA256 hashes, when hash generation takes longer than the WebSocket timeout, or when Windows library paths need to be resolved to the container mount.
+
 ## [2.2.2] - 2026-08-31
 
 ### Fixed
