@@ -36,6 +36,7 @@ test.describe('Printventory features', () => {
     await expect(window.locator('#view-library-button')).toBeVisible();
     await expect(window.locator('#dup-button')).toBeVisible();
     await expect(window.locator('#tag-button')).toBeVisible();
+    await expect(window.locator('#filament-button')).toBeVisible();
     await expect(window.locator('#roulette-button')).toBeVisible();
   });
 
@@ -46,12 +47,37 @@ test.describe('Printventory features', () => {
     await expect(sortSelect.locator('option[value="date-desc"]')).toHaveCount(1);
   });
 
-  test('Filtering: filter controls are present', async () => {
+  test('Filtering: pinned search/folders and collapsible extra filters', async () => {
     await expect(window.locator('#search-filter-input')).toBeVisible();
+    await expect(window.locator('#folder-select')).toBeVisible();
+    await expect(window.locator('#filter-stack-toggle')).toBeVisible();
+    await expect(window.locator('#designer-select')).toBeHidden();
+    await window.locator('#filter-stack-toggle').click();
     await expect(window.locator('#designer-select')).toBeVisible();
     await expect(window.locator('#printed-select')).toBeVisible();
     await expect(window.locator('#tag-filter')).toBeVisible();
+    await expect(window.locator('#filament-filter')).toBeVisible();
     await expect(window.locator('#invert-filter-button')).toBeVisible();
+    const invertClipped = await window.evaluate(() => {
+      const btn = document.getElementById('invert-filter-button');
+      const sidebar = document.querySelector('.sidebar');
+      if (!btn || !sidebar) return true;
+      btn.scrollIntoView({ block: 'end' });
+      const br = btn.getBoundingClientRect();
+      const sr = sidebar.getBoundingClientRect();
+      return br.bottom > sr.bottom + 1 || br.bottom > window.innerHeight + 1;
+    });
+    expect(invertClipped).toBe(false);
+  });
+
+  test('Folders: popover tree opens from the Folders control', async () => {
+    await expect(window.locator('#folder-rail-toggle')).toBeVisible();
+    await expect(window.locator('#sidebar-resize-handle')).toBeVisible();
+    await window.locator('#folder-tree-button').click();
+    await expect(window.locator('#folder-tree-popover')).toBeVisible();
+    await expect(window.locator('#folder-tree-resize-handle')).toBeVisible();
+    await window.keyboard.press('Escape');
+    await expect(window.locator('#folder-tree-popover')).toBeHidden();
   });
 
   test('View modes: view selector has List, Preview, Detailed', async () => {

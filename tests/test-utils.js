@@ -102,6 +102,16 @@ async function scrollSidebarToTop(page) {
   });
 }
 
+async function expandSidebarFilters(page) {
+  await page.evaluate(() => {
+    if (typeof window.SidebarLayout?.setExpanded === 'function') {
+      window.SidebarLayout.setExpanded(true);
+      return;
+    }
+    document.querySelector('.sidebar')?.classList.add('filters-expanded');
+  });
+}
+
 async function waitForSidebarReady(page, timeoutMs = 30000) {
   await page.waitForFunction(
     () => {
@@ -304,7 +314,7 @@ async function saveCurrentModel(page) {
       designer: document.getElementById('model-designer').value || 'Unknown',
       source: document.getElementById('model-source').value || '',
       notes: document.getElementById('model-notes').value || '',
-      printed: document.getElementById('model-printed').checked,
+      printStatus: document.getElementById('model-print-status')?.value || undefined,
       parentModel: document.getElementById('model-parent').value || '',
       license: document.getElementById('model-license').value || '',
       tags
@@ -445,6 +455,7 @@ module.exports = {
   acceptTerms,
   waitForSidebarReady,
   scrollSidebarToTop,
+  expandSidebarFilters,
   enableZipArchives,
   runDirectoryScan,
   applyFilters,

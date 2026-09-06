@@ -11,7 +11,8 @@ const {
   dismissOnboarding,
   acceptTerms,
   runDirectoryScan,
-  getSmallFixtureScanPath
+  getSmallFixtureScanPath,
+  expandSidebarFilters
 } = require('./test-utils');
 
 let app;
@@ -61,6 +62,7 @@ test.describe('Search, sort and filter', () => {
 
     await acceptTerms(window);
     await dismissOnboarding(window);
+    await expandSidebarFilters(window);
     await runDirectoryScan(window, 300000, 2);
   });
 

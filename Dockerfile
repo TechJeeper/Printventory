@@ -105,14 +105,15 @@ RUN rm -rf node_modules/better-sqlite3/build || true && \
 COPY main.js bundle-keys.js zip-extract.js preload.js renderer.js index.html styles.css preview-wall.css thumbnail-progress.css thumbnail-progress.js ./
 COPY server-bridge.js scan-worker.js parse-worker.js ./
 COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
-COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js thumbnail-compress.js ./
+COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js thumbnail-compress.js filament.js print-events.js print-history.js spoolman.js ./
+COPY folder-tree-lib.js folder-tree.js sidebar-layout.js mcp-server.js ./
 COPY vendor/ ./vendor/
 COPY favicon.ico ./
 COPY *.png *.jpg *.bmp ./
 COPY guide/ ./guide/
 
 # Fail the build if required app modules were omitted from COPY above
-RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js; do \
+RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js sidebar-layout.js folder-tree.js; do \
       test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
     done
 

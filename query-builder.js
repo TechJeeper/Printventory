@@ -2,14 +2,18 @@
  * Multi-value filters (AND/OR) and search query clauses for getModelsFiltered.
  */
 (function () {
-  const MULTI_KEYS = ["designer", "license", "parentModel", "tags"];
+  const MULTI_KEYS = ["designer", "license", "parentModel", "tags", "filaments"];
 
   function initState() {
     if (!window.multiFilterChips) {
-      window.multiFilterChips = { designer: [], license: [], parentModel: [], tags: [] };
+      window.multiFilterChips = { designer: [], license: [], parentModel: [], tags: [], filaments: [] };
+    } else if (!Array.isArray(window.multiFilterChips.filaments)) {
+      window.multiFilterChips.filaments = [];
     }
     if (!window.multiFilterCombine) {
-      window.multiFilterCombine = { designer: "OR", license: "OR", parentModel: "OR", tags: "AND" };
+      window.multiFilterCombine = { designer: "OR", license: "OR", parentModel: "OR", tags: "AND", filaments: "AND" };
+    } else if (!window.multiFilterCombine.filaments) {
+      window.multiFilterCombine.filaments = "AND";
     }
   }
 
@@ -42,7 +46,10 @@
       chip.className = "filter-value-chip";
       chip.dataset.kind = kind;
       chip.dataset.value = val;
-      const label = val === "__none__" ? "(empty)" : val;
+      let label = val === "__none__" ? "(empty)" : val;
+      if (kind === "filaments" && window.filamentLabelById && window.filamentLabelById[String(val)]) {
+        label = window.filamentLabelById[String(val)];
+      }
       chip.textContent = label;
       const x = document.createElement("button");
       x.type = "button";
@@ -122,7 +129,7 @@
       });
     });
 
-    ["designer", "license", "parentModel", "tags"].forEach((kind) => {
+    ["designer", "license", "parentModel", "tags", "filaments"].forEach((kind) => {
       document.querySelectorAll(`input[name="${kind}-combine"]`).forEach((radio) => {
         radio.addEventListener("change", async () => {
           window.multiFilterCombine[kind] = getCombine(kind);
@@ -144,6 +151,7 @@
     source: "Source",
     license: "License",
     tag: "Tag name",
+    filament: "Filament",
   };
 
   /** @typedef {{ t: 'clause', field: string, value: string }} SearchClauseToken */
@@ -230,7 +238,7 @@
         const k = String(tok.kind || "").trim();
         if (!k || !["designer", "license", "parentModel", "tag", "fileType", "printed", "isNew", "favorite", "rating", "ratingMin"].includes(k)) return false;
         const v = tok.value != null ? String(tok.value).trim() : "";
-        if (k === "printed") return v === "printed" || v === "not-printed";
+        if (k === "printed") return v === "printed" || v === "not-printed" || v === "unprinted" || v === "want" || v === "queued" || v === "printing" || v === "failed" || v === "ever-printed" || v === "never-printed";
         if (k === "isNew") return v === "new" || v === "not-new";
         if (k === "favorite") return v === "favorited" || v === "not-favorited";
         if (k === "rating") return v === "unrated" || /^[1-5]$/.test(v);
@@ -284,6 +292,10 @@
     if (enc.has("tag")) {
       delete filters.tags;
       delete filters.tag;
+    }
+    if (enc.has("filament")) {
+      delete filters.filaments;
+      delete filters.filament;
     }
     if (enc.has("fileType")) delete filters.fileType;
     if (enc.has("printed")) delete filters.printed;
@@ -366,6 +378,9 @@
     const tg = effectiveTagValues();
     if (tg.values.length === 1) atoms.push({ t: "filter", kind: "tag", value: tg.values[0] });
     else if (tg.values.length > 1) atoms.push({ t: "filterMulti", kind: "tag", values: tg.values.slice(), combine: tg.combine });
+    const fl = effectiveScalarValues("filaments", "filament-filter");
+    if (fl.values.length === 1) atoms.push({ t: "filter", kind: "filament", value: fl.values[0] });
+    else if (fl.values.length > 1) atoms.push({ t: "filterMulti", kind: "filament", values: fl.values.slice(), combine: fl.combine });
 
     return atoms;
   }
@@ -414,6 +429,12 @@
       if (sel) sel.value = "";
       window.multiFilterChips.tags = [];
       renderChips("tags");
+    }
+    if (kindSet.has("filament")) {
+      const sel = document.getElementById("filament-filter");
+      if (sel) sel.value = "";
+      window.multiFilterChips.filaments = [];
+      renderChips("filaments");
     }
     if (kindSet.has("fileType")) {
       const sel = document.getElementById("filetype-select");
@@ -483,6 +504,18 @@
       if (!sc.values.length) return [];
       if (sc.values.length === 1) return [{ t: "filter", kind: "parentModel", value: sc.values[0] }];
       return [{ t: "filterMulti", kind: "parentModel", values: sc.values.slice(), combine: sc.combine }];
+    }
+    if (elementId === "tag-filter") {
+      const sc = effectiveTagValues();
+      if (!sc.values.length) return [];
+      if (sc.values.length === 1) return [{ t: "filter", kind: "tag", value: sc.values[0] }];
+      return [{ t: "filterMulti", kind: "tag", values: sc.values.slice(), combine: sc.combine }];
+    }
+    if (elementId === "filament-filter") {
+      const sc = effectiveScalarValues("filaments", "filament-filter");
+      if (!sc.values.length) return [];
+      if (sc.values.length === 1) return [{ t: "filter", kind: "filament", value: sc.values[0] }];
+      return [{ t: "filterMulti", kind: "filament", values: sc.values.slice(), combine: sc.combine }];
     }
     return [];
   }
@@ -631,6 +664,11 @@
       filters.tags = tg.values;
       filters.tagCombine = tg.combine;
     }
+    const fl = effectiveScalarValues("filaments", "filament-filter");
+    if (fl.values.length) {
+      filters.filaments = fl.values;
+      filters.filamentCombine = fl.combine;
+    }
 
     const normalized = normalizeTokensForIpc(readSearchBoolTokens());
     const hasSearchExpr = normalized.some(
@@ -654,6 +692,7 @@
       if (tok.kind === "license") return `License: ${vs} (${mode})`;
       if (tok.kind === "parentModel") return `Parent: ${vs} (${mode})`;
       if (tok.kind === "tag") return `Tag: ${vs} (${mode})`;
+      if (tok.kind === "filament") return `Filament: ${vs} (${mode})`;
     }
     if (tok.t === "filter") {
       const vdisp = tok.value === "__none__" ? "(empty)" : String(tok.value);
@@ -661,8 +700,12 @@
       if (tok.kind === "license") return `License: ${vdisp}`;
       if (tok.kind === "parentModel") return `Parent: ${vdisp}`;
       if (tok.kind === "tag") return `Tag: ${vdisp}`;
+      if (tok.kind === "filament") {
+        const pretty = (window.filamentLabelById && window.filamentLabelById[String(tok.value)]) || vdisp;
+        return `Filament: ${pretty}`;
+      }
       if (tok.kind === "fileType") return `Type: ${vdisp}`;
-      if (tok.kind === "printed") return tok.value === "printed" ? "Printed" : "Not printed";
+      if (tok.kind === "printed") return (window.PrintHistory && window.PrintHistory.filterLabel(tok.value)) || (tok.value === "printed" ? "Printed" : "Not printed");
       if (tok.kind === "isNew") return tok.value === "new" ? "New models only" : "Exclude new models";
       if (tok.kind === "favorite") return tok.value === "favorited" ? "Favorites" : "Not favorites";
       if (tok.kind === "rating") {
@@ -679,6 +722,7 @@
     if ((tok.t === "filter" || tok.t === "filterMulti") && tok.kind === "license" && window.invertedFilters?.license) return true;
     if ((tok.t === "filter" || tok.t === "filterMulti") && tok.kind === "parentModel" && window.invertedFilters?.parentModel) return true;
     if ((tok.t === "filter" || tok.t === "filterMulti") && tok.kind === "tag" && window.invertedFilters?.tag) return true;
+    if ((tok.t === "filter" || tok.t === "filterMulti") && tok.kind === "filament" && window.invertedFilters?.filament) return true;
     return false;
   }
 
@@ -716,6 +760,11 @@
   window.queryBuilderTryConsumeAwaitingFilterFromElement = queryBuilderTryConsumeAwaitingFilterFromElement;
   window.queryBuilderTryConsumeAwaitingTagPick = queryBuilderTryConsumeAwaitingTagPick;
   window.setTagMultiFilter = setTagMultiFilter;
+  window.setFilamentMultiFilter = function (ids) {
+    initState();
+    window.multiFilterChips.filaments = (Array.isArray(ids) ? ids : []).map((n) => String(n).trim()).filter(Boolean);
+    renderChips("filaments");
+  };
   window.addMultiTagFilter = (name) => addChip("tags", name);
   window.queryBuilderRemoveMultiFilterChip = removeChip;
   window.queryBuilderHasActiveMultiFilters = function () {

@@ -18,6 +18,7 @@ const {
   cleanTestArtifacts,
   dismissOnboarding,
   acceptTerms,
+  expandSidebarFilters,
   enableZipArchives,
   runDirectoryScan,
   applyFilters,
@@ -66,6 +67,7 @@ test.describe('Printventory full application E2E', () => {
 
     await acceptTerms(window);
     await dismissOnboarding(window);
+    await expandSidebarFilters(window);
     await enableZipArchives(window);
     await runDirectoryScan(window, 300000);
     await expectMinTotalCount(window, 5, 120000);
@@ -113,6 +115,7 @@ test.describe('Printventory full application E2E', () => {
     await expect(window.locator('#view-library-button')).toBeVisible();
     await expect(window.locator('#dup-button')).toBeVisible();
     await expect(window.locator('#tag-button')).toBeVisible();
+    await expect(window.locator('#filament-button')).toBeVisible();
     await expect(window.locator('#roulette-button')).toBeVisible();
     await expect(window.locator('#edit-mode-toggle')).toBeAttached();
   });
@@ -308,7 +311,7 @@ test.describe('Printventory full application E2E', () => {
 
     await window.locator('#model-source').fill('https://example.com/e2e-model');
     await window.locator('#model-notes').fill('E2E notes for automated test');
-    await window.locator('#model-printed').check();
+    await window.locator('#model-print-status').selectOption('printed');
 
     await window.locator('#add-tag-button').click();
     await window.locator('#new-tag-name').fill('e2e-tag');
@@ -375,7 +378,7 @@ test.describe('Printventory full application E2E', () => {
     await window.locator('#multi-source').fill('https://multi.e2e.example.com');
     await window.locator('#multi-license').selectOption({ label: 'E2E License' });
     await window.locator('#multi-parent').selectOption({ label: 'E2E Parent' });
-    await window.locator('#multi-printed').check();
+    await window.locator('#multi-print-status').selectOption('printed');
     await saveMultiSelection(window);
 
     const paths = (await getAllFilePaths(window)).slice(0, 3);
@@ -500,11 +503,14 @@ test.describe('Printventory full application E2E', () => {
   // ─── De-Dup ─────────────────────────────────────────────────────────────────
 
   test('De-Dup: dialog opens and analyzes library', async () => {
+    await clearAllFilters(window);
     await openDialog(window, 'dedup-dialog');
     await expect(window.locator('#dedup-dialog')).toBeVisible();
     await expect(window.locator('#dedup-easy-button')).toBeVisible();
     await expect(window.locator('#dedup-clear-button')).toBeVisible();
     await expect(window.locator('#delete-selected')).toBeVisible();
+    await expect(window.locator('#dedup-scope-entire')).toBeVisible();
+    await expect(window.locator('#dedup-scope-current')).toBeVisible();
 
     await window.waitForFunction(
       () => {
@@ -529,7 +535,69 @@ test.describe('Printventory full application E2E', () => {
     await closeDialog(window, 'dedup-dialog', '#close-dedup');
   });
 
+  test('De-Dup: current view uses library filters', async () => {
+    await clearAllFilters(window);
+    await window.locator('#designer-select').selectOption({ label: 'E2E Designer' });
+    await applyFilters(window);
+    expect(await getViewCount(window)).toBeGreaterThan(0);
+
+    await openDialog(window, 'dedup-dialog');
+    await expect(window.locator('#dedup-dialog')).toBeVisible();
+    await window.evaluate(async () => {
+      window._dedupScope = null;
+      if (typeof loadDuplicateFiles === 'function') {
+        await loadDuplicateFiles(true);
+      }
+    });
+    await expect(window.locator('#dedup-scope-current')).toBeChecked();
+    await expect(window.locator('#dedup-scope-summary')).toContainText('E2E Designer');
+
+    const result = await window.evaluate(async () => {
+      const models = await window.electron.getModelsFiltered({ designer: 'E2E Designer' });
+      const paths = new Set(models.map((m) => m.filePath));
+      const scoped = await window.electron.getDuplicates({
+        includeZip: false,
+        filters: { designer: 'E2E Designer' }
+      });
+      const groups = Array.isArray(scoped) ? scoped : Object.values(scoped || {});
+      return {
+        filteredCount: paths.size,
+        groupCount: groups.length,
+        allInFilter: groups.every((g) => Array.isArray(g.files) && g.files.every((f) => paths.has(f.filePath))),
+        groupsHaveTwo: groups.every((g) => Array.isArray(g.files) && g.files.length > 1)
+      };
+    });
+    expect(result.filteredCount).toBeGreaterThan(0);
+    expect(result.allInFilter).toBe(true);
+    expect(result.groupsHaveTwo).toBe(true);
+
+    await window.evaluate(async () => {
+      window._dedupScope = 'entire';
+      if (typeof loadDuplicateFiles === 'function') {
+        await loadDuplicateFiles(true);
+      }
+    });
+    await expect(window.locator('#dedup-scope-entire')).toBeChecked();
+    await expect(window.locator('#dedup-scope-summary')).toContainText('entire library');
+    await closeDialog(window, 'dedup-dialog', '#close-dedup');
+    await clearAllFilters(window);
+  });
+
   // ─── Tools & sidebar dialogs ────────────────────────────────────────────────
+
+  test('Tools: Filament Management create and search', async () => {
+    await openDialog(window, 'filament-manager-dialog');
+    await expect(window.locator('#filament-manager-dialog')).toBeVisible();
+    await window.locator('#new-filament-name').fill('manager-e2e-filament');
+    await window.locator('#new-filament-vendor').fill('E2E Vendor');
+    await window.locator('#new-filament-material').fill('PLA');
+    await window.locator('#add-filament-manager-button').click();
+    await window.waitForTimeout(400);
+    await window.locator('#filament-manager-search').fill('manager-e2e');
+    await window.waitForTimeout(300);
+    await expect(window.locator('#filament-manager-dialog')).toContainText('manager-e2e-filament');
+    await closeDialog(window, 'filament-manager-dialog', 'button:has-text("Close")');
+  });
 
   test('Tools: Tag Manager create and search', async () => {
     await openDialog(window, 'tag-manager-dialog');
@@ -597,13 +665,14 @@ test.describe('Printventory full application E2E', () => {
     await expect(window.locator('#file-type-settings-dialog')).not.toBeVisible();
   });
 
-  test('Settings: Theme, Performance, STL Home, Slicer, Browser Extension, AI Config', async () => {
+  test('Tools: Browser Extension, MCP Server; Settings: Theme, Performance, STL Home, Slicer, AI Config', async () => {
     const dialogs = [
       { id: 'settings-dialog', cancel: '#cancel-settings', extra: '#ui-theme' },
       { id: 'performance-settings-dialog', cancel: '#cancel-performance-settings', extra: '#max-file-size' },
       { id: 'stl-home-dialog', cancel: '#cancel-stl-home-button', extra: '#choose-stl-home-button' },
       { id: 'slicer-dialog', cancel: '#cancel-slicer-settings', extra: '#add-slicer-button' },
       { id: 'browser-extension-settings-dialog', cancel: '#cancel-browser-extension-settings', extra: '#enable-browser-extension' },
+      { id: 'mcp-server-settings-dialog', cancel: '#cancel-mcp-server-settings', extra: '#mcp-server-url' },
       { id: 'ai-config-dialog', cancel: '#cancel-ai-config', extra: '#test-ai-config' }
     ];
     for (const { id, cancel, extra } of dialogs) {
@@ -665,7 +734,7 @@ test.describe('Printventory full application E2E', () => {
 
   // ─── Sidebar De-Dup / Tag buttons ───────────────────────────────────────────
 
-  test('Sidebar: De-Dup and Tag Manager buttons open dialogs', async () => {
+  test('Sidebar: De-Dup, Tag Manager, and Filament buttons open dialogs', async () => {
     await window.locator('#dup-button').click();
     await expect(window.locator('#dedup-dialog')).toBeVisible();
     await closeDialog(window, 'dedup-dialog', '#close-dedup');
@@ -673,5 +742,9 @@ test.describe('Printventory full application E2E', () => {
     await window.locator('#tag-button').click();
     await expect(window.locator('#tag-manager-dialog')).toBeVisible();
     await closeDialog(window, 'tag-manager-dialog', 'button:has-text("Close")');
+
+    await window.locator('#filament-button').click();
+    await expect(window.locator('#filament-manager-dialog')).toBeVisible();
+    await closeDialog(window, 'filament-manager-dialog', 'button:has-text("Close")');
   });
 });

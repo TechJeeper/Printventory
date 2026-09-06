@@ -66,10 +66,11 @@ const guidePages = [
     title: "Advanced Tools",
     content: `🌟 Explore powerful features under the <strong>Tools</strong> menu!<br>
     <ul>
+      <li><strong>Filament Management</strong> – Track which filament a model uses. Add filaments yourself, or open <strong>Spoolman Setup</strong> in that same window to sync your catalog! 🧵</li>
       <li><strong>Tag Manager</strong> – Organize your models with tags for easy access! 🏷️</li>
       <li><strong>Print Roulette</strong> – Feeling indecisive? Let Printventory randomly select your next model to print! 🎲</li>
       <li><strong>Backup/Restore</strong> – Safeguard your data with easy backup and restore options! 💾</li>
-      <li><strong>De-Dup</strong> – Say goodbye to clutter! Easily clean up duplicate files in your library, ensuring your collection stays organized and efficient! 🧹</li>
+      <li><strong>De-Dup</strong> – Say goodbye to clutter! Clean up duplicate files in your library, and limit the scan to the models currently in view (designer, tags, search, and other filters) so a large collection does not have to be processed all at once. 🧹</li>
       <li><strong>AI Tagging</strong> – Configure your AI services in <strong>Settings > AI Config</strong> to enable powerful AI-assisted tagging! Right-click on one or multiple models to "Generate Tags using AI" and automatically categorize your models. 🤖</li>
       <li><strong>Slicer Integration</strong> – Configure slicers in <strong>Settings</strong> for right-click <strong>Open in Slicer</strong> and the preview dialog <strong>Send to Slicer</strong> button. Sending again while a slicer is open starts a new instance with your model loaded. 🖨️</li>
       <li><strong>Folder &amp; ZIP bundles</strong> – Multi-part folders and ZIP archives group into one row. Click to expand; right-click <strong>Preview</strong> for an all-parts 3D view; double-click for bundle details. 📦</li>

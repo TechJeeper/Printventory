@@ -192,6 +192,27 @@ test.describe('Metadata and tags', () => {
     expect(tagNames).toContain('single-tag');
   });
 
+  test('Single-edit: apply existing tag from List dialog', async () => {
+    await openFirstModelDetails();
+    await window.locator('#add-tag-button').click();
+    await expect(window.locator('#new-tag-dialog')).toBeVisible();
+    await window.locator('#new-tag-name').fill('list-tag');
+    await window.locator('#add-tag-submit').click();
+    await window.waitForTimeout(400);
+    await window.locator('.file-grid .file-item').nth(1).click();
+    await expect(window.locator('#model-details')).not.toHaveClass(/hidden/);
+    await window.waitForTimeout(200);
+    await window.locator('.list-button[data-field="tag"][data-target="tag-select"]').click();
+    await expect(window.locator('#searchable-list-dialog')).toBeVisible();
+    await window.locator('#searchable-list-items li', { hasText: /^list-tag$/ }).click();
+    await expect(window.locator('#searchable-list-dialog')).toBeHidden();
+    await expect(window.locator('#model-tags')).toContainText('list-tag');
+    const listFilePath = await getNthModelPath(2);
+    const listModel = await getModelData(listFilePath);
+    const listTagNames = (listModel.tags || []).map((t) => (typeof t === 'string' ? t : t.name));
+    expect(listTagNames).toContain('list-tag');
+  });
+
   // --- Multi-edit: metadata and tags ---
   test('Multi-edit: enter mode and select all', async () => {
     await window.keyboard.press('Control+e');

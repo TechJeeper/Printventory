@@ -4,7 +4,7 @@
  * Run: npm test
  */
 const { test, expect, _electron: electron } = require('@playwright/test');
-const { getElectronLaunchOptions, cleanTestArtifacts, dismissOnboarding, acceptTerms, scrollSidebarToTop } = require('./test-utils');
+const { getElectronLaunchOptions, cleanTestArtifacts, dismissOnboarding, acceptTerms, scrollSidebarToTop, expandSidebarFilters } = require('./test-utils');
 
 let app;
 let window;
@@ -53,6 +53,7 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#view-library-button')).toBeVisible();
     await expect(window.locator('#dup-button')).toBeVisible();
     await expect(window.locator('#tag-button')).toBeVisible();
+    await expect(window.locator('#filament-button')).toBeVisible();
     await expect(window.locator('#roulette-button')).toBeVisible();
     await expect(window.locator('#edit-mode-toggle')).toBeAttached();
     await expect(window.locator('#filter-search-button')).toBeVisible();
@@ -61,13 +62,16 @@ test.describe('Scan then menu and button checks', () => {
   });
 
   test('Sidebar: sort and filter controls', async () => {
+    await expandSidebarFilters(window);
     await expect(window.locator('#sort-select')).toBeVisible();
+    await expect(window.locator('#folder-select')).toBeVisible();
     await expect(window.locator('#designer-select')).toBeVisible();
     await expect(window.locator('#parent-select')).toBeVisible();
     await expect(window.locator('#license-select')).toBeVisible();
     await expect(window.locator('#printed-select')).toBeVisible();
     await expect(window.locator('#filetype-select')).toBeVisible();
     await expect(window.locator('#tag-filter')).toBeVisible();
+    await expect(window.locator('#filament-filter')).toBeVisible();
   });
 
   test('Settings > Theme: dialog and buttons', async () => {
@@ -117,13 +121,25 @@ test.describe('Scan then menu and button checks', () => {
     await closeDialog('stl-home-dialog', 'button#cancel-stl-home-button');
   });
 
-  test('Settings > Browser Extension: dialog and buttons', async () => {
+  test('Tools > Browser Extension: dialog and buttons', async () => {
     await openDialog('browser-extension-settings-dialog');
     await expect(window.locator('#browser-extension-settings-dialog')).toBeVisible();
     await expect(window.locator('#save-browser-extension-settings')).toBeVisible();
     await expect(window.locator('#cancel-browser-extension-settings')).toBeVisible();
     await expect(window.locator('#enable-browser-extension')).toBeVisible();
     await closeDialog('browser-extension-settings-dialog', 'button#cancel-browser-extension-settings');
+  });
+
+  test('Tools > MCP Server: dialog and buttons', async () => {
+    await openDialog('mcp-server-settings-dialog');
+    await expect(window.locator('#mcp-server-settings-dialog')).toBeVisible();
+    await expect(window.locator('#save-mcp-server-settings')).toBeVisible();
+    await expect(window.locator('#cancel-mcp-server-settings')).toBeVisible();
+    await expect(window.locator('#enable-mcp-server')).toBeVisible();
+    await expect(window.locator('#mcp-server-settings-dialog .warning-text')).toContainText('Experimental feature');
+    await expect(window.locator('#mcp-server-url')).toBeVisible();
+    await expect(window.locator('#mcp-server-config')).toBeVisible();
+    await closeDialog('mcp-server-settings-dialog', 'button#cancel-mcp-server-settings');
   });
 
   test('Settings > AI Config: dialog and buttons', async () => {
@@ -143,8 +159,28 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#dedup-easy-button')).toBeVisible();
     await expect(window.locator('#dedup-clear-button')).toBeVisible();
     await expect(window.locator('#delete-selected')).toBeVisible();
+    await expect(window.locator('#dedup-scope-current')).toBeVisible();
+    await expect(window.locator('#dedup-scope-entire')).toBeVisible();
     await expect(window.locator('#close-dedup')).toBeVisible();
     await closeDialog('dedup-dialog', 'button#close-dedup');
+  });
+
+  test('Tools > Filament Management: dialog and buttons', async () => {
+    await openDialog('filament-manager-dialog');
+    await expect(window.locator('#filament-manager-dialog')).toBeVisible();
+    await expect(window.locator('#add-filament-manager-button')).toBeVisible();
+    await expect(window.locator('#filament-manager-search')).toBeVisible();
+    await expect(window.locator('#clear-filament-search')).toBeVisible();
+    await expect(window.locator('#spoolman-setup-toggle')).toBeVisible();
+    await expect(window.locator('#spoolman-url')).toBeHidden();
+    await expect(window.locator('#spoolman-test-button')).toBeHidden();
+    await expect(window.locator('#spoolman-sync-button')).toBeHidden();
+    await window.locator('#spoolman-setup-toggle').click();
+    await expect(window.locator('#spoolman-url')).toBeVisible();
+    await expect(window.locator('#spoolman-test-button')).toBeVisible();
+    await expect(window.locator('#spoolman-sync-button')).toBeVisible();
+    await expect(window.locator('#filament-manager-fullscreen-toggle')).toBeVisible();
+    await closeDialog('filament-manager-dialog', 'button:has-text("Close")');
   });
 
   test('Tools > Tag Manager: dialog and buttons', async () => {

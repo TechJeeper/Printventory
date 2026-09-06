@@ -25,6 +25,7 @@
 
 <body style="background-color: #1e1e2e;">
   <div class="sidebar">
+    <div class="sidebar-chrome">
     <img src="logo.png" alt="Printventory Logo" id="logo">
     <div class="model-stats">
       <div id="view-count" class="model-count">0 models in view</div>
@@ -36,6 +37,9 @@
       </button>
       <button id="tag-button" class="icon-button" title="Tag - Tag Manager">
         <img src="tag.png" alt="Tag Manager">
+      </button>
+      <button id="filament-button" class="icon-button" title="Filament - Filament Management">
+        <img src="filament.png" alt="Filament Management">
       </button>
       <button id="roulette-button" class="icon-button" title="Roulette - Print Roulette">
         <img src="roulette.png" alt="Print Roulette">
@@ -59,6 +63,7 @@
       <button id="stop-thumbnail-generation" class="stop-button" title="Stop thumbnail generation">Stop Processing</button>
       <div class="performance-notice">Scanning may impact performance.</div>
     </div>
+    </div>
     <div id="current-filter">
       <div id="current-filter-body"></div>
       <div id="search-boolean-toolbar" class="search-boolean-toolbar query-builder-control" hidden>
@@ -73,6 +78,7 @@
       <button type="button" id="clear-all-filters-button" class="clear-filter-button" hidden>Clear All Filters</button>
     </div>
     <div class="filter-section">
+      <div class="filter-pinned">
       <div class="form-group">
         <label for="search-filter-input">Search Models:</label>
         <div class="input-with-icon">
@@ -100,10 +106,31 @@
           <option value="parentmodel-desc">Parent Model (Z-A)</option>
           <option value="printed-asc">Printed (Not Printed First)</option>
           <option value="printed-desc">Printed (Printed First)</option>
+          <option value="printstatus-asc">Print Status (Printing First)</option>
+          <option value="printstatus-desc">Print Status (Unprinted First)</option>
+          <option value="printcount-desc">Print Count (Most First)</option>
+          <option value="printcount-asc">Print Count (Least First)</option>
+          <option value="lastprinted-desc">Last Printed (Newest First)</option>
+          <option value="lastprinted-asc">Last Printed (Oldest First)</option>
           <option value="rating-desc">Rating (Highest First)</option>
           <option value="rating-asc">Rating (Lowest First)</option>
         </select>
       </div>
+      <div class="form-group">
+        <label for="folder-select">Folders:</label>
+        <div class="dropdown-with-list">
+          <select id="folder-select">
+            <option value="">All folders</option>
+          </select>
+          <button type="button" id="folder-tree-button" class="list-button icon-button folder-tree-button" title="Browse folder tree">☰</button>
+        </div>
+      </div>
+      </div>
+      <button type="button" id="filter-stack-toggle" class="filter-stack-toggle" aria-expanded="false" aria-controls="filter-stack">
+        <span class="filter-stack-toggle-label">More filters</span>
+        <span class="filter-stack-toggle-chevron" aria-hidden="true">▸</span>
+      </button>
+      <div id="filter-stack" class="filter-stack">
       <div class="form-group">
         <label for="designer-select">Select Designer:</label>
         <div class="dropdown-with-list">
@@ -154,8 +181,15 @@
         <label for="printed-select">Print Status:</label>
         <select id="printed-select">
           <option value="all">All Models</option>
+          <option value="unprinted">Unprinted</option>
+          <option value="want">Want</option>
+          <option value="queued">Queued</option>
+          <option value="printing">Printing</option>
           <option value="printed">Printed</option>
-          <option value="not-printed">Not Printed</option>
+          <option value="failed">Failed</option>
+          <option value="ever-printed">Ever printed</option>
+          <option value="never-printed">Never printed</option>
+          <option value="not-printed">Not printed</option>
         </select>
       </div>
       <div class="form-group">
@@ -225,19 +259,53 @@
       </div>
 
       <div class="form-group">
+        <label for="filament-filter">Filter by Filament:</label>
+        <div class="dropdown-with-list">
+          <div class="tags-input-container">
+            <select id="filament-filter">
+              <option value="">All Filaments</option>
+            </select>
+          </div>
+          <button type="button" class="list-button icon-button" data-field="filament" data-target="filament-filter" title="Search existing filaments">☰</button>
+        </div>
+        <div id="filaments-filter-chips" class="filter-multi-chips" hidden></div>
+        <div id="filaments-combine-row" class="filter-combine-row query-builder-control" hidden>
+          <span class="filter-combine-label">Match:</span>
+          <label><input type="radio" name="filaments-combine" value="OR"> Any filament</label>
+          <label><input type="radio" name="filaments-combine" value="AND" checked> All filaments</label>
+        </div>
+      </div>
+
+      <div class="form-group">
         <button type="button" id="invert-filter-button" title="Invert the current filter (NOT equal instead of equal)">Invert Filters</button>
       </div>
 
       <div class="form-group">
         <button id="edit-mode-toggle">Multi-Edit Mode</button>
       </div>
+      </div>
     </div>
 
     <div id="model-details" class="model-details hidden">
       <h3>Model Details</h3>
-      <div class="form-group checkbox-container">
-        <input type="checkbox" id="model-printed">
-        <label>Printed</label>
+      <div class="form-group print-lifecycle-group">
+        <label for="model-print-status">Print status</label>
+        <div class="print-lifecycle-controls">
+          <select id="model-print-status">
+            <option value="unprinted">Not printed</option>
+            <option value="want">Want</option>
+            <option value="queued">Queued</option>
+            <option value="printing">Printing</option>
+            <option value="printed">Printed</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button type="button" id="log-print-button" class="icon-button log-print-icon-button" title="Log a print" aria-label="Log a print">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.992 11h3.5m-3.5-4h7m-11-1h-3m3 6h-3m3 6h-3m6 3.939c-1.581-.103-2.595-.377-3.328-1.11C4.492 19.656 4.492 17.77 4.492 14v-4c0-3.771 0-5.657 1.172-6.828S8.72 2 12.492 2h.5c3.771 0 5.657 0 6.829 1.172S20.992 6.229 20.992 10v.5m-1.136 3.94l.695.692a1.496 1.496 0 0 1 0 2.12L16.91 20.95a2 2 0 0 1-1.05.551l-2.258.488a.5.5 0 0 1-.597-.593l.48-2.235c.074-.397.268-.762.554-1.047l3.688-3.674a1.51 1.51 0 0 1 2.13 0" />
+            </svg>
+          </button>
+        </div>
+        <p id="print-history-hint" class="print-history-hint"></p>
       </div>
       <div class="form-group">
         <label for="model-name">Name:</label>
@@ -245,7 +313,10 @@
       </div>
       <div class="form-group">
         <label for="model-path">Path:</label>
-        <div id="path-tree-container" class="path-tree-container"></div>
+        <div class="path-tree-field">
+          <div id="path-tree-container" class="path-tree-container"></div>
+          <button type="button" id="reveal-in-folders-button" class="icon-button" title="Reveal in folders">☰</button>
+        </div>
       </div>
       <div class="form-group">
         <label for="model-source">Source URL:</label>
@@ -258,20 +329,20 @@
       <div class="form-group">
         <label for="model-designer">Designer:</label>
         <div class="designer-input-container">
-          <button type="button" class="list-button icon-button" data-field="designer" data-target="model-designer" data-mode="edit" title="Search existing designers">☰</button>
           <select id="model-designer">
             <option value="Unknown">Unknown</option>
           </select>
+          <button type="button" class="list-button icon-button" data-field="designer" data-target="model-designer" data-mode="edit" title="Search existing designers">☰</button>
           <button type="button" id="add-new-designer-button" class="icon-button">+</button>
         </div>
       </div>
       <div class="form-group">
         <label for="model-parent">Parent Model:</label>
         <div class="designer-input-container">
-          <button type="button" class="list-button icon-button" data-field="parent" data-target="model-parent" data-mode="edit" title="Search existing parent models">☰</button>
           <select id="model-parent">
             <option value="">None</option>
           </select>
+          <button type="button" class="list-button icon-button" data-field="parent" data-target="model-parent" data-mode="edit" title="Search existing parent models">☰</button>
           <button type="button" id="add-new-parent-button" class="icon-button">+</button>
         </div>
       </div>
@@ -279,8 +350,8 @@
       <div class="form-group">
         <label for="model-license">License:</label>
         <div class="designer-input-container">
-          <button type="button" class="list-button icon-button" data-field="license" data-target="model-license" data-mode="edit" title="Search existing licenses">☰</button>
           <select id="model-license" class="form-control"></select>
+          <button type="button" class="list-button icon-button" data-field="license" data-target="model-license" data-mode="edit" title="Search existing licenses">☰</button>
           <button type="button" id="add-new-license-button" class="icon-button">+</button>
         </div>
       </div>
@@ -288,13 +359,26 @@
         <label>Tags:</label>
         <div class="tags-container">
           <div class="tags-input-container">
-            <button type="button" class="list-button icon-button" data-field="tag" data-target="tag-select" data-mode="edit" data-container="model-tags" title="Search existing tags">☰</button>
             <select id="tag-select">
               <option value="">Select a tag...</option>
             </select>
+            <button type="button" class="list-button icon-button" data-field="tag" data-target="tag-select" data-mode="edit" data-container="model-tags" title="Search existing tags">☰</button>
             <button type="button" id="add-tag-button" class="icon-button">+</button>
           </div>
           <div id="model-tags" class="tags-list"></div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Filament:</label>
+        <div class="tags-container">
+          <div class="tags-input-container">
+            <select id="filament-select">
+              <option value="">Select a filament...</option>
+            </select>
+            <button type="button" class="list-button icon-button" data-field="filament" data-target="filament-select" data-mode="edit" data-container="model-filaments" title="Search existing filaments">☰</button>
+            <button type="button" id="add-filament-button" class="icon-button" title="Filament Management">+</button>
+          </div>
+          <div id="model-filaments" class="tags-list"></div>
         </div>
       </div>
       <div class="form-group">
@@ -303,6 +387,17 @@
           <textarea id="model-notes"></textarea>
           <button type="button" id="open-notes-modal-button" class="icon-button" title="Open in larger editor">✏️</button>
         </div>
+      </div>
+      <div class="form-group print-history-group">
+        <div class="print-history-label-row">
+          <label>Print history</label>
+          <button type="button" id="log-print-history-button" class="icon-button log-print-icon-button" title="Log a print" aria-label="Log a print">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.992 11h3.5m-3.5-4h7m-11-1h-3m3 6h-3m3 6h-3m6 3.939c-1.581-.103-2.595-.377-3.328-1.11C4.492 19.656 4.492 17.77 4.492 14v-4c0-3.771 0-5.657 1.172-6.828S8.72 2 12.492 2h.5c3.771 0 5.657 0 6.829 1.172S20.992 6.229 20.992 10v.5m-1.136 3.94l.695.692a1.496 1.496 0 0 1 0 2.12L16.91 20.95a2 2 0 0 1-1.05.551l-2.258.488a.5.5 0 0 1-.597-.593l.48-2.235c.074-.397.268-.762.554-1.047l3.688-3.674a1.51 1.51 0 0 1 2.13 0" />
+            </svg>
+          </button>
+        </div>
+        <ul id="print-history-list" class="print-history-list" aria-label="Print history"></ul>
       </div>
       <button id="save-model-button"></button>
     </div>
@@ -323,6 +418,44 @@
         <ul id="bundle-contents-list" class="bundle-contents-list" aria-label="Models in archive"></ul>
       </div>
     </div>
+    <dialog id="log-print-dialog" class="modal">
+      <form id="log-print-form">
+        <h3 id="log-print-title">Log a print</h3>
+        <p class="setting-description">Creates a history row. Status-only changes use the dropdown or Shift-click on the card badge.</p>
+        <div class="form-group">
+          <label for="log-print-when">When</label>
+          <input type="datetime-local" id="log-print-when" required>
+        </div>
+        <div class="form-group">
+          <label for="log-print-outcome">Outcome</label>
+          <select id="log-print-outcome">
+            <option value="printed">Printed</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="log-print-quantity">Quantity</label>
+          <input type="number" id="log-print-quantity" min="1" max="9999" value="1">
+        </div>
+        <div class="form-group">
+          <label for="log-print-filament-select">Filament used</label>
+          <select id="log-print-filament-select">
+            <option value="">Add filament…</option>
+          </select>
+          <div id="log-print-filaments" class="tags-list"></div>
+        </div>
+        <div class="form-group">
+          <label for="log-print-notes">Notes</label>
+          <textarea id="log-print-notes" placeholder="Optional — layer height, what failed, who it was for"></textarea>
+        </div>
+        <p id="log-print-status" class="print-history-hint"></p>
+        <div class="dialog-buttons">
+          <button type="submit" id="log-print-save">Save</button>
+          <button type="button" id="log-print-cancel">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="new-designer-dialog" class="modal">
       <form method="dialog">
         <h3>Add New Designer</h3>
@@ -407,12 +540,16 @@
           <label for="bulk-source">Source:</label>
           <input type="text" id="bulk-source" placeholder="No Change">
         </div>
-        <div class="form-group checkbox-container">
-          <label for="bulk-printed">Printed:</label>
+        <div class="form-group">
+          <label for="bulk-printed">Print status:</label>
           <select id="bulk-printed">
             <option value="">No Change</option>
-            <option value="true">Yes</option>
-            <option value="false">No</option>
+            <option value="unprinted">Not printed</option>
+            <option value="want">Want</option>
+            <option value="queued">Queued</option>
+            <option value="printing">Printing</option>
+            <option value="printed">Printed</option>
+            <option value="failed">Failed</option>
           </select>
         </div>
         <div class="dialog-buttons">
@@ -427,9 +564,20 @@
       <button id="select-all-button" class="full-width-button">Select All Visible</button>
       <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
       <p class="selected-count">0 models selected</p>
-      <div class="form-group checkbox-container">
-        <input type="checkbox" id="multi-printed">
-        <label>Printed</label>
+      <div class="form-group">
+        <label for="multi-print-status">Print status</label>
+        <select id="multi-print-status">
+          <option value="">No change</option>
+          <option value="unprinted">Not printed</option>
+          <option value="want">Want</option>
+          <option value="queued">Queued</option>
+          <option value="printing">Printing</option>
+          <option value="printed">Printed</option>
+          <option value="failed">Failed</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <button type="button" id="multi-log-print-button" class="full-width-button">Log a print on selected</button>
       </div>
       <div class="form-group">
         <label for="multi-source">Source:</label>
@@ -441,30 +589,30 @@
       <div class="form-group">
         <label for="multi-designer">Designer:</label>
         <div class="designer-input-container">
-          <button type="button" class="list-button icon-button" data-field="designer" data-target="multi-designer" data-mode="multi" title="Search existing designers">☰</button>
           <select id="multi-designer">
             <option value="">Select Designer...</option>
             <option value="Unknown">Unknown</option>
           </select>
+          <button type="button" class="list-button icon-button" data-field="designer" data-target="multi-designer" data-mode="multi" title="Search existing designers">☰</button>
           <button type="button" class="icon-button add-designer-button">+</button>
         </div>
       </div>
       <div class="form-group">
         <label for="multi-parent">Parent Model:</label>
         <div class="designer-input-container">
-          <button type="button" class="list-button icon-button" data-field="parent" data-target="multi-parent" data-mode="multi" title="Search existing parent models">☰</button>
           <select id="multi-parent">
             <option value="">Select Parent...</option>
             <option value="none">None</option>
           </select>
+          <button type="button" class="list-button icon-button" data-field="parent" data-target="multi-parent" data-mode="multi" title="Search existing parent models">☰</button>
           <button type="button" class="icon-button add-parent-button">+</button>
         </div>
       </div>
       <div class="form-group">
         <label for="multi-license">License:</label>
         <div class="designer-input-container">
-          <button type="button" class="list-button icon-button" data-field="license" data-target="multi-license" data-mode="multi" title="Search existing licenses">☰</button>
           <select id="multi-license" class="form-control"></select>
+          <button type="button" class="list-button icon-button" data-field="license" data-target="multi-license" data-mode="multi" title="Search existing licenses">☰</button>
           <button type="button" class="icon-button add-license-button">+</button>
         </div>
       </div>
@@ -472,20 +620,42 @@
         <label>Tags:</label>
         <div class="tags-container">
           <div class="tags-input-container">
-            <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-select" data-mode="multi" data-container="multi-tags" title="Search existing tags">☰</button>
             <select id="multi-tag-select">
               <option value="">Select a tag...</option>
             </select>
+            <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-select" data-mode="multi" data-container="multi-tags" title="Search existing tags">☰</button>
             <button type="button" class="icon-button add-tag-button">+</button>
           </div>
           <div id="multi-tags" class="tags-list" style="display: none;"></div>
           <div style="margin-top: 8px;">
             <label for="multi-tag-remove-select" style="display: block; margin-bottom: 4px;">Remove Tag:</label>
             <div class="tags-input-container">
-              <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-remove-select" data-mode="multi" data-remove="true" title="Search tags to remove">☰</button>
-              <select id="multi-tag-remove-select" style="flex: 1;">
+              <select id="multi-tag-remove-select">
                 <option value="">Select a tag to remove...</option>
               </select>
+              <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-remove-select" data-mode="multi" data-remove="true" title="Search tags to remove">☰</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Filament:</label>
+        <div class="tags-container">
+          <div class="tags-input-container">
+            <select id="multi-filament-select">
+              <option value="">Select a filament...</option>
+            </select>
+            <button type="button" class="list-button icon-button" data-field="filament" data-target="multi-filament-select" data-mode="multi" data-container="multi-filaments" title="Search existing filaments">☰</button>
+            <button type="button" class="icon-button add-filament-button" title="Filament Management">+</button>
+          </div>
+          <div id="multi-filaments" class="tags-list"></div>
+          <div style="margin-top: 8px;">
+            <label for="multi-filament-remove-select" style="display: block; margin-bottom: 4px;">Remove Filament:</label>
+            <div class="tags-input-container">
+              <select id="multi-filament-remove-select">
+                <option value="">Select a filament to remove...</option>
+              </select>
+              <button type="button" class="list-button icon-button" data-field="filament" data-target="multi-filament-remove-select" data-mode="multi" data-remove="true" title="Search filaments to remove">☰</button>
             </div>
           </div>
         </div>
@@ -523,7 +693,20 @@
           <h3>Duplicate Files</h3>
           <p style="font-size: 0.9rem; margin: 0.2rem 0; color: #555;">
             De-duplication is performed using the file hash to ensure that only identical files are considered duplicates.
+            Limit the scan to your current library filters so a large collection does not have to be processed all at once.
           </p>
+          <div id="dedup-scope-container" class="dedup-scope">
+            <span class="dedup-scope-label">Scope</span>
+            <label class="dedup-scope-option" for="dedup-scope-current">
+              <input type="radio" name="dedup-scope" id="dedup-scope-current" value="current">
+              <span>Current view</span>
+            </label>
+            <label class="dedup-scope-option" for="dedup-scope-entire">
+              <input type="radio" name="dedup-scope" id="dedup-scope-entire" value="entire" checked>
+              <span>Entire library</span>
+            </label>
+            <p id="dedup-scope-summary" class="dedup-scope-summary"></p>
+          </div>
           <div id="include-zip-container" style="display: none; margin: 0.5rem 0;">
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
               <input type="checkbox" id="include-zipped-models" style="margin: 0;">
@@ -794,6 +977,51 @@
         </div>
       </form>
     </dialog>
+    <dialog id="mcp-server-settings-dialog" class="modal">
+      <form method="dialog">
+        <h3>MCP Server</h3>
+        <p class="warning-text">Experimental feature. MCP Server is unfinished and may change, break, or expose library data to any client that can reach the endpoint. By enabling or using it, you assume all risk.</p>
+        <p class="setting-description">Connect a local AI agent (Cursor, Claude Desktop, VS Code, and similar) to search your library, read model details, and write thumbnails while Printventory is running.</p>
+        <div class="settings-group">
+          <div id="mcp-server-desktop-controls">
+            <div class="form-group checkbox-container">
+              <input type="checkbox" id="enable-mcp-server">
+              <label for="enable-mcp-server">Enable MCP Server</label>
+            </div>
+            <div class="form-group">
+              <label for="mcp-server-port">Port:</label>
+              <input type="number" id="mcp-server-port" min="1024" max="65535" value="5000">
+              <p class="setting-description">When enabled, a local listener runs on this port (default 5000). Shared with the Browser Extension local server.</p>
+            </div>
+          </div>
+          <div id="mcp-server-server-mode-note" hidden>
+            <p class="setting-description">Server/Docker mode: the MCP endpoint is always available on this host. No toggle is required.</p>
+          </div>
+          <p id="mcp-server-status" class="setting-description"></p>
+          <div class="form-group">
+            <label for="mcp-server-url">MCP URL</label>
+            <input type="text" id="mcp-server-url" readonly>
+            <div class="dialog-buttons mcp-inline-actions">
+              <button type="button" id="copy-mcp-server-url">Copy URL</button>
+            </div>
+            <p id="mcp-server-extra-urls" class="setting-description"></p>
+          </div>
+          <div class="form-group">
+            <label for="mcp-server-config">Client config (Cursor / Claude Desktop / VS Code)</label>
+            <pre id="mcp-server-config" class="mcp-config"></pre>
+            <div class="dialog-buttons mcp-inline-actions">
+              <button type="button" id="copy-mcp-server-config">Copy config</button>
+            </div>
+            <p class="setting-description">Place this under <code>mcpServers</code> in your MCP client settings. The agent can then list models missing thumbnails, render images locally, and call <code>set_thumbnail</code> with a PNG or JPEG.</p>
+            <p id="mcp-server-tools" class="setting-description"></p>
+          </div>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="save-mcp-server-settings">Save</button>
+          <button type="button" id="cancel-mcp-server-settings">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="ai-config-dialog" class="modal">
       <form method="dialog">
         <h3>AI Configuration</h3>
@@ -977,10 +1205,30 @@
       </div>
     </dialog>
   </div>
+  <div id="sidebar-resize-handle" class="panel-resize-handle sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" title="Drag to resize sidebar"></div>
+  <aside id="folder-rail" class="folder-rail hidden" aria-label="Folder tree" hidden>
+    <div class="folder-rail-header">
+      <span>Folders</span>
+      <button type="button" id="folder-rail-close" class="icon-button" title="Hide folder tree">×</button>
+    </div>
+    <div id="folder-rail-search-wrap" class="folder-tree-search-wrap">
+      <input type="search" id="folder-rail-search" placeholder="Find folder..." autocomplete="off">
+    </div>
+    <div id="folder-rail-tree" class="folder-tree"></div>
+    <div id="folder-rail-resize-handle" class="panel-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize folders panel" title="Drag to resize folders panel"></div>
+  </aside>
+  <div id="folder-tree-popover" class="folder-tree-popover hidden" role="dialog" aria-label="Folder tree" hidden>
+    <input type="search" id="folder-tree-search" placeholder="Find folder..." autocomplete="off">
+    <div id="folder-tree-popover-tree" class="folder-tree"></div>
+    <div id="folder-tree-resize-handle" class="panel-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize folders panel" title="Drag to resize folders panel"></div>
+  </div>
   <div class="main-content">
     <main>
       <div class="grid-view-selector-background"></div>
       <div class="grid-view-selector">
+        <button type="button" id="folder-rail-toggle" class="folder-rail-toggle" title="Show folder tree beside the grid">
+          <span>Folders</span>
+        </button>
         <button class="view-button active" data-view="detailed" title="Detailed - Large thumbnails with full details">
           <span>Detailed</span>
         </button>
@@ -1412,6 +1660,50 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
         </form>
       </dialog>
 
+      <dialog id="filament-manager-dialog" class="modal">
+        <form method="dialog">
+          <h3>Filament Management</h3>
+          <div id="spoolman-setup-panel" class="form-group spoolman-setup-panel" hidden>
+            <label>Spoolman Setup</label>
+            <input type="text" id="spoolman-url" placeholder="http://localhost:7912" autocomplete="off" spellcheck="false">
+            <input type="password" id="spoolman-api-token" placeholder="API token (optional)" autocomplete="off" style="margin-top: 8px;">
+            <div class="filament-spoolman-actions">
+              <button type="button" id="spoolman-test-button">Test Connection</button>
+              <button type="button" id="spoolman-sync-button">Sync Now</button>
+            </div>
+            <div id="spoolman-setup-status" class="filament-manager-status"></div>
+          </div>
+          <div class="form-group">
+            <label>Add Filament</label>
+            <div class="filament-add-grid">
+              <input type="text" id="new-filament-name" placeholder="Name (required)" autocomplete="off">
+              <input type="text" id="new-filament-vendor" placeholder="Vendor" autocomplete="off">
+              <input type="text" id="new-filament-material" placeholder="Material (PLA, PETG…)" autocomplete="off">
+              <div class="filament-color-row">
+                <input type="color" id="new-filament-color-picker" value="#808080" title="Color">
+                <input type="text" id="new-filament-color" placeholder="Hex color" autocomplete="off">
+              </div>
+              <input type="number" id="new-filament-diameter" placeholder="Diameter" value="1.75" step="0.05" min="0">
+              <button type="button" id="add-filament-manager-button" class="icon-button">+</button>
+            </div>
+            <div id="filament-manager-status" class="filament-manager-status"></div>
+          </div>
+          <div class="form-group">
+            <label>Filaments</label>
+            <div class="input-with-icon">
+              <input type="text" id="filament-manager-search" placeholder="Search filaments...">
+              <button type="button" id="clear-filament-search" class="icon-button" title="Clear search">×</button>
+            </div>
+            <div id="filament-manager-list" class="filament-manager-list"></div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="button" id="spoolman-setup-toggle" aria-expanded="false" aria-controls="spoolman-setup-panel">Spoolman Setup</button>
+            <button type="button" id="filament-manager-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleFilamentManagerFullscreen==='function')window.toggleFilamentManagerFullscreen()">Full Screen</button>
+            <button type="button" onclick="document.getElementById('filament-manager-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
       <dialog id="tag-manager-dialog" class="modal">
         <form method="dialog">
           <h3>Tag Manager</h3>
@@ -1567,6 +1859,9 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       document.getElementById("tag-button").addEventListener("click", function() {
         window.electron.send('open-tag-manager');
       });
+      document.getElementById("filament-button").addEventListener("click", function() {
+        window.electron.send('open-filament-manager');
+      });
       document.getElementById("roulette-button").addEventListener("click", function() {
         window.electron.send('start-print-roulette');
       });
@@ -1605,7 +1900,11 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="preview.js"></script>
   <script src="query-builder.js"></script>
   <script src="search.js"></script>
+  <script src="sidebar-layout.js"></script>
+  <script src="folder-tree.js"></script>
   <script src="renderer.js"></script>
+  <script src="filament.js"></script>
+  <script src="print-history.js"></script>
   <script type="module" src="slicer.js"></script>
   <script src="guide.js"></script>
 

@@ -16,7 +16,8 @@ Printventory is a desktop application for managing your 3D printing model collec
 ### Model Organization
 - Tag models for easy categorization
 - Assign designers to models
-- Track print status
+- Track print status (Want, Queued, Printing, Printed, Failed)
+- Assign filaments (manual catalog or Spoolman sync)
 - Add source URLs and notes
 - Link related models (parent/child relationships)
 - **Folder and ZIP bundles**: Models in the same subfolder or ZIP archive (2+ files) appear as one grouped row; click to expand, right-click **Preview** for all parts in 3D, double-click for bundle details
@@ -61,8 +62,10 @@ Printventory is a desktop application for managing your 3D printing model collec
 - Search by filename
 - Filter by:
   - Designer
+  - Folders (directory tree of scanned libraries; drag the panel edge to resize)
   - Print status
   - Tags
+  - Filament
   - Parent model
   - License
 
@@ -70,7 +73,8 @@ Printventory is a desktop application for managing your 3D printing model collec
 - Track file size
 - Track modification dates
 - Store model thumbnails
-- Track print status
+- Track print status (Want, Queued, Printing, Printed, Failed)
+- Log each print attempt with date, quantity, filaments, and notes
 - Add custom notes
 - Link to source URLs
 
@@ -86,7 +90,8 @@ Printventory is a desktop application for managing your 3D printing model collec
 - **Print Roulette**: Randomly select models from your collection
 - **Tag Manager**: Comprehensive interface for managing all tags across your collection
 - **Metadata Editor**: Bulk edit metadata for multiple models at once
-- **De-Dup Tool**: Find and manage duplicate files with visual comparison
+- **De-Dup Tool**: Find and manage duplicate files with visual comparison. Scope the scan to the current library filters (designer, tags, search, and other query-builder filters) so large collections do not have to be processed all at once.
+- **MCP Server**: Experimental Streamable HTTP endpoint at `/mcp` so a local AI agent can search the library, update metadata, and write thumbnails (Tools → MCP Server)
 
 ## Data Persistence
 - User data is stored in `%LOCALAPPDATA%\Printventory` on Windows
@@ -105,6 +110,7 @@ Printventory is a desktop application for managing your 3D printing model collec
    - **Theme**: Choose your preferred UI theme and model background color
    - **Performance**: Adjust thumbnail settings for your system
    - **AI Config**: Set up AI tagging if you want automated tag suggestions
+   - **MCP Server**: Let a local AI agent search the library and write thumbnails (Tools → MCP Server)
 5. Start organizing your models!
 
 ## View Modes
@@ -116,6 +122,16 @@ Printventory offers three different view modes to suit your workflow:
 - **Detailed View**: Large thumbnails with full metadata display, perfect for detailed review
 
 Switch between view modes using the view controls in the interface.
+
+## Print status and history
+
+Each model has a **status** (Unprinted, Want, Queued, Printing, Printed, Failed) and an optional **print log**.
+
+- Click the card badge to **log a print** (date, outcome, quantity, filaments, notes). Logging a successful print sets status to Printed and shows a reprint count.
+- Shift-click the badge to change status without creating a history row.
+- The details panel has a status dropdown, a **Log a print** button, and a history list you can delete from.
+- Filters include each status plus **Ever printed** / **Never printed** (based on successful log entries, not the sticky status).
+- Existing models that were only checked as Printed keep that status with “No logged prints yet” until you backfill.
 
 ## AI Tagging
 
@@ -194,6 +210,12 @@ When a scan finds **two or more** STL/3MF files in the same folder or inside the
 - Model background color customization
 - Visual appearance preferences
 
+### MCP Server
+- Experimental: by using MCP Server you assume the risk; it may change, break, or expose library data to clients that can reach the endpoint
+- Desktop: enable a localhost MCP listener while Printventory is running (Tools → MCP Server, under Browser Extension)
+- Docker/Server: MCP is always available at `http://<host>:5000/mcp` — the same settings dialog shows the URL and client config
+- Agents can search the library, read model details (including on-disk `filePath`), update metadata, and set thumbnails with a PNG or JPEG
+
 ## Tips
 
 ### Organization
@@ -222,6 +244,6 @@ When a scan finds **two or more** STL/3MF files in the same folder or inside the
 ### Maintenance
 - Regular backups recommended
 - Use the context menu for quick actions
-- Check for duplicates periodically using the De-Dup tool
+- Check for duplicates periodically using the De-Dup tool (optionally limited to the models currently in view)
 - Use Print Roulette to discover forgotten models in your collection
 - Purge models that no longer exist to keep your database clean 

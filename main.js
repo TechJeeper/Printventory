@@ -6,6 +6,15 @@ const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const { Worker } = require('worker_threads');
 const { deriveBundleFromFilePath } = require('./bundle-keys');
+const spoolman = require('./spoolman');
+const printEvents = require('./print-events');
+const { buildFolderForest } = require('./folder-tree-lib');
+const {
+  registerMcpRoutes,
+  buildMcpClientConfig,
+  listToolDefinitions,
+  SERVER_NAME: MCP_SERVER_NAME
+} = require('./mcp-server');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -549,7 +558,8 @@ function startHttpServer(port = 5000, localhostOnly = false) {
   expressApp.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID');
+    res.header('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version');
     if (req.method === 'OPTIONS') {
       res.sendStatus(200);
     } else {
@@ -559,6 +569,7 @@ function startHttpServer(port = 5000, localhostOnly = false) {
 
   // JSON body parser for extension upload (large payloads for base64 file)
   expressApp.use(express.json({ limit: '50mb' }));
+  registerMcpRoutes(expressApp, getMcpToolContext());
   registerPuterAiProxyRoute(expressApp);
 
   // Serve static files from the application directory
@@ -932,12 +943,12 @@ ${bridgeCode}
   const serverPromise = new Promise((resolve, reject) => {
     const scheme = useTls ? 'https' : 'http';
     if (localhostOnly) {
-      console.log(`[Browser extension] Starting server on ${scheme}://${HOST}:${PORT}...`);
+      console.log(`[Local HTTP] Starting server on ${scheme}://${HOST}:${PORT}...`);
     }
 
     const onListening = () => {
       if (localhostOnly) {
-        console.log(`[Browser extension] Server listening at ${scheme}://${HOST}:${PORT}`);
+        console.log(`[Local HTTP] Server listening at ${scheme}://${HOST}:${PORT}`);
       } else {
         console.log(`Printventory server mode started`);
         console.log(`Server running at ${scheme}://${HOST}:${PORT}`);
@@ -958,8 +969,8 @@ ${bridgeCode}
     }
 
     httpServer.on('error', (err) => {
-      console.error('[Browser extension] Server failed to bind:', err.message);
-      console.error('[Browser extension] Code:', err.code, '— If EACCES on macOS, add com.apple.security.network.server to entitlements and rebuild.');
+      console.error('[Local HTTP] Server failed to bind:', err.message);
+      console.error('[Local HTTP] Code:', err.code, '— If EACCES on macOS, add com.apple.security.network.server to entitlements and rebuild.');
       httpServer = null;
       reject(err);
     });
@@ -1459,6 +1470,233 @@ function stopHttpServer() {
   });
 }
 
+function getSettingValueOr(key, fallback) {
+  try {
+    if (!db) return fallback;
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    if (row && row.value != null && row.value !== '') return row.value;
+  } catch (_) { /* ignore */ }
+  return fallback;
+}
+
+function getConfiguredHttpPort() {
+  return parseInt(getSettingValueOr('browserExtensionPort', '5000'), 10) || 5000;
+}
+
+function localHttpServerShouldRun() {
+  if (isServerMode) return true;
+  return getSettingValueOr('enableBrowserExtension', '0') === '1'
+    || getSettingValueOr('enableMcpServer', '0') === '1';
+}
+
+function getHttpServerListenPort() {
+  if (!httpServer) return null;
+  try {
+    const addr = httpServer.address();
+    if (addr && typeof addr === 'object' && addr.port) return addr.port;
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function collectLanAddresses() {
+  const nets = os.networkInterfaces();
+  const out = [];
+  for (const name of Object.keys(nets || {})) {
+    for (const net of nets[name] || []) {
+      if (!net || net.internal) continue;
+      if (net.family !== 'IPv4' && net.family !== 4) continue;
+      if (net.address) out.push(net.address);
+    }
+  }
+  return out;
+}
+
+async function syncLocalHttpServer(port) {
+  if (isServerMode) {
+    return { success: true, running: true, port: getHttpServerListenPort() || 5000 };
+  }
+  const portNum = parseInt(port, 10) || getConfiguredHttpPort();
+  if (!localHttpServerShouldRun()) {
+    if (httpServer) await stopHttpServer();
+    return { success: true, running: false, port: portNum };
+  }
+  const currentPort = getHttpServerListenPort();
+  if (httpServer && currentPort === portNum) {
+    return { success: true, running: true, port: portNum };
+  }
+  try {
+    if (httpServer) await stopHttpServer();
+    console.log('[Local HTTP] Starting server on port', portNum, '...');
+    await startHttpServer(portNum, true);
+    return { success: true, running: true, port: portNum };
+  } catch (error) {
+    console.error('[Local HTTP] Failed to start server:', error.message);
+    return { success: false, running: false, port: portNum, message: error?.message || 'Failed to start' };
+  }
+}
+
+function getMcpConnectionInfo() {
+  const port = getHttpServerListenPort() || getConfiguredHttpPort();
+  const enabled = isServerMode || getSettingValueOr('enableMcpServer', '0') === '1';
+  const running = isServerMode ? !!httpServer : (!!httpServer && enabled);
+  const lanAddresses = isServerMode ? collectLanAddresses() : [];
+  const localUrl = `http://127.0.0.1:${port}/mcp`;
+  const urls = isServerMode
+    ? [`http://<server-host>:${port}/mcp`, localUrl, ...lanAddresses.map((ip) => `http://${ip}:${port}/mcp`)]
+    : [localUrl];
+  const primaryUrl = isServerMode
+    ? (lanAddresses[0] ? `http://${lanAddresses[0]}:${port}/mcp` : `http://0.0.0.0:${port}/mcp`)
+    : localUrl;
+  return {
+    serverMode: isServerMode,
+    enabled,
+    running,
+    port,
+    url: primaryUrl,
+    urls,
+    clientConfig: buildMcpClientConfig(isServerMode ? `http://<server-host>:${port}/mcp` : localUrl),
+    tools: listToolDefinitions().map((t) => t.name),
+    serverName: MCP_SERVER_NAME
+  };
+}
+
+function resolveModelForMcp(args) {
+  if (!args) throw new Error('Provide id or filePath');
+  if (args.filePath) {
+    const model = getModelByFilePath(args.filePath);
+    if (!model) throw new Error(`Model not found for filePath: ${args.filePath}`);
+    return model;
+  }
+  if (args.id != null && args.id !== '') {
+    const id = Number(args.id);
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid model id');
+    const model = getModelById(id);
+    if (!model) throw new Error(`Model not found for id: ${id}`);
+    return model;
+  }
+  throw new Error('Provide id or filePath');
+}
+
+function getMcpToolContext() {
+  return {
+    getVersion: () => version,
+    searchModels: async (filters) => {
+      const models = await getModelsFilteredHandler(null, {
+        search: filters.search,
+        designer: filters.designer,
+        tags: filters.tags,
+        directory: filters.directory,
+        fileType: filters.fileType,
+        printed: filters.printed,
+        limit: filters.limit,
+        offset: filters.offset
+      });
+      return {
+        count: Array.isArray(models) ? models.length : 0,
+        models: models || []
+      };
+    },
+    getModel: async (args) => {
+      const includeThumbnails = !!args.includeThumbnails;
+      let model = null;
+      if (args.id != null && args.id !== '') {
+        model = getModelById(Number(args.id), { includeThumbnail: includeThumbnails });
+      } else if (args.filePath) {
+        model = getModelByFilePath(args.filePath, { includeThumbnail: includeThumbnails });
+      } else {
+        throw new Error('Provide id or filePath');
+      }
+      if (!model) return null;
+      const tags = db.prepare(`
+        SELECT t.name FROM tags t
+        JOIN model_tags mt ON mt.tag_id = t.id
+        WHERE mt.model_id = ?
+      `).all(model.id).map((t) => t.name);
+      const filaments = getFilamentsForModel(model.id);
+      if (!includeThumbnails) {
+        const stored = readThumbnailColumn(model.filePath);
+        applyThumbnailFlags(Object.assign(model, { thumbnail: stored }));
+        delete model.thumbnail;
+      }
+      return { ...model, tags, filaments: filaments || [] };
+    },
+    updateModel: async (args) => {
+      const existing = resolveModelForMcp(args);
+      const payload = {
+        id: existing.id,
+        filePath: existing.filePath,
+        fileName: existing.fileName,
+        designer: existing.designer,
+        source: existing.source,
+        notes: existing.notes,
+        printed: existing.printed,
+        printStatus: existing.print_status,
+        parentModel: existing.parentModel,
+        license: existing.license,
+        rating: existing.rating,
+        favorite: existing.favorite
+      };
+      for (const key of ['designer', 'source', 'notes', 'license', 'parentModel', 'printStatus', 'rating', 'favorite', 'tags']) {
+        if (args[key] !== undefined) payload[key] = args[key];
+      }
+      await saveModel(payload);
+      return { success: true, id: existing.id, filePath: existing.filePath };
+    },
+    getLibraryStats: async () => {
+      const handler = ipcHandlerRegistry.get('get-stats');
+      return handler({ sender: { send() {} } });
+    },
+    getFolderTree: async () => {
+      const handler = ipcHandlerRegistry.get('get-folder-tree');
+      return handler({ sender: { send() {} } });
+    },
+    listTags: async () => getAllTagsHandler(),
+    addTag: async (name) => {
+      const tagName = String(name || '').trim();
+      if (!tagName) throw new Error('Tag name is required');
+      return saveTagHandler(null, tagName);
+    },
+    listDesigners: async () => {
+      const handler = ipcHandlerRegistry.get('get-designers');
+      return handler({ sender: { send() {} } });
+    },
+    listLicenses: async () => {
+      const handler = ipcHandlerRegistry.get('get-licenses');
+      return handler({ sender: { send() {} } });
+    },
+    getModelsMissingThumbnails: async (limit) => {
+      const cap = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
+      return db.prepare(`
+        SELECT id, filePath, fileName, size, designer
+        FROM models
+        WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
+        ORDER BY fileName COLLATE NOCASE ASC
+        LIMIT ?
+      `).all(cap);
+    },
+    getThumbnails: async (args) => {
+      const model = resolveModelForMcp(args);
+      const stored = loadThumbnailForModel(model.filePath) || '';
+      const thumbnails = parseThumbnails(stored);
+      return { id: model.id, filePath: model.filePath, count: thumbnails.length, thumbnails };
+    },
+    setThumbnail: async (args) => {
+      const model = resolveModelForMcp(args);
+      await saveThumbnail(model.filePath, args.image);
+      const payload = { filePath: model.filePath, thumbnailCount: 1, hasMultiple: false, newImageIsDefault: true };
+      if (isServerMode && global.broadcastEvent) global.broadcastEvent('thumbnail-added', payload);
+      else if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('thumbnail-added', payload);
+      return { success: true, id: model.id, filePath: model.filePath };
+    },
+    addThumbnail: async (args) => {
+      const model = resolveModelForMcp(args);
+      const handler = ipcHandlerRegistry.get('add-thumbnail');
+      await handler({ sender: { send() {} } }, model.filePath, args.image);
+      return { success: true, id: model.id, filePath: model.filePath };
+    }
+  };
+}
+
 // Restart HTTP server function
 async function restartHttpServer() {
   try {
@@ -1647,7 +1885,7 @@ function loadThumbnailForModel(filePath) {
   }
 }
 
-const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind';
+const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind';
 
 /** List queries omit thumbnail blobs; these flags are computed without returning the column. */
 const MODEL_LIST_THUMB_FLAGS =
@@ -1658,7 +1896,7 @@ const MODEL_LIST_THUMB_FLAGS_QUALIFIED =
   "CASE WHEN models.thumbnail IS NOT NULL AND INSTR(models.thumbnail, '::') > 0 THEN 1 ELSE 0 END AS hasMultipleThumbnails";
 const MODEL_LIST_COLUMNS = `${MODEL_DETAIL_COLUMNS}, ${MODEL_LIST_THUMB_FLAGS}`;
 const MODEL_LIST_COLUMNS_QUALIFIED =
-  `models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, ${MODEL_LIST_THUMB_FLAGS_QUALIFIED}`;
+  `models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.print_status, models.print_count, models.last_printed_at, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, ${MODEL_LIST_THUMB_FLAGS_QUALIFIED}`;
 
 function applyThumbnailFlags(row) {
   if (!row) return row;
@@ -1809,19 +2047,19 @@ if (!gotTheLock) {
           // Keep the app running in server mode
         });
       } else {
-        // Normal mode: start localhost-only HTTP server only when Browser Extension is enabled
-        const enableExt = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableBrowserExtension')?.value;
-        const portRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('browserExtensionPort');
-        const extPort = parseInt(portRow?.value || '5000', 10) || 5000;
-        if (enableExt === '1') {
-          console.log('[Browser extension] Setting enabled at startup — starting server on port', extPort);
+        // Normal mode: start localhost-only HTTP server when Browser Extension or MCP is enabled
+        const extPort = getConfiguredHttpPort();
+        if (localHttpServerShouldRun()) {
+          const mcpOn = getSettingValueOr('enableMcpServer', '0') === '1';
+          const extOn = getSettingValueOr('enableBrowserExtension', '0') === '1';
+          console.log('[Local HTTP] Starting at startup on port', extPort, '(extension:', extOn, 'mcp:', mcpOn, ')');
           startHttpServer(extPort, true).then(() => {
-            console.log('[Browser extension] Server started successfully at startup');
+            console.log('[Local HTTP] Server started successfully at startup');
           }).catch((err) => {
-            console.error('[Browser extension] Failed to start server at startup:', err.message);
-            console.error('[Browser extension] Run from Terminal to see this, or check entitlements (com.apple.security.network.server) and rebuild.');
+            console.error('[Local HTTP] Failed to start server at startup:', err.message);
+            console.error('[Local HTTP] Run from Terminal to see this, or check entitlements (com.apple.security.network.server) and rebuild.');
             if (dialog && dialog.showErrorBox) {
-              dialog.showErrorBox('Browser Extension Server', `Could not start server on port ${extPort}: ${err.message}\n\nOn macOS, the app needs the "Allow incoming network connections" entitlement. Rebuild the app after adding com.apple.security.network.server to build/entitlements.mac.plist.`);
+              dialog.showErrorBox('Local HTTP Server', `Could not start server on port ${extPort}: ${err.message}\n\nOn macOS, the app needs the "Allow incoming network connections" entitlement. Rebuild the app after adding com.apple.security.network.server to build/entitlements.mac.plist.`);
             }
           });
         }
@@ -1938,6 +2176,9 @@ function initializeDatabase() {
           source TEXT,
           notes TEXT,
           printed INTEGER,
+          print_status TEXT DEFAULT 'unprinted',
+          print_count INTEGER DEFAULT 0,
+          last_printed_at DATETIME,
           thumbnail TEXT,
           parentModel TEXT,
           hash TEXT,
@@ -1988,6 +2229,28 @@ function initializeDatabase() {
       db.prepare('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)').run();
       db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_tag_id ON model_tags(tag_id)').run();
       db.prepare('CREATE INDEX IF NOT EXISTS idx_model_tags_model_id ON model_tags(model_id)').run();
+
+      db.prepare(`CREATE TABLE IF NOT EXISTS filaments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          vendor TEXT,
+          material TEXT,
+          color_hex TEXT,
+          diameter REAL,
+          spoolman_id INTEGER UNIQUE,
+          source TEXT NOT NULL DEFAULT 'manual'
+      )`).run();
+      db.prepare(`CREATE TABLE IF NOT EXISTS model_filaments (
+          model_id INTEGER,
+          filament_id INTEGER,
+          FOREIGN KEY(model_id) REFERENCES models(id),
+          FOREIGN KEY(filament_id) REFERENCES filaments(id),
+          PRIMARY KEY(model_id, filament_id)
+      )`).run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_filaments_name ON filaments(name)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_filaments_spoolman_id ON filaments(spoolman_id)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_model_filaments_filament_id ON model_filaments(filament_id)').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_model_filaments_model_id ON model_filaments(model_id)').run();
       
       // Single-column indexes for sorting and filtering
       db.prepare('CREATE INDEX IF NOT EXISTS idx_models_size ON models(size)').run();
@@ -2011,6 +2274,7 @@ function initializeDatabase() {
     migrateIsNewColumn();
     migrateRatingFavoriteColumns();
     migrateBundleColumns();
+    migratePrintLifecycleColumns();
     clearFailurePlaceholderThumbnails();
     
     // Create index for dateAdded after migration (in case it was just added)
@@ -2027,6 +2291,7 @@ function initializeDatabase() {
     
     // Check and create slicers table if it doesn't exist
     ensureSlicersTableExists();
+    ensureFilamentsTablesExist();
     
     // Initialize default settings
     initializeDefaultSettings();
@@ -2118,6 +2383,16 @@ function migrateRatingFavoriteColumns() {
     return true;
   } catch (error) {
     console.error('Error migrating rating/favorite columns:', error);
+    return false;
+  }
+}
+
+function migratePrintLifecycleColumns() {
+  try {
+    printEvents.migratePrintLifecycle(db);
+    return true;
+  } catch (error) {
+    console.error('Error migrating print lifecycle columns:', error);
     return false;
   }
 }
@@ -2387,7 +2662,10 @@ function initializeDefaultSettings() {
       { key: 'aiTagAllowRetagging', value: '0' }, // Allow re-tagging even if "AI Tagged" exists
       { key: 'aiTagConcurrency', value: '3' }, // Number of concurrent tag generation requests
       { key: 'enableBrowserExtension', value: '0' }, // Browser extension local server disabled by default
-      { key: 'browserExtensionPort', value: '5000' }, // Port for browser extension server (default 5000)
+      { key: 'browserExtensionPort', value: '5000' }, // Port for browser extension / MCP local server (default 5000)
+      { key: 'enableMcpServer', value: '0' }, // MCP listener disabled by default in desktop mode
+      { key: 'spoolmanUrl', value: '' },
+      { key: 'spoolmanApiToken', value: '' },
     ];
     
     // Insert default settings if they don't exist
@@ -2512,7 +2790,19 @@ async function createWindow() {
           label: 'Browser Extension',
           click: () => mainWindow.webContents.send('open-browser-extension-settings')
         }]),
+        {
+          label: 'MCP Server',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('open-mcp-server-settings');
+            }
+          }
+        },
         { type: 'separator' },
+        {
+          label: 'Filament Management',
+          click: () => mainWindow.webContents.send('open-filament-manager')
+        },
         {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
@@ -2776,7 +3066,19 @@ function createApplicationMenu() {
           label: 'Browser Extension',
           click: () => mainWindow.webContents.send('open-browser-extension-settings')
         }]),
+        {
+          label: 'MCP Server',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('open-mcp-server-settings');
+            }
+          }
+        },
         { type: 'separator' },
+        {
+          label: 'Filament Management',
+          click: () => mainWindow.webContents.send('open-filament-manager')
+        },
         {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
@@ -3196,7 +3498,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
         db.transaction(() => {
           for (const file of filesToDelete) {
             // First delete from model_tags (child table)
-            db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(file.id);
+            deleteModelJunctionRows(file.id);
             // Then delete from models (parent table)
             db.prepare('DELETE FROM models WHERE id = ?').run(file.id);
           }
@@ -3231,7 +3533,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
     db.transaction(() => {
       for (const fileInfo of filesToDelete) {
         // First delete from model_tags (child table)
-        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(fileInfo.id);
+        deleteModelJunctionRows(fileInfo.id);
         
         // Then delete from models (parent table)
         db.prepare('DELETE FROM models WHERE id = ?').run(fileInfo.id);
@@ -3579,10 +3881,13 @@ ipcMain.handle('get-model', async (event, filePath) => {
       WHERE mt.model_id = ?
     `).all(model.id).map(t => t.name);
 
+    const filaments = getFilamentsForModel(model.id);
+
     // Parse any JSON fields
     return {
       ...model,
-      tags: tags || []
+      tags: tags || [],
+      filaments: filaments || []
     };
   } catch (error) {
     console.error('Error getting model:', error);
@@ -3640,7 +3945,7 @@ ipcMain.handle('get-licenses', async () => {
 ipcMain.handle('get-models-by-designer', async (event, designer) => {
   try {
     const rows = db.prepare(`
-      SELECT id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
+      SELECT id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
       FROM models WHERE designer = ?
     `).all(designer);
     return rows.map((row) => ({
@@ -3702,6 +4007,16 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
         break;
       case "rating-desc":
         orderClause = "ORDER BY rating DESC, fileName ASC";
+        break;
+      case "printed-asc":
+      case "printed-desc":
+      case "printstatus-asc":
+      case "printstatus-desc":
+      case "printcount-asc":
+      case "printcount-desc":
+      case "lastprinted-asc":
+      case "lastprinted-desc":
+        orderClause = printEvents.printSortOrderClause(sortOption);
         break;
       default:
         orderClause = "ORDER BY modifiedDate DESC";
@@ -3776,8 +4091,13 @@ function pushSearchClauseFragment(field, rawValue, params) {
     case 'tag':
       params.push(term);
       return 'EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)';
+    case 'filament':
+      params.push(term, term, term);
+      return `EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
+        LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
+      ))`;
     default:
-      params.push(term, term, term, term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term, term, term);
       return `(
           LOWER(COALESCE(fileName, \'\')) LIKE ? OR 
           LOWER(COALESCE(designer, \'\')) LIKE ? OR 
@@ -3786,7 +4106,10 @@ function pushSearchClauseFragment(field, rawValue, params) {
           LOWER(COALESCE(filePath, \'\')) LIKE ? OR
           LOWER(COALESCE(source, \'\')) LIKE ? OR
           LOWER(COALESCE(license, \'\')) LIKE ? OR
-          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
+          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) OR
+          EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
+            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
+          ))
         )`;
   }
 }
@@ -3807,10 +4130,11 @@ function sanitizeSearchTokensForCompile(raw) {
       out.push({ t: 'not' });
     } else if (x.t === 'filter') {
       const kind = String(x.kind || '').trim();
-      if (!kind || !['designer', 'license', 'parentModel', 'tag', 'fileType', 'printed', 'isNew', 'favorite', 'rating', 'ratingMin'].includes(kind)) continue;
+      if (!kind || !['designer', 'license', 'parentModel', 'tag', 'filament', 'fileType', 'printed', 'isNew', 'favorite', 'rating', 'ratingMin'].includes(kind)) continue;
       const valRaw = String(x.value != null ? x.value : '').trim();
       if (kind === 'printed') {
-        if (valRaw !== 'printed' && valRaw !== 'not-printed') continue;
+        const allowed = ['printed', 'not-printed', 'unprinted', 'want', 'queued', 'printing', 'failed', 'ever-printed', 'never-printed'];
+        if (!allowed.includes(valRaw)) continue;
         out.push({ t: 'filter', kind, value: valRaw });
       } else if (kind === 'isNew') {
         if (valRaw !== 'new' && valRaw !== 'not-new') continue;
@@ -3832,7 +4156,7 @@ function sanitizeSearchTokensForCompile(raw) {
       }
     } else if (x.t === 'filterMulti') {
       const kind = String(x.kind || '').trim();
-      if (!kind || !['designer', 'license', 'parentModel', 'tag'].includes(kind)) continue;
+      if (!kind || !['designer', 'license', 'parentModel', 'tag', 'filament'].includes(kind)) continue;
       const vals = Array.isArray(x.values) ? x.values.map((v) => String(v).trim()).filter(Boolean) : [];
       if (vals.length === 0) continue;
       const combine = String(x.combine || 'OR').toUpperCase() === 'AND' ? 'AND' : 'OR';
@@ -3883,6 +4207,17 @@ function compileSidebarFilterClauseToSQL(tok, filters, params) {
       pushTagListSQL(cond, params, f);
       return cond[0] || '1';
     }
+    if (tok.kind === 'filament') {
+      const ids = tok.values.slice();
+      const f = {
+        filaments: ids,
+        filamentCombine: combine,
+        filamentInverted: !!filters.filamentInverted,
+      };
+      const cond = [];
+      pushFilamentListSQL(cond, params, f);
+      return cond[0] || '1';
+    }
     return null;
   }
   if (tok.t !== 'filter') return null;
@@ -3898,6 +4233,12 @@ function compileSidebarFilterClauseToSQL(tok, filters, params) {
     const f = { tags: [tok.value], tagCombine: 'OR', tagInverted: !!filters.tagInverted };
     const cond = [];
     pushTagListSQL(cond, params, f);
+    return cond[0] || '1';
+  }
+  if (tok.kind === 'filament') {
+    const f = { filaments: [tok.value], filamentCombine: 'OR', filamentInverted: !!filters.filamentInverted };
+    const cond = [];
+    pushFilamentListSQL(cond, params, f);
     return cond[0] || '1';
   }
   if (tok.kind === 'fileType') {
@@ -3921,9 +4262,10 @@ function compileSidebarFilterClauseToSQL(tok, filters, params) {
     return `(${ph})`;
   }
   if (tok.kind === 'printed') {
-    if (tok.value === 'printed') return '(printed = 1)';
-    if (tok.value === 'not-printed') return '(printed = 0 OR printed IS NULL)';
-    return null;
+    const bound = printEvents.printFilterSqlBound(tok.value);
+    if (!bound) return null;
+    if (bound.params.length) params.push(...bound.params);
+    return bound.sql;
   }
   if (tok.kind === 'isNew') {
     if (tok.value === 'new') return '(isNew = 1)';
@@ -4083,16 +4425,50 @@ function pushTagListSQL(conditions, params, filters) {
   return true;
 }
 
-const getModelsFilteredHandler = async (event, filters) => {
-  try {
-    console.log('getModelsFiltered called with filters:', filters);
-    console.log('Designer inverted flag:', filters.designerInverted);
-    
-    // Build WHERE clause conditions
-    const conditions = [];
-    const params = [];
-    
-    // Designer filter (multi-value + legacy single)
+function normalizeFilamentIdList(filters) {
+  const raw = [];
+  if (Array.isArray(filters?.filaments)) raw.push(...filters.filaments);
+  else if (filters?.filament != null && filters.filament !== '') raw.push(filters.filament);
+  return raw.map((v) => {
+    if (v && typeof v === 'object') return Number(v.id);
+    return Number(v);
+  }).filter((id) => Number.isInteger(id) && id > 0);
+}
+
+function pushFilamentListSQL(conditions, params, filters) {
+  const ids = normalizeFilamentIdList(filters);
+  if (!ids.length) return false;
+  const combine = filters.filamentCombine === 'AND' ? 'AND' : 'OR';
+  const inverted = !!filters.filamentInverted;
+  let inner;
+  if (combine === 'OR') {
+    const ph = ids.map(() => '?').join(', ');
+    inner = `EXISTS (SELECT 1 FROM model_filaments mf WHERE mf.model_id = models.id AND mf.filament_id IN (${ph}))`;
+    params.push(...ids);
+  } else {
+    const existsParts = [];
+    for (const id of ids) {
+      params.push(id);
+      existsParts.push('EXISTS (SELECT 1 FROM model_filaments mf WHERE mf.model_id = models.id AND mf.filament_id = ?)');
+    }
+    inner = `(${existsParts.join(' AND ')})`;
+  }
+  if (inverted) {
+    conditions.push(`NOT (${inner})`);
+  } else {
+    conditions.push(inner);
+  }
+  return true;
+}
+
+function buildModelFilterConditions(filters) {
+  const conditions = [];
+  const params = [];
+  if (!filters || typeof filters !== 'object') {
+    return { conditions, params };
+  }
+
+  // Designer filter (multi-value + legacy single)
     const designers = normalizeFilterValueList(filters.designers, filters.designer);
     if (designers.length) {
       pushEqualityListCondition(
@@ -4134,12 +4510,12 @@ const getModelsFilteredHandler = async (event, filters) => {
       );
     }
     
-    // Print status filter
-    if (filters.printed !== undefined) {
-      if (filters.printed === 'printed') {
-        conditions.push("printed = 1");
-      } else if (filters.printed === 'not-printed') {
-        conditions.push("(printed = 0 OR printed IS NULL)");
+    // Print status / history filter
+    if (filters.printed !== undefined && filters.printed !== 'all') {
+      const bound = printEvents.printFilterSqlBound(filters.printed);
+      if (bound) {
+        conditions.push(bound.sql);
+        if (bound.params.length) params.push(...bound.params);
       }
     }
 
@@ -4298,7 +4674,10 @@ const getModelsFilteredHandler = async (event, filters) => {
           LOWER(COALESCE(filePath, '')) NOT LIKE ? AND
           LOWER(COALESCE(source, '')) NOT LIKE ? AND
           LOWER(COALESCE(license, '')) NOT LIKE ? AND
-          NOT EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
+          NOT EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) AND
+          NOT EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
+            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
+          ))
         )`);
       } else {
         conditions.push(`(
@@ -4309,20 +4688,39 @@ const getModelsFilteredHandler = async (event, filters) => {
           LOWER(COALESCE(filePath, '')) LIKE ? OR
           LOWER(COALESCE(source, '')) LIKE ? OR
           LOWER(COALESCE(license, '')) LIKE ? OR
-          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?)
+          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) OR
+          EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
+            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
+          ))
         )`);
       }
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     pushTagListSQL(conditions, params, filters);
+    pushFilamentListSQL(conditions, params, filters);
 
     // Date Added filter (filter by dateAdded >= specified date)
     if (filters.dateAdded) {
       conditions.push("dateAdded >= ?");
       params.push(filters.dateAdded);
     }
-    
+
+  return { conditions, params };
+}
+
+function sqlAndFilterConditions(conditions) {
+  if (!conditions.length) return '';
+  return ` AND ${conditions.join(' AND ')}`;
+}
+
+const getModelsFilteredHandler = async (event, filters) => {
+  try {
+    console.log('getModelsFiltered called with filters:', filters);
+    console.log('Designer inverted flag:', filters.designerInverted);
+
+    const { conditions, params } = buildModelFilterConditions(filters);
+
     // Build WHERE clause
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     
@@ -4358,10 +4756,14 @@ const getModelsFilteredHandler = async (event, filters) => {
         orderClause = "ORDER BY dateAdded DESC";
         break;
       case "printed-asc":
-        orderClause = "ORDER BY printed ASC";
-        break;
       case "printed-desc":
-        orderClause = "ORDER BY printed DESC";
+      case "printstatus-asc":
+      case "printstatus-desc":
+      case "printcount-asc":
+      case "printcount-desc":
+      case "lastprinted-asc":
+      case "lastprinted-desc":
+        orderClause = printEvents.printSortOrderClause(sortOption);
         break;
       case "rating-asc":
         orderClause = "ORDER BY rating ASC, fileName ASC";
@@ -4463,6 +4865,278 @@ async function saveTagHandler(event, tagName) {
 ipcMain.handle('save-tag', saveTagHandler);
 ipcHandlerRegistry.set('save-tag', saveTagHandler);
 
+function getFilamentsForModel(modelId) {
+  if (modelId == null) return [];
+  return db.prepare(`
+    SELECT f.id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source
+    FROM filaments f
+    JOIN model_filaments mf ON mf.filament_id = f.id
+    WHERE mf.model_id = ?
+    ORDER BY f.vendor COLLATE NOCASE, f.name COLLATE NOCASE
+  `).all(modelId);
+}
+
+function normalizeFilamentIds(raw) {
+  if (raw === undefined || raw === null) return null;
+  const list = Array.isArray(raw) ? raw : [raw];
+  const ids = [];
+  const seen = new Set();
+  for (const item of list) {
+    let id = null;
+    if (item && typeof item === 'object') id = Number(item.id);
+    else id = Number(item);
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function replaceModelFilaments(modelId, filamentIds) {
+  db.prepare('DELETE FROM model_filaments WHERE model_id = ?').run(modelId);
+  if (!filamentIds || filamentIds.length === 0) return;
+  const insert = db.prepare('INSERT OR IGNORE INTO model_filaments (model_id, filament_id) VALUES (?, ?)');
+  const exists = db.prepare('SELECT 1 FROM filaments WHERE id = ?');
+  for (const id of filamentIds) {
+    if (exists.get(id)) insert.run(modelId, id);
+  }
+}
+
+function deleteModelJunctionRows(modelId) {
+  db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
+  db.prepare('DELETE FROM model_filaments WHERE model_id = ?').run(modelId);
+  printEvents.deletePrintRowsForModel(db, modelId);
+}
+
+function upsertImportedFilament(filament) {
+  if (!filament || typeof filament !== 'object') return null;
+  const name = String(filament.name || '').trim();
+  if (!name) return null;
+  const vendor = String(filament.vendor || '').trim() || null;
+  const material = String(filament.material || '').trim() || null;
+  const colorHex = spoolman.normalizeColorHex(filament.color_hex) || null;
+  const diameter = filament.diameter == null || filament.diameter === '' ? null : Number(filament.diameter);
+  const spoolmanId = filament.spoolman_id != null && filament.spoolman_id !== '' ? Number(filament.spoolman_id) : null;
+  const source = spoolmanId ? 'spoolman' : (filament.source === 'spoolman' ? 'spoolman' : 'manual');
+
+  if (spoolmanId) {
+    const existing = db.prepare('SELECT id FROM filaments WHERE spoolman_id = ?').get(spoolmanId);
+    if (existing) {
+      db.prepare(`
+        UPDATE filaments SET name = ?, vendor = ?, material = ?, color_hex = ?, diameter = ?, source = 'spoolman'
+        WHERE id = ?
+      `).run(name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : null, existing.id);
+      return existing.id;
+    }
+  }
+
+  const existingManual = db.prepare(`
+    SELECT id FROM filaments
+    WHERE name = ?
+      AND IFNULL(vendor, '') = IFNULL(?, '')
+      AND IFNULL(material, '') = IFNULL(?, '')
+      AND IFNULL(color_hex, '') = IFNULL(?, '')
+      AND spoolman_id IS NULL
+  `).get(name, vendor, material, colorHex);
+  if (existingManual) return existingManual.id;
+
+  const result = db.prepare(`
+    INSERT INTO filaments (name, vendor, material, color_hex, diameter, spoolman_id, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : null, spoolmanId || null, source);
+  return result.lastInsertRowid;
+}
+
+async function getAllFilamentsHandler() {
+  try {
+    return db.prepare(`
+      SELECT
+        f.id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source,
+        COUNT(DISTINCT mf.model_id) as model_count
+      FROM filaments f
+      LEFT JOIN model_filaments mf ON f.id = mf.filament_id
+      GROUP BY f.id
+      ORDER BY f.vendor COLLATE NOCASE, f.name COLLATE NOCASE
+    `).all();
+  } catch (error) {
+    console.error('Error getting filaments:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-all-filaments', getAllFilamentsHandler);
+
+async function saveFilamentHandler(event, filament) {
+  try {
+    const name = String(filament?.name || '').trim();
+    if (!name) throw new Error('Filament name is required');
+    const vendor = String(filament?.vendor || '').trim() || null;
+    const material = String(filament?.material || '').trim() || null;
+    const colorHex = spoolman.normalizeColorHex(filament?.color_hex) || null;
+    const diameter = filament?.diameter == null || filament.diameter === '' ? 1.75 : Number(filament.diameter);
+    const id = filament?.id != null ? Number(filament.id) : null;
+    if (id) {
+      const existing = db.prepare('SELECT id, source FROM filaments WHERE id = ?').get(id);
+      if (!existing) throw new Error('Filament not found');
+      if (existing.source === 'spoolman') {
+        throw new Error('Synced filaments are edited in Spoolman. Sync again to update them here.');
+      }
+      db.prepare(`
+        UPDATE filaments SET name = ?, vendor = ?, material = ?, color_hex = ?, diameter = ?
+        WHERE id = ?
+      `).run(name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : 1.75, id);
+      return db.prepare('SELECT * FROM filaments WHERE id = ?').get(id);
+    }
+    const result = db.prepare(`
+      INSERT INTO filaments (name, vendor, material, color_hex, diameter, spoolman_id, source)
+      VALUES (?, ?, ?, ?, ?, NULL, 'manual')
+    `).run(name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : 1.75);
+    return db.prepare('SELECT * FROM filaments WHERE id = ?').get(result.lastInsertRowid);
+  } catch (error) {
+    console.error('Error saving filament:', error);
+    throw error;
+  }
+}
+ipcMain.handle('save-filament', saveFilamentHandler);
+
+async function deleteFilamentHandler(event, filamentId) {
+  try {
+    return db.transaction(() => {
+      db.prepare('DELETE FROM model_filaments WHERE filament_id = ?').run(filamentId);
+      printEvents.deletePrintEventFilamentsForFilament(db, filamentId);
+      db.prepare('DELETE FROM filaments WHERE id = ?').run(filamentId);
+      return true;
+    })();
+  } catch (error) {
+    console.error('Error deleting filament:', error);
+    throw error;
+  }
+}
+ipcMain.handle('delete-filament', deleteFilamentHandler);
+
+async function getModelFilamentsHandler(event, modelId) {
+  try {
+    return getFilamentsForModel(modelId);
+  } catch (error) {
+    console.error('Error getting model filaments:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-model-filaments', getModelFilamentsHandler);
+
+async function getPrintEventsHandler(event, modelId) {
+  try {
+    return printEvents.getPrintEvents(db, modelId);
+  } catch (error) {
+    console.error('Error getting print events:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-print-events', getPrintEventsHandler);
+
+async function logPrintEventHandler(event, payload) {
+  try {
+    return printEvents.logPrintEvent(db, payload || {});
+  } catch (error) {
+    console.error('Error logging print event:', error);
+    throw error;
+  }
+}
+ipcMain.handle('log-print-event', logPrintEventHandler);
+
+async function logPrintEventsBatchHandler(event, payload) {
+  try {
+    return printEvents.logPrintEventsBatch(db, payload || {});
+  } catch (error) {
+    console.error('Error logging print events batch:', error);
+    throw error;
+  }
+}
+ipcMain.handle('log-print-events-batch', logPrintEventsBatchHandler);
+
+async function deletePrintEventHandler(event, eventId) {
+  try {
+    return printEvents.deletePrintEvent(db, eventId);
+  } catch (error) {
+    console.error('Error deleting print event:', error);
+    throw error;
+  }
+}
+ipcMain.handle('delete-print-event', deletePrintEventHandler);
+
+async function setPrintStatusHandler(event, payload) {
+  try {
+    return printEvents.setPrintStatus(db, payload || {});
+  } catch (error) {
+    console.error('Error setting print status:', error);
+    throw error;
+  }
+}
+ipcMain.handle('set-print-status', setPrintStatusHandler);
+
+async function setPrintStatusBatchHandler(event, payload) {
+  try {
+    return printEvents.setPrintStatusBatch(db, payload || {});
+  } catch (error) {
+    console.error('Error setting print status batch:', error);
+    throw error;
+  }
+}
+ipcMain.handle('set-print-status-batch', setPrintStatusBatchHandler);
+
+function readSpoolmanSettings(urlOverride, tokenOverride) {
+  const urlRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('spoolmanUrl');
+  const tokenRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('spoolmanApiToken');
+  const url = urlOverride != null && String(urlOverride).trim() !== '' ? String(urlOverride).trim() : (urlRow?.value || '');
+  const token = tokenOverride != null ? String(tokenOverride) : (tokenRow?.value || '');
+  return { url, token };
+}
+
+async function testSpoolmanConnectionHandler(event, url, token) {
+  const settings = readSpoolmanSettings(url, token);
+  if (!settings.url) throw new Error('Spoolman URL is required');
+  return await spoolman.testConnection(settings.url, settings.token);
+}
+ipcMain.handle('test-spoolman-connection', testSpoolmanConnectionHandler);
+
+async function syncSpoolmanFilamentsHandler(event, url, token) {
+  const settings = readSpoolmanSettings(url, token);
+  if (!settings.url) throw new Error('Spoolman URL is required');
+  if (url != null && String(url).trim()) {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('spoolmanUrl', String(url).trim());
+  }
+  if (token !== undefined) {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('spoolmanApiToken', String(token || ''));
+  }
+  const remote = await spoolman.fetchAllFilaments(settings.url, settings.token);
+  let created = 0;
+  let updated = 0;
+  db.transaction(() => {
+    const selectBySpoolman = db.prepare('SELECT id FROM filaments WHERE spoolman_id = ?');
+    const insertStmt = db.prepare(`
+      INSERT INTO filaments (name, vendor, material, color_hex, diameter, spoolman_id, source)
+      VALUES (?, ?, ?, ?, ?, ?, 'spoolman')
+    `);
+    const updateStmt = db.prepare(`
+      UPDATE filaments SET name = ?, vendor = ?, material = ?, color_hex = ?, diameter = ?, source = 'spoolman'
+      WHERE id = ?
+    `);
+    for (const filament of remote) {
+      const existing = selectBySpoolman.get(filament.spoolman_id);
+      if (existing) {
+        updateStmt.run(filament.name, filament.vendor, filament.material, filament.color_hex, filament.diameter, existing.id);
+        updated += 1;
+      } else {
+        insertStmt.run(filament.name, filament.vendor, filament.material, filament.color_hex, filament.diameter, filament.spoolman_id);
+        created += 1;
+      }
+    }
+  })();
+  return { success: true, total: remote.length, created, updated };
+}
+ipcMain.handle('sync-spoolman-filaments', syncSpoolmanFilamentsHandler);
+
 // Add error handling to the getSetting handler
 ipcMain.handle('get-additional-file-types-catalog', async () => {
   return ADDITIONAL_FILE_TYPES_CATALOG;
@@ -4505,6 +5179,7 @@ ipcMain.handle('remove-models-by-file-type-ids', async (event, catalogIds) => {
     const deleted = db.transaction(() => {
       for (const id of ids) {
         db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(id);
+        db.prepare('DELETE FROM model_filaments WHERE model_id = ?').run(id);
         db.prepare('DELETE FROM models WHERE id = ?').run(id);
       }
       return ids.length;
@@ -5284,7 +5959,7 @@ ipcMain.handle('restore-database', async (event, payload = null) => {
 ipcMain.handle('export-library', async () => {
   const buildExportData = () => {
     const models = db.prepare(`
-      SELECT id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
+      SELECT id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
       FROM models
     `).all();
     const modelsWithTags = models.map(model => {
@@ -5294,6 +5969,15 @@ ipcMain.handle('export-library', async () => {
         JOIN model_tags mt ON mt.tag_id = t.id 
         WHERE mt.model_id = ?
       `).all(model.id).map(t => t.name);
+      const filaments = getFilamentsForModel(model.id).map((f) => ({
+        name: f.name,
+        vendor: f.vendor,
+        material: f.material,
+        color_hex: f.color_hex,
+        diameter: f.diameter,
+        spoolman_id: f.spoolman_id,
+        source: f.source
+      }));
       
       return {
         filePath: model.filePath,
@@ -5302,11 +5986,15 @@ ipcMain.handle('export-library', async () => {
         source: model.source,
         notes: model.notes,
         printed: model.printed,
+        print_status: model.print_status || (model.printed ? 'printed' : 'unprinted'),
+        print_count: model.print_count || 0,
+        last_printed_at: model.last_printed_at || null,
         parentModel: model.parentModel,
         license: model.license,
         rating: model.rating || 0,
         favorite: model.favorite ? 1 : 0,
-        tags: tags || []
+        tags: tags || [],
+        filaments: filaments || []
       };
     });
 
@@ -5376,6 +6064,20 @@ ipcMain.handle('import-library', async (event, payload = null) => {
       try {
         const existingModel = db.prepare('SELECT id FROM models WHERE filePath = ?').get(modelData.filePath);
 
+        let filamentIds;
+        if (Array.isArray(modelData.filaments)) {
+          filamentIds = [];
+          for (const entry of modelData.filaments) {
+            if (entry && typeof entry === 'object') {
+              const id = upsertImportedFilament(entry);
+              if (id) filamentIds.push(id);
+            } else {
+              const id = Number(entry);
+              if (Number.isInteger(id) && id > 0) filamentIds.push(id);
+            }
+          }
+        }
+
         await saveModel({
           filePath: modelData.filePath,
           fileName: modelData.fileName,
@@ -5385,7 +6087,8 @@ ipcMain.handle('import-library', async (event, payload = null) => {
           printed: modelData.printed || 0,
           parentModel: modelData.parentModel || null,
           license: modelData.license || null,
-          tags: modelData.tags || []
+          tags: modelData.tags || [],
+          ...(filamentIds !== undefined ? { filaments: filamentIds } : {})
         });
 
         if (existingModel) {
@@ -5550,7 +6253,7 @@ ipcMain.handle('trash-file', async (event, filePath) => {
       db.transaction(() => {
         const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(normalizedPath);
         if (model) {
-          db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+          deleteModelJunctionRows(model.id);
           db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
         }
       })();
@@ -6127,6 +6830,7 @@ const purgeModelsHandler = async (event, options = {}) => {
         // Execute each statement individually to avoid transaction issues
         // First clear the model_tags table (child table)
         db.prepare('DELETE FROM model_tags').run();
+        db.prepare('DELETE FROM model_filaments').run();
 
         // Then clear the models table (parent table)
         db.prepare('DELETE FROM models').run();
@@ -7280,7 +7984,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               filePaths.forEach(fp => {
                 const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
                 if (model) {
-                  db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
+                  deleteModelJunctionRows(model.id);
                   db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
                 }
               });
@@ -7561,10 +8265,7 @@ async function deleteFile(filePath) {
       // Get the model ID first
       const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePath);
       if (model) {
-        // First delete from model_tags (child table)
-        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(model.id);
-        
-        // Then delete from models (parent table)
+        deleteModelJunctionRows(model.id);
         db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
       }
     })();
@@ -7627,31 +8328,23 @@ ipcMain.handle('saveSetting', async (event, key, value) => {
   }
 });
 
-// Browser extension server control (normal mode only)
+// Browser extension / MCP local HTTP server control (normal mode)
 ipcMain.handle('start-extension-server', async (event, port) => {
-  if (isServerMode) return { success: false, message: 'Not available in server mode' };
-  try {
-    const portNum = parseInt(port, 10) || 5000;
-    if (httpServer) await stopHttpServer();
-    console.log('[Browser extension] Starting server on port', portNum, '...');
-    await startHttpServer(portNum, true);
-    console.log('[Browser extension] Server started successfully');
-    return { success: true };
-  } catch (error) {
-    console.error('[Browser extension] Error starting extension server:', error.message);
-    return { success: false, message: error?.message || 'Failed to start' };
-  }
+  if (isServerMode) return { success: true, running: true, message: 'Server mode already listening' };
+  return syncLocalHttpServer(port);
 });
 
 ipcMain.handle('stop-extension-server', async () => {
   if (isServerMode) return { success: false, message: 'Not available in server mode' };
-  try {
-    await stopHttpServer();
-    return { success: true };
-  } catch (error) {
-    console.error('Error stopping extension server:', error);
-    return { success: false, message: error?.message || 'Failed to stop' };
-  }
+  return syncLocalHttpServer(getConfiguredHttpPort());
+});
+
+ipcMain.handle('sync-local-http-server', async (event, port) => {
+  return syncLocalHttpServer(port);
+});
+
+ipcMain.handle('get-mcp-connection-info', async () => {
+  return getMcpConnectionInfo();
 });
 
 /** Copy SQLite main + sidecar files (-wal / -shm) when migrating paths. */
@@ -9119,8 +9812,19 @@ ipcMain.handle('extract-zip-archive', async (event, filePath, destinationPath) =
   }
 });
 
+function parseDuplicatesRequest(includeZipOrOptions) {
+  if (includeZipOrOptions && typeof includeZipOrOptions === 'object' && !Array.isArray(includeZipOrOptions)) {
+    const filters = includeZipOrOptions.filters && typeof includeZipOrOptions.filters === 'object'
+      ? includeZipOrOptions.filters
+      : null;
+    return { includeZip: !!includeZipOrOptions.includeZip, filters };
+  }
+  return { includeZip: !!includeZipOrOptions, filters: null };
+}
+
 // Add a new IPC handler for getting duplicates
-const getDuplicatesHandler = async (event, includeZip = false) => {
+const getDuplicatesHandler = async (event, includeZipOrOptions = false) => {
+  const { includeZip, filters } = parseDuplicatesRequest(includeZipOrOptions);
   const maxRetries = isServerMode && isGeneratingHashes ? 5 : 1;
   const retryDelayMs = 150;
   let lastError;
@@ -9128,7 +9832,11 @@ const getDuplicatesHandler = async (event, includeZip = false) => {
     try {
       // Only fetch rows whose hash has 2+ distinct paths (avoids loading every unique model into memory).
       // Zip entries use "archive::entry" paths — exclude them unless includeZip is true.
+      // Optional filters (current library view) apply to both the hash-count subquery
+      // and the file list so De-Dup can run on a designer/tag/query subset.
       const zipClause = includeZip ? '' : " AND instr(filePath, '::') = 0";
+      const outerFilter = buildModelFilterConditions(filters);
+      const innerFilter = buildModelFilterConditions(filters);
       const rows = db.prepare(`
         SELECT filePath, fileName, hash, size
         FROM models
@@ -9136,6 +9844,7 @@ const getDuplicatesHandler = async (event, includeZip = false) => {
           AND hash != ''
           AND LENGTH(TRIM(hash)) > 0
           ${zipClause}
+          ${sqlAndFilterConditions(outerFilter.conditions)}
           AND hash IN (
             SELECT hash
             FROM models
@@ -9143,11 +9852,12 @@ const getDuplicatesHandler = async (event, includeZip = false) => {
               AND hash != ''
               AND LENGTH(TRIM(hash)) > 0
               ${zipClause}
+              ${sqlAndFilterConditions(innerFilter.conditions)}
             GROUP BY hash
             HAVING COUNT(DISTINCT filePath) > 1
           )
         ORDER BY hash, filePath
-      `).all();
+      `).all(...outerFilter.params, ...innerFilter.params);
 
       // Group by hash; dedupe by filePath (DB can have duplicate rows for the same path)
       const groupsByHash = new Map();
@@ -9191,15 +9901,17 @@ const getDuplicatesHandler = async (event, includeZip = false) => {
 ipcMain.handle('get-duplicates', getDuplicatesHandler);
 ipcHandlerRegistry.set('get-duplicates', getDuplicatesHandler);
 
-function countModelsNeedingHash({ includeSha256 = false } = {}) {
+function countModelsNeedingHash({ includeSha256 = false, filters = null } = {}) {
   const hashClause = includeSha256
     ? `(hash IS NULL OR hash = '' OR LENGTH(hash) = 64)`
     : `(hash IS NULL OR hash = '')`;
+  const { conditions, params } = buildModelFilterConditions(filters);
   const row = db.prepare(`
     SELECT COUNT(*) as count FROM models
     WHERE ${hashClause}
       AND filePath NOT LIKE 'url::%'
-  `).get();
+      ${sqlAndFilterConditions(conditions)}
+  `).get(...params);
   return row ? row.count : 0;
 }
 
@@ -9220,7 +9932,7 @@ function emitHashGenerationComplete(event, payload) {
 }
 
 // Internal function to calculate missing hashes
-async function calculateMissingHashesInternal(event) {
+async function calculateMissingHashesInternal(event, filters = null) {
   if (isGeneratingHashes) {
     return { alreadyRunning: true, calculated: 0, failed: 0, total: 0 };
   }
@@ -9230,12 +9942,14 @@ async function calculateMissingHashesInternal(event) {
 
     // Missing hashes, plus SHA256 (64 hex chars) that can be regenerated as MD5.
     // SHA256 still groups duplicates correctly — conversion is best-effort.
+    const filterSql = buildModelFilterConditions(filters);
     const modelsWithMissingHashes = db.prepare(`
       SELECT filePath, fileName, size, hash
       FROM models
       WHERE (hash IS NULL OR hash = '' OR LENGTH(hash) = 64)
         AND filePath NOT LIKE 'url::%'
-    `).all();
+        ${sqlAndFilterConditions(filterSql.conditions)}
+    `).all(...filterSql.params);
 
     console.log(`Found ${modelsWithMissingHashes.length} models with missing or SHA256 hashes (need MD5)`);
 
@@ -9383,22 +10097,22 @@ ipcMain.handle('calculate-missing-hashes', async (event) => {
 });
 
 // Add IPC handler for generateMissingHashes (calls the same internal function)
-ipcMain.handle('generateMissingHashes', async (event) => {
+const generateMissingHashesHandler = async (event, filters = null) => {
   // Check if hash generation is already in progress
   if (isGeneratingHashes) {
     console.log('Hash generation already in progress, returning current status');
     return {
       alreadyRunning: true,
-      total: countModelsNeedingHash({ includeSha256: true })
+      total: countModelsNeedingHash({ includeSha256: true, filters })
     };
   }
-  const total = countModelsNeedingHash({ includeSha256: true });
+  const total = countModelsNeedingHash({ includeSha256: true, filters });
   if (total === 0) {
     return { calculated: 0, failed: 0, total: 0 };
   }
   // Don't hold the WebSocket IPC slot for the entire hash run (default 30s timeout
   // made Docker/server Dedup report that every hash failed).
-  calculateMissingHashesInternal(event).catch((error) => {
+  calculateMissingHashesInternal(event, filters).catch((error) => {
     isGeneratingHashes = false;
     console.error('Error calculating missing hashes:', error);
     emitHashGenerationComplete(event, {
@@ -9409,18 +10123,21 @@ ipcMain.handle('generateMissingHashes', async (event) => {
     });
   });
   return { started: true, total };
-});
+};
+ipcMain.handle('generateMissingHashes', generateMissingHashesHandler);
+ipcHandlerRegistry.set('generateMissingHashes', generateMissingHashesHandler);
 
-// Add IPC handler to get count of models without hash
-ipcMain.handle('getModelsWithoutHash', async () => {
+const getModelsWithoutHashHandler = async (event, filters = null) => {
   try {
     // SHA256 hashes already work for Dedup grouping — only prompt when hash is empty.
-    return countModelsNeedingHash({ includeSha256: false });
+    return countModelsNeedingHash({ includeSha256: false, filters });
   } catch (error) {
     console.error('Error getting models without hash:', error);
     return 0;
   }
-});
+};
+ipcMain.handle('getModelsWithoutHash', getModelsWithoutHashHandler);
+ipcHandlerRegistry.set('getModelsWithoutHash', getModelsWithoutHashHandler);
 
 // Add IPC handler to check if hash generation is in progress
 ipcMain.handle('is-generating-hashes', async () => {
@@ -9797,6 +10514,10 @@ ipcMain.on('open-tag-manager', (event) => {
   mainWindow.webContents.send('open-tag-manager');
 });
 
+ipcMain.on('open-filament-manager', (event) => {
+  mainWindow.webContents.send('open-filament-manager');
+});
+
 ipcMain.on('open-metadata-editor', (event) => {
   mainWindow.webContents.send('open-metadata-editor');
 });
@@ -10140,6 +10861,23 @@ ipcMain.handle('get-models-with-default-thumbnails', async () => {
   } catch (error) {
     console.error('Error fetching models with default thumbnails:', error);
     return [];
+  }
+});
+
+ipcMain.handle('get-folder-tree', async () => {
+  try {
+    const rows = db.prepare('SELECT filePath FROM models').all();
+    const filePaths = rows.map((r) => r.filePath).filter(Boolean);
+    const stlHome = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value || '';
+    const lastScan = db.prepare('SELECT value FROM settings WHERE key = ?').get('directoryPath')?.value || '';
+    const envHome = process.env.STL_HOME || '';
+    return buildFolderForest(filePaths, {
+      stlHome: stlHome || envHome,
+      roots: [stlHome, envHome, lastScan].filter(Boolean)
+    });
+  } catch (error) {
+    console.error('Error building folder tree:', error);
+    return { roots: [] };
   }
 });
 
@@ -10675,6 +11413,9 @@ async function updateModelsBatch(modelDataBatch) {
           source = ?,
           notes = ?,
           printed = ?,
+          print_status = ?,
+          print_count = ?,
+          last_printed_at = ?,
           parentModel = ?,
           license = ?,
           rating = ?,
@@ -10698,11 +11439,13 @@ async function updateModelsBatch(modelDataBatch) {
           source,
           notes,
           printed,
+          printStatus,
           parentModel,
           license,
           rating,
           favorite,
-          tags
+          tags,
+          filaments
         } = modelData;
 
         console.log(`[Batch ${i}] Processing model: ${filePath}`);
@@ -10722,7 +11465,11 @@ async function updateModelsBatch(modelDataBatch) {
         const finalDesigner = designer !== undefined ? (designer || null) : existingModel.designer;
         const finalSource = source !== undefined ? (source || null) : existingModel.source;
         const finalNotes = notes !== undefined ? (notes || null) : existingModel.notes;
-        const finalPrinted = printed !== undefined ? (printed ? 1 : 0) : existingModel.printed;
+        const printFields = printEvents.resolvePrintFieldsOnSave(existingModel, { printed, printStatus });
+        const finalPrinted = printFields.printed;
+        const finalPrintStatus = printFields.print_status;
+        const finalPrintCount = printFields.print_count;
+        const finalLastPrintedAt = printFields.last_printed_at;
         const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModel.parentModel;
         const finalLicense = license !== undefined ? (license || null) : existingModel.license;
         const finalRating = rating !== undefined ? normalizeModelRating(rating) : normalizeModelRating(existingModel.rating);
@@ -10734,6 +11481,7 @@ async function updateModelsBatch(modelDataBatch) {
           source: finalSource,
           notes: finalNotes,
           printed: finalPrinted,
+          print_status: finalPrintStatus,
           parentModel: finalParentModel,
           license: finalLicense
         };
@@ -10761,6 +11509,9 @@ async function updateModelsBatch(modelDataBatch) {
           finalSource,
           finalNotes,
           finalPrinted,
+          finalPrintStatus,
+          finalPrintCount,
+          finalLastPrintedAt,
           finalParentModel,
           finalLicense,
           finalRating,
@@ -10796,6 +11547,10 @@ async function updateModelsBatch(modelDataBatch) {
             }
           }
         }
+
+        if (filaments !== undefined) {
+          replaceModelFilaments(existingModel.id, normalizeFilamentIds(filaments) || []);
+        }
       }
     });
 
@@ -10818,6 +11573,7 @@ function modelUserFieldsChanged(existing, finals) {
     norm(finals.source) !== norm(existing.source) ||
     norm(finals.notes) !== norm(existing.notes) ||
     Number(finals.printed ? 1 : 0) !== Number(existing.printed ? 1 : 0) ||
+    String(finals.print_status || '') !== String(existing.print_status || '') ||
     norm(finals.parentModel) !== norm(existing.parentModel) ||
     norm(finals.license) !== norm(existing.license)
   );
@@ -10841,11 +11597,13 @@ async function saveModel(modelData) {
       source,
       notes,
       printed,
+      printStatus,
       parentModel,
       license,
       rating,
       favorite,
-      tags: rawTags
+      tags: rawTags,
+      filaments: rawFilaments
     } = modelData;
 
     // Extension path mapping (Docker: client path -> container path) and optional copy to NAS
@@ -10921,7 +11679,8 @@ async function saveModel(modelData) {
         license,
         rating,
         favorite,
-        tags: rawTags
+        tags: rawTags,
+        filaments: rawFilaments
       };
       for (const entry of toAdd) {
         const entryPath = `${filePath}::${entry.name}`;
@@ -10963,7 +11722,11 @@ async function saveModel(modelData) {
         const finalDesigner = designer !== undefined ? (designer || null) : existingModelData.designer;
         const finalSource = source !== undefined ? (source || null) : existingModelData.source;
         const finalNotes = notes !== undefined ? (notes || null) : existingModelData.notes;
-        const finalPrinted = printed !== undefined ? (printed ? 1 : 0) : existingModelData.printed;
+        const printFields = printEvents.resolvePrintFieldsOnSave(existingModelData, { printed, printStatus });
+        const finalPrinted = printFields.printed;
+        const finalPrintStatus = printFields.print_status;
+        const finalPrintCount = printFields.print_count;
+        const finalLastPrintedAt = printFields.last_printed_at;
         const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModelData.parentModel;
         const finalLicense = license !== undefined ? (license || null) : existingModelData.license;
         const finalRating = rating !== undefined ? normalizeModelRating(rating) : normalizeModelRating(existingModelData.rating);
@@ -10975,6 +11738,7 @@ async function saveModel(modelData) {
           source: finalSource,
           notes: finalNotes,
           printed: finalPrinted,
+          print_status: finalPrintStatus,
           parentModel: finalParentModel,
           license: finalLicense
         };
@@ -10997,6 +11761,9 @@ async function saveModel(modelData) {
             source = ?,
             notes = ?,
             printed = ?,
+            print_status = ?,
+            print_count = ?,
+            last_printed_at = ?,
             parentModel = ?,
             license = ?,
             rating = ?,
@@ -11014,6 +11781,9 @@ async function saveModel(modelData) {
           finalSource,
           finalNotes,
           finalPrinted,
+          finalPrintStatus,
+          finalPrintCount,
+          finalLastPrintedAt,
           finalParentModel,
           finalLicense,
           finalRating,
@@ -11030,13 +11800,14 @@ async function saveModel(modelData) {
         // Insert new model
         console.log('Inserting new model');
         
+        const printFields = printEvents.resolvePrintFieldsOnSave(null, { printed, printStatus });
         const dateAdded = new Date().toISOString();
         const bundle = deriveBundleFromFilePath(filePath);
         const insertStmt = db.prepare(`
           INSERT INTO models (
-            filePath, fileName, designer, source, notes, printed, parentModel, license,
+            filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, license,
             dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
         `);
         
         const result = insertStmt.run(
@@ -11045,7 +11816,10 @@ async function saveModel(modelData) {
           designer || null,
           source || null,
           notes || null,
-          printed ? 1 : 0,
+          printFields.printed,
+          printFields.print_status,
+          printFields.print_count,
+          printFields.last_printed_at,
           parentModel || null,
           license || null,
           dateAdded,
@@ -11176,6 +11950,14 @@ async function saveModel(modelData) {
           }
         }
         // Continue with the save even if tag update fails - don't throw to preserve model data
+      }
+    }
+
+    if (modelId && rawFilaments !== undefined) {
+      try {
+        replaceModelFilaments(modelId, normalizeFilamentIds(rawFilaments) || []);
+      } catch (filamentError) {
+        console.error('Error updating filaments:', filamentError);
       }
     }
 
@@ -11313,6 +12095,36 @@ function ensureSlicersTableExists() {
     return true;
   } catch (error) {
     console.error('Error ensuring slicers table exists:', error);
+    return false;
+  }
+}
+
+function ensureFilamentsTablesExist() {
+  try {
+    db.prepare(`CREATE TABLE IF NOT EXISTS filaments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        vendor TEXT,
+        material TEXT,
+        color_hex TEXT,
+        diameter REAL,
+        spoolman_id INTEGER UNIQUE,
+        source TEXT NOT NULL DEFAULT 'manual'
+    )`).run();
+    db.prepare(`CREATE TABLE IF NOT EXISTS model_filaments (
+        model_id INTEGER,
+        filament_id INTEGER,
+        FOREIGN KEY(model_id) REFERENCES models(id),
+        FOREIGN KEY(filament_id) REFERENCES filaments(id),
+        PRIMARY KEY(model_id, filament_id)
+    )`).run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_filaments_name ON filaments(name)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_filaments_spoolman_id ON filaments(spoolman_id)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_model_filaments_filament_id ON model_filaments(filament_id)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_model_filaments_model_id ON model_filaments(model_id)').run();
+    return true;
+  } catch (error) {
+    console.error('Error ensuring filaments tables exist:', error);
     return false;
   }
 }

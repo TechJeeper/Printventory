@@ -54,7 +54,15 @@ const filesToCopy = [
   'thumbnail-compress.js',
   'slicer.js',
   'guide.js',
-  'search.js'
+  'search.js',
+  'sidebar-layout.js',
+  'folder-tree.js',
+  'folder-tree-lib.js',
+  'filament.js',
+  'print-events.js',
+  'print-history.js',
+  'spoolman.js',
+  'mcp-server.js'
 ];
 
 // Copy files

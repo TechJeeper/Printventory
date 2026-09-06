@@ -12,13 +12,21 @@ let isFilteringInProgress = false;
 // Generation counter so a filter change during progressive load wins over stale "rest" response
 let searchGeneration = 0;
 
-// Optional overrides: { limit, offset } for progressive load when clearing filters (Server/Docker)
-async function getCombinedFilteredModels(overrides = {}) {
-  // Get all models using the current sort option.
-  const sortSelect = document.getElementById("sort-select");
-  const sortOption = sortSelect ? sortSelect.value : "date-desc";
+function filterValueList(primaryArr, legacyStr) {
+  const out = [];
+  if (Array.isArray(primaryArr)) {
+    for (const x of primaryArr) {
+      if (x != null && String(x).trim() !== "") out.push(String(x).trim());
+    }
+  }
+  if (!out.length && legacyStr != null && String(legacyStr).trim() !== "") {
+    out.push(String(legacyStr).trim());
+  }
+  return out;
+}
 
-  // Get filter values from the filter menu (multi-value + query builder filled in below).
+/** Snapshot of sidebar / query-builder filters (same atoms as View Entire Library). */
+function getCurrentLibraryFilters() {
   const designer = document.getElementById("designer-select")?.value || "";
   const license = document.getElementById("license-select")?.value || "";
   const parentModel = document.getElementById("parent-select")?.value || "";
@@ -28,33 +36,10 @@ async function getCombinedFilteredModels(overrides = {}) {
   const ratingStatus = document.getElementById("rating-select")?.value || "all";
   const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
   const tagFilter = document.getElementById("tag-filter")?.value || "";
+  const filamentFilter = document.getElementById("filament-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
 
-  const activeSearchClauses =
-    typeof window.queryBuilderHasActiveSearchClauses === "function" &&
-    window.queryBuilderHasActiveSearchClauses();
-  const activeMulti =
-    typeof window.queryBuilderHasActiveMultiFilters === "function" &&
-    window.queryBuilderHasActiveMultiFilters();
-
-  // Check if any filters are active - if so, we should reset viewingEntireLibrary flag
-  // Draft text in the search box alone does not count until you press search (clauses/tokens).
-  const hasActiveFilters = designer || license || parentModel || printStatus !== "all" ||
-                          newStatus !== "all" ||
-                          favoriteStatus !== "all" ||
-                          ratingStatus !== "all" ||
-                          ratingMinStatus !== "all" ||
-                          tagFilter || fileType || activeSearchClauses || activeMulti ||
-                          window.currentDirectoryFilter || window.dateAddedFilter;
-
-  if (hasActiveFilters && window.viewingEntireLibrary) {
-    // Reset the flag since filters are now being applied
-    window.viewingEntireLibrary = false;
-    console.log("Reset viewingEntireLibrary flag due to active filters");
-  }
-
   const filters = {
-    sortOption,
     designerInverted: window.invertedFilters?.designer || false,
     dateAdded: window.dateAddedFilter || null,
     licenseInverted: window.invertedFilters?.license || false,
@@ -65,6 +50,7 @@ async function getCombinedFilteredModels(overrides = {}) {
     rating: ratingStatus === "all" ? undefined : ratingStatus,
     ratingMin: ratingMinStatus === "all" ? undefined : ratingMinStatus,
     tagInverted: window.invertedFilters?.tag || false,
+    filamentInverted: window.invertedFilters?.filament || false,
     fileType,
     searchInverted: window.invertedFilters?.search || false,
     directory: window.currentDirectoryFilter
@@ -78,8 +64,85 @@ async function getCombinedFilteredModels(overrides = {}) {
     filters.license = license;
     filters.parentModel = parentModel;
     filters.tag = tagFilter;
+    if (filamentFilter) filters.filament = filamentFilter;
     filters.search = resolvedSearchTerm;
   }
+  return filters;
+}
+
+function libraryFiltersAreActive(filters) {
+  const f = filters || getCurrentLibraryFilters();
+  if (!f) return false;
+  if (filterValueList(f.designers, f.designer).length) return true;
+  if (filterValueList(f.licenses, f.license).length) return true;
+  if (filterValueList(f.parentModels, f.parentModel).length) return true;
+  if (Array.isArray(f.tags) ? f.tags.length : f.tag) return true;
+  if (Array.isArray(f.filaments) ? f.filaments.length : f.filament) return true;
+  if (f.printed) return true;
+  if (f.isNew && f.isNew !== "all") return true;
+  if (f.favorite && f.favorite !== "all") return true;
+  if (f.rating && f.rating !== "all") return true;
+  if (f.ratingMin && f.ratingMin !== "all") return true;
+  if (f.fileType) return true;
+  if (f.directory) return true;
+  if (f.dateAdded) return true;
+  if (Array.isArray(f.searchTokens) && f.searchTokens.length) return true;
+  if (Array.isArray(f.searchClauses) && f.searchClauses.length) return true;
+  if (f.search && String(f.search).trim()) return true;
+  return false;
+}
+
+function describeLibraryFilters(filters) {
+  const f = filters || getCurrentLibraryFilters();
+  if (!f) return "";
+  const parts = [];
+  const designers = filterValueList(f.designers, f.designer);
+  if (designers.length) parts.push(`Designer: ${designers.join(", ")}`);
+  const licenses = filterValueList(f.licenses, f.license);
+  if (licenses.length) parts.push(`License: ${licenses.join(", ")}`);
+  const parents = filterValueList(f.parentModels, f.parentModel);
+  if (parents.length) parts.push(`Parent: ${parents.join(", ")}`);
+  const tags = Array.isArray(f.tags) ? f.tags : (f.tag ? [f.tag] : []);
+  if (tags.length) parts.push(`Tag: ${tags.join(", ")}`);
+  const filamentIds = Array.isArray(f.filaments) ? f.filaments : (f.filament ? [f.filament] : []);
+  if (filamentIds.length) {
+    const labels = filamentIds.map((id) => {
+      const key = String(id);
+      return (window.filamentLabelById && window.filamentLabelById[key]) || key;
+    });
+    parts.push(`Filament: ${labels.join(", ")}`);
+  }
+  if (f.printed && f.printed !== "all") parts.push((window.PrintHistory && window.PrintHistory.filterLabel(f.printed)) || f.printed);
+  if (f.isNew === "new") parts.push("New");
+  if (f.isNew === "not-new") parts.push("Not new");
+  if (f.favorite === "favorited") parts.push("Favorites");
+  if (f.favorite === "not-favorited") parts.push("Not favorited");
+  if (f.rating && f.rating !== "all") parts.push(f.rating === "unrated" ? "Unrated" : `Rating ${f.rating}`);
+  if (f.ratingMin && f.ratingMin !== "all") parts.push(`Rating ≥ ${f.ratingMin}`);
+  if (f.fileType) parts.push(`Type: ${f.fileType}`);
+  if (f.directory) {
+    const bits = String(f.directory).split(/[/\\]/).filter(Boolean);
+    parts.push(`Folder: ${bits[bits.length - 1] || f.directory}`);
+  }
+  if (f.dateAdded) parts.push("Date added");
+  if (Array.isArray(f.searchTokens) && f.searchTokens.length) parts.push("Query");
+  else if (Array.isArray(f.searchClauses) && f.searchClauses.length) parts.push("Search");
+  else if (f.search && String(f.search).trim()) parts.push(`Search: ${String(f.search).trim()}`);
+  return parts.join(" · ");
+}
+
+// Optional overrides: { limit, offset } for progressive load when clearing filters (Server/Docker)
+async function getCombinedFilteredModels(overrides = {}) {
+  const sortSelect = document.getElementById("sort-select");
+  const sortOption = sortSelect ? sortSelect.value : "date-desc";
+  const filters = getCurrentLibraryFilters();
+  filters.sortOption = sortOption;
+
+  if (libraryFiltersAreActive(filters) && window.viewingEntireLibrary) {
+    window.viewingEntireLibrary = false;
+    console.log("Reset viewingEntireLibrary flag due to active filters");
+  }
+
   if (overrides.limit != null) filters.limit = overrides.limit;
   if (overrides.offset != null) filters.offset = overrides.offset;
 
@@ -112,6 +175,7 @@ async function performCombinedSearch() {
     const ratingStatus = document.getElementById("rating-select")?.value || "all";
     const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
     const tagFilter = document.getElementById("tag-filter")?.value || "";
+  const filamentFilter = document.getElementById("filament-filter")?.value || "";
     const fileType = document.getElementById("filetype-select")?.value || "";
     const qbClauses =
       typeof window.queryBuilderHasActiveSearchClauses === "function" &&
@@ -261,6 +325,7 @@ function updateFilterIndicator(count) {
   const ratingStatus = document.getElementById("rating-select")?.value || "all";
   const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
   const tagFilter = document.getElementById("tag-filter")?.value || "";
+  const filamentFilter = document.getElementById("filament-filter")?.value || "";
   const fileType = document.getElementById("filetype-select")?.value || "";
   const inverted = window.invertedFilters || {};
   const qbClauses =
@@ -281,6 +346,7 @@ function updateFilterIndicator(count) {
     ratingStatus !== "all" ||
     ratingMinStatus !== "all" ||
     tagFilter ||
+    filamentFilter ||
     fileType ||
     qbClauses ||
     qbMulti ||
@@ -440,7 +506,7 @@ function updateFilterIndicator(count) {
       
       // Add print status filter pill if active
       if (printStatus !== "all") {
-        const displayText = printStatus === "printed" ? "Printed" : "Not printed";
+        const displayText = (window.PrintHistory && window.PrintHistory.filterLabel(printStatus)) || printStatus;
         message += `<div class="filter-pill" data-filter-type="printStatus">
           ${displayText}
           <span class="filter-remove" data-filter-type="printStatus">×</span>
@@ -526,6 +592,7 @@ function updateFilterIndicator(count) {
       if (ratingStatus !== "all") document.getElementById("rating-select").value = "all";
       if (ratingMinStatus !== "all") document.getElementById("rating-min-select").value = "all";
       if (tagFilter) document.getElementById("tag-filter").value = "";
+      if (filamentFilter) document.getElementById("filament-filter").value = "";
       if (fileType) document.getElementById("filetype-select").value = "";
       if (typeof window.queryBuilderClearAllMultiChips === "function") {
         window.queryBuilderClearAllMultiChips();
@@ -559,6 +626,7 @@ function updateFilterIndicator(count) {
       // Clear inverted flags
       if (window.invertedFilters) {
         window.invertedFilters.tag = false;
+        window.invertedFilters.filament = false;
         window.invertedFilters.designer = false;
         window.invertedFilters.license = false;
         window.invertedFilters.parentModel = false;
@@ -628,6 +696,15 @@ function updateFilterIndicator(count) {
           }
           if (window.invertedFilters) window.invertedFilters.tag = false;
           break;
+        case 'filamentFilter':
+          document.getElementById("filament-filter").value = "";
+          if (window.multiFilterChips) window.multiFilterChips.filaments = [];
+          if (typeof window.queryBuilderRenderMultiChips === "function") {
+            window.queryBuilderRenderMultiChips("filaments");
+          }
+          if (window.invertedFilters) window.invertedFilters.filament = false;
+          break;
+          break;
         case "tagChip": {
           const raw = e.target.getAttribute("data-tag-value");
           if (raw != null && typeof window.queryBuilderRemoveMultiFilterChip === "function") {
@@ -681,6 +758,10 @@ function updateFilterIndicator(count) {
     });
   });
 
+  if (typeof window.FolderTree?.syncControl === 'function') {
+    window.FolderTree.syncControl();
+  }
+
 }
 
 async function initializeCombinedSearch() {
@@ -706,6 +787,7 @@ async function initializeCombinedSearch() {
     'rating-select',
     'rating-min-select',
     'tag-filter',
+    'filament-filter',
     'filetype-select'
   ];
 
@@ -732,7 +814,7 @@ async function initializeCombinedSearch() {
     const savedSortOption = await window.electron.getSetting('sortOption');
     if (savedSortOption) {
       // Validate that the saved option is a valid sort option
-      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc', 'directory-asc', 'directory-desc', 'designer-asc', 'designer-desc', 'parentmodel-asc', 'parentmodel-desc', 'printed-asc', 'printed-desc'];
+      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc', 'directory-asc', 'directory-desc', 'designer-asc', 'designer-desc', 'parentmodel-asc', 'parentmodel-desc', 'printed-asc', 'printed-desc', 'printstatus-asc', 'printstatus-desc', 'printcount-asc', 'printcount-desc', 'lastprinted-asc', 'lastprinted-desc', 'rating-asc', 'rating-desc'];
       if (validOptions.includes(savedSortOption)) {
         newSortSelect.value = savedSortOption;
       } else {
@@ -799,11 +881,34 @@ async function initializeCombinedSearch() {
           }
         }
 
+        if (elementId === "filament-filter") {
+          const raw = (e.target.value || "").trim();
+          if (raw) {
+            if (
+              typeof window.queryBuilderTryConsumeAwaitingFilterFromElement === "function" &&
+              window.queryBuilderTryConsumeAwaitingFilterFromElement(elementId)
+            ) {
+              consumedAwaitingTag = true;
+              e.target.value = "";
+            } else if (typeof window.setFilamentMultiFilter === "function") {
+              const existing = (window.multiFilterChips && window.multiFilterChips.filaments) || [];
+              window.setFilamentMultiFilter([...existing, raw]);
+              e.target.value = "";
+            }
+          } else if (window.multiFilterChips && (window.multiFilterChips.filaments || []).length) {
+            window.multiFilterChips.filaments = [];
+            if (typeof window.queryBuilderRenderMultiChips === "function") {
+              window.queryBuilderRenderMultiChips("filaments");
+            }
+          }
+        }
+
         console.log(`Filter changed: ${elementId} = ${e.target.value}`);
 
         let consumedAwaitingFilter = false;
         if (
           elementId !== "tag-filter" &&
+          elementId !== "filament-filter" &&
           typeof window.queryBuilderTryConsumeAwaitingFilterFromElement === "function"
         ) {
           consumedAwaitingFilter = window.queryBuilderTryConsumeAwaitingFilterFromElement(elementId);
@@ -940,6 +1045,9 @@ async function initializeCombinedSearch() {
 
 // Attach functions to the global window object IMMEDIATELY
 // This ensures they're available before renderer.js tries to use them
+window.getCurrentLibraryFilters = getCurrentLibraryFilters;
+window.libraryFiltersAreActive = libraryFiltersAreActive;
+window.describeLibraryFilters = describeLibraryFilters;
 window.getCombinedFilteredModels = getCombinedFilteredModels;
 window.resetCurrentFilterPanelShell = resetCurrentFilterPanelShell;
 window.updateFilterIndicator = updateFilterIndicator;
@@ -975,11 +1083,14 @@ function toggleFilterControls(enabled) {
     'rating-select',
     'rating-min-select',
     'tag-filter',
+    'filament-filter',
     'filetype-select',
+    'folder-select',
     'sort-select',
     'search-filter-input',
     'filter-search-button',
     'clear-filter-search-button',
+    'folder-tree-button',
     'view-library-button'
   ];
   

@@ -25,3 +25,13 @@ scripts/.discord
 .cursor/
 .deploySteps
 .env
+demos/*.webm
+demos/*.mp3
+demos/*.db
+demos/*.db-shm
+demos/*.db-wal
+demos/electron-user-data/
+demos/raw-video/
+demos/frames/
+demos/tiktok-work/
+spoolman-data/

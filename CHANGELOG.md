@@ -4,12 +4,28 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
-## [2.2.3] - 2026-09-03
+## [2.2.3] - 2026-09-05
+
+### Added
+
+- **Print lifecycle and history** — Status is no longer a Printed checkbox. Each model has Unprinted / Want / Queued / Printing / Printed / Failed, plus an append-only print log (date, Printed/Failed/Cancelled, quantity, notes, filaments used). Click a card badge to log a print (reprints increment `Printed ×N`); Shift-click changes status only. Details panel has a status dropdown, Log a print, and a deletable history list. Filters include each status plus Ever printed / Never printed (from successful logs). Sort by last printed, print count, or status. Existing `printed = 1` rows keep Printed with “No logged prints yet” — no fake history is invented. Send to Slicer does not auto-log a print.
+- **Folder-tree library explorer** — A Folders filter (roots + recent) with a ☰ popover tree of scanned directories (counts, ZIP bundles highlighted). Click a folder to set the existing Directory chip. Optional Folders rail next to the grid for hopping between folders. The tree is a picker for a filter you already have; it does not replace the grid.
+- **Sidebar layout** — Search and sort stay pinned. The long filter stack auto-collapses when model details open so the details panel can use the remaining height. Sidebar and Folders panel (popover and rail) are drag-resizable; last widths are remembered.
+- **De-Dup on the current view** — De-Dup can hash/compare the current library filters (designer, tags, query builder, search, and other chips) instead of always scanning the entire collection ([#61](https://github.com/TechJeeper/Printventory/issues/61)).
+- **Filament catalog and Spoolman** — Assign filaments to models (vendor, material, color). Filter the library by filament. Optional pull-only Spoolman sync of the filament catalog (URL + API token; Test Connection / Sync Now). Filament chips pre-fill on Log a print.
+- **MCP Server (experimental)** — Connect a local AI agent (Cursor, Claude Desktop, VS Code, and similar) to the library over Streamable HTTP at `/mcp` while Printventory is running. Desktop: Tools → MCP Server enables a localhost listener (same port as the Browser Extension, default 5000); copy URL or client `mcpServers` JSON from the dialog. Docker/server mode: `/mcp` is always available on the host — no toggle. Tools: `search_models`, `get_model`, `update_model`, `get_library_stats`, `get_folder_tree`, `list_tags`, `add_tag`, `list_designers`, `list_licenses`, `get_models_missing_thumbnails`, `get_thumbnails`, `set_thumbnail`, `add_thumbnail`. Agents can list models missing thumbnails, render images locally, and write PNG/JPEG back with `set_thumbnail`. Any client that can reach the endpoint can read and change library data; use on trusted networks only.
 
 ### Fixed
 
+- Invert Filters is no longer clipped at the bottom of the sidebar when More filters is expanded.
+- The sidebar scrolls again so extra filters and model details are reachable instead of being clipped with no scrollbar.
 - Nested `.3mf` models inside ZIP archives no longer fail hash generation with `Invalid local header` / `unexpected end of file`. Zip extraction is serialized per archive and falls back to fflate/JSZip when `node-stream-zip` cannot read an entry.
 - Docker/server Dedup no longer reports that every file hash failed when models already have SHA256 hashes, when hash generation takes longer than the WebSocket timeout, or when Windows library paths need to be resolved to the container mount.
+
+### Database
+
+- New on `models`: `print_status`, `print_count`, `last_printed_at`. `printed` remains a derived flag so existing filters keep working.
+- New tables: `print_events`, `print_event_filaments`, `filaments`, `model_filaments`.
 
 ## [2.2.2] - 2026-08-31
 

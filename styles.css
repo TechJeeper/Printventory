@@ -1,5 +1,8 @@
 html {
   overflow-x: hidden;
+  --sidebar-width: 350px;
+  --folder-rail-width: 0px;
+  --folder-tree-width: 280px;
 }
 
 body {
@@ -96,8 +99,9 @@ select option:not(:checked):not([selected]):not(:hover) {
 }
 
 .sidebar {
-  width: 350px;
+  width: var(--sidebar-width, 350px);
   height: 100vh;
+  box-sizing: border-box;
   position: fixed;
   top: 0;
   left: 0 !important;
@@ -111,10 +115,50 @@ select option:not(:checked):not([selected]):not(:hover) {
   flex-direction: column;
   align-items: center;
   padding-top: 20px;
+  /* Flex + overflow-y ignores padding-bottom in Chromium; spacer ::after supplies it. */
+  padding-bottom: 0;
   box-shadow: 4px 0 20px rgba(0, 0, 0, 0.3), inset -1px 0 0 rgba(255, 255, 255, 0.05);
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-bottom: 32px;
   z-index: 100;
+}
+
+.sidebar > * {
+  flex-shrink: 0;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.sidebar > #current-filter {
+  flex-shrink: 0;
+}
+
+/* Real flex item so the last buttons can scroll fully into view. */
+.sidebar::after {
+  content: '';
+  display: block;
+  flex: 0 0 40px;
+  width: 100%;
+  pointer-events: none;
+}
+
+.sidebar-chrome {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.sidebar:not(.filters-expanded) .filter-stack {
+  display: none;
+}
+
+body.folder-rail-open {
+  --folder-rail-width: var(--folder-tree-width, 280px);
 }
 
 /* Docker/Server mode: same layout fix + menu bar offset */
@@ -188,12 +232,13 @@ body.server-mode .sidebar {
   box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1), 0 4px 12px var(--primary-shadow, rgba(0, 212, 255, 0.2));
 }
 
-/* Model name field - text input without dropdown arrow, match filter section width */
+/* Model name field - text input without dropdown arrow */
 #model-name {
   background-image: none !important;
   padding-right: 16px !important;
-  max-width: 240px; /* Match filter section width */
-  width: auto;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
 }
 
 /* Notes input container */
@@ -323,9 +368,19 @@ body.server-mode .sidebar {
   display: none !important;
 }
 
-.path-tree-container {
+.path-tree-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   width: 100%;
-  max-width: 240px; /* Match filter section width */
+  min-width: 0;
+}
+
+.path-tree-container {
+  flex: 1 1 0;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
   padding: 8px 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
@@ -465,11 +520,12 @@ button:disabled {
 .model-details {
   margin-top: 20px;
   width: 100%;
-  max-width: none; /* Allow full width expansion */
+  max-width: none;
   background: color-mix(in srgb, var(--model-background-color) 25%, transparent);
-  padding: 20px 0;
+  padding: 16px 0 24px;
   border-bottom: 1px solid #444;
   border-top: 1px solid #444;
+  box-sizing: border-box;
 }
 
 .bundle-details-subtitle {
@@ -569,111 +625,113 @@ button:disabled {
 }
 
 /* ============================================
-   MODEL DETAILS DROPDOWN SIZING - REFACTORED
+   MODEL DETAILS FIELDS — match filter/search rows
+   Label on top; field flexes; 28px actions on the right.
    ============================================ */
 
-/* Container for model details dropdowns - match filter section width */
-.model-details .designer-input-container {
-  display: flex !important;
-  align-items: center !important;
-  width: 100% !important;
-  max-width: 240px !important; /* Match filter section width */
-  gap: 6px !important;
-  box-sizing: border-box !important;
+.model-details .form-group {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 16px;
+  margin-bottom: 15px;
+  box-sizing: border-box;
 }
 
-/* Model details dropdowns - account for list button (28px) + gap (6px) + add button (28px) + gap (6px) = 68px */
+.model-details .designer-input-container,
+.model-details .tags-input-container,
+.model-details .input-with-icon,
+.model-details .notes-input-container,
+.model-details .path-tree-field,
+.model-details .bundle-details-path-row,
+.model-details .print-lifecycle-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.model-details .notes-input-container {
+  align-items: flex-start;
+}
+
+.model-details .tags-container {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
 .model-details .designer-input-container select,
+.model-details .tags-input-container select,
+.model-details .input-with-icon input,
+.model-details .notes-input-container textarea,
+.model-details .print-lifecycle-controls select,
+.model-details #model-source,
+.model-details #model-print-status,
 .model-details #model-designer,
 .model-details #model-parent,
-.model-details #model-license {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  width: auto !important;
-  max-width: calc(240px - 68px) !important; /* Container width minus both buttons and gaps */
-  margin: 0 !important;
-  box-sizing: border-box !important;
+.model-details #model-license,
+.model-details #tag-select,
+.model-details #filament-select {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  max-width: none;
+  margin: 0;
+  box-sizing: border-box;
 }
 
-/* Override form-group select width for model details */
-.model-details .form-group .designer-input-container select,
-.model-details .form-group #model-designer,
-.model-details .form-group #model-parent,
-.model-details .form-group #model-license {
-  width: auto !important; /* Override .form-group select { width: 100% } */
-  max-width: calc(240px - 68px) !important; /* Match the container max-width minus button space */
+.model-details .path-tree-container {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: none;
 }
 
-/* ============================================
-   MODEL DETAILS SOURCE FIELD SIZING - REFACTORED
-   ============================================ */
-
-/* Source field container in model details - match filter section width */
-.model-details .input-with-icon {
-  display: flex !important;
-  align-items: center !important;
-  width: 100% !important;
-  max-width: 240px !important; /* Match filter section width */
-  gap: 8px !important;
-  box-sizing: border-box !important;
-  position: relative !important;
+.model-details .designer-input-container .icon-button,
+.model-details .tags-input-container .icon-button,
+.model-details .input-with-icon .icon-button,
+.model-details .notes-input-container .icon-button,
+.model-details .path-tree-field .icon-button,
+.model-details .bundle-details-path-row .icon-button,
+.model-details .print-lifecycle-controls .icon-button,
+.model-details .print-history-label-row .icon-button {
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  margin: 0;
+  position: static;
+  top: auto;
+  right: auto;
+  transform: none;
 }
 
-/* Source input field - account for open button (36px) + gap (8px) = 44px */
-.model-details .input-with-icon input,
-.model-details #model-source {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  width: auto !important;
-  max-width: calc(240px - 44px) !important; /* Container width minus button and gap */
-  box-sizing: border-box !important;
-}
-
-/* ============================================
-   MODEL DETAILS TAGS DROPDOWN SIZING - REFACTORED
-   ============================================ */
-
-/* Tags container in model details - match filter section width */
-.model-details .tags-container {
-  width: 100% !important;
-  max-width: 240px !important; /* Match filter section width */
-}
-
-/* Tags input container in model details - match filter section width */
-.model-details .tags-input-container {
-  display: flex !important;
-  align-items: center !important;
-  width: 100% !important;
-  max-width: 240px !important; /* Match filter section width */
-  gap: 6px !important;
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  box-sizing: border-box !important;
-}
-
-/* Tags dropdown in model details - account for list button (28px) + gap (6px) + add button (28px) + gap (6px) = 68px */
-.model-details .tags-input-container select,
-.model-details #tag-select {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  width: auto !important;
-  max-width: calc(240px - 68px) !important; /* Container width minus both buttons and gaps */
-  margin: 0 !important;
-  box-sizing: border-box !important;
+.model-details .tags-list {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
 }
 
 .model-details h3 {
-  padding: 0 20px;
+  padding: 0 16px;
   margin-top: 0;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
   font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.02em;
   color: #fff;
 }
 
+/* Nested divs used to pick up a blanket 10px margin and throw off field spacing. */
 .model-details div {
-  margin-bottom: 10px;
+  margin-bottom: 0;
+}
+
+.model-details > .form-group {
+  margin-bottom: 15px;
 }
 
 .checkbox-container {
@@ -936,8 +994,8 @@ main {
   align-items: center;
   gap: 10px;
   padding: 15px 20px;
-  margin-left: 370px;
-  width: calc(100% - 390px);
+  margin-left: calc(var(--sidebar-width, 350px) + 20px + var(--folder-rail-width, 0px));
+  width: calc(100% - (var(--sidebar-width, 350px) + 40px + var(--folder-rail-width, 0px)));
   background: transparent;
   z-index: 1;
   box-sizing: border-box;
@@ -983,9 +1041,9 @@ main {
   gap: 24px;
   row-gap: 32px;
   padding: 20px 24px;
-  margin-left: 370px;
-  width: calc(100% - 390px);
-  max-width: calc(100vw - 390px);
+  margin-left: calc(var(--sidebar-width, 350px) + 20px + var(--folder-rail-width, 0px));
+  width: calc(100% - (var(--sidebar-width, 350px) + 40px + var(--folder-rail-width, 0px)));
+  max-width: calc(100vw - (var(--sidebar-width, 350px) + 40px + var(--folder-rail-width, 0px)));
   box-sizing: border-box;
   overflow: visible;
   animation: fadeIn 0.5s ease-out;
@@ -2516,13 +2574,24 @@ header {
 }
 
 
-/* Model details specific - match filter section width constraints */
-.model-details .designer-input-container:has(.list-button) select,
-.model-details .designer-input-container:not(:has(.list-button)) select {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  width: auto !important;
-  max-width: calc(240px - 68px) !important; /* Match filter section width minus buttons */
+.model-details .input-with-icon .icon-button {
+  position: static;
+  top: auto;
+  right: auto;
+  transform: none;
+  opacity: 1;
+  background: linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%);
+  border: none;
+  box-shadow: 0 2px 6px rgba(91, 159, 255, 0.3);
+}
+
+.model-details .input-with-icon .icon-button:hover {
+  transform: translateY(-1px) scale(1.05);
+  background: linear-gradient(135deg, #00e5ff 0%, #6ba8ff 100%);
+}
+
+.model-details .input-with-icon input {
+  padding-right: 16px;
 }
 
 .designer-input-container select:focus {
@@ -2555,47 +2624,48 @@ header {
   min-width: 0;
 }
 
-/* For filter section, make all dropdowns the same width - narrower to match model details */
+/* Filter dropdown + list-button row must stay inside the sidebar (do not use 100% + button). */
 .sidebar .dropdown-with-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
-  max-width: 240px; /* Reduced to match model details fields and prevent overflow */
-}
-
-.sidebar .dropdown-with-list select,
-.sidebar .dropdown-with-list .tags-input-container select,
-.sidebar .dropdown-with-list .tags-input-container input#tag-filter {
-  flex: 1;
+  max-width: 100%;
   min-width: 0;
-  width: calc(100% - 34px); /* Account for list button (28px) + gap (6px) */
-  max-width: calc(240px - 34px); /* Match the container max-width minus button space */
-}
-
-/* Make all filter dropdowns the same width - dropdowns without buttons match width */
-.sidebar .form-group:not(:has(.dropdown-with-list)) select {
-  width: calc(100% - 34px); /* Match the width of dropdowns with list buttons */
-  max-width: calc(240px - 34px); /* Match the max-width of dropdowns with buttons */
-  margin-right: 34px; /* Add right margin to account for button space */
   box-sizing: border-box;
 }
 
-/* Tag filter in sidebar - match other filter dropdowns */
-.sidebar .dropdown-with-list:has(#tag-filter) {
-  width: 100%;
-  max-width: 240px; /* Match other filter dropdowns - reduced to prevent overflow */
+.sidebar .dropdown-with-list select,
+.sidebar .dropdown-with-list .tags-input-container {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  max-width: none;
 }
 
-.sidebar .dropdown-with-list:has(#tag-filter) .tags-input-container {
-  flex: 1;
+.sidebar .dropdown-with-list .tags-input-container select,
+.sidebar .dropdown-with-list .tags-input-container input#tag-filter {
+  flex: 1 1 auto;
   min-width: 0;
   width: 100%;
+  max-width: none;
 }
 
-/* Tag filter field - match other filter dropdowns width */
-.sidebar .dropdown-with-list:has(#tag-filter) .tags-input-container input#tag-filter {
-  flex: 1;
-  min-width: 0;
-  width: calc(100% - 34px); /* Account for list button (28px) + gap (6px) */
-  max-width: calc(240px - 34px); /* Match the container max-width minus button space */
+.sidebar .dropdown-with-list .list-button,
+.sidebar .dropdown-with-list .folder-tree-button {
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  margin: 0;
+}
+
+/* Filter dropdowns without a list button align with the select column beside those buttons. */
+.filter-section .form-group:not(:has(.dropdown-with-list)) select {
+  width: calc(100% - 34px);
+  max-width: none;
+  margin-right: 34px;
+  box-sizing: border-box;
 }
 
 /* List button styling - matches icon-button style, smaller size */
@@ -3073,9 +3143,9 @@ header {
   min-width: 0;
 }
 
-/* In filter view, tag filter only has list button - make field wider */
+/* In filter view, tag filter only has list button - field fills the flex slot beside it */
 .dropdown-with-list:has(#tag-filter) .tags-input-container input#tag-filter {
-  max-width: calc(100% - 38px); /* Account for list button (32px) + gap (6px) */
+  max-width: none;
 }
 
 .tags-input-container select:focus,
@@ -3149,22 +3219,73 @@ header {
 .filter-section {
   display: flex;
   flex-direction: column;
-  width: 100%;
-  padding: 24px 0;
-  margin: 20px 0;
+  width: calc(100% - 16px);
+  max-width: 100%;
+  min-width: 0;
+  padding: 16px 0 28px;
+  margin: 8px 8px 0;
   background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(10px);
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 16px;
-  margin-left: 10px;
-  margin-right: 10px;
+  flex: 0 0 auto;
+  overflow: visible;
+  box-sizing: border-box;
+}
+
+.filter-pinned {
+  flex-shrink: 0;
+}
+
+.filter-stack {
+  flex: 0 0 auto;
+  overflow: visible;
+  padding-bottom: 16px;
+  box-sizing: border-box;
+}
+
+.filter-stack-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: calc(100% - 32px);
+  max-width: none;
+  margin: 4px 16px 8px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: none;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.filter-stack-toggle::before {
+  display: none;
+}
+
+.filter-stack-toggle:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+}
+
+.filter-stack-toggle-chevron {
+  opacity: 0.7;
 }
 
 .filter-section .form-group {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   margin-bottom: 15px;
-  padding: 0 20px;
+  padding: 0 16px;
+  box-sizing: border-box;
 }
 
 .filter-section select {
@@ -3304,7 +3425,7 @@ header {
 }
 
 #multi-edit-panel .selected-count {
-  padding-left: 20px;
+  padding: 0 16px;
 }
 
 #multi-save-button {
@@ -3321,13 +3442,13 @@ header {
   margin-top: 20px;
   width: 100%;
   background: color-mix(in srgb, var(--model-background-color) 25%, transparent);
-  padding: 20px 0;
+  padding: 16px 0 24px;
   border-top: 1px solid #444;
   border-bottom: 1px solid #444;
 }
 
 #multi-edit-panel h3 {
-  padding: 0 20px;
+  padding: 0 16px;
   margin-top: 0;
   margin-bottom: 15px;
 }
@@ -3335,11 +3456,16 @@ header {
 #multi-edit-panel .form-group {
   margin-bottom: 15px;
   width: 100%;
-  padding: 0 20px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 16px;
+  box-sizing: border-box;
 }
 
 #multi-edit-panel .full-width-button {
-  margin-left: 20px;
+  width: calc(100% - 32px);
+  max-width: none;
+  margin: 8px 16px;
 }
 
 #multi-edit-panel .checkbox-container {
@@ -3348,7 +3474,7 @@ header {
   align-items: center;
   width: 100%;
   gap: 8px;
-  padding: 8px 20px;
+  padding: 8px 16px;
   margin-bottom: 15px;
   margin-left: 0;
 }
@@ -3400,7 +3526,8 @@ header {
 }
 
 #invert-filter-button {
-  width: 265px;
+  width: calc(100% - 40px);
+  max-width: 280px;
   padding: 8px 18px;
   border-radius: 18px;
   background: linear-gradient(135deg, #f97316 0%, #fb923c 100%);
@@ -3429,8 +3556,10 @@ header {
 #multi-edit-panel .designer-input-container {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 85%;
+  gap: 6px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
 }
 
 #multi-edit-panel .designer-input-container select {
@@ -3602,7 +3731,10 @@ header {
 #multi-edit-panel .tags-input-container {
   display: flex;
   align-items: center;
-  width: 85%;
+  gap: 6px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
 }
 
 #multi-edit-panel .designer-input-container select,
@@ -3646,6 +3778,41 @@ header {
   min-width: 800px;
   max-width: 90vw;
   max-height: 80vh;
+}
+
+.dedup-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 0.6rem 0 0.2rem;
+}
+
+.dedup-scope-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ccc;
+}
+
+.dedup-scope-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: #ddd;
+  cursor: pointer;
+}
+
+.dedup-scope-option.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.dedup-scope-summary {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.85rem;
+  color: #9ad;
 }
 
 .dedup-dialog .duplicate-groups {
@@ -3718,6 +3885,17 @@ header {
   min-height: 0;
 }
 #tag-manager-dialog.modal-fullscreen #tag-manager-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+#filament-manager-dialog.modal-fullscreen form .form-group:last-of-type {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#filament-manager-dialog.modal-fullscreen #filament-manager-list {
   flex: 1;
   min-height: 0;
   max-height: none;
@@ -3998,6 +4176,163 @@ header {
   border-radius: 4px;
   background-color: #444;
   color: #fff;
+}
+
+/* Filament Management */
+#filament-manager-dialog {
+  min-width: 480px;
+  max-width: 720px;
+}
+#filament-manager-dialog input[type="text"],
+#filament-manager-dialog input[type="password"],
+#filament-manager-dialog input[type="number"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}
+.spoolman-setup-panel {
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.spoolman-setup-panel[hidden] {
+  display: none !important;
+}
+.filament-spoolman-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.filament-manager-status {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #9ad;
+  min-height: 1.2em;
+}
+.filament-manager-status.error {
+  color: #f88;
+}
+.filament-add-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.filament-color-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.filament-color-row input[type="color"] {
+  width: 40px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+#filament-manager-list,
+.filament-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 80px;
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.filament-manager-empty {
+  color: #999;
+  padding: 12px;
+  text-align: center;
+}
+.filament-manager-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.filament-manager-item-body {
+  flex: 1;
+  min-width: 0;
+}
+.filament-manager-item-name {
+  color: #fff;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.filament-manager-item-meta {
+  color: #999;
+  font-size: 11px;
+}
+.filament-source-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 212, 255, 0.2);
+  color: #9eefff;
+  white-space: nowrap;
+}
+.filament-source-badge.manual {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ddd;
+}
+.filament-count {
+  font-size: 12px;
+  color: #aaa;
+}
+.filament-remove {
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+.filament-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+  display: inline-block;
+}
+.filament-chip,
+.filament-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin: 2px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #eee;
+  font-size: 12px;
+}
+.filament-chip-remove {
+  cursor: pointer;
+  padding: 0 4px;
+}
+.filament-filter-link {
+  cursor: pointer;
+}
+.tags-list .filament-chip {
+  margin: 0;
+  font-size: 14px;
 }
 
 /* Metadata Editor Dialog */
@@ -4333,16 +4668,16 @@ header {
 }
 
 #select-all-button {
-  margin-bottom: 15px;
+  margin: 8px 16px 12px;
   background-color: #2a2a2a;
   color: #fff;
   border: 1px solid #3a3a3a;
   padding: 8px;
-  border-radius: 4px;
+  border-radius: 12px;
   cursor: pointer;
   transition: background-color 0.2s;
-  width: 100%;
-  max-width: 240px; /* Match filter section width */
+  width: calc(100% - 32px);
+  max-width: none;
   box-sizing: border-box;
 }
 
@@ -5169,16 +5504,16 @@ header {
 /* Add styles for the multi-edit mode buttons - match filter section width */
 #enter-multi-edit-button,
 #exit-multi-edit-button {
-  margin: 10px 0 20px 20px; /* Adjust top/bottom margins and add left margin */
+  margin: 8px 16px 12px;
   background-color: #2a2a2a;
   color: #fff;
   border: 1px solid #3a3a3a;
   padding: 8px;
-  border-radius: 4px;
+  border-radius: 12px;
   cursor: pointer;
   transition: background-color 0.2s;
-  width: 100%;
-  max-width: 240px; /* Match filter section width */
+  width: calc(100% - 32px);
+  max-width: none;
   box-sizing: border-box;
 }
 
@@ -5315,6 +5650,180 @@ header {
   background: rgba(46, 204, 113, 0.85);
 }
 
+.print-status-want,
+.file-grid .print-status-want,
+.file-item-list .print-status-want {
+  background: rgba(155, 89, 182, 0.7);
+}
+.print-status-want:hover,
+.file-grid .print-status-want:hover,
+.file-item-list .print-status-want:hover {
+  background: rgba(155, 89, 182, 0.9);
+}
+.print-status-queued,
+.file-grid .print-status-queued,
+.file-item-list .print-status-queued {
+  background: rgba(241, 196, 15, 0.8);
+  color: #1a1a1a;
+}
+.print-status-queued:hover,
+.file-grid .print-status-queued:hover,
+.file-item-list .print-status-queued:hover {
+  background: rgba(241, 196, 15, 0.95);
+}
+.print-status-printing,
+.file-grid .print-status-printing,
+.file-item-list .print-status-printing {
+  background: rgba(52, 152, 219, 0.75);
+}
+.print-status-printing:hover,
+.file-grid .print-status-printing:hover,
+.file-item-list .print-status-printing:hover {
+  background: rgba(52, 152, 219, 0.95);
+}
+.print-status-failed,
+.file-grid .print-status-failed,
+.file-item-list .print-status-failed {
+  background: rgba(231, 76, 60, 0.75);
+}
+.print-status-failed:hover,
+.file-grid .print-status-failed:hover,
+.file-item-list .print-status-failed:hover {
+  background: rgba(231, 76, 60, 0.95);
+}
+.print-status-mixed,
+.file-grid .print-status-mixed,
+.file-item-list .print-status-mixed {
+  background: rgba(230, 126, 34, 0.75);
+}
+.print-status-mixed:hover {
+  background: rgba(230, 126, 34, 0.95);
+}
+
+.print-lifecycle-controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: none;
+  margin-bottom: 0;
+}
+.print-lifecycle-controls select,
+.model-details #model-print-status {
+  flex: 1 1 0;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  margin-right: 0;
+  box-sizing: border-box;
+}
+#log-print-button,
+.log-print-icon-button {
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border-radius: 8px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+#log-print-button::before,
+.log-print-icon-button::before {
+  display: none;
+}
+#log-print-button svg,
+.log-print-icon-button svg {
+  display: block;
+  flex-shrink: 0;
+}
+.print-history-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #aaa;
+  min-height: 1em;
+}
+.print-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.print-history-empty {
+  color: #888;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.print-history-item {
+  position: relative;
+  padding: 8px 28px 8px 8px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border-left: 3px solid rgba(46, 204, 113, 0.8);
+}
+.print-history-item.outcome-failed {
+  border-left-color: rgba(231, 76, 60, 0.9);
+}
+.print-history-item.outcome-cancelled {
+  border-left-color: rgba(149, 165, 166, 0.9);
+}
+.print-history-item-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.print-history-outcome {
+  font-weight: 600;
+}
+.print-history-when,
+.print-history-filaments,
+.print-history-notes {
+  font-size: 12px;
+  color: #bbb;
+  margin-top: 2px;
+}
+.print-history-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+.print-status-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 140px;
+  background: #1e1e1e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+}
+.print-status-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #eee;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.print-status-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+#log-print-dialog {
+  min-width: 420px;
+}
+#log-print-dialog textarea {
+  min-height: 72px;
+  width: 100%;
+}
+
 .setting-description {
   color: #888;
   font-size: 0.9em;
@@ -5327,6 +5836,44 @@ header {
 }
 #browser-extension-settings-dialog .setting-description a:hover {
   color: #a8d4ff;
+}
+
+#mcp-server-settings-dialog [hidden] {
+  display: none !important;
+}
+#mcp-server-settings-dialog .mcp-inline-actions {
+  margin-top: 8px;
+  margin-bottom: 0;
+  justify-content: flex-start;
+}
+#mcp-server-settings-dialog .mcp-inline-actions button {
+  width: auto;
+  margin-bottom: 0;
+}
+#mcp-server-settings-dialog #mcp-server-status {
+  width: 85%;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+#mcp-server-settings-dialog pre.mcp-config {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #d6e4f0;
+  padding: 12px 16px;
+  border-radius: 12px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.4;
+  max-height: 220px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  box-sizing: border-box;
+}
+#mcp-server-settings-dialog #mcp-server-url {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  background-image: none;
+  padding-right: 16px;
 }
 
 .full-width-button {
@@ -5658,18 +6205,20 @@ header {
 }
 
 #current-filter {
-  padding: 8px;
-  width: 100%;
+  padding: 8px 10px 10px;
+  width: auto;
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  margin: 8px 8px;
+  margin: 8px;
   background: rgba(74, 158, 255, 0.1);
-  border-radius: 4px;
+  border-radius: 8px;
   font-size: 14px;
   color: #fff;
   display: none;
   align-self: stretch;
+  flex-shrink: 0;
+  overflow: visible;
 }
 
 #current-filter.visible {
@@ -5679,9 +6228,26 @@ header {
   gap: 6px;
 }
 
+/* Cap height when details are open, but never crush the pill list. */
+.sidebar.details-open #current-filter.visible {
+  max-height: 40vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  flex-shrink: 0;
+  min-height: auto;
+}
+
 #current-filter-body {
   min-width: 0;
   max-width: 100%;
+  overflow: visible;
+}
+
+.filter-count,
+.no-results {
+  margin: 0;
+  line-height: 1.4;
+  overflow: visible;
 }
 
 #clear-all-filters-button.clear-filter-button {
@@ -6563,12 +7129,13 @@ header {
 
 .filter-pills-search-chain .filter-pill,
 .filter-pills-search-chain .filter-pill-search-op {
-  flex-shrink: 0;
+  flex-shrink: 1;
 }
 
 .filter-pill {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   background: rgba(0, 212, 255, 0.15);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(0, 150, 200, 0.5);
@@ -6578,6 +7145,12 @@ header {
   font-weight: 500;
   color: #fff;
   transition: all 0.3s ease;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .filter-pill.inverted {
@@ -7357,4 +7930,306 @@ header {
 .filter-combine-label {
   margin-right: 4px;
   opacity: 0.85;
+}
+
+.path-tree-label-row,
+.print-history-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.path-tree-label-row label,
+.print-history-label-row label {
+  margin-bottom: 0;
+}
+
+.path-tree-label-row .icon-button {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.folder-rail-toggle {
+  width: auto;
+  max-width: none;
+  margin-bottom: 0;
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 10px 20px;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: none;
+  overflow: visible;
+}
+
+.folder-rail-toggle::before {
+  display: none;
+}
+
+.folder-rail-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(0, 150, 200, 0.5);
+  transform: translateY(-1px);
+  box-shadow: none;
+}
+
+.folder-rail-toggle.active {
+  background: var(--primary-gradient, linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%));
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 4px 12px var(--primary-shadow, rgba(91, 159, 255, 0.3));
+}
+
+.folder-rail {
+  position: fixed;
+  top: 0;
+  left: var(--sidebar-width, 350px);
+  width: var(--folder-tree-width, 280px);
+  height: 100vh;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  background: rgba(30, 30, 46, 0.88);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.25);
+}
+
+.folder-rail.hidden,
+.folder-tree-popover.hidden {
+  display: none;
+}
+
+body.server-mode .folder-rail {
+  top: 30px;
+  height: calc(100vh - 30px);
+}
+
+.folder-rail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
+}
+
+.folder-rail-header .icon-button {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+}
+
+.folder-rail-header .icon-button::before {
+  display: none;
+}
+
+.folder-tree-search-wrap {
+  padding: 0 10px 8px;
+  flex-shrink: 0;
+}
+
+.folder-tree-search-wrap input,
+.folder-tree-popover > input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 12px;
+}
+
+.folder-rail-tree,
+.folder-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px 12px;
+}
+
+.folder-tree-popover {
+  position: fixed;
+  z-index: 240;
+  width: var(--folder-tree-width, 280px);
+  max-height: min(70vh, 520px);
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  background: rgba(30, 30, 46, 0.96);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.folder-tree-popover > input {
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.folder-tree-node {
+  user-select: none;
+}
+
+.folder-tree-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  max-width: none;
+  padding: 4px 6px;
+  margin: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  text-align: left;
+  box-shadow: none;
+  overflow: visible;
+  font-weight: 400;
+}
+
+.folder-tree-row::before {
+  display: none;
+}
+
+.folder-tree-row:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+}
+
+.folder-tree-row.is-selected {
+  background: rgba(0, 212, 255, 0.16);
+}
+
+.folder-tree-twist {
+  width: 16px;
+  flex-shrink: 0;
+  opacity: 0.7;
+  font-size: 10px;
+}
+
+.folder-tree-twist.is-empty {
+  opacity: 0;
+}
+
+.folder-tree-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 2px;
+  background: rgba(255, 210, 80, 0.85);
+  position: relative;
+}
+
+.folder-tree-icon.is-bundle {
+  background: transparent;
+  box-shadow:
+    2px 2px 0 rgba(255, 210, 80, 0.45),
+    0 0 0 1px rgba(255, 210, 80, 0.9);
+}
+
+.folder-tree-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-tree-count {
+  flex-shrink: 0;
+  opacity: 0.55;
+  font-size: 11px;
+}
+
+.folder-tree-children {
+  margin-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  padding-left: 4px;
+}
+
+.sidebar .dropdown-with-list .folder-tree-button {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: col-resize;
+  z-index: 30;
+  touch-action: none;
+  flex: none;
+}
+
+.sidebar-resize-handle {
+  position: fixed;
+  top: 0;
+  left: calc(var(--sidebar-width, 350px) - 8px);
+  right: auto;
+  bottom: auto;
+  width: 8px;
+  height: 100vh;
+  z-index: 110;
+}
+
+body.server-mode .sidebar-resize-handle {
+  top: 30px;
+  height: calc(100vh - 30px);
+}
+
+.panel-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 2px;
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.panel-resize-handle:hover::after,
+.panel-resize-handle.is-active::after,
+body.is-panel-resizing .panel-resize-handle.is-active::after {
+  background: rgba(0, 212, 255, 0.7);
+}
+
+body.is-panel-resizing,
+body.is-panel-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }

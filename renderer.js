@@ -88,9 +88,9 @@ window._electronRealEventHandlers = {};
 window._electronPendingEvents = {};
 const earlyEventChannels = [
   'open-theme-settings', 'regenerate-thumbnails', 'generate-missing-thumbnails',
-  'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-stats',
+  'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-filament-manager', 'open-stats',
   'open-backup-restore', 'open-ai-config', 'open-file-type-settings', 'open-performance-settings',
-  'open-slicer-settings', 'open-browser-extension-settings', 'open-purge-models',
+  'open-slicer-settings', 'open-browser-extension-settings', 'open-mcp-server-settings', 'open-purge-models',
   'open-metadata-editor', 'open-system-report', 'open-manage-thumbnails',
   'open-settings', 'open-guide', 'open-about', 'open-keyboard-shortcuts',
   'open-server-mode-info',
@@ -295,6 +295,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (!dedupDialog || dedupDialog.dataset.dedupTeardownBound === '1') return;
   dedupDialog.dataset.dedupTeardownBound = '1';
   dedupDialog.addEventListener('close', function() {
+    window._dedupScope = null;
     if (typeof window.teardownDedupVirtualList === 'function') {
       window.teardownDedupVirtualList();
     } else {
@@ -790,6 +791,7 @@ const DEFAULT_SORT = 'dateAdded DESC'; // Show newest models by default
 let currentBatch = 0;
 let isRendering = false;
 let selectedModels = new Set();
+window.selectedModels = selectedModels;
 let isMultiSelectMode = false;
 let isScanning = false;
 
@@ -1140,6 +1142,7 @@ let renderContext = null;
 // Inverted filter state - tracks which filters are inverted (NOT equal instead of equal)
 let invertedFilters = window.invertedFilters || {
   tag: false,
+  filament: false,
   designer: false,
   license: false,
   parentModel: false,
@@ -2011,10 +2014,10 @@ async function updateModelElement(filePath) {
       }
     }
     
-    if (shouldBeVisible && printStatus === 'printed') {
-      shouldBeVisible = model.printed;
-    } else if (shouldBeVisible && printStatus === 'not-printed') {
-      shouldBeVisible = !model.printed;
+    if (shouldBeVisible && printStatus && printStatus !== 'all') {
+      shouldBeVisible = window.PrintHistory
+        ? window.PrintHistory.modelMatchesPrintFilter(model, printStatus)
+        : (printStatus === 'printed' ? !!model.printed : printStatus === 'not-printed' ? !model.printed : true);
     }
 
     if (shouldBeVisible && newStatus === 'new') {
@@ -2174,36 +2177,18 @@ async function updateModelElement(filePath) {
       previewTileNameEl.textContent = displayFileName;
     }
 
-    // Update print status - make sure to match the class/structure used in renderFile
+    // Update print status
     const printStatusElement = existingElement.querySelector('.print-status');
-    if (printStatusElement) {
+    if (printStatusElement && window.PrintHistory) {
+      window.PrintHistory.applyBadge(printStatusElement, model);
+      window.PrintHistory.bindBadge(printStatusElement, filePath);
+    } else if (printStatusElement) {
       printStatusElement.textContent = model.printed ? 'Printed' : 'Not Printed';
-      if (model.printed) {
-        printStatusElement.classList.add('printed');
-      } else {
-        printStatusElement.classList.remove('printed');
-      }
-    } else {
-      // If print status element doesn't exist, create it
+      printStatusElement.classList.toggle('printed', !!model.printed);
+    } else if (window.PrintHistory) {
       const statusElement = document.createElement('div');
-      statusElement.className = `print-status${model.printed ? ' printed' : ''}`;
-      statusElement.textContent = model.printed ? 'Printed' : 'Not Printed';
-      statusElement.style.cursor = 'pointer';
-      statusElement.title = 'Click to toggle printed status';
-      
-      // Add click handler to toggle printed status
-      statusElement.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation(); // Prevent triggering file item click
-        
-        // Get current model to check printed status
-        const currentModel = await window.electron.getModel(filePath);
-        if (currentModel) {
-          const newPrintedStatus = !currentModel.printed;
-          await autoSaveModel('printed', newPrintedStatus, filePath);
-        }
-      });
-      
+      window.PrintHistory.applyBadge(statusElement, model);
+      window.PrintHistory.bindBadge(statusElement, filePath);
       existingElement.appendChild(statusElement);
     }
 
@@ -2509,6 +2494,9 @@ async function updateModelElement(filePath) {
         }).catch(err => console.error('Error loading tags:', err));
       } else {
         applyDetailedTagsRow([]);
+      }
+      if (typeof window.updateModelFilamentDisplay === 'function') {
+        window.updateModelFilamentDisplay(existingElement);
       }
     } else if (isDetailedView || currentViewIsDetailed) {
       // Only warn if we're in detailed view but metadata container is missing
@@ -3002,6 +2990,8 @@ async function showModelDetails(filePath) {
     
     // Clear existing tags
     document.getElementById('model-tags').innerHTML = '';
+    const modelFilamentsEl = document.getElementById('model-filaments');
+    if (modelFilamentsEl) modelFilamentsEl.innerHTML = '';
 
     // First populate all dropdowns with available options
     await Promise.all([
@@ -3036,7 +3026,6 @@ async function showModelDetails(filePath) {
 
     // Add auto-save event listeners for all fields
     const fields = {
-      'model-printed': { type: 'checkbox', field: 'printed' },
       'model-source': { type: 'text', field: 'source' },
       'model-notes': { type: 'text', field: 'notes', useChange: true },
       'model-designer': { type: 'select', field: 'designer' },
@@ -3051,7 +3040,6 @@ async function showModelDetails(filePath) {
       'model-designer': model.designer || '',
       'model-source': model.source || '',
       'model-notes': model.notes || '',
-      'model-printed': Boolean(model.printed),
       'model-parent': model.parentModel || '',
       'model-license': model.license || ''
     };
@@ -3190,7 +3178,9 @@ async function showModelDetails(filePath) {
     
     document.getElementById('model-source').value = storedValues['model-source'];
     document.getElementById('model-notes').value = storedValues['model-notes'];
-    document.getElementById('model-printed').checked = storedValues['model-printed'];
+    if (window.PrintHistory) {
+      await window.PrintHistory.populateDetails(model);
+    }
 
     // Add new event listeners
     Object.entries(fields).forEach(([id, config]) => {
@@ -3241,6 +3231,9 @@ async function showModelDetails(filePath) {
         await addTagToModel(tagName, 'model-tags', { skipSave: true });
       }
     }
+    if (typeof window.loadModelFilaments === 'function') {
+      await window.loadModelFilaments(filePath);
+    }
     
     // Final check before showing the panel
     if (currentModelDetailsAbort || currentModelDetailsPath !== filePath) {
@@ -3249,6 +3242,12 @@ async function showModelDetails(filePath) {
 
     // Show the details panel
     detailsPanel.classList.remove('hidden');
+    if (typeof window.SidebarLayout?.collapseFiltersForDetails === 'function') {
+      window.SidebarLayout.collapseFiltersForDetails();
+    }
+    requestAnimationFrame(() => {
+      detailsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
 
     // Hide multi-edit panel if it's open and clear its form fields
     const multiEditPanel = document.getElementById('multi-edit-panel');
@@ -3263,13 +3262,6 @@ async function showModelDetails(filePath) {
       } else {
         item.classList.remove('selected');
       }
-    });
-
-    // Scroll the sidebar to show the model details panel
-    const sidebar = document.querySelector('.sidebar');
-    sidebar.scrollTo({
-      top: detailsPanel.offsetTop - 20, // 20px padding from top
-      behavior: 'smooth'
     });
 
   } catch (error) {
@@ -4081,11 +4073,81 @@ function notifyHashGenerationFailures(result) {
   }
 }
 
+let dedupScopeUiSync = false;
+
+function getDedupScopeFilters() {
+  const dialog = document.getElementById('dedup-dialog');
+  const currentRadio = dialog?.querySelector('#dedup-scope-current');
+  const entireRadio = dialog?.querySelector('#dedup-scope-entire');
+  const summaryEl = dialog?.querySelector('#dedup-scope-summary');
+  const filters = typeof window.getCurrentLibraryFilters === 'function'
+    ? window.getCurrentLibraryFilters()
+    : null;
+  const hasFilters = typeof window.libraryFiltersAreActive === 'function'
+    ? window.libraryFiltersAreActive(filters)
+    : false;
+
+  if (!window._dedupScope || !hasFilters) {
+    window._dedupScope = hasFilters ? 'current' : 'entire';
+  }
+
+  dedupScopeUiSync = true;
+  try {
+    if (currentRadio) {
+      currentRadio.disabled = !hasFilters;
+      currentRadio.checked = window._dedupScope === 'current';
+      const opt = currentRadio.closest('.dedup-scope-option');
+      if (opt) opt.classList.toggle('disabled', !hasFilters);
+    }
+    if (entireRadio) entireRadio.checked = window._dedupScope === 'entire';
+  } finally {
+    dedupScopeUiSync = false;
+  }
+
+  if (summaryEl) {
+    if (!hasFilters) {
+      summaryEl.textContent = 'Apply a library filter (designer, tags, search, …) to de-dup only that subset.';
+    } else if (window._dedupScope === 'current') {
+      const label = typeof window.describeLibraryFilters === 'function'
+        ? window.describeLibraryFilters(filters)
+        : '';
+      summaryEl.textContent = label
+        ? `De-dupping models matching: ${label}`
+        : 'De-dupping the current library view.';
+    } else {
+      summaryEl.textContent = 'De-dupping the entire library.';
+    }
+  }
+
+  return window._dedupScope === 'current' ? filters : null;
+}
+
+function prepareDedupDialog() {
+  const dialog = document.getElementById('dedup-dialog');
+  if (!dialog) return null;
+  dialog.classList.remove('modal-fullscreen');
+  const fullscreenBtn = document.getElementById('dedup-fullscreen-toggle');
+  if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
+  const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
+  if (includeZipCheckbox) includeZipCheckbox.checked = false;
+  window._dedupScope = null;
+  return dialog;
+}
+
+function onDedupScopeChange() {
+  if (dedupScopeUiSync) return;
+  const current = document.getElementById('dedup-scope-current');
+  if (current?.disabled) return;
+  window._dedupScope = current?.checked ? 'current' : 'entire';
+  loadDuplicateFiles();
+}
+
 // Add or update the loadDuplicateFiles function
 // refreshOnly: when true, only refresh duplicate-groups content and do not call showModal() (dialog stays open)
 async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
   try {
     const serverMode = await window.electron.isServerMode().catch(() => false);
+    const scopeFilters = getDedupScopeFilters();
     // First check for models without file hash (unless we're skipping the check)
     if (!skipHashCheck) {
       // Check if a hash dialog is already showing or if we're currently checking
@@ -4094,7 +4156,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
       }
       
       isCheckingForHashes = true; // Set flag before checking
-      const modelsWithoutHashCount = await window.electron.getModelsWithoutHash();
+      const modelsWithoutHashCount = await window.electron.getModelsWithoutHash(scopeFilters);
       const isAlreadyGenerating = await window.electron.isGeneratingHashes();
       isCheckingForHashes = false; // Reset flag after checking
       
@@ -4166,7 +4228,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
         isHashDialogShowing = true; // Set flag before showing dialog
         const response = await window.electron.showMessage(
           'Generate File Hashes',
-          `${modelsWithoutHashCount} models don't have file hashes which are needed for de-duplication. Would you like to generate the hashes now?`,
+          `${modelsWithoutHashCount} models${scopeFilters ? ' in the current view' : ''} don't have file hashes which are needed for de-duplication. Would you like to generate the hashes now?`,
           ['Yes', 'No']
         );
       
@@ -4250,7 +4312,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           
           // Start hash generation
           try {
-            const result = await window.electron.generateMissingHashes();
+            const result = await window.electron.generateMissingHashes(scopeFilters);
             
             // Check if it's already running (shouldn't happen after the check above, but handle it)
             if (result && result.alreadyRunning) {
@@ -4354,8 +4416,11 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
       </div>
     `;
     
-    // Load duplicates with the includeZip parameter
-    const duplicatesRaw = await window.electron.getDuplicates(includeZip);
+    // Load duplicates with the includeZip parameter and optional current-view filters
+    const duplicatesRaw = await window.electron.getDuplicates({
+      includeZip,
+      filters: scopeFilters || undefined
+    });
     const groups = normalizeDuplicateGroups(duplicatesRaw);
     const isGeneratingHashes = await window.electron.isGeneratingHashes();
     console.log(`Loaded ${groups.length} duplicate groups (includeZip=${includeZip}, generatingHashes=${isGeneratingHashes})`);
@@ -4384,7 +4449,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
       }
       emptyHtml += `
         <div style="text-align: center; padding: 20px; color: #888;">
-          No duplicate models found
+          No duplicate models found${scopeFilters ? ' in the current view' : ''}
         </div>
       `;
       duplicateGroups.innerHTML = emptyHtml;
@@ -5571,7 +5636,7 @@ async function loadAndShowFileTypeSettings() {
   dialog.showModal();
 }
 
-// Function to create server mode menu bar (async so we can hide Browser Extension in server mode)
+// Function to create server mode menu bar
 async function createServerMenuBar() {
   const serverMode = await window.electron.isServerMode().catch(() => false);
   const menuBar = document.createElement('div');
@@ -5585,16 +5650,9 @@ async function createServerMenuBar() {
     { label: '---', action: null },
     { label: 'Print Roulette', action: () => window.electron.send('start-print-roulette') },
     { label: 'De-Dup', action: () => {
-      const dialog = document.getElementById('dedup-dialog');
+      const dialog = prepareDedupDialog();
       if (dialog) {
-        dialog.classList.remove('modal-fullscreen');
-        const fullscreenBtn = document.getElementById('dedup-fullscreen-toggle');
-        if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
         dialog.showModal();
-        const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
-        if (includeZipCheckbox) {
-          includeZipCheckbox.checked = false;
-        }
         loadDuplicateFiles();
       } else {
         // Trigger the event which will open the dialog via the listener
@@ -5602,6 +5660,43 @@ async function createServerMenuBar() {
       }
     }},
     { label: '---', action: null },
+    ...(serverMode ? [{
+      label: 'Browser Extension',
+      action: () => {
+        window.open('https://chromewebstore.google.com/detail/pigngedngcegmemgfbkaiihjnbplaedj?utm_source=item-share-cb', '_blank', 'noopener,noreferrer');
+      }
+    }] : [{
+      label: 'Browser Extension',
+      action: async () => {
+        const dialog = document.getElementById('browser-extension-settings-dialog');
+        if (!dialog) {
+          window.electron.send('open-browser-extension-settings');
+          return;
+        }
+        const enabled = await window.electron.getSetting('enableBrowserExtension');
+        const port = await window.electron.getSetting('browserExtensionPort');
+        const check = document.getElementById('enable-browser-extension');
+        const portInput = document.getElementById('browser-extension-port');
+        if (check) check.checked = enabled === '1';
+        if (portInput) portInput.value = port || '5000';
+        dialog.showModal();
+      }
+    }]),
+    { label: 'MCP Server', action: async () => {
+      if (typeof window.openMcpServerSettings === 'function') {
+        await window.openMcpServerSettings();
+      } else {
+        window.electron.send('open-mcp-server-settings');
+      }
+    }},
+    { label: '---', action: null },
+    { label: 'Filament Management', action: () => {
+      if (typeof window.openFilamentManager === 'function') {
+        window.openFilamentManager();
+      } else {
+        window.electron.send('open-filament-manager');
+      }
+    }},
     { label: 'Tag Manager', action: () => {
       const dialog = document.getElementById('tag-manager-dialog');
       if (dialog) {
@@ -5638,10 +5733,6 @@ async function createServerMenuBar() {
       if (dialog) {
         dialog.showModal();
       }
-    }},
-    { label: '---', action: null },
-    { label: 'Browser Extension', action: () => {
-      window.open('https://chromewebstore.google.com/detail/pigngedngcegmemgfbkaiihjnbplaedj?utm_source=item-share-cb', '_blank', 'noopener,noreferrer');
     }},
     { label: '---', action: null },
     { label: 'Restart Server', action: async () => {
@@ -5695,7 +5786,7 @@ async function createServerMenuBar() {
     }}
   ]);
   
-  // Settings menu (Browser Extension not needed in Docker/Server mode)
+  // Settings menu
   const settingsMenuItems = [
     { label: 'AI Config', action: async () => {
       await loadAndShowAIConfig();
@@ -5718,22 +5809,6 @@ async function createServerMenuBar() {
       window.electron.send('open-theme-settings');
     }}
   ];
-  if (!serverMode) {
-    settingsMenuItems.push({ label: 'Browser Extension', action: async () => {
-      const dialog = document.getElementById('browser-extension-settings-dialog');
-      if (!dialog) {
-        window.electron.send('open-browser-extension-settings');
-        return;
-      }
-      const enabled = await window.electron.getSetting('enableBrowserExtension');
-      const port = await window.electron.getSetting('browserExtensionPort');
-      const check = document.getElementById('enable-browser-extension');
-      const portInput = document.getElementById('browser-extension-port');
-      if (check) check.checked = enabled === '1';
-      if (portInput) portInput.value = port || '5000';
-      dialog.showModal();
-    }});
-  }
   const settingsMenu = createMenuDropdown('Settings', settingsMenuItems);
   
   // Help menu - Quick Start Guide opens multi-page quickstart-guide, not guide-dialog
@@ -6235,6 +6310,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (tagFilter || tagChips) {
       invertedFilters.tag = !invertedFilters.tag;
       console.log('Inverted tag filter:', invertedFilters.tag);
+    } else if (document.getElementById('filament-filter')?.value || window.multiFilterChips?.filaments?.length) {
+      invertedFilters.filament = !invertedFilters.filament;
+      console.log('Inverted filament filter:', invertedFilters.filament);
     } else if (designer || window.multiFilterChips?.designer?.length) {
       invertedFilters.designer = !invertedFilters.designer;
       console.log('Inverted designer filter:', invertedFilters.designer);
@@ -6606,7 +6684,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         designer: document.getElementById('model-designer').value || 'Unknown',
         source: document.getElementById('model-source').value || '',
         notes: document.getElementById('model-notes').value || '',
-        printed: document.getElementById('model-printed').checked,
+        printStatus: document.getElementById('model-print-status')?.value || undefined,
         parentModel: document.getElementById('model-parent').value || '',
         license: document.getElementById('model-license').value || '',
         tags: tags
@@ -6631,7 +6709,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const source = document.getElementById('multi-source').value;
       const parent = document.getElementById('multi-parent').value;
       const license = document.getElementById('multi-license').value;
-      const printed = document.getElementById('multi-printed').checked;
+      const printStatus = document.getElementById('multi-print-status')?.value || '';
 
       // Get all selected tags
       const tagElements = document.getElementById('multi-tags').querySelectorAll('.tag');
@@ -6647,7 +6725,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           ...(source && { source }),
           ...(parent && { parentModel: parent }),
           ...(license && { license }),
-          printed: printed,
+          ...(printStatus && { printStatus }),
           tags: tags.length > 0 ? tags : (existingModel.tags || []) // Keep tag logic simple here, merging is in auto-save
         };
 
@@ -6811,6 +6889,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       'printed-select',
       'new-select',
       'tag-filter',
+      'filament-filter',
       'filetype-select'  // Add this line
     ];
 
@@ -7702,13 +7781,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Assign real handler for open-dedup (early listener already registered; avoids "No listeners" in Docker/server)
   window._electronRealEventHandlers['open-dedup'] = function() {
-    const dialog = document.getElementById('dedup-dialog');
+    const dialog = prepareDedupDialog();
     if (!dialog) return;
-    dialog.classList.remove('modal-fullscreen');
-    const fullscreenBtn = document.getElementById('dedup-fullscreen-toggle');
-    if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
-    const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
-    if (includeZipCheckbox) includeZipCheckbox.checked = false;
     loadDuplicateFiles();
   };
   if (window._electronPendingEvents['open-dedup']) {
@@ -7797,9 +7871,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('dedup-easy-button')?.addEventListener('click', () => window.dedupEasyFromDialog());
   document.getElementById('dedup-clear-button')?.addEventListener('click', () => window.dedupClearFromDialog());
+  document.getElementById('dedup-scope-current')?.addEventListener('change', onDedupScopeChange);
+  document.getElementById('dedup-scope-entire')?.addEventListener('change', onDedupScopeChange);
 
   // Free large dedup payloads when the dialog closes
   document.getElementById('dedup-dialog')?.addEventListener('close', () => {
+    window._dedupScope = null;
     teardownDedupVirtualList();
     const groupsEl = document.querySelector('#dedup-dialog .duplicate-groups');
     if (groupsEl) groupsEl.innerHTML = '';
@@ -7833,11 +7910,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         // Refresh tag filter dropdown
         await populateTagFilter();
+        if (typeof window.populateFilamentSelect === 'function') {
+          await window.populateFilamentSelect('filament-select', 'model-filaments');
+          await window.populateFilamentSelect('multi-filament-select', 'multi-filaments');
+        }
+        if (typeof window.populateFilamentFilter === 'function') {
+          await window.populateFilamentFilter();
+        }
         
         // Refresh tag list in edit view if a model is currently being edited
         const currentModelPath = getCurrentModelFilePath() || currentModelDetailsPath;
         if (currentModelPath) {
           await loadModelTags(currentModelPath);
+          if (typeof window.loadModelFilaments === 'function') {
+            await window.loadModelFilaments(currentModelPath);
+          }
         }
         
         // Force a full grid refresh to show updated tags on all model cards
@@ -7918,6 +8005,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             const currentModelPath = getCurrentModelFilePath() || currentModelDetailsPath;
             if (currentModelPath) {
               await loadModelTags(currentModelPath);
+          if (typeof window.loadModelFilaments === 'function') {
+            await window.loadModelFilaments(currentModelPath);
+          }
             }
             
             // Refresh the grid to show updated tags on model cards
@@ -8483,6 +8573,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const newSelPurge = document.getElementById('new-select');
         if (newSelPurge) newSelPurge.value = 'all';
         document.getElementById('tag-filter').value = '';
+        const filamentFilterClear = document.getElementById('filament-filter');
+        if (filamentFilterClear) filamentFilterClear.value = '';
       }
     } catch (error) {
       console.error('Error purging models:', error);
@@ -9958,6 +10050,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const newSelVl = document.getElementById('new-select');
         if (newSelVl) newSelVl.value = 'all';
         document.getElementById('tag-filter').value = '';
+        const filamentFilterClear = document.getElementById('filament-filter');
+        if (filamentFilterClear) filamentFilterClear.value = '';
         document.getElementById('filetype-select').value = '';
         document.getElementById('search-filter-input').value = '';
         if (typeof window.queryBuilderClearAllMultiChips === 'function') {
@@ -9998,7 +10092,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Add event listeners on filter and search elements so that the "view-library-message" is removed when a filter or search is active.
-  ["designer-select", "license-select", "parent-select", "printed-select", "new-select", "favorite-select", "rating-select", "rating-min-select", "tag-filter", "filetype-select", "search-filter-input"].forEach(id => {
+  ["designer-select", "license-select", "parent-select", "printed-select", "new-select", "favorite-select", "rating-select", "rating-min-select", "tag-filter", "filament-filter", "filetype-select", "search-filter-input"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("change", () => {
@@ -10405,6 +10499,185 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (url && typeof window.electron?.openExternal === 'function') {
       await window.electron.openExternal(url);
     }
+  });
+
+  async function copyTextToClipboard(text) {
+    const value = text == null ? '' : String(text);
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+    } catch (_) { /* fall through */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function flashButtonCopied(btn) {
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => {
+      if (btn.textContent === 'Copied') btn.textContent = original;
+    }, 1200);
+  }
+
+  function mcpClientConfigJson(url) {
+    return JSON.stringify({
+      mcpServers: {
+        printventory: { url }
+      }
+    }, null, 2);
+  }
+
+  function getMcpDialogPort() {
+    return Math.min(65535, Math.max(1024, parseInt(document.getElementById('mcp-server-port')?.value || '5000', 10) || 5000));
+  }
+
+  function updateMcpDialogPreview(info, serverMode) {
+    const check = document.getElementById('enable-mcp-server');
+    const port = getMcpDialogPort();
+    let url = `http://127.0.0.1:${port}/mcp`;
+    if (serverMode && window.location && window.location.origin) {
+      url = String(window.location.origin).replace(/\/$/, '') + '/mcp';
+    } else if (!serverMode && info && info.url && String(info.url).includes(':' + String(info.port || port))) {
+      url = String(info.url).replace(/:\d+(\/mcp)?$/, ':' + port + '/mcp');
+    }
+    const urlInput = document.getElementById('mcp-server-url');
+    if (urlInput) urlInput.value = url;
+    const configEl = document.getElementById('mcp-server-config');
+    if (configEl) configEl.textContent = mcpClientConfigJson(url);
+
+    const statusEl = document.getElementById('mcp-server-status');
+    if (statusEl) {
+      if (serverMode) {
+        statusEl.textContent = 'Status: MCP endpoint is available on this server.';
+      } else if (check?.checked && info && info.running) {
+        statusEl.textContent = 'Status: Listening at ' + url;
+      } else if (check?.checked) {
+        statusEl.textContent = 'Status: Enabled. Click Save to start the listener.';
+      } else {
+        statusEl.textContent = 'Status: Disabled. Enable and Save to start the listener while Printventory is running.';
+      }
+    }
+    const extra = document.getElementById('mcp-server-extra-urls');
+    if (extra) {
+      const alts = ((info && info.urls) || []).filter((u) => u && u !== url);
+      extra.textContent = alts.length ? ('Also reachable at: ' + alts.join('  ·  ')) : '';
+    }
+  }
+
+  async function populateMcpServerSettingsDialog() {
+    const dialog = document.getElementById('mcp-server-settings-dialog');
+    if (!dialog) return;
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    const desktopControls = document.getElementById('mcp-server-desktop-controls');
+    const serverNote = document.getElementById('mcp-server-server-mode-note');
+    const saveBtn = document.getElementById('save-mcp-server-settings');
+    const cancelBtn = document.getElementById('cancel-mcp-server-settings');
+    if (desktopControls) desktopControls.hidden = !!serverMode;
+    if (serverNote) serverNote.hidden = !serverMode;
+    if (saveBtn) saveBtn.hidden = !!serverMode;
+    if (cancelBtn) cancelBtn.textContent = serverMode ? 'Close' : 'Cancel';
+
+    const enabled = await window.electron.getSetting('enableMcpServer');
+    const port = await window.electron.getSetting('browserExtensionPort');
+    const check = document.getElementById('enable-mcp-server');
+    const portInput = document.getElementById('mcp-server-port');
+    if (check) check.checked = enabled === '1';
+    if (portInput) portInput.value = port || '5000';
+
+    let info = {};
+    try {
+      info = await window.electron.getMcpConnectionInfo() || {};
+    } catch (err) {
+      console.error('MCP connection info failed:', err);
+    }
+    dialog._mcpInfo = info;
+    dialog._mcpServerMode = serverMode;
+
+    const toolsEl = document.getElementById('mcp-server-tools');
+    if (toolsEl) {
+      const tools = info.tools || [];
+      toolsEl.textContent = tools.length ? ('Tools: ' + tools.join(', ')) : '';
+    }
+    updateMcpDialogPreview(info, serverMode);
+  }
+
+  window.openMcpServerSettings = async function openMcpServerSettings() {
+    const dialog = document.getElementById('mcp-server-settings-dialog');
+    if (!dialog) {
+      window.electron.send('open-mcp-server-settings');
+      return;
+    }
+    await populateMcpServerSettingsDialog();
+    dialog.showModal();
+  };
+
+  window._electronRealEventHandlers['open-mcp-server-settings'] = async function() {
+    await window.openMcpServerSettings();
+  };
+  if (window._electronPendingEvents['open-mcp-server-settings']) {
+    window._electronPendingEvents['open-mcp-server-settings'].forEach((args) => {
+      window._electronRealEventHandlers['open-mcp-server-settings'].apply(null, args);
+    });
+    delete window._electronPendingEvents['open-mcp-server-settings'];
+  }
+
+  document.getElementById('save-mcp-server-settings')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const serverMode = await window.electron.isServerMode().catch(() => false);
+    if (serverMode) {
+      document.getElementById('mcp-server-settings-dialog')?.close();
+      return;
+    }
+    const check = document.getElementById('enable-mcp-server');
+    const portInput = document.getElementById('mcp-server-port');
+    const enabled = check?.checked ? '1' : '0';
+    const port = Math.min(65535, Math.max(1024, parseInt(portInput?.value || '5000', 10) || 5000));
+    await window.electron.saveSetting('enableMcpServer', enabled);
+    await window.electron.saveSetting('browserExtensionPort', String(port));
+    const result = await window.electron.syncLocalHttpServer(port);
+    if (enabled === '1' && result && !result.success) {
+      await window.electron.showMessage('MCP Server', result.message || 'Failed to start the MCP listener. On macOS, check the main process console or rebuild with the network.server entitlement.');
+      return;
+    }
+    document.getElementById('mcp-server-settings-dialog')?.close();
+  });
+
+  document.getElementById('cancel-mcp-server-settings')?.addEventListener('click', () => {
+    document.getElementById('mcp-server-settings-dialog')?.close();
+  });
+
+  const refreshMcpDialogPreview = () => {
+    const dialog = document.getElementById('mcp-server-settings-dialog');
+    updateMcpDialogPreview(dialog?._mcpInfo || {}, !!dialog?._mcpServerMode);
+  };
+  document.getElementById('enable-mcp-server')?.addEventListener('change', refreshMcpDialogPreview);
+  document.getElementById('mcp-server-port')?.addEventListener('input', refreshMcpDialogPreview);
+
+  document.getElementById('copy-mcp-server-url')?.addEventListener('click', async () => {
+    const url = document.getElementById('mcp-server-url')?.value || '';
+    const ok = await copyTextToClipboard(url);
+    if (ok) flashButtonCopied(document.getElementById('copy-mcp-server-url'));
+  });
+
+  document.getElementById('copy-mcp-server-config')?.addEventListener('click', async () => {
+    const text = document.getElementById('mcp-server-config')?.textContent || '';
+    const ok = await copyTextToClipboard(text);
+    if (ok) flashButtonCopied(document.getElementById('copy-mcp-server-config'));
   });
 
   // Store pending tags for preview (can handle multiple models)
@@ -12721,23 +12994,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         // Create print status indicator
         const printStatus = document.createElement('div');
-        printStatus.className = 'print-status';
-        printStatus.textContent = 'Not Printed';
-        printStatus.style.cursor = 'pointer';
-        printStatus.title = 'Click to toggle printed status';
-        
-        // Add click handler to toggle printed status
-        printStatus.addEventListener('click', async (e) => {
-          e.preventDefault();
-          e.stopPropagation(); // Prevent triggering file item click
-          
-          // Get current model to check printed status
-          const currentModel = await window.electron.getModel(model.filePath);
-          if (currentModel) {
-            const newPrintedStatus = !currentModel.printed;
-            await autoSaveModel('printed', newPrintedStatus, model.filePath);
-          }
-        });
+        if (window.PrintHistory) {
+          window.PrintHistory.applyBadge(printStatus, model);
+          window.PrintHistory.bindBadge(printStatus, model.filePath);
+        } else {
+          printStatus.className = 'print-status';
+          printStatus.textContent = 'Not Printed';
+        }
         
         thumbnailContainer.appendChild(printStatus);
         
@@ -12831,14 +13094,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             
             // Update print status
             const printStatus = fileElement.querySelector('.print-status');
-            if (printStatus) {
-              if (model.printed) {
-                printStatus.textContent = 'Printed';
-                printStatus.classList.add('printed');
-              } else {
-                printStatus.textContent = 'Not Printed';
-                printStatus.classList.remove('printed');
-              }
+            if (printStatus && window.PrintHistory) {
+              window.PrintHistory.applyBadge(printStatus, model);
+              window.PrintHistory.bindBadge(printStatus, model.filePath);
+            } else if (printStatus) {
+              printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
+              printStatus.classList.toggle('printed', !!model.printed);
             }
             
             // Update file details
@@ -12903,8 +13164,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (designer === '__none__' && model.designer) return false;
     if (license && model.license !== license) return false;
     if (parentModel && model.parentModel !== parentModel) return false;
-    if (printStatus === 'printed' && !model.printed) return false;
-    if (printStatus === 'not-printed' && model.printed) return false;
+    if (printStatus === 'printed' && !(window.PrintHistory ? window.PrintHistory.modelMatchesPrintFilter(model, printStatus) : model.printed)) return false;
+    if (printStatus === 'not-printed' && (window.PrintHistory ? !window.PrintHistory.modelMatchesPrintFilter(model, printStatus) : model.printed)) return false;
+    if (printStatus !== 'all' && printStatus !== 'printed' && printStatus !== 'not-printed' && window.PrintHistory && !window.PrintHistory.modelMatchesPrintFilter(model, printStatus)) return false;
     if (favoriteStatus === 'favorited' && !model.favorite) return false;
     if (favoriteStatus === 'not-favorited' && model.favorite) return false;
     const modelRating = normalizeModelRatingValue(model.rating);
@@ -13691,6 +13953,8 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         const newSelNm = document.getElementById('new-select');
         if (newSelNm) newSelNm.value = 'all';
         document.getElementById('tag-filter').value = '';
+        const filamentFilterClear = document.getElementById('filament-filter');
+        if (filamentFilterClear) filamentFilterClear.value = '';
         document.getElementById('filetype-select').value = '';
         document.getElementById('search-filter-input').value = '';
         window.currentDirectoryFilter = null;
@@ -13751,6 +14015,9 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
     window._scanThumbnailProgress = null;
     // Clean up event listener
     stopButton.removeEventListener('click', handleStopClick);
+    if (typeof window.FolderTree?.refresh === 'function') {
+      window.FolderTree.refresh().catch(() => {});
+    }
     
     if (!background) {
       progressSection.classList.add('hidden');
@@ -13852,10 +14119,10 @@ async function refreshModelDisplay() {
         models = models.filter(model => model.parentModel === parentModel);
       }
     }
-    if (printStatus === 'printed') {
-      models = models.filter(model => model.printed);
-    } else if (printStatus === 'not-printed') {
-      models = models.filter(model => !model.printed);
+    if (printStatus && printStatus !== 'all') {
+      models = models.filter((model) => window.PrintHistory
+        ? window.PrintHistory.modelMatchesPrintFilter(model, printStatus)
+        : (printStatus === 'printed' ? !!model.printed : printStatus === 'not-printed' ? !model.printed : true));
     }
     if (newStatus === 'new') {
       models = models.filter(model => isModelNew(model));
@@ -13919,6 +14186,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'printed-select',
     'new-select',
     'tag-filter',
+    'filament-filter',
     // Note: sort-select is handled by search.js via initializeCombinedSearch()
     'filetype-select'  // Add this line
   ];
@@ -14048,8 +14316,13 @@ async function renderFile(file, container, skipThumbnail = false) {
   }
 
   const printStatus = document.createElement('div');
-  printStatus.className = `print-status ${file.printed? 'printed': ''}`;
-  printStatus.textContent = file.printed? 'Printed': 'Not Printed';
+  if (window.PrintHistory) {
+    window.PrintHistory.applyBadge(printStatus, file);
+    window.PrintHistory.bindBadge(printStatus, file.filePath);
+  } else {
+    printStatus.className = `print-status ${file.printed? 'printed': ''}`;
+    printStatus.textContent = file.printed? 'Printed': 'Not Printed';
+  }
   fileElement.appendChild(printStatus);
 
   const thumbnailContainer = document.createElement('div');
@@ -14875,14 +15148,20 @@ function clearModelDetailsSidebar() {
   if (ms) ms.value = '';
   const mnotes = document.getElementById('model-notes');
   if (mnotes) mnotes.value = '';
-  const mp = document.getElementById('model-printed');
-  if (mp) mp.checked = false;
+  const mp = document.getElementById('model-print-status');
+  if (mp) mp.value = 'unprinted';
+  const hist = document.getElementById('print-history-list');
+  if (hist) hist.innerHTML = '';
+  const hint = document.getElementById('print-history-hint');
+  if (hint) hint.textContent = '';
   const mparent = document.getElementById('model-parent');
   if (mparent) mparent.value = '';
   const mlic = document.getElementById('model-license');
   if (mlic) mlic.value = '';
   const mtags = document.getElementById('model-tags');
   if (mtags) mtags.innerHTML = '';
+  const mfil = document.getElementById('model-filaments');
+  if (mfil) mfil.innerHTML = '';
   previousSelectionHash = '';
 }
 
@@ -15559,6 +15838,10 @@ async function initializeTags() {
   // Initial population of tag dropdowns
   await populateTagSelect('tag-select', 'model-tags');
   await populateTagSelect('multi-tag-select', 'multi-tags');
+  if (typeof window.populateFilamentSelect === 'function') {
+    await window.populateFilamentSelect('filament-select', 'model-filaments');
+    await window.populateFilamentSelect('multi-filament-select', 'multi-filaments');
+  }
 }
 
 async function populateTagSelect(selectId = 'tag-select', containerId = 'model-tags') {
@@ -16019,7 +16302,7 @@ document.getElementById('bulk-edit-dialog').addEventListener('submit', async (ev
         designer: updates.designer || model.designer,
         parentModel: updates.parentModel === 'none' ? '' : (updates.parentModel || model.parentModel),
         source: updates.source || model.source,
-        printed: updates.printed ? (updates.printed === 'true') : model.printed
+        printStatus: updates.printed || undefined
       };
       await window.electron.saveModel(updatedModel);
     }
@@ -17804,7 +18087,7 @@ function exitMultiEditMode() {
   const formFields = [
     'multi-designer',
     'multi-source',
-    'multi-printed', // Add printed checkbox to list
+    'multi-print-status',
     'multi-parent',
     'multi-license',
     'multi-tag-select'
@@ -17819,8 +18102,8 @@ function exitMultiEditMode() {
       element.parentNode.replaceChild(newElement, element);
       
       // Reset any specific element states
-      if (fieldId === 'multi-printed') {
-        newElement.checked = false;
+      if (fieldId === 'multi-print-status') {
+        newElement.value = '';
       } else if (newElement.tagName === 'SELECT') {
         newElement.value = ''; // Reset select elements
       } else if (newElement.tagName === 'INPUT') {
@@ -17835,7 +18118,7 @@ function exitMultiEditMode() {
   
   // Remove event listeners from model details form fields by cloning them
   const modelDetailsFields = [
-    'model-printed',
+    'model-print-status',
     'model-source',
     'model-notes',
     'model-designer',
@@ -17851,8 +18134,8 @@ function exitMultiEditMode() {
       element.parentNode.replaceChild(newElement, element);
       
       // Reset element states
-      if (fieldId === 'model-printed') {
-        newElement.checked = false;
+      if (fieldId === 'model-print-status') {
+        newElement.value = 'unprinted';
       } else if (newElement.tagName === 'SELECT') {
         newElement.value = '';
       } else if (newElement.tagName === 'INPUT') {
@@ -17871,10 +18154,13 @@ function exitMultiEditMode() {
   document.getElementById('model-designer').value = '';
   document.getElementById('model-source').value = '';
   document.getElementById('model-notes').value = '';
-  document.getElementById('model-printed').checked = false;
+  const printStatusSelect = document.getElementById('model-print-status');
+  if (printStatusSelect) printStatusSelect.value = 'unprinted';
   document.getElementById('model-parent').value = '';
   document.getElementById('model-license').value = '';
   document.getElementById('model-tags').innerHTML = '';
+  const modelFilamentsClear = document.getElementById('model-filaments');
+  if (modelFilamentsClear) modelFilamentsClear.innerHTML = '';
   
   // Clear the multi-edit tag container as well
   const multiTagsContainer = document.getElementById('multi-tags');
@@ -17960,7 +18246,8 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
     designer: 'Select Designer',
     parent: 'Select Parent Model',
     license: 'Select License',
-    tag: isRemove ? 'Remove Tag' : 'Select Tag'
+    tag: isRemove ? 'Remove Tag' : 'Select Tag',
+    filament: isRemove ? 'Remove Filament' : 'Select Filament'
   };
   titleElement.textContent = titles[fieldType] || 'Select Item';
   
@@ -17970,6 +18257,7 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
   
   // Fetch data based on field type
   let items = [];
+  let filamentValueByLabel = null;
   try {
     switch (fieldType) {
       case 'designer':
@@ -18022,11 +18310,48 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
           items = tags.map(t => t.name);
         }
         break;
+      case 'filament':
+        if (isRemove && targetSelectId === 'multi-filament-remove-select') {
+          if (typeof selectedModels === 'undefined' || selectedModels.size === 0) {
+            items = [];
+          } else {
+            const filePaths = Array.from(selectedModels);
+            const lists = await Promise.all(filePaths.map(async (filePath) => {
+              try {
+                const model = await window.electron.getModel(filePath);
+                return Array.isArray(model?.filaments) ? model.filaments : [];
+              } catch (error) {
+                return [];
+              }
+            }));
+            const byId = new Map();
+            lists.flat().forEach((f) => {
+              if (f && f.id != null && !byId.has(String(f.id))) byId.set(String(f.id), f);
+            });
+            items = Array.from(byId.values());
+          }
+        } else {
+          const filaments = await window.electron.getAllFilaments();
+          items = filaments || [];
+        }
+        break;
       default:
         console.error('Unknown field type:', fieldType);
         return;
     }
     
+    if (fieldType === 'filament') {
+      filamentValueByLabel = new Map();
+      items = (items || []).map((f) => {
+        const id = String(f && f.id != null ? f.id : f);
+        const label = (typeof window.formatFilamentLabel === 'function' && f && typeof f === 'object')
+          ? window.formatFilamentLabel(f)
+          : String(f && f.name ? f.name : id);
+        filamentValueByLabel.set(label, id);
+        return label;
+      });
+    }
+
     // Sort items alphabetically
     items.sort((a, b) => a.localeCompare(b));
     
@@ -18054,7 +18379,7 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
   }
   
   // Handle item selection
-  const handleItemClick = (itemValue) => {
+  const handleItemClick = async (itemValue) => {
     dialog.close();
     
     const targetSelect = document.getElementById(targetSelectId);
@@ -18062,39 +18387,54 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
       console.error('Target select element not found:', targetSelectId);
       return;
     }
+
+    try {
+      const resolvedValue = filamentValueByLabel ? (filamentValueByLabel.get(itemValue) || itemValue) : itemValue;
+      targetSelect.value = resolvedValue;
     
-    // Set the value in the dropdown
-    targetSelect.value = itemValue;
-    
-    // For remove tags, trigger the remove handler
-    if (isRemove && targetSelectId === 'multi-tag-remove-select') {
-      // Trigger the change event which will call handleRemoveTagSelect
-      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (fieldType === 'tag' && mode !== 'filter' && containerId) {
-      // For tags in edit mode, use addTagToModel
-      addTagToModel(itemValue, containerId);
-    } else if (mode === 'edit' || mode === 'multi') {
-      // For edit/multi mode, trigger auto-save
-      const fieldMap = {
-        designer: 'designer',
-        parent: 'parentModel',
-        license: 'license'
-      };
-      
-      if (fieldMap[fieldType]) {
-        const filePath = mode === 'edit' ? getCurrentModelFilePath() : null;
-        if (mode === 'multi') {
-          autoSaveMultipleModels(fieldMap[fieldType], itemValue);
-        } else if (filePath) {
-          autoSaveModel(fieldMap[fieldType], itemValue, filePath);
+      // For remove tags, trigger the remove handler
+      if (isRemove && targetSelectId === 'multi-tag-remove-select') {
+        // Trigger the change event which will call handleRemoveTagSelect
+        targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (isRemove && targetSelectId === 'multi-filament-remove-select') {
+        targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (fieldType === 'tag' && mode !== 'filter' && containerId) {
+        // For tags in edit mode, use addTagToModel
+        await addTagToModel(itemValue, containerId);
+        targetSelect.value = '';
+        if (typeof populateTagSelect === 'function') {
+          await populateTagSelect(targetSelectId, containerId);
         }
-      }
+      } else if (fieldType === 'filament' && mode !== 'filter' && containerId) {
+        if (typeof window.addFilamentToModel === 'function') {
+          await window.addFilamentToModel({ id: Number(resolvedValue) }, containerId);
+        }
+        targetSelect.value = '';
+      } else if (mode === 'edit' || mode === 'multi') {
+        // For edit/multi mode, trigger auto-save
+        const fieldMap = {
+          designer: 'designer',
+          parent: 'parentModel',
+          license: 'license'
+        };
       
-      // Trigger change event after setting value
-      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (mode === 'filter') {
-      // For filter mode, trigger filter update
-      targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        if (fieldMap[fieldType]) {
+          const filePath = mode === 'edit' ? getCurrentModelFilePath() : null;
+          if (mode === 'multi') {
+            autoSaveMultipleModels(fieldMap[fieldType], itemValue);
+          } else if (filePath) {
+            autoSaveModel(fieldMap[fieldType], itemValue, filePath);
+          }
+        }
+      
+        // Trigger change event after setting value
+        targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (mode === 'filter') {
+        // For filter mode, trigger filter update
+        targetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    } catch (error) {
+      console.error('Error applying searchable list selection:', error);
     }
   };
   
@@ -18179,6 +18519,7 @@ function getCurrentModelFilePath() {
 // Initialize List button event listeners
 function initializeListButtons() {
   document.querySelectorAll('.list-button').forEach(button => {
+    if (button.id === 'folder-tree-button') return;
     // Remove existing listeners to avoid duplicates
     const newButton = button.cloneNode(true);
     button.parentNode.replaceChild(newButton, button);
@@ -18210,7 +18551,7 @@ async function initializeApp() {
     const sortSelect = document.getElementById('sort-select');
     if (sortSelect && savedSortOption) {
       // Validate that the saved option is a valid sort option
-      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc', 'directory-asc', 'directory-desc', 'designer-asc', 'designer-desc', 'parentmodel-asc', 'parentmodel-desc', 'printed-asc', 'printed-desc'];
+      const validOptions = ['name-asc', 'name-desc', 'size-asc', 'size-desc', 'date-asc', 'date-desc', 'dateadded-asc', 'dateadded-desc', 'directory-asc', 'directory-desc', 'designer-asc', 'designer-desc', 'parentmodel-asc', 'parentmodel-desc', 'printed-asc', 'printed-desc', 'printstatus-asc', 'printstatus-desc', 'printcount-asc', 'printcount-desc', 'lastprinted-asc', 'lastprinted-desc', 'rating-asc', 'rating-desc'];
       if (validOptions.includes(savedSortOption)) {
         sortSelect.value = savedSortOption;
       }
@@ -18566,17 +18907,12 @@ async function autoSaveModel(field, value, filePath) {
     await updateModelElement(filePath);
     
     // Also update the checkbox in the model details panel if it's showing this model
-    if (field === 'printed') {
-      // Use the same logic as getModelFilePath to determine current model
+    if (field === 'printed' || field === 'printStatus') {
       const currentModelPath = getCurrentModelFilePath() || 
         document.querySelector('.model-details')?.getAttribute('data-filepath');
-      
-      // Check if the details panel is showing this model
-      if (currentModelPath === filePath) {
-        const printedCheckbox = document.getElementById('model-printed');
-        if (printedCheckbox) {
-          printedCheckbox.checked = value;
-        }
+      if (currentModelPath === filePath && window.PrintHistory) {
+        const updated = await window.electron.getModel(filePath);
+        if (updated) await window.PrintHistory.populateDetails(updated);
       }
     }
     
@@ -18648,6 +18984,15 @@ async function autoSaveMultipleModels(field, value, options = {}) {
             const allTags = [...new Set([...existingTags, ...newTags])].sort(); 
             model.tags = allTags;
             console.log(`[${i}] Merging tags. Existing: ${existingTags.join(', ')}, New: ${newTags.join(', ')}, Result: ${allTags.join(', ')}`);
+          }
+        } else if (field === 'filaments') {
+          const toId = (v) => (v && typeof v === 'object' ? Number(v.id) : Number(v));
+          const newIds = (Array.isArray(value) ? value : []).map(toId).filter((id) => Number.isInteger(id) && id > 0);
+          if (options.replaceFilaments) {
+            model.filaments = newIds;
+          } else {
+            const existing = (Array.isArray(model.filaments) ? model.filaments : []).map(toId).filter((id) => Number.isInteger(id) && id > 0);
+            model.filaments = [...new Set([...existing, ...newIds])];
           }
         } else {
           // Handle other fields
@@ -18755,10 +19100,9 @@ function getModelFilePath() {
 
 // Helper function to clear all multi-edit form fields
 function clearMultiEditFormFields() {
-  // Clear the printed checkbox
-  const multiPrintedCheckbox = document.getElementById('multi-printed');
-  if (multiPrintedCheckbox) {
-    multiPrintedCheckbox.checked = false;
+  const multiPrintStatus = document.getElementById('multi-print-status');
+  if (multiPrintStatus) {
+    multiPrintStatus.value = '';
   }
   
   // Clear the source input
@@ -18831,10 +19175,9 @@ async function showMultiEditPanel() {
   // Also call the selection change handler to update tracking
   clearTagsOnSelectionChange();
   
-  // Force the checkbox to be unchecked at the start
-  const multiPrintedCheckbox = document.getElementById('multi-printed');
-  if (multiPrintedCheckbox) {
-    multiPrintedCheckbox.checked = false;
+  const multiPrintStatus = document.getElementById('multi-print-status');
+  if (multiPrintStatus) {
+    multiPrintStatus.value = '';
   }
   
   // Reset the source input
@@ -18893,37 +19236,6 @@ async function showMultiEditPanel() {
     console.log('Multi-source input event handler attached');
   } else {
     console.error('Multi-source input not found');
-  }
-  
-  // Add explicit event listener for the printed checkbox
-  if (multiPrintedCheckbox) {
-    // Create a highly visible function for debugging
-    const handlePrintedChange = async function() {
-      const isChecked = this.checked;
-      console.log(`Multi-printed checkbox changed to: ${isChecked}`);
-      
-      if (selectedModels.size === 0) {
-        console.warn('No models selected for updating printed status');
-        return;
-      }
-      
-      // Use autoSaveMultipleModels which handles bulk update
-      await autoSaveMultipleModels('printed', isChecked);
-    };
-    
-    // First remove any existing event listeners
-    const newCheckbox = multiPrintedCheckbox.cloneNode(true);
-    multiPrintedCheckbox.parentNode.replaceChild(newCheckbox, multiPrintedCheckbox);
-    
-    // Add event listener with both input and change events
-    newCheckbox.addEventListener('change', handlePrintedChange);
-    newCheckbox.addEventListener('click', function() {
-      console.log('Multi-printed checkbox clicked, current state:', this.checked);
-    });
-    
-    console.log('Multi-printed checkbox event handlers attached in showMultiEditPanel');
-  } else {
-    console.error('Multi-printed checkbox not found in showMultiEditPanel');
   }
   
   // Re-attach event listener for multi-tag-select
@@ -18988,29 +19300,7 @@ document.getElementById('edit-mode-toggle')?.addEventListener('click', () => {
   }
 });
 
-// Add a direct event listener for the multi-printed checkbox
 document.addEventListener('DOMContentLoaded', () => {
-  // Setup multi-printed checkbox handler
-  const multiPrintedCheckbox = document.getElementById('multi-printed');
-  if (multiPrintedCheckbox) {
-    // First remove any existing listeners by cloning and replacing
-    const newCheckbox = multiPrintedCheckbox.cloneNode(true);
-    multiPrintedCheckbox.parentNode.replaceChild(newCheckbox, multiPrintedCheckbox);
-    
-    // Add the event listener to the new checkbox
-    newCheckbox.addEventListener('change', async function() {
-      const isChecked = this.checked;
-      console.log(`Multi-printed checkbox changed to: ${isChecked}`);
-      
-      // Use autoSaveMultipleModels which handles bulk update
-      await autoSaveMultipleModels('printed', isChecked);
-    });
-    
-    console.log('Multi-printed checkbox event listener attached');
-  } else {
-    console.error('Multi-printed checkbox not found');
-  }
-
   // Add event listener for the Clear Selection button
   const clearSelectionButton = document.getElementById('clear-selection-button');
   if (clearSelectionButton) {
@@ -19373,24 +19663,13 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
   // Print status element
   const printStatus = document.createElement('div');
-  printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
-  printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
-  printStatus.style.cursor = 'pointer';
-  printStatus.title = 'Click to toggle printed status';
-  
-  // Add click handler to toggle printed status
-  printStatus.addEventListener('click', async (e) => {
-    e.preventDefault();
-    e.stopPropagation(); // Prevent triggering file item click
-    
-    // Get current model state to ensure we have the latest printed status
-    const currentModel = await window.electron.getModel(model.filePath);
-    if (currentModel) {
-      const newPrintedStatus = !currentModel.printed;
-      await autoSaveModel('printed', newPrintedStatus, model.filePath);
-    }
-  });
-  
+  if (window.PrintHistory) {
+    window.PrintHistory.applyBadge(printStatus, model);
+    window.PrintHistory.bindBadge(printStatus, model.filePath);
+  } else {
+    printStatus.className = 'print-status' + (model.printed ? ' printed' : '');
+    printStatus.textContent = model.printed ? 'Printed' : 'Not Printed';
+  }
   item.appendChild(printStatus);
 
   // Archive status element (for models inside ZIP archives)
@@ -20301,6 +20580,9 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     tagsSpan.style.whiteSpace = 'nowrap';
     tagsColumn.appendChild(tagsSpan);
     fileInfo.appendChild(tagsColumn);
+    if (typeof window.updateModelFilamentDisplay === 'function') {
+      window.updateModelFilamentDisplay(item);
+    }
     
     // Archive column (with icon, only show for files in zip/archive)
     const archiveStatusColumn = document.createElement('div');
@@ -21532,6 +21814,9 @@ async function showBundleDetails(groupRecord) {
 
   document.getElementById('model-details')?.classList.add('hidden');
   document.getElementById('multi-edit-panel')?.classList.add('hidden');
+  if (typeof window.SidebarLayout?.collapseFiltersForDetails === 'function') {
+    window.SidebarLayout.collapseFiltersForDetails();
+  }
 
   const panel = document.getElementById('bundle-details');
   if (!panel) return;
@@ -21559,12 +21844,13 @@ async function showBundleDetails(groupRecord) {
   if (pathEl) pathEl.value = containerPath;
 
   const totalBytes = children.reduce((sum, c) => sum + (Number(c.size) || 0), 0);
-  const printedCount = children.filter((c) => Boolean(c.printed)).length;
+  const bundlePrint = window.PrintHistory?.bundleSummary(children);
+  const printedCount = bundlePrint ? bundlePrint.printedCount : children.filter((c) => Boolean(c.printed)).length;
   if (statsEl) {
     statsEl.innerHTML = `
       <span><strong>${children.length}</strong> models</span>
       <span><strong>${formatFileSize(totalBytes)}</strong> combined size</span>
-      <span><strong>${printedCount}/${children.length}</strong> printed</span>
+      <span><strong>${printedCount}/${children.length}</strong> printed${bundlePrint?.totalCount ? ` (${bundlePrint.label})` : ''}</span>
     `;
   }
 
@@ -21608,7 +21894,7 @@ async function showBundleDetails(groupRecord) {
   }
 
   panel.classList.remove('hidden');
-  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   const grid = document.querySelector('.file-grid');
   if (grid?.renderVisibleItemsFn) grid.renderVisibleItemsFn();
@@ -21863,16 +22149,17 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   titleRow.appendChild(chevron);
   titleRow.appendChild(title);
 
-  const printedCount = groupRecord.children.filter(child => Boolean(child.printed)).length;
+  const bundlePrint = window.PrintHistory?.bundleSummary(groupRecord.children);
+  const printedCount = bundlePrint ? bundlePrint.printedCount : groupRecord.children.filter(child => Boolean(child.printed)).length;
   const childCount = groupRecord.children.length;
   const meta = document.createElement('div');
   meta.className = 'parent-model-group-meta';
   if (groupRecord?.groupKind === 'bundle') {
     const kindLabel = bundleKind === 'zip' ? 'zip archive' : 'folder';
-    meta.textContent = `${childCount} part${childCount === 1 ? '' : 's'} • ${kindLabel} • ${printedCount}/${childCount} printed`;
+    meta.textContent = `${childCount} part${childCount === 1 ? '' : 's'} • ${kindLabel} • ${bundlePrint ? bundlePrint.label : `${printedCount}/${childCount} printed`}`;
     meta.title = 'Right-click for Preview and more options';
   } else {
-    meta.textContent = `${childCount} model${childCount === 1 ? '' : 's'} • ${printedCount}/${childCount} printed`;
+    meta.textContent = `${childCount} model${childCount === 1 ? '' : 's'} • ${bundlePrint ? bundlePrint.label : `${printedCount}/${childCount} printed`}`;
   }
 
   details.appendChild(titleRow);

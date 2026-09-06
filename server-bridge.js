@@ -488,6 +488,7 @@
     'scanDirectory': 'scan-directory',
     'getModel': 'get-model',
     'getModelsFiltered': 'get-models-filtered',
+    'getFolderTree': 'get-folder-tree',
     'saveModel': 'save-model',
     'saveModelFromUpload': 'save-model-from-upload',
     'saveModelBatch': 'save-model-batch',
@@ -505,6 +506,18 @@
     'saveTag': 'save-tag',
     'deleteTag': 'delete-tag',
     'getTagModelCount': 'get-tag-model-count',
+    'getAllFilaments': 'get-all-filaments',
+    'saveFilament': 'save-filament',
+    'deleteFilament': 'delete-filament',
+    'getModelFilaments': 'get-model-filaments',
+    'getPrintEvents': 'get-print-events',
+    'logPrintEvent': 'log-print-event',
+    'logPrintEventsBatch': 'log-print-events-batch',
+    'deletePrintEvent': 'delete-print-event',
+    'setPrintStatus': 'set-print-status',
+    'setPrintStatusBatch': 'set-print-status-batch',
+    'testSpoolmanConnection': 'test-spoolman-connection',
+    'syncSpoolmanFilaments': 'sync-spoolman-filaments',
     'getAllMetadata': 'get-all-metadata',
     'getStats': 'get-stats',
     'renameMetadata': 'rename-metadata',
@@ -513,6 +526,8 @@
     'saveModelTags': 'save-model-tags',
     'getSetting': 'get-setting',
     'saveSetting': 'save-setting',
+    'getMcpConnectionInfo': 'get-mcp-connection-info',
+    'syncLocalHttpServer': 'sync-local-http-server',
     'getAppVersion': 'get-app-version',
     'checkCollectUsage': 'check-collect-usage',
     'purgeThumbnails': 'purge-thumbnails',
@@ -604,6 +619,10 @@
   console.log('[Bridge] Creating event listener methods...');
   window.electron.onOpenTagManager = function(callback) {
     window.electron.on('open-tag-manager', callback);
+  };
+
+  window.electron.onOpenFilamentManager = function(callback) {
+    window.electron.on('open-filament-manager', callback);
   };
   
   window.electron.onOpenMetadataEditor = function(callback) {

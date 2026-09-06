@@ -17,7 +17,8 @@ Printventory is an Electron-based desktop application for managing your 3D print
 ### Organization & Metadata
 - **Tagging System**: Organize models with custom tags and categories
 - **Designer Tracking**: Assign and track designer information for each model
-- **Print Status**: Track whether models have been printed, planned, or are in progress
+- **Print Status & History**: Track Unprinted / Want / Queued / Printing / Printed / Failed, log reprints with date and notes, and filter by last printed or ever printed
+- **Filament catalog**: Assign filaments to models and optionally sync the catalog from Spoolman (pull-only)
 - **Source URLs**: Store links to where you found or purchased models
 - **Notes**: Add custom notes to any model
 - **Parent/Child Relationships**: Link related models together
@@ -26,13 +27,14 @@ Printventory is an Electron-based desktop application for managing your 3D print
 
 ### Advanced Features
 - **Server Mode**: Run Printventory as a web server accessible from any device on your local network (see [Server Mode](#server-mode) section for details)
+- **MCP Server**: Connect a local AI agent to search the library, read model details, and write thumbnails (see [MCP Server](#mcp-server))
 - **Multi-Edit Mode**: Select and edit multiple models simultaneously for batch operations
-- **Duplicate Detection**: Find duplicate files based on content hash with visual comparison
+- **Duplicate Detection**: Find duplicate files based on content hash with visual comparison, optionally limited to the current library filters
 - **Print Roulette**: Randomly select models from your collection
 - **AI Tagging**: Automated tag suggestions using AI
 - **3D bundle preview**: Open every STL/3MF in a folder or ZIP in a single preview layout
 - **Send to Slicer from preview**: Open the current model or entire bundle in your configured slicer (new instance when already running)
-- **Search & Filter**: Real-time search by filename and filter by designer, tags, print status, parent model, or license
+- **Search & Filter**: Real-time search by filename and filter by designer, folders, tags, print status, filament, parent model, or license
 - **Tag Manager**: Comprehensive tag management interface
 - **Metadata Editor**: Bulk metadata editing capabilities
 - **Thumbnail Management**: Generate, regenerate, or purge model thumbnails
@@ -162,6 +164,46 @@ To disable automatic scanning, clear the STL Home directory field and save. This
 ### Getting Help
 
 For more information about Server Mode, use the **Help > Server Mode Info** menu item in the application, which provides detailed information and instructions including Docker deployment options.
+
+## MCP Server
+
+Printventory can expose a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) endpoint so a local AI agent (Cursor, Claude Desktop, VS Code Copilot, and similar) can search the library, read model details, update metadata, and write thumbnails from outside the app.
+
+This is an **experimental** feature. By enabling or using it, you assume the risk: the API may change or break, and any client that can reach the endpoint can read and change library data.
+
+The transport is **Streamable HTTP** at `/mcp`.
+
+### Desktop
+
+1. Open **Tools → MCP Server** (listed under Browser Extension)
+2. Enable **MCP Server** and Save — Printventory starts a localhost listener while the app is running (same port as the Browser Extension, default `5000`)
+3. Copy the client config from the dialog into your MCP client
+
+```json
+{
+  "mcpServers": {
+    "printventory": {
+      "url": "http://127.0.0.1:5000/mcp"
+    }
+  }
+}
+```
+
+Disable MCP Server (or quit Printventory) to stop the listener. If the Browser Extension is also enabled, the local HTTP server stays up for the extension.
+
+### Docker / Server mode
+
+The MCP endpoint is always available while the server is running — there is no toggle. Open **Tools → MCP Server** for the URL and client config.
+
+```
+http://<your-host>:5000/mcp
+```
+
+### Tools
+
+Agents can call `search_models`, `get_model`, `update_model`, `get_library_stats`, `get_folder_tree`, `list_tags`, `add_tag`, `list_designers`, `list_licenses`, `get_models_missing_thumbnails`, `get_thumbnails`, `set_thumbnail`, and `add_thumbnail`.
+
+To generate thumbnails outside Printventory: list models with `get_models_missing_thumbnails`, open each `filePath` on disk, render an image, then call `set_thumbnail` with a PNG or JPEG data URL or raw base64.
 
 ## Building from Source
 
@@ -943,6 +985,8 @@ To automatically mount on host reboot, add to `/etc/fstab`:
 ### Feature Modules
 - `aitagging.js` - AI-powered tagging functionality
 - `search.js` - Search and filtering implementation
+- `folder-tree.js` / `folder-tree-lib.js` - Folder tree picker and catalog folder forest
+- `sidebar-layout.js` - Collapsible sidebar filters vs model details; drag-resize sidebar and Folders panel widths
 - `slicer.js` - 3D model slicing and thumbnail generation
 - `guide.js` - Interactive guide system
 - `scan-worker.js` - Background worker for directory scanning

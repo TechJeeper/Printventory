@@ -14,9 +14,9 @@
 .file-grid.preview-wall {
   --preview-tile: 180px;
   padding: 8px 0 16px;
-  margin-left: 370px;
-  width: calc(100% - 390px);
-  max-width: calc(100vw - 390px);
+  margin-left: calc(var(--sidebar-width, 350px) + 20px + var(--folder-rail-width, 0px));
+  width: calc(100% - (var(--sidebar-width, 350px) + 40px + var(--folder-rail-width, 0px)));
+  max-width: calc(100vw - (var(--sidebar-width, 350px) + 40px + var(--folder-rail-width, 0px)));
   background-image: none;
   background-color: transparent;
   gap: 0;
