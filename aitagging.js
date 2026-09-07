@@ -55,18 +55,31 @@ function initializeOpenAI(apiKey, baseURL, service = 'openai', puterIPCHandler =
   };
   
   // Add baseURL if provided or use default based on service
-  const GEMINI_OPENAI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai/';
   if (baseURL) {
     const trimmed = baseURL.trim();
     // Ensure single trailing slash so path concatenation is correct (helps avoid 400 in Docker/proxy)
-    config.baseURL = trimmed ? (trimmed.replace(/\/+$/, '') + '/') : (normalizedService === 'gemini' ? GEMINI_OPENAI_BASE : 'https://api.openai.com/v1');
-  } else if (normalizedService === 'gemini') {
-    config.baseURL = GEMINI_OPENAI_BASE;
+    config.baseURL = trimmed ? (trimmed.replace(/\/+$/, '') + '/') : defaultBaseURLForService(normalizedService);
   } else {
-    config.baseURL = 'https://api.openai.com/v1';
+    config.baseURL = defaultBaseURLForService(normalizedService);
+  }
+
+  if (normalizedService === 'claude') {
+    config.defaultHeaders = { 'anthropic-version': '2023-06-01' };
   }
 
   openaiClient = new OpenAI(config);
+}
+
+function defaultBaseURLForService(service) {
+  if (service === 'gemini') return 'https://generativelanguage.googleapis.com/v1beta/openai/';
+  if (service === 'claude') return 'https://api.anthropic.com/v1/';
+  return 'https://api.openai.com/v1';
+}
+
+function defaultModelForService(service) {
+  if (service === 'gemini') return 'gemini-2.5-flash';
+  if (service === 'claude') return 'claude-haiku-4-5';
+  return 'gpt-4o-mini';
 }
 
 // Helper function to introduce a delay
@@ -424,11 +437,13 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
       // Introduce a delay before making the API call
       await delay(delayMs);
 
-      console.log(`Attempting to generate tags with model: ${model || "gpt-4o-mini"} (attempt ${attempt + 1}/${maxRetries})`);
+      console.log(`Attempting to generate tags with model: ${model || defaultModelForService(currentService)} (attempt ${attempt + 1}/${maxRetries})`);
 
       // Gemini's OpenAI-compatible endpoint can return 400 with no body when given
       // max_tokens or response_format (e.g. in Docker or behind proxies). Use minimal payload for Gemini.
+      // Claude's OpenAI-compatible layer ignores response_format; omit it to avoid 400s.
       const isGemini = currentService === 'gemini';
+      const isClaude = currentService === 'claude';
       const createPayload = {
         messages: [{
           role: "user",
@@ -437,12 +452,14 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
             { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Image}` } }
           ]
         }],
-        model: model || (isGemini ? "gemini-2.5-flash" : "gpt-4o-mini"),
+        model: model || defaultModelForService(currentService),
         temperature: 0.3 // Lower temperature for more consistent JSON output
       };
       if (!isGemini) {
         createPayload.max_tokens = useJsonResponse ? 1000 : 300;
-        createPayload.response_format = useJsonResponse ? { type: "json_object" } : undefined;
+        if (!isClaude) {
+          createPayload.response_format = useJsonResponse ? { type: "json_object" } : undefined;
+        }
       }
 
       const completion = await openaiClient.chat.completions.create(createPayload);
@@ -659,7 +676,7 @@ async function testAIConfig(apiKey, baseURL, model, service = 'openai', puterIPC
     }
     
     // Minimal request: for Gemini use only model + messages (no max_tokens) to avoid 400 from gateways/proxies
-    const testModel = model && model.trim() ? model.trim() : (normalizedService === 'gemini' ? 'gemini-2.5-flash' : 'gpt-4o-mini');
+    const testModel = model && model.trim() ? model.trim() : defaultModelForService(normalizedService);
     const isGemini = normalizedService === 'gemini' || (baseURL && baseURL.includes('generativelanguage.googleapis.com'));
     const payload = {
       messages: [{ role: 'user', content: 'test' }],

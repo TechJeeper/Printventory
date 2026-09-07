@@ -2,12 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Printventory - 3D Model Manager</title>
+  <meta name="theme-color" content="#1e1e2e">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Printventory">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="favicon.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="preview-wall.css">
   <link rel="stylesheet" href="thumbnail-progress.css">
+  <link rel="stylesheet" href="mobile-ui.css">
   <script src="vendor/three.min.js"></script>
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
@@ -24,6 +32,25 @@
 
 
 <body style="background-color: #1e1e2e;">
+  <div id="mobile-ui-overlay" hidden></div>
+  <header id="mobile-app-bar" hidden aria-label="Printventory">
+    <button type="button" id="mobile-menu-toggle" class="mobile-icon-btn" aria-label="Open filters" aria-controls="sidebar">☰</button>
+    <div class="mobile-bar-text">
+      <div class="mobile-bar-title">Printventory</div>
+      <div class="mobile-bar-subtitle" id="mobile-bar-count"></div>
+    </div>
+    <button type="button" id="mobile-search-toggle" class="mobile-icon-btn" aria-label="Search models" aria-expanded="false">⌕</button>
+  </header>
+  <form id="mobile-search-bar" hidden>
+    <input type="search" id="mobile-search-input" placeholder="Search models" enterkeyhint="search" autocomplete="off">
+    <button type="submit" id="mobile-search-go">Go</button>
+  </form>
+  <nav id="mobile-bottom-nav" hidden aria-label="Mobile navigation">
+    <button type="button" id="mobile-nav-library" data-nav="library"><span class="nav-glyph">▦</span>Library</button>
+    <button type="button" id="mobile-nav-filters" data-nav="filters"><span class="nav-glyph">☰</span>Filters</button>
+    <button type="button" id="mobile-nav-folders" data-nav="folders"><span class="nav-glyph">▢</span>Folders</button>
+    <button type="button" id="mobile-nav-more" data-nav="more"><span class="nav-glyph">⋯</span>Menu</button>
+  </nav>
   <div class="sidebar">
     <div class="sidebar-chrome">
     <img src="logo.png" alt="Printventory Logo" id="logo">
@@ -287,7 +314,7 @@
     </div>
 
     <div id="model-details" class="model-details hidden">
-      <h3>Model Details</h3>
+      <h3>Model Details <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
       <div class="form-group print-lifecycle-group">
         <label for="model-print-status">Print status</label>
         <div class="print-lifecycle-controls">
@@ -403,7 +430,7 @@
     </div>
 
     <div id="bundle-details" class="model-details bundle-details hidden">
-      <h3 id="bundle-details-title">Bundle Details</h3>
+      <h3 id="bundle-details-title">Bundle Details <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
       <p id="bundle-details-subtitle" class="bundle-details-subtitle"></p>
       <div class="form-group">
         <label>Container path</label>
@@ -413,6 +440,19 @@
         </div>
       </div>
       <div class="bundle-details-stats" id="bundle-details-stats"></div>
+      <div class="form-group">
+        <label>Tags:</label>
+        <div class="tags-container">
+          <div class="tags-input-container">
+            <select id="bundle-tag-select">
+              <option value="">Select a tag...</option>
+            </select>
+            <button type="button" class="list-button icon-button" data-field="tag" data-target="bundle-tag-select" data-mode="edit" data-container="bundle-tags" title="Search existing tags">☰</button>
+            <button type="button" class="icon-button add-tag-button" title="Add a new tag to all models in this archive">+</button>
+          </div>
+          <div id="bundle-tags" class="tags-list"></div>
+        </div>
+      </div>
       <div class="form-group">
         <label>Models</label>
         <ul id="bundle-contents-list" class="bundle-contents-list" aria-label="Models in archive"></ul>
@@ -559,7 +599,7 @@
       </form>
     </dialog>
     <div id="multi-edit-panel" class="model-details hidden">
-      <h3>Multi-Edit Panel</h3>
+      <h3>Multi-Edit Panel <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
       <button id="exit-multi-edit-button" class="full-width-button">Exit Multi-Edit Mode</button>
       <button id="select-all-button" class="full-width-button">Select All Visible</button>
       <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
@@ -937,28 +977,24 @@
     <dialog id="browser-extension-settings-dialog" class="modal">
       <form method="dialog">
         <h3>Browser Extension</h3>
-        <p class="setting-description">When enabled, a local web server runs so the Printventory Chrome extension can connect to this app. Disabled by default.</p>
+        <p class="setting-description">The Chrome extension writes queue files to an inbox folder. Printventory imports them on launch and every minute while this app is open. Printventory does not need to be running when you add models from the browser.</p>
         <p class="setting-description"><a id="browser-extension-store-link" href="https://chromewebstore.google.com/detail/pigngedngcegmemgfbkaiihjnbplaedj?utm_source=item-share-cb">Download the Printventory Watcher on Chrome Web Store</a></p>
         <div class="settings-group">
-          <div class="form-group checkbox-container">
-            <input type="checkbox" id="enable-browser-extension">
-            <label for="enable-browser-extension">Enable Browser Extension</label>
-          </div>
           <div class="form-group">
-            <label for="browser-extension-port">Port:</label>
-            <input type="number" id="browser-extension-port" min="1024" max="65535" value="5000">
-            <p class="setting-description">Port for the local server (default 5000). The Chrome extension must use the same port in its options.</p>
+            <label for="extension-inbox-directory">Inbox directory:</label>
+            <input type="text" id="extension-inbox-directory" placeholder="Downloads/PrintventoryInbox">
+            <div class="dialog-buttons" style="margin-top: 8px; justify-content: flex-start;">
+              <button type="button" id="choose-extension-inbox-directory">Choose folder</button>
+              <button type="button" id="import-extension-inbox-now">Import now</button>
+            </div>
+            <p class="setting-description">Optional override. Printventory always also checks <code>Downloads/PrintventoryInbox</code> and <code>PrintventoryInbox</code> next to <code>printventory.db</code> (the folder the Chrome extension asks you to pick).</p>
+            <p class="setting-description" id="extension-inbox-last-status"></p>
           </div>
-          <div class="form-group">
-            <label for="extension-upload-directory">Extension upload directory (Docker/NAS):</label>
-            <input type="text" id="extension-upload-directory" placeholder="e.g. /mnt/network-share/models">
-            <p class="setting-description">When the extension uses "Use upload for server", files are saved here. Use an absolute path (e.g. a NAS mount). In Docker, set EXTENSION_UPLOAD_DIR or configure here.</p>
-          </div>
-          <p class="setting-description" style="margin-top: 12px; font-weight: 500;">Path mapping (optional, when Downloads is mounted in container)</p>
+          <p class="setting-description" style="margin-top: 12px; font-weight: 500;">Path mapping (optional, Docker/NAS)</p>
           <div class="form-group">
             <label for="extension-client-path-prefix">Client path prefix:</label>
             <input type="text" id="extension-client-path-prefix" placeholder="e.g. C:\Users\You\Downloads">
-            <p class="setting-description">Path on the machine where the browser runs (extension sends this). Leave empty to disable mapping.</p>
+            <p class="setting-description">Path on the machine where the browser runs. Leave empty to disable mapping.</p>
           </div>
           <div class="form-group">
             <label for="extension-container-path-prefix">Container path prefix:</label>
@@ -968,7 +1004,12 @@
           <div class="form-group">
             <label for="extension-copy-to-nas-path">Copy to NAS path:</label>
             <input type="text" id="extension-copy-to-nas-path" placeholder="e.g. /mnt/network-share/models">
-            <p class="setting-description">If set, extension-added files are copied here and the library uses this path (so files live on the share).</p>
+            <p class="setting-description">If set, extension-added files are copied here and the library uses this path.</p>
+          </div>
+          <div class="form-group">
+            <label for="extension-upload-directory">Legacy upload directory (older extension):</label>
+            <input type="text" id="extension-upload-directory" placeholder="e.g. /mnt/network-share/models">
+            <p class="setting-description">Only used by older extension builds that upload over HTTP.</p>
           </div>
         </div>
         <div class="dialog-buttons">
@@ -981,7 +1022,7 @@
       <form method="dialog">
         <h3>MCP Server</h3>
         <p class="warning-text">Experimental feature. MCP Server is unfinished and may change, break, or expose library data to any client that can reach the endpoint. By enabling or using it, you assume all risk.</p>
-        <p class="setting-description">Connect a local AI agent (Cursor, Claude Desktop, VS Code, and similar) to search your library, read model details, and write thumbnails while Printventory is running.</p>
+        <p class="setting-description">Connect a local AI agent (Cursor, Claude Desktop, VS Code, and similar) to search your library, read model details, and write thumbnails while Printventory is running. The URL uses <code>https://</code> when TLS is enabled under Settings → HTTPS / SSL.</p>
         <div class="settings-group">
           <div id="mcp-server-desktop-controls">
             <div class="form-group checkbox-container">
@@ -1022,16 +1063,98 @@
         </div>
       </form>
     </dialog>
+    <dialog id="https-settings-dialog" class="modal">
+      <form method="dialog">
+        <h3>HTTPS / SSL</h3>
+        <p class="setting-description">Use a custom certificate, Let's Encrypt, or a self-signed cert. In desktop mode this applies to the Browser Extension and MCP localhost listener. In server/Docker mode it applies to the web UI (<code>https://</code> and <code>wss://</code>) on the listen port below. After enabling TLS, use the matching <code>https://</code> URL in the Chrome extension and MCP client.</p>
+        <div class="settings-group" id="https-settings-fields">
+          <p id="https-settings-status" class="setting-description"></p>
+          <p id="https-settings-env-note" class="warning-text" hidden>TLS is controlled by <code>PRINTVENTORY_TLS_CERT</code> / <code>PRINTVENTORY_TLS_KEY</code> (or <code>SSL_*</code>) on this process. Unset those environment variables to configure certificates here.</p>
+          <p id="https-settings-desktop-note" class="setting-description" hidden>Desktop: the main window stays on its local UI server. HTTPS is used by Browser Extension and MCP on the port configured in those dialogs. Self-signed certs include <code>localhost</code> and <code>127.0.0.1</code>.</p>
+          <div class="form-group" id="tls-listen-port-group" hidden>
+            <label for="tls-listen-port">Listen port</label>
+            <input type="number" id="tls-listen-port" min="1" max="65535" value="5000">
+            <p class="setting-description">Port Printventory binds inside the container or server process (default 5000). On Synology or Docker, also publish that port on the host (for example <code>5001:5001</code> if you change this to 5001). DSM already uses host port 5000, so pick another host mapping. <code>PRINTVENTORY_PORT</code> seeds this when the setting is empty.</p>
+          </div>
+          <div class="form-group">
+            <label for="tls-mode">Mode</label>
+            <select id="tls-mode">
+              <option value="off">Off (HTTP only)</option>
+              <option value="custom">Custom certificate files</option>
+              <option value="letsencrypt">Let's Encrypt</option>
+              <option value="selfsigned">Self-signed (LAN)</option>
+            </select>
+          </div>
+          <div id="tls-panel-custom" class="tls-mode-panel" hidden>
+            <div class="form-group">
+              <label for="tls-cert-path">Certificate (PEM)</label>
+              <input type="text" id="tls-cert-path" placeholder="/certs/fullchain.pem">
+            </div>
+            <div class="form-group">
+              <label for="tls-key-path">Private key (PEM)</label>
+              <input type="text" id="tls-key-path" placeholder="/certs/privkey.pem">
+            </div>
+            <div class="form-group">
+              <label for="tls-ca-path">Certificate chain (optional)</label>
+              <input type="text" id="tls-ca-path" placeholder="/certs/chain.pem">
+            </div>
+            <p class="setting-description">Use absolute paths the server process can read. In Docker, mount files (for example <code>./certs:/certs:ro</code>) and enter container paths.</p>
+          </div>
+          <div id="tls-panel-letsencrypt" class="tls-mode-panel" hidden>
+            <p class="setting-description">Let's Encrypt issues a trusted certificate for a <strong>public DNS name</strong>. Port <strong>80</strong> must reach this host (Docker: publish <code>80:80</code>). This will not work for LAN-only IPs — use self-signed or a custom certificate instead.</p>
+            <div class="form-group">
+              <label for="tls-domain">Domain</label>
+              <input type="text" id="tls-domain" placeholder="printventory.example.com" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="tls-email">Contact email</label>
+              <input type="email" id="tls-email" placeholder="admin@example.com" autocomplete="off">
+            </div>
+            <div class="form-group checkbox-container">
+              <input type="checkbox" id="tls-agree-tos">
+              <label for="tls-agree-tos">I agree to the <a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener noreferrer">Let's Encrypt Terms of Service</a></label>
+            </div>
+            <div class="form-group checkbox-container">
+              <input type="checkbox" id="tls-use-staging">
+              <label for="tls-use-staging">Use Let's Encrypt staging (testing only; browsers will not trust it)</label>
+            </div>
+            <div class="dialog-buttons mcp-inline-actions">
+              <button type="button" id="tls-issue-letsencrypt" onclick="if(typeof window.issueLetsEncryptCertificate==='function')window.issueLetsEncryptCertificate()">Issue / renew certificate</button>
+            </div>
+          </div>
+          <div id="tls-panel-selfsigned" class="tls-mode-panel" hidden>
+            <p class="setting-description">Generates a local certificate for LAN access. Browsers will show a warning until you trust it. Enter the hostname or IP you type in the address bar.</p>
+            <div class="form-group">
+              <label for="tls-selfsigned-host">Hostname or IP</label>
+              <input type="text" id="tls-selfsigned-host" placeholder="localhost" autocomplete="off">
+            </div>
+            <div class="dialog-buttons mcp-inline-actions">
+              <button type="button" id="tls-generate-selfsigned" onclick="if(typeof window.generateSelfSignedCertificate==='function')window.generateSelfSignedCertificate()">Generate certificate</button>
+            </div>
+          </div>
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="tls-redirect-http">
+            <label for="tls-redirect-http" id="tls-redirect-http-label">Redirect HTTP on port 80 to https://&lt;host&gt;:&lt;listen-port&gt;</label>
+          </div>
+          <p class="setting-description">Certificates issued by Let's Encrypt or generated here are stored under the app data directory (Docker volume <code>./data</code>), not in the settings database.</p>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="save-https-settings" onclick="if(typeof window.saveHttpsSettingsFromDialog==='function')window.saveHttpsSettingsFromDialog()">Save and apply</button>
+          <button type="button" id="cancel-https-settings" onclick="document.getElementById('https-settings-dialog')?.close()">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="ai-config-dialog" class="modal">
       <form method="dialog">
         <h3>AI Configuration</h3>
         <p class="setting-description">
-          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Deepseek, Gemini, Puter.com, etc. The selected model must support image analysis (e.g., gpt-4-o). Puter.com does not require an API key, but may have limitations. You can use the Test button to check that your AI is properly configured. 
+          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Claude, Deepseek, Gemini, Puter.com, etc. The selected model must support image analysis (e.g., gpt-4-o). Puter.com does not require an API key, but may have limitations. You can use the Test button to check that your AI is properly configured. 
         </p>
         <div class="form-group">
           <label for="ai-service-select">AI Service:</label>
           <select id="ai-service-select">
             <option value="openai">OpenAI</option>
+            <option value="claude">Claude</option>
             <option value="gemini">Gemini</option>
             <option value="puter" selected>Puter.com</option>
             <option value="custom">Custom</option>
@@ -1489,7 +1612,7 @@
                   <li>Server Mode requires <strong>UNC (Universal Naming Convention) paths</strong> for all file operations</li>
                   <li>UNC paths use the format: <code>\\\\server\\share\\path\\to\\file</code></li>
                   <li>Local drive paths (C:\, D:\, etc.) will <strong>not work</strong> in Server Mode</li>
-                  <li>The server runs on port 5000 and listens on all network interfaces (0.0.0.0)</li>
+                  <li>The server listens on all network interfaces (0.0.0.0). Default port is 5000; change it under Settings → HTTPS / SSL</li>
                 </ul>
               </div>
             </div>
@@ -1501,6 +1624,7 @@
                 <p><strong>http://&lt;your-computer-ip&gt;:5000</strong></p>
                 <p>For example, if your computer's IP address is 192.168.1.100:</p>
                 <p><strong>http://192.168.1.100:5000</strong></p>
+                <p>To serve HTTPS, open <strong>Settings → HTTPS / SSL</strong>. You can point at your own PEM files, generate a self-signed certificate for LAN use, or request a Let's Encrypt certificate for a public domain (requires inbound port 80). Set the listen port there if 5000 is already in use (for example Synology DSM). After TLS is on, use <strong>https://&lt;host&gt;:&lt;port&gt;</strong>.</p>
               </div>
             </div>
 
@@ -1907,6 +2031,8 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="print-history.js"></script>
   <script type="module" src="slicer.js"></script>
   <script src="guide.js"></script>
+  <script src="pwa.js"></script>
+  <script src="mobile-ui.js"></script>
 
   <!-- Add this template for slicer entries -->
   <template id="slicer-entry-template">

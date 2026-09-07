@@ -1,24 +1,34 @@
 {
   "manifest_version": 3,
   "name": "Printventory Watcher",
-  "version": "1.0.8",
-  "description": "Adds STL/3MF/ZIP from 3D model websites to Printventory with metadata.",
-  "permissions": ["storage", "activeTab", "downloads", "notifications", "tabs"],
+  "version": "2.1.6",
+  "description": "Queue 3D model pages and downloads for Printventory. No running app required.",
+  "permissions": ["storage", "activeTab", "downloads", "notifications", "tabs", "offscreen"],
   "icons": {
+    "16": "icon16.png",
     "48": "icon48.png",
-    "128": "icon48.png"
+    "128": "icon128.png"
   },
   "action": {
-    "default_title": "Printventory Watcher — open settings",
+    "default_title": "Add to Printventory",
+    "default_popup": "popup.html",
     "default_icon": {
-      "48": "icon48.png"
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
     }
   },
   "host_permissions": [
-    "http://*/*",
-    "https://*/*",
-    "ws://*/*",
-    "wss://*/*"
+    "*://makerworld.com/*",
+    "*://*.makerworld.com/*",
+    "https://api.bambulab.com/*",
+    "*://*.thangs.com/*",
+    "*://printables.com/*",
+    "*://*.printables.com/*",
+    "https://api.printables.com/*",
+    "*://*.thingiverse.com/*",
+    "*://*.cults3d.com/*",
+    "*://*.myminifactory.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -26,14 +36,16 @@
   "content_scripts": [
     {
       "matches": [
+        "*://makerworld.com/*",
         "*://*.makerworld.com/*",
         "*://*.thangs.com/*",
+        "*://printables.com/*",
         "*://*.printables.com/*",
         "*://*.thingiverse.com/*",
         "*://*.cults3d.com/*",
         "*://*.myminifactory.com/*"
       ],
-      "js": ["debug.js", "scrapers.js", "content.js"],
+      "js": ["debug.js", "extractors.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

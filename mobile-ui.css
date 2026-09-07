@@ -1,0 +1,531 @@
+/* Server/Docker phone chrome. Desktop Electron is unchanged unless body.mobile-ui is set. */
+
+html.mobile-ui,
+body.mobile-ui {
+  overflow-x: hidden;
+}
+
+body.mobile-ui {
+  --sidebar-width: 0px !important;
+  --folder-rail-width: 0px !important;
+  padding-top: calc(56px + env(safe-area-inset-top, 0px)) !important;
+  padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
+  padding-left: 0 !important;
+  -webkit-tap-highlight-color: rgba(91, 159, 255, 0.18);
+}
+
+body.mobile-ui.mobile-search-open {
+  padding-top: calc(108px + env(safe-area-inset-top, 0px)) !important;
+}
+
+body.mobile-ui.mobile-sheet-open {
+  overflow: hidden;
+}
+
+#mobile-app-bar,
+#mobile-bottom-nav,
+#mobile-ui-overlay,
+#mobile-search-bar,
+#mobile-drawer-head,
+.mobile-panel-close {
+  display: none;
+  pointer-events: none;
+}
+
+#mobile-ui-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11000;
+  background: rgba(8, 8, 14, 0.55);
+  pointer-events: none !important;
+  visibility: hidden;
+}
+
+#mobile-ui-overlay[hidden],
+#mobile-search-bar[hidden] {
+  display: none !important;
+}
+
+body.mobile-ui #mobile-ui-overlay.is-open {
+  display: block;
+  visibility: visible;
+  pointer-events: auto !important;
+}
+
+body.mobile-ui #mobile-app-bar {
+  display: flex;
+  pointer-events: auto;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 12050;
+  height: calc(56px + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) 10px 0;
+  align-items: center;
+  gap: 8px;
+  background: rgba(22, 22, 34, 0.94);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.mobile-ui .mobile-bar-text {
+  flex: 1;
+  min-width: 0;
+}
+
+body.mobile-ui .mobile-bar-title {
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.mobile-ui .mobile-bar-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.58);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.mobile-ui .mobile-icon-btn {
+  flex: 0 0 42px;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+body.mobile-ui #mobile-search-bar {
+  display: flex;
+  pointer-events: auto;
+  position: fixed;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
+  z-index: 12040;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  background: rgba(22, 22, 34, 0.96);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.mobile-ui #mobile-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  padding: 0 12px;
+  font-size: 16px;
+}
+
+body.mobile-ui #mobile-search-go {
+  height: 40px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 10px;
+  background: #4a9eff;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+body.mobile-ui #mobile-bottom-nav {
+  display: grid;
+  pointer-events: auto;
+  grid-template-columns: repeat(4, 1fr);
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 12050;
+  height: calc(60px + env(safe-area-inset-bottom, 0px));
+  padding: 4px 2px env(safe-area-inset-bottom, 0px);
+  background: rgba(22, 22, 34, 0.96);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.mobile-ui #mobile-bottom-nav button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+body.mobile-ui #mobile-bottom-nav button.is-active,
+body.mobile-ui #mobile-bottom-nav button:active {
+  color: #8ec5ff;
+  background: rgba(74, 158, 255, 0.12);
+}
+
+body.mobile-ui #mobile-bottom-nav .nav-glyph {
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* Hide the 30px desktop File menu unless the phone sheet is open */
+body.mobile-ui #server-menu-bar {
+  display: none !important;
+}
+
+body.mobile-ui.mobile-menu-open #server-menu-bar {
+  display: flex !important;
+  flex-direction: column;
+  align-items: stretch;
+  top: calc(56px + env(safe-area-inset-top, 0px)) !important;
+  height: auto !important;
+  max-height: min(72dvh, 560px);
+  overflow: auto;
+  padding: 10px 10px calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 12020;
+  background: #1c1c2a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+body.mobile-ui #server-menu-bar > div {
+  margin: 0 0 8px 0 !important;
+}
+
+body.mobile-ui.mobile-menu-open #server-menu-bar > div > button {
+  width: 100%;
+  min-height: 28px;
+  text-align: left;
+  font-size: 12px !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  pointer-events: none;
+  padding: 10px 8px 4px !important;
+  border-radius: 0;
+  background: transparent;
+}
+
+body.mobile-ui.mobile-menu-open #server-menu-bar > div > div {
+  position: static !important;
+  display: block !important;
+  min-width: 0 !important;
+  width: 100%;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+body.mobile-ui.mobile-menu-open #server-menu-bar > div > div > div {
+  padding: 12px 16px !important;
+  font-size: 16px !important;
+  border-radius: 8px;
+}
+
+body.mobile-ui.mobile-menu-open #server-menu-bar > div > div > div[style*="height: 1px"] {
+  padding: 0 !important;
+  height: 1px !important;
+  min-height: 0 !important;
+  margin: 8px 10px !important;
+}
+
+/* Filter drawer */
+body.server-mode.mobile-ui .sidebar,
+body.mobile-ui .sidebar {
+  top: calc(56px + env(safe-area-inset-top, 0px)) !important;
+  height: calc(100dvh - 56px - 60px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important;
+  width: min(86vw, 360px) !important;
+  max-width: 100vw;
+  transform: translateX(-110%) !important;
+  transition: transform 0.2s ease;
+  z-index: 12000;
+  padding: 8px 0 20px !important;
+  align-items: stretch;
+  pointer-events: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+body.mobile-ui.mobile-sidebar-open .sidebar {
+  transform: translateX(0) !important;
+}
+
+body.mobile-ui.mobile-sidebar-open .sidebar #model-details,
+body.mobile-ui.mobile-sidebar-open .sidebar #bundle-details,
+body.mobile-ui.mobile-sidebar-open .sidebar #multi-edit-panel {
+  display: none !important;
+}
+
+body.mobile-ui .sidebar-resize-handle,
+body.mobile-ui .panel-resize-handle,
+body.mobile-ui #logo,
+body.mobile-ui .icon-buttons-container,
+body.mobile-ui #server-mode-indicator,
+body.mobile-ui .folder-rail-toggle,
+body.mobile-ui #scan-directory-button,
+body.mobile-ui #scan-stl-home-button,
+body.mobile-ui #view-library-button,
+body.mobile-ui #view-library-message,
+body.mobile-ui .model-stats,
+body.mobile-ui #mobile-drawer-head {
+  display: none !important;
+}
+
+body.mobile-ui.mobile-sidebar-open #mobile-drawer-head {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(30, 30, 46, 0.96);
+}
+
+body.mobile-ui #mobile-drawer-done {
+  width: auto !important;
+  margin: 0 !important;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 10px;
+  background: #4a9eff;
+  color: #fff;
+  font-weight: 700;
+}
+
+body.mobile-ui .sidebar-chrome,
+body.mobile-ui .filter-section,
+body.mobile-ui .form-group,
+body.mobile-ui #current-filter {
+  width: 100%;
+  max-width: none;
+  align-items: stretch;
+}
+
+body.mobile-ui .form-group {
+  padding: 0 14px;
+  width: auto;
+}
+
+body.mobile-ui.mobile-sidebar-open .filter-pinned .form-group:first-child {
+  display: none;
+}
+
+body.mobile-ui .model-stats {
+  padding: 4px 14px 10px;
+  text-align: left;
+}
+
+body.mobile-ui .sidebar button:not(.icon-button):not(.list-button):not(.mobile-panel-close) {
+  width: calc(100% - 28px);
+  margin-left: 14px;
+  margin-right: 14px;
+  min-height: 44px;
+  border-radius: 12px;
+}
+
+body.mobile-ui input,
+body.mobile-ui select,
+body.mobile-ui textarea {
+  font-size: 16px;
+}
+
+body.mobile-ui .sidebar .icon-button,
+body.mobile-ui .list-button {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+/* Details as a bottom sheet */
+body.mobile-ui.mobile-details-open .sidebar {
+  transform: none !important;
+  top: auto !important;
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
+  left: 0 !important;
+  right: 0 !important;
+  width: 100% !important;
+  height: min(78dvh, 680px) !important;
+  border-radius: 18px 18px 0 0;
+  border-right: none;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.5);
+  padding-top: 4px !important;
+  z-index: 12010;
+}
+
+body.mobile-ui.mobile-details-open .sidebar-chrome,
+body.mobile-ui.mobile-details-open .filter-section,
+body.mobile-ui.mobile-details-open #current-filter,
+body.mobile-ui.mobile-details-open #progress-section {
+  display: none !important;
+}
+
+body.mobile-ui .mobile-panel-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  width: 36px;
+  height: 36px;
+  margin-left: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+body.mobile-ui .model-details {
+  margin-top: 0;
+  padding-top: 8px;
+  width: 100%;
+}
+
+body.mobile-ui .model-details > h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 16px 4px;
+  font-size: 17px;
+}
+
+/* Folders overlay */
+body.mobile-ui .folder-rail {
+  top: calc(56px + env(safe-area-inset-top, 0px)) !important;
+  left: 0 !important;
+  height: calc(100dvh - 56px - 60px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important;
+  width: min(86vw, 360px) !important;
+  z-index: 11990;
+  box-shadow: 8px 0 28px rgba(0, 0, 0, 0.4);
+}
+
+body.mobile-ui.folder-rail-open {
+  --folder-rail-width: 0px !important;
+}
+
+body.mobile-ui .folder-rail-header {
+  padding: 14px 14px 10px;
+  font-size: 16px;
+}
+
+body.mobile-ui #folder-rail-search {
+  font-size: 16px;
+  min-height: 40px;
+}
+
+/* Main library */
+body.mobile-ui .main-content,
+body.mobile-ui main {
+  width: 100% !important;
+  max-width: 100vw !important;
+  margin: 0 !important;
+}
+
+body.mobile-ui .grid-view-selector,
+body.mobile-ui .grid-view-selector-background,
+body.mobile-ui .file-grid,
+body.mobile-ui .file-grid.preview-wall,
+body.mobile-ui .list-view-header {
+  margin-left: 0 !important;
+  width: 100% !important;
+  max-width: 100vw !important;
+}
+
+body.mobile-ui .grid-view-selector-background {
+  min-height: 52px;
+  padding: 8px 0;
+}
+
+body.mobile-ui .grid-view-selector {
+  flex-wrap: wrap;
+  padding: 8px 10px 6px;
+  gap: 6px;
+}
+
+body.mobile-ui .view-button {
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+
+body.mobile-ui .file-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  row-gap: 12px;
+  padding: 8px 10px 20px;
+}
+
+body.mobile-ui .file-grid.preview-wall {
+  --preview-tile: calc(50vw - 6px);
+  padding: 4px 0 16px;
+  gap: 0;
+}
+
+body.mobile-ui .file-item {
+  min-width: 0;
+  padding: 8px;
+}
+
+body.mobile-ui .file-item .metadata-item,
+body.mobile-ui .file-item .file-details {
+  font-size: 12px;
+}
+
+body.mobile-ui .file-item-list {
+  height: auto !important;
+  min-height: 56px;
+  padding: 8px 10px !important;
+  font-size: 13px;
+}
+
+body.mobile-ui .list-view-header {
+  overflow-x: auto;
+}
+
+body.mobile-ui dialog.modal,
+body.mobile-ui .modal,
+body.mobile-ui #quickstart-guide,
+body.mobile-ui #welcome-message,
+body.mobile-ui #terms-of-service-dialog {
+  width: calc(100vw - 16px) !important;
+  max-width: none !important;
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 20px) !important;
+  margin: auto;
+  padding: 16px !important;
+  border-radius: 16px;
+  overflow: auto;
+}
+
+body.mobile-ui dialog button {
+  min-height: 44px;
+}
+
+body.mobile-ui #html-context-menu {
+  min-width: min(280px, 92vw) !important;
+  max-width: 92vw;
+  max-height: 70dvh;
+  overflow: auto;
+  font-size: 16px !important;
+  padding: 8px 0 !important;
+}
+
+body.mobile-ui #html-context-menu > div {
+  padding: 12px 16px !important;
+}

@@ -201,7 +201,21 @@ body.server-mode .sidebar {
   letter-spacing: 0.02em;
 }
 
-.form-group input,
+.form-group input[type="checkbox"],
+.form-group input[type="radio"] {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  background-image: none !important;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.form-group input:not([type="checkbox"]):not([type="radio"]),
 .form-group textarea,
 .form-group select {
   width: 100%;
@@ -223,7 +237,7 @@ body.server-mode .sidebar {
   padding-right: 40px;
 }
 
-.form-group input:focus,
+.form-group input:not([type="checkbox"]):not([type="radio"]):focus,
 .form-group textarea:focus,
 .form-group select:focus {
   outline: none;
@@ -1675,6 +1689,21 @@ main {
   white-space: nowrap;
 }
 
+.parent-model-group-tags {
+  color: #ccc;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parent-model-group-detailed .parent-model-group-tags {
+  white-space: normal;
+}
+
 .parent-model-group-detailed .parent-model-group-meta,
 .parent-model-group-preview .parent-model-group-meta {
   white-space: normal;
@@ -2807,6 +2836,11 @@ header {
   background: linear-gradient(135deg, #00e5ff 0%, #6ba8ff 100%);
 }
 
+/* Closed dialogs must never eat clicks if CSS keeps them in the layout. */
+dialog:not([open]) {
+  pointer-events: none !important;
+}
+
 .modal {
   border: none;
   border-radius: 20px;
@@ -3644,8 +3678,7 @@ header {
   background-color: #2a2a2a;
   color: white;
   max-width: 400px;
-  opacity: 0; /* Start invisible */
-  animation: fadeIn 5s forwards; /* Apply fade-in animation */
+  opacity: 1;
 }
 
 @keyframes fadeIn {
@@ -5841,6 +5874,38 @@ header {
 #mcp-server-settings-dialog [hidden] {
   display: none !important;
 }
+
+#https-settings-dialog [hidden],
+#https-settings-dialog .tls-mode-panel[hidden] {
+  display: none !important;
+}
+#https-settings-dialog .mcp-inline-actions {
+  margin-top: 8px;
+  margin-bottom: 0;
+  justify-content: flex-start;
+}
+#https-settings-dialog .mcp-inline-actions button {
+  width: auto;
+  margin-bottom: 0;
+}
+#https-settings-dialog #https-settings-status {
+  width: 85%;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+#https-settings-dialog input[type="text"],
+#https-settings-dialog input[type="email"] {
+  background-image: none;
+  padding-right: 16px;
+}
+#https-settings-dialog .checkbox-container label a {
+  pointer-events: auto;
+  color: #7eb8f7;
+}
+#https-settings-fields[data-disabled="1"] {
+  opacity: 0.65;
+  pointer-events: none;
+}
 #mcp-server-settings-dialog .mcp-inline-actions {
   margin-top: 8px;
   margin-bottom: 0;
@@ -6392,8 +6457,7 @@ header {
    ============================================ */
 
 #quickstart-guide {
-  opacity: 0;
-  animation: guideFadeIn 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  opacity: 1;
 }
 
 @keyframes guideFadeIn {

@@ -126,7 +126,7 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#browser-extension-settings-dialog')).toBeVisible();
     await expect(window.locator('#save-browser-extension-settings')).toBeVisible();
     await expect(window.locator('#cancel-browser-extension-settings')).toBeVisible();
-    await expect(window.locator('#enable-browser-extension')).toBeVisible();
+    await expect(window.locator('#extension-inbox-directory')).toBeVisible();
     await closeDialog('browser-extension-settings-dialog', 'button#cancel-browser-extension-settings');
   });
 

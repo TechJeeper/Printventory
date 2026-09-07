@@ -1,6 +1,6 @@
 # Printventory
 
-**Version 2.2.3**
+**Version 2.2.4**
 
 Printventory is an Electron-based desktop application for managing your 3D printing model collection. It helps you organize, catalog, and manage STL and 3MF files with powerful features including automatic scanning, thumbnail generation, tagging, and duplicate detection.
 
@@ -54,9 +54,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent feature additions and migration note
 ### Pre-built Releases
 
 Download the latest release for your platform:
-- **Windows**: `Printventory-Setup-2.2.3.exe` (NSIS installer)
+- **Windows**: `Printventory-Setup-2.2.4.exe` (NSIS installer)
 - **macOS**: Universal binary (Intel and Apple Silicon) DMG
-- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.2.3.zip`)
+- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.2.4.zip`)
 
 ### Data Storage
 
@@ -119,6 +119,7 @@ http://192.168.1.100:5000
 - **Network Access**: The server listens on all network interfaces (0.0.0.0) on port 5000
 - **Firewall**: You may need to allow Printventory through your firewall to access it from other devices
 - **Network Security**: Server Mode is designed for local network use. For production deployments, consider additional security measures
+- **HTTPS / SSL**: Open **Settings → HTTPS / SSL** to use custom PEM files, a self-signed LAN certificate, or Let's Encrypt (public DNS + inbound port 80). In server/Docker mode you can also set the **listen port** (default 5000; `https://` and `wss://` on that port). `PRINTVENTORY_PORT` seeds the port when unset. `PRINTVENTORY_TLS_*` environment variables override the certificate UI. Reverse proxies should leave in-app TLS off and upgrade WebSockets.
 - **STL Home Setting**: The STL Home setting follows the same path format rules as regular scanning. See the [STL Home Setting](#stl-home-setting-server-mode) section below for details on automatic and periodic scanning.
 
 ### Use Cases
@@ -176,8 +177,9 @@ The transport is **Streamable HTTP** at `/mcp`.
 ### Desktop
 
 1. Open **Tools → MCP Server** (listed under Browser Extension)
-2. Enable **MCP Server** and Save — Printventory starts a localhost listener while the app is running (same port as the Browser Extension, default `5000`)
-3. Copy the client config from the dialog into your MCP client
+2. Enable **MCP Server** and Save — Printventory starts a localhost listener while the app is running (default port `5000`)
+3. Optional: **Settings → HTTPS / SSL** so the MCP listener uses `https://` (use `https://127.0.0.1:5000/mcp` in the client config)
+4. Copy the client config from the dialog into your MCP client
 
 ```json
 {
@@ -189,7 +191,7 @@ The transport is **Streamable HTTP** at `/mcp`.
 }
 ```
 
-Disable MCP Server (or quit Printventory) to stop the listener. If the Browser Extension is also enabled, the local HTTP server stays up for the extension.
+Disable MCP Server (or quit Printventory) to stop the listener.
 
 ### Docker / Server mode
 
@@ -413,7 +415,9 @@ services:
     container_name: printventory-server
     ports:
       - "5000:5000"
-      # HTTPS inside the container (optional — see TLS env vars below):
+      # Let's Encrypt (Settings → HTTPS / SSL) needs port 80:
+      # - "80:80"
+      # Optional: map 443 to the app when TLS is on:
       # - "443:5000"
     volumes:
       # Persist DB and app data (host ./data → container config dir)
@@ -426,7 +430,7 @@ services:
       # - /mnt/network-share:/mnt/network-share:ro
       # Local host directory:
       # - /home/user/models:/mnt/models:ro
-      # TLS certs (optional):
+      # Custom PEM files (optional). Let's Encrypt / self-signed certs live in ./data.
       # - ./certs:/certs:ro
     environment:
       # Headless Chromium / Electron (set by the image; usually leave as-is)
@@ -449,7 +453,7 @@ services:
       # Server-side thumbnail GPU: auto (default) | nvidia | swiftshader
       # - PRINTVENTORY_GPU=auto
 
-      # HTTPS in-container (optional). Mount PEMs and point these at them:
+      # HTTPS: prefer Settings → HTTPS / SSL in the UI. These env vars override the UI.
       # - PRINTVENTORY_TLS_CERT=/certs/fullchain.pem
       # - PRINTVENTORY_TLS_KEY=/certs/privkey.pem
       # - PRINTVENTORY_TLS_CA=/certs/chain.pem
@@ -477,10 +481,10 @@ docker compose up -d
 | `image` | Image to run (`printventory/printventory:latest` or a version tag). |
 | `build` | Build from the local `Dockerfile` instead of (or in addition to) pulling. |
 | `container_name` | Fixed container name (`printventory-server`) for easy `docker logs` / `docker exec`. |
-| `ports` | Maps host → container. `5000:5000` is HTTP. For in-container HTTPS you can map `443:5000` and set TLS env vars. |
+| `ports` | Maps host → container. `5000:5000` is the app (HTTP or HTTPS). Publish `80:80` for Let's Encrypt HTTP-01. Optional `443:5000` when TLS is on. |
 | `volumes` → `./data:...` | Persists the SQLite DB and app config on the host so updates/recreates keep your library. |
 | `volumes` → model mounts | Exposes host/network files inside the container. Always use the **container** path (e.g. `/mnt/models`) in the UI and in `STL_HOME`. `:ro` is read-only. |
-| `volumes` → `./certs:...` | Optional PEM directory for TLS when terminating HTTPS inside Printventory. |
+| `volumes` → `./certs:...` | Optional PEM directory for custom certificates. Let's Encrypt and self-signed files are stored in `./data`. |
 | `restart: unless-stopped` | Restarts the container after reboot or crash, unless you stopped it manually. |
 | `mem_limit` / `mem_reservation` | Caps / reserves container RAM. Recommend **4GB+** (8g in the example) for large libraries. Host RAM alone does not help if the container is capped low. |
 | `gpus: all` | Passes host NVIDIA GPUs into the container (requires NVIDIA Container Toolkit). |
@@ -496,7 +500,7 @@ docker compose up -d
 | `PRINTVENTORY_PREVIEW_3MF_MAX_FILE_SIZE_MB` | Skip / limit very large 3MF files during preview. |
 | `PRINTVENTORY_MAX_OLD_SPACE_MB` | V8 heap size in MB. Defaults scale from the container memory limit; raise if logs show `OOM error in V8: Zone Allocation failed`. |
 | `PRINTVENTORY_DB_PATH` | Optional override for the SQLite DB path inside the container. |
-| `PRINTVENTORY_TLS_CERT` / `PRINTVENTORY_TLS_KEY` / `PRINTVENTORY_TLS_CA` | Enable HTTPS inside the container (browser uses `https://` and `wss://`). If you terminate TLS at Traefik/Caddy/nginx instead, leave these unset and configure WebSocket upgrade on the proxy. |
+| `PRINTVENTORY_TLS_CERT` / `PRINTVENTORY_TLS_KEY` / `PRINTVENTORY_TLS_CA` | Ops override for in-container HTTPS (wins over **Settings → HTTPS / SSL**). Browser uses `https://` and `wss://`. If you terminate TLS at Traefik/Caddy/nginx instead, leave these unset, leave the UI on Off, and configure WebSocket upgrade on the proxy. |
 | `NVIDIA_VISIBLE_DEVICES` | Which GPUs the container can see (`all` or a device index). |
 | `NVIDIA_DRIVER_CAPABILITIES` | Must include **`graphics`** for WebGL (`graphics,compute,utility`). `compute,utility` alone is enough for `nvidia-smi` but not Chromium. |
 

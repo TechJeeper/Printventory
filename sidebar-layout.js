@@ -51,6 +51,7 @@
 
   function bindResize(handle, options) {
     if (!handle || handle.dataset.resizeBound) return;
+    if (document.body.classList.contains('mobile-ui')) return;
     handle.dataset.resizeBound = '1';
     handle.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;

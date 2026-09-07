@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -30,6 +30,8 @@
     "test:bundle": "node bundle-keys.test.js",
     "test:print-events": "node print-events.test.js",
     "test:folder-tree": "node folder-tree-lib.test.js",
+    "test:inbox": "node extension-inbox.test.js",
+    "test:extractors": "node chrome-extension/extractors.test.js",
     "test:mcp": "node mcp-server.test.js",
     "test:full": "playwright test full-app-e2e.spec.js",
     "test:dedup-stress": "node tests/dedup-stress-test.js"
@@ -121,11 +123,19 @@
       "print-history.js",
       "spoolman.js",
       "index.html",
+      "manifest.webmanifest",
+      "sw.js",
+      "pwa.js",
+      "mobile-ui.js",
+      "mobile-ui.css",
       "styles.css",
       "preview-wall.css",
       "thumbnail-progress.css",
       "thumbnail-progress.js",
       "logo.png",
+      "pwa-icon-192.png",
+      "pwa-icon-512.png",
+      "apple-touch-icon.png",
       "dup.png",
       "roulette.png",
       "tag.png",
@@ -153,6 +163,8 @@
       "vendor/**",
       "vendor/**/*",
       "server-bridge.js",
+      "server-tls.js",
+      "extension-inbox.js",
       "mcp-server.js",
       "installer.nsh",
       "node_modules/node-stream-zip/**/*"
@@ -175,6 +187,7 @@
     "node-abi": "^3.94.0"
   },
   "dependencies": {
+    "acme-client": "^5.4.0",
     "better-sqlite3": "^12.11.1",
     "chart.js": "^4.4.0",
     "dotenv": "^17.4.2",
@@ -187,6 +200,7 @@
     "node-stream-zip": "^1.15.0",
     "openai": "^6.9.1",
     "puppeteer": "^24.31.0",
+    "selfsigned": "^5.5.0",
     "three": "^0.181.2",
     "ws": "^8.14.2",
     "xmldom": "^0.6.0"

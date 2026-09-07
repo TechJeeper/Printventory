@@ -15,6 +15,8 @@ const {
   listToolDefinitions,
   SERVER_NAME: MCP_SERVER_NAME
 } = require('./mcp-server');
+const serverTls = require('./server-tls');
+const extensionInbox = require('./extension-inbox');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -318,10 +320,13 @@ function debugLog(...args) {
 // Server mode detection
 const isServerMode = process.argv.includes('--server');
 let httpServer = null;
+let httpServerEpoch = 0;
+let http80Server = null;
 let electronUiServer = null;
 let electronUiPort = null;
 let wss = null; // WebSocket server
 let wsClients = null; // WebSocket clients Set
+let letsEncryptRenewInFlight = false;
 
 // Store pending context menu actions for server mode (browser access)
 const pendingContextMenus = new Map();
@@ -429,37 +434,103 @@ function getWindowFromEvent(event) {
   }
 }
 
+function getTlsCertsDir() {
+  try {
+    return path.join(app.getPath('userData'), 'certs');
+  } catch (_) {
+    return path.join(process.cwd(), 'certs');
+  }
+}
+
+function resolveAppTls() {
+  return serverTls.resolveServerTls({
+    getSetting: getSettingValueOr,
+    certsDir: getTlsCertsDir()
+  });
+}
+
 /**
- * Optional TLS for server mode (e.g. Docker without a reverse proxy).
- * Set PRINTVENTORY_TLS_CERT and PRINTVENTORY_TLS_KEY to PEM paths (inside the container).
- * Also accepts SSL_CERT_FILE / SSL_KEY_FILE. Optional chain: PRINTVENTORY_TLS_CA.
+ * Optional TLS for server mode. Env PRINTVENTORY_TLS_* / SSL_* overrides UI settings.
  */
 function loadOptionalServerTlsOptions() {
-  const certEnv = process.env.PRINTVENTORY_TLS_CERT || process.env.SSL_CERT_FILE;
-  const keyEnv = process.env.PRINTVENTORY_TLS_KEY || process.env.SSL_KEY_FILE;
-  if (!certEnv || !keyEnv) return null;
-  const certPath = path.resolve(certEnv);
-  const keyPath = path.resolve(keyEnv);
-  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-    console.warn('[Server] TLS env vars set but certificate files not found.');
-    console.warn('[Server] cert:', certPath, 'exists:', fs.existsSync(certPath));
-    console.warn('[Server] key:', keyPath, 'exists:', fs.existsSync(keyPath));
-    return null;
+  return resolveAppTls().options || null;
+}
+
+function persistSetting(key, value) {
+  if (!db) throw new Error('Database is not initialized');
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value == null ? '' : String(value));
+}
+
+function formatPort80BindError(err) {
+  if (!err) return 'Failed to bind port 80.';
+  if (err.code === 'EACCES') {
+    return 'Could not bind port 80 (permission denied). Let\'s Encrypt HTTP-01 and HTTP redirect need port 80. Run as administrator/root, or in Docker publish 80:80.';
   }
-  const opts = {
-    cert: fs.readFileSync(certPath),
-    key: fs.readFileSync(keyPath)
-  };
-  const caEnv = process.env.PRINTVENTORY_TLS_CA;
-  if (caEnv) {
-    const caPath = path.resolve(caEnv);
-    if (fs.existsSync(caPath)) {
-      opts.ca = fs.readFileSync(caPath);
-    } else {
-      console.warn('[Server] PRINTVENTORY_TLS_CA not found:', caPath);
+  if (err.code === 'EADDRINUSE') {
+    return 'Port 80 is already in use. Stop the other listener or disable HTTP-01 / redirect.';
+  }
+  return err.message || 'Failed to bind port 80.';
+}
+
+function stopPort80Server() {
+  return new Promise((resolve) => {
+    if (!http80Server) {
+      resolve();
+      return;
     }
+    const server = http80Server;
+    http80Server = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      server.close(() => finish());
+    } catch (_) {
+      finish();
+      return;
+    }
+    setTimeout(finish, 2000);
+  });
+}
+
+function startPort80Server() {
+  return new Promise((resolve, reject) => {
+    if (http80Server) {
+      resolve();
+      return;
+    }
+    const http = require('http');
+    const server = http.createServer((req, res) => {
+      serverTls.handleAcmeOrRedirectRequest(req, res, {
+        getSetting: getSettingValueOr,
+        appPort: getAppListenPort(),
+        tlsActive: !!resolveAppTls().options
+      });
+    });
+    server.once('error', (err) => {
+      http80Server = null;
+      const message = formatPort80BindError(err);
+      serverTls.setLastTlsError(message);
+      reject(new Error(message));
+    });
+    server.listen(80, '0.0.0.0', () => {
+      http80Server = server;
+      console.log('[TLS] HTTP listener on 0.0.0.0:80 (ACME HTTP-01 / optional redirect)');
+      resolve();
+    });
+  });
+}
+
+async function syncPort80Server() {
+  if (!serverTls.shouldBindAcmeHttpPort(getSettingValueOr)) {
+    await stopPort80Server();
+    return { running: false };
   }
-  return opts;
+  await startPort80Server();
+  return { running: true };
 }
 
 /**
@@ -549,10 +620,11 @@ function registerPuterAiProxyRoute(expressApp) {
 }
 
 // HTTP Server Function
-function startHttpServer(port = 5000, localhostOnly = false) {
+function startHttpServer(port = 5000, localhostOnly = false, options = {}) {
   const expressApp = express();
   const PORT = typeof port === 'number' ? port : parseInt(port, 10) || 5000;
   const HOST = localhostOnly ? '127.0.0.1' : '0.0.0.0';
+  const forcePlainHttp = !!(options && options.forcePlainHttp);
 
   // Enable CORS for remote access
   expressApp.use((req, res, next) => {
@@ -652,7 +724,21 @@ ${bridgeCode}
 
   // Now register static file serving AFTER the route handler
   // This ensures the route handler takes precedence for the root path
-  expressApp.use(express.static(appDir));
+  expressApp.use(express.static(appDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.webmanifest') || filePath.endsWith('manifest.json')) {
+        res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+      }
+      if (filePath.endsWith(`${path.sep}sw.js`) || filePath.endsWith('/sw.js') || filePath.endsWith('sw.js')) {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Service-Worker-Allowed', '/');
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+      if (/\.(js|css|html|webmanifest)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    }
+  }));
 
   // Extension upload: accept file bytes + metadata, write to configured directory (e.g. NAS), then saveModel
   expressApp.post('/api/extension-upload', async (req, res) => {
@@ -895,6 +981,7 @@ ${bridgeCode}
         '.css': 'text/css',
         '.js': 'application/javascript',
         '.json': 'application/json',
+        '.webmanifest': 'application/manifest+json',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
         '.jpeg': 'image/jpeg',
@@ -907,13 +994,20 @@ ${bridgeCode}
       if (mimeTypes[ext]) {
         res.setHeader('Content-Type', mimeTypes[ext]);
       }
+      if (path.basename(filePath) === 'sw.js') {
+        res.setHeader('Service-Worker-Allowed', '/');
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+      if (['.js', '.css', '.html', '.webmanifest'].includes(ext)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
     }
   }));
 
   // Handle 404 - serve index.html for SPA routing (with bridge injection)
   expressApp.get('*', (req, res) => {
     // Missing static files: express.static already called next(); respond or the client hangs (blocks parser on <script src>)
-    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
+    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json|webmanifest|map)$/)) {
       res.status(404).type('text/plain').send('Not Found');
       return;
     }
@@ -936,7 +1030,8 @@ ${bridgeCode}
     });
   });
 
-  const tlsOptions = loadOptionalServerTlsOptions();
+  const tlsResolved = forcePlainHttp ? { options: null, source: 'none' } : resolveAppTls();
+  const tlsOptions = tlsResolved.options || null;
   const useTls = !!tlsOptions;
 
   // Start server (returns Promise so callers can catch bind errors, e.g. macOS entitlement)
@@ -949,18 +1044,31 @@ ${bridgeCode}
     const onListening = () => {
       if (localhostOnly) {
         console.log(`[Local HTTP] Server listening at ${scheme}://${HOST}:${PORT}`);
+        if (useTls) {
+          console.log(`[Local HTTP] TLS enabled (source: ${tlsResolved.source}) for Browser Extension / MCP`);
+        }
+        syncPort80Server().catch((err) => {
+          console.warn('[TLS] Port 80 listener:', err.message);
+        });
       } else {
         console.log(`Printventory server mode started`);
         console.log(`Server running at ${scheme}://${HOST}:${PORT}`);
         console.log(`Access from remote browsers: ${scheme}://<your-ip>:${PORT}`);
         if (useTls) {
-          console.log('TLS enabled: browser will use wss:// for the Printventory bridge (same port).');
+          console.log(`TLS enabled (source: ${tlsResolved.source}): browser will use wss:// for the Printventory bridge (same port).`);
+        }
+        if (isServerMode && !localhostOnly) {
+          syncPort80Server().catch((err) => {
+            console.warn('[TLS] Port 80 listener:', err.message);
+          });
         }
         console.log(`Server mode requires UNC paths for all file operations`);
       }
       resolve();
     };
 
+    console.log(`[Server] Binding ${scheme}://${HOST}:${PORT} (tls source: ${tlsResolved.source || 'none'})`);
+    httpServerEpoch += 1;
     if (useTls) {
       httpServer = https.createServer(tlsOptions, expressApp);
       httpServer.listen(PORT, HOST, onListening);
@@ -1350,6 +1458,7 @@ function startElectronUiServer() {
         '.css': 'text/css',
         '.js': 'application/javascript',
         '.json': 'application/json',
+        '.webmanifest': 'application/manifest+json',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
         '.jpeg': 'image/jpeg',
@@ -1362,11 +1471,18 @@ function startElectronUiServer() {
       if (mimeTypes[ext]) {
         res.setHeader('Content-Type', mimeTypes[ext]);
       }
+      if (path.basename(filePath) === 'sw.js') {
+        res.setHeader('Service-Worker-Allowed', '/');
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+      if (['.js', '.css', '.html', '.webmanifest'].includes(ext)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
     }
   }));
 
   expressApp.get('*', (req, res) => {
-    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
+    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json|webmanifest|map)$/)) {
       res.status(404).type('text/plain').send('Not Found');
       return;
     }
@@ -1410,6 +1526,8 @@ function stopHttpServer() {
       return;
     }
 
+    const epoch = httpServerEpoch;
+    const server = httpServer;
     console.log('Stopping HTTP server...');
 
     // Close all WebSocket connections gracefully
@@ -1439,23 +1557,29 @@ function stopHttpServer() {
       wss = null;
     }
 
+    if (typeof server.closeAllConnections === 'function') {
+      try { server.closeAllConnections(); } catch (_) { /* ignore */ }
+    }
+
     // Close HTTP server
-    httpServer.close(() => {
+    server.close(() => {
       console.log('HTTP server closed');
-      httpServer = null;
-      wsClients = null;
-      // Clear global broadcast function
-      global.broadcastEvent = null;
-      global.sendEvent = null;
+      if (httpServerEpoch === epoch) {
+        httpServer = null;
+        wsClients = null;
+        global.broadcastEvent = null;
+        global.sendEvent = null;
+      }
       resolve();
     });
 
     // Force close after timeout if graceful shutdown doesn't complete
     setTimeout(() => {
-      if (httpServer) {
+      if (httpServerEpoch !== epoch) return;
+      if (httpServer === server) {
         console.log('Force closing HTTP server...');
         try {
-          httpServer.close();
+          server.close();
         } catch (error) {
           console.error('Error force closing server:', error);
         }
@@ -1479,14 +1603,114 @@ function getSettingValueOr(key, fallback) {
   return fallback;
 }
 
+let extensionInboxTimer = null;
+let extensionInboxImporting = false;
+
+function getExtensionInboxDirectory() {
+  return extensionInbox.resolveInboxDirectory(getSettingValueOr('extensionInboxDirectory', ''));
+}
+
+function getExtensionInboxDirectories() {
+  const custom = (getSettingValueOr('extensionInboxDirectory', '') || '').trim();
+  return extensionInbox.uniqueInboxDirectories([
+    custom || null,
+    extensionInbox.defaultInboxDirectory(),
+    extensionInbox.inboxDirectoryBesideDatabase(getDatabasePath())
+  ]);
+}
+
+function recordExtensionInboxStatus(result, reason) {
+  const payload = {
+    at: new Date().toISOString(),
+    reason: reason || null,
+    imported: result.imported || 0,
+    failed: result.failed || 0,
+    skipped: result.skipped || 0,
+    errors: (result.errors || []).slice(0, 5)
+  };
+  persistSetting('extensionInboxLastStatus', JSON.stringify(payload));
+}
+
+async function runExtensionInboxImport(reason) {
+  if (extensionInboxImporting) {
+    return { imported: 0, failed: 0, skipped: 0, errors: [], busy: true };
+  }
+  extensionInboxImporting = true;
+  try {
+    const result = await extensionInbox.importInboxMany({
+      inboxDirs: getExtensionInboxDirectories(),
+      saveModel
+    });
+    if (result.imported || result.failed || reason === 'manual' || reason === 'startup') {
+      recordExtensionInboxStatus(result, reason);
+    }
+    if (result.imported > 0) {
+      try {
+        if (typeof global.broadcastEvent === 'function') {
+          global.broadcastEvent('refresh-grid');
+        } else if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('refresh-grid');
+        }
+      } catch (e) {
+        console.warn('[Extension inbox] refresh-grid failed:', e.message);
+      }
+    }
+    if (result.imported || result.failed) {
+      console.log('[Extension inbox]', reason, 'imported', result.imported, 'failed', result.failed);
+    }
+    return result;
+  } catch (err) {
+    console.error('[Extension inbox] import failed:', err);
+    return { imported: 0, failed: 0, skipped: 0, errors: [err.message || String(err)] };
+  } finally {
+    extensionInboxImporting = false;
+  }
+}
+
+function startExtensionInboxWatcher() {
+  if (extensionInboxTimer) return;
+  runExtensionInboxImport('startup').catch((e) => console.error('[Extension inbox] startup:', e));
+  extensionInboxTimer = setInterval(() => {
+    runExtensionInboxImport('interval').catch((e) => console.error('[Extension inbox] interval:', e));
+  }, extensionInbox.POLL_INTERVAL_MS);
+  if (typeof extensionInboxTimer.unref === 'function') extensionInboxTimer.unref();
+}
+
+function parseListenPort(value, fallback = 5000) {
+  const n = parseInt(value, 10);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return fallback;
+  return n;
+}
+
 function getConfiguredHttpPort() {
-  return parseInt(getSettingValueOr('browserExtensionPort', '5000'), 10) || 5000;
+  return parseListenPort(getSettingValueOr('browserExtensionPort', '5000'), 5000);
+}
+
+function getEnvServerListenPort() {
+  const raw = process.env.PRINTVENTORY_PORT;
+  if (raw == null || String(raw).trim() === '') return null;
+  const parsed = parseListenPort(raw, 0);
+  return parsed > 0 ? parsed : null;
+}
+
+function envOverridesSettings() {
+  return process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === '1'
+    || process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === 'true';
+}
+
+function getServerListenPort() {
+  const envPort = getEnvServerListenPort();
+  if (envPort && envOverridesSettings()) return envPort;
+  return parseListenPort(getSettingValueOr('serverHttpPort', envPort ? String(envPort) : '5000'), 5000);
+}
+
+function getAppListenPort() {
+  return isServerMode ? getServerListenPort() : getConfiguredHttpPort();
 }
 
 function localHttpServerShouldRun() {
   if (isServerMode) return true;
-  return getSettingValueOr('enableBrowserExtension', '0') === '1'
-    || getSettingValueOr('enableMcpServer', '0') === '1';
+  return getSettingValueOr('enableMcpServer', '0') === '1';
 }
 
 function getHttpServerListenPort() {
@@ -1513,7 +1737,7 @@ function collectLanAddresses() {
 
 async function syncLocalHttpServer(port) {
   if (isServerMode) {
-    return { success: true, running: true, port: getHttpServerListenPort() || 5000 };
+    return { success: true, running: true, port: getHttpServerListenPort() || getAppListenPort() };
   }
   const portNum = parseInt(port, 10) || getConfiguredHttpPort();
   if (!localHttpServerShouldRun()) {
@@ -1540,12 +1764,13 @@ function getMcpConnectionInfo() {
   const enabled = isServerMode || getSettingValueOr('enableMcpServer', '0') === '1';
   const running = isServerMode ? !!httpServer : (!!httpServer && enabled);
   const lanAddresses = isServerMode ? collectLanAddresses() : [];
-  const localUrl = `http://127.0.0.1:${port}/mcp`;
+  const scheme = resolveAppTls().options ? 'https' : 'http';
+  const localUrl = `${scheme}://127.0.0.1:${port}/mcp`;
   const urls = isServerMode
-    ? [`http://<server-host>:${port}/mcp`, localUrl, ...lanAddresses.map((ip) => `http://${ip}:${port}/mcp`)]
+    ? [`${scheme}://<server-host>:${port}/mcp`, localUrl, ...lanAddresses.map((ip) => `${scheme}://${ip}:${port}/mcp`)]
     : [localUrl];
   const primaryUrl = isServerMode
-    ? (lanAddresses[0] ? `http://${lanAddresses[0]}:${port}/mcp` : `http://0.0.0.0:${port}/mcp`)
+    ? (lanAddresses[0] ? `${scheme}://${lanAddresses[0]}:${port}/mcp` : `${scheme}://0.0.0.0:${port}/mcp`)
     : localUrl;
   return {
     serverMode: isServerMode,
@@ -1554,7 +1779,7 @@ function getMcpConnectionInfo() {
     port,
     url: primaryUrl,
     urls,
-    clientConfig: buildMcpClientConfig(isServerMode ? `http://<server-host>:${port}/mcp` : localUrl),
+    clientConfig: buildMcpClientConfig(isServerMode ? `${scheme}://<server-host>:${port}/mcp` : localUrl),
     tools: listToolDefinitions().map((t) => t.name),
     serverName: MCP_SERVER_NAME
   };
@@ -1697,36 +1922,65 @@ function getMcpToolContext() {
   };
 }
 
-// Restart HTTP server function
-async function restartHttpServer() {
+function listenWithTimeout(startPromise, ms) {
+  return Promise.race([
+    startPromise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`Server did not start listening within ${ms}ms`)), ms);
+    })
+  ]);
+}
+
+async function restartHttpServerNow() {
+  const localhostOnly = !isServerMode;
+  const port = getAppListenPort();
+  console.log('[Server] Restarting listener on', localhostOnly ? '127.0.0.1' : '0.0.0.0', port);
+  await stopHttpServer();
+  await new Promise((resolve) => setTimeout(resolve, 400));
   try {
-    console.log('Restarting HTTP server...');
-    
-    // Return success immediately so response can be sent via WebSocket
-    // The actual restart will happen asynchronously after a delay
-    // to allow the WebSocket response to be sent first
-    setTimeout(async () => {
-      try {
-        // Stop the server
-        await stopHttpServer();
-        
-        // Wait a brief moment to ensure port is released
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Restart the server
-        await startHttpServer();
-        
-        console.log('HTTP server restarted successfully');
-      } catch (error) {
-        console.error('Error during server restart:', error);
-      }
-    }, 100); // Small delay to allow WebSocket response to be sent
-    
-    return { success: true, message: 'Server restart initiated' };
+    await listenWithTimeout(startHttpServer(port, localhostOnly), 8000);
+    console.log('[Server] Listener restarted');
+    const scheme = resolveAppTls().options ? 'https' : 'http';
+    return {
+      success: true,
+      message: isServerMode
+        ? `Server restarted at ${scheme}://<host>:${port}. Reopen the UI with that scheme.`
+        : `Local listener restarted at ${scheme}://127.0.0.1:${port}.`
+    };
   } catch (error) {
-    console.error('Error initiating server restart:', error);
-    return { success: false, message: error.message || 'Failed to initiate server restart' };
+    console.error('[Server] Restart bind failed:', error.message);
+    if (httpServer) {
+      try {
+        if (typeof httpServer.closeAllConnections === 'function') httpServer.closeAllConnections();
+        httpServer.close();
+      } catch (_) { /* ignore */ }
+      httpServer = null;
+    }
+    if (resolveAppTls().options) {
+      console.error('[Server] Falling back to HTTP');
+      try {
+        await listenWithTimeout(startHttpServer(port, localhostOnly, { forcePlainHttp: true }), 8000);
+        return {
+          success: false,
+          message: 'Could not start HTTPS; the server is back on HTTP. ' + error.message
+        };
+      } catch (fallbackErr) {
+        console.error('[Server] HTTP fallback failed:', fallbackErr.message);
+        return { success: false, message: fallbackErr.message };
+      }
+    }
+    return { success: false, message: error.message || 'Failed to restart server' };
   }
+}
+
+// Menu "Restart Server": reply on WebSocket first, then bounce the listener.
+async function restartHttpServer() {
+  setTimeout(() => {
+    restartHttpServerNow().catch((error) => {
+      console.error('Error during server restart:', error);
+    });
+  }, 100);
+  return { success: true, message: 'Server restart initiated' };
 }
 
 let db;
@@ -1963,6 +2217,238 @@ ipcMain.handle('restart-server', async () => {
   return await restartHttpServer();
 });
 
+function flushSettingsToDisk() {
+  try {
+    if (!db) return;
+    db.pragma('synchronous = FULL');
+    db.prepare('PRAGMA wal_checkpoint(FULL)').run();
+  } catch (_) { /* ignore */ }
+}
+
+function persistTlsSettingsFromPayload(payload) {
+  const mode = String(payload.tlsMode || serverTls.TLS_MODES.OFF);
+  persistSetting('tlsMode', mode);
+  persistSetting('tlsCertPath', payload.tlsCertPath || '');
+  persistSetting('tlsKeyPath', payload.tlsKeyPath || '');
+  persistSetting('tlsCaPath', payload.tlsCaPath || '');
+  persistSetting('tlsDomain', payload.tlsDomain || '');
+  persistSetting('tlsEmail', payload.tlsEmail || '');
+  persistSetting('tlsAgreeTos', payload.tlsAgreeTos ? '1' : '0');
+  persistSetting('tlsUseStaging', payload.tlsUseStaging ? '1' : '0');
+  persistSetting('tlsRedirectHttp', payload.tlsRedirectHttp ? '1' : '0');
+  if (isServerMode && payload.serverHttpPort != null && payload.serverHttpPort !== '') {
+    persistSetting('serverHttpPort', String(parseListenPort(payload.serverHttpPort, getServerListenPort())));
+  }
+  flushSettingsToDisk();
+}
+
+function getTlsStatusForUi() {
+  const resolved = resolveAppTls();
+  const payload = serverTls.getTlsStatusPayload({
+    getSetting: getSettingValueOr,
+    certsDir: getTlsCertsDir(),
+    serverMode: isServerMode,
+    scheme: resolved.options ? 'https' : 'http',
+    appPort: getAppListenPort()
+  });
+  payload.portEnvOverride = !!(isServerMode && getEnvServerListenPort() && envOverridesSettings());
+  return payload;
+}
+
+async function reloadTlsHttpListener() {
+  if (!isServerMode && !localHttpServerShouldRun()) {
+    if (httpServer) await stopHttpServer();
+    await syncPort80Server().catch(() => {});
+    return {
+      success: true,
+      running: false,
+      port: getAppListenPort(),
+      message: 'TLS settings saved. Enable MCP Server to start the localhost HTTPS listener.'
+    };
+  }
+  const port = getAppListenPort();
+  const scheme = resolveAppTls().options ? 'https' : 'http';
+  setTimeout(() => {
+    restartHttpServerNow().catch((error) => {
+      console.error('[TLS] Listener reload failed:', error);
+    });
+  }, 300);
+  return {
+    success: true,
+    running: true,
+    port,
+    message: `Settings saved. The listener is restarting at ${scheme}://<host>:${port}. If the page drops, open that URL (self-signed certs need a browser trust exception).`
+  };
+}
+
+async function ensurePort80ForAcme() {
+  try {
+    await startPort80Server();
+    return { success: true };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+}
+
+async function maybeRenewLetsEncryptCertificate() {
+  if (letsEncryptRenewInFlight) return;
+  if (serverTls.hasEnvTlsOverride()) return;
+  if (getSettingValueOr('tlsMode', 'off') !== serverTls.TLS_MODES.LETSENCRYPT) return;
+
+  const live = serverTls.getLiveCertPaths(getTlsCertsDir());
+  let needsIssue = true;
+  if (fs.existsSync(live.certPath)) {
+    try {
+      needsIssue = serverTls.certificateNeedsRenewal(fs.readFileSync(live.certPath));
+    } catch (_) {
+      needsIssue = true;
+    }
+  }
+  if (!needsIssue) return;
+
+  letsEncryptRenewInFlight = true;
+  try {
+    const port80 = await ensurePort80ForAcme();
+    if (!port80.success) {
+      serverTls.setLastTlsError(port80.message);
+      return;
+    }
+    console.log('[TLS] Renewing Let\'s Encrypt certificate...');
+    await serverTls.obtainLetsEncryptCertificate({
+      certsDir: getTlsCertsDir(),
+      domain: getSettingValueOr('tlsDomain', ''),
+      email: getSettingValueOr('tlsEmail', ''),
+      agreeTos: getSettingValueOr('tlsAgreeTos', '0') === '1',
+      useStaging: getSettingValueOr('tlsUseStaging', '0') === '1'
+    });
+    await reloadTlsHttpListener();
+  } catch (err) {
+    serverTls.setLastTlsError(err.message || 'Let\'s Encrypt renewal failed');
+    console.warn('[TLS] Renewal failed:', err.message);
+  } finally {
+    letsEncryptRenewInFlight = false;
+  }
+}
+
+ipcMain.handle('get-tls-status', async () => {
+  return getTlsStatusForUi();
+});
+
+ipcMain.handle('apply-tls-settings', async (_event, payload = {}) => {
+  if (serverTls.hasEnvTlsOverride()) {
+    return {
+      success: false,
+      message: 'TLS is overridden by PRINTVENTORY_TLS_CERT / PRINTVENTORY_TLS_KEY (or SSL_*). Unset those environment variables to use this UI.',
+      status: getTlsStatusForUi()
+    };
+  }
+
+  try {
+    const mode = String(payload.tlsMode || serverTls.TLS_MODES.OFF);
+    if (isServerMode && payload.serverHttpPort != null && String(payload.serverHttpPort).trim() !== '') {
+      const requested = parseInt(payload.serverHttpPort, 10);
+      if (!Number.isInteger(requested) || requested < 1 || requested > 65535) {
+        throw new Error('Listen port must be between 1 and 65535.');
+      }
+      if (requested === 80 && (mode === serverTls.TLS_MODES.LETSENCRYPT || payload.tlsRedirectHttp)) {
+        throw new Error('Port 80 is reserved for Let\'s Encrypt HTTP-01 and HTTP redirect. Choose a different listen port.');
+      }
+    }
+    persistTlsSettingsFromPayload(payload || {});
+    const listenPort = getAppListenPort();
+    if (listenPort === 80 && (mode === serverTls.TLS_MODES.LETSENCRYPT || payload.tlsRedirectHttp)) {
+      throw new Error('Port 80 is reserved for Let\'s Encrypt HTTP-01 and HTTP redirect. Choose a different listen port.');
+    }
+
+    if (mode === serverTls.TLS_MODES.CUSTOM) {
+      const certPath = String(payload.tlsCertPath || '').trim();
+      const keyPath = String(payload.tlsKeyPath || '').trim();
+      if (!certPath || !keyPath) {
+        throw new Error('Certificate and key file paths are required for a custom certificate.');
+      }
+      const loaded = serverTls.readPemTlsOptions(certPath, keyPath, payload.tlsCaPath || '');
+      if (!loaded) {
+        throw new Error('Certificate or key file was not found. Use an absolute path visible to the server (or container).');
+      }
+    }
+
+    if (mode === serverTls.TLS_MODES.LETSENCRYPT) {
+      const live = serverTls.getLiveCertPaths(getTlsCertsDir());
+      const haveCert = fs.existsSync(live.certPath) && fs.existsSync(live.keyPath);
+      const shouldIssue = !!payload.issueNow || !haveCert;
+      if (shouldIssue) {
+        const port80 = await ensurePort80ForAcme();
+        if (!port80.success) throw new Error(port80.message);
+        await serverTls.obtainLetsEncryptCertificate({
+          certsDir: getTlsCertsDir(),
+          domain: payload.tlsDomain,
+          email: payload.tlsEmail,
+          agreeTos: !!payload.tlsAgreeTos,
+          useStaging: !!payload.tlsUseStaging
+        });
+      }
+    }
+
+    if (mode === serverTls.TLS_MODES.SELFSIGNED) {
+      const managed = serverTls.getSelfSignedPaths(getTlsCertsDir());
+      if (!fs.existsSync(managed.certPath) || !fs.existsSync(managed.keyPath)) {
+        await serverTls.generateSelfSignedCertificate({
+          certsDir: getTlsCertsDir(),
+          hostname: String(payload.tlsDomain || '').trim() || 'localhost'
+        });
+      }
+    }
+
+    serverTls.setLastTlsError(null);
+    await syncPort80Server().catch((err) => {
+      if (mode === serverTls.TLS_MODES.LETSENCRYPT || payload.tlsRedirectHttp) {
+        throw err;
+      }
+    });
+    const restart = await reloadTlsHttpListener();
+    if (!restart.success) throw new Error(restart.message);
+    return { success: true, message: restart.message, status: getTlsStatusForUi() };
+  } catch (err) {
+    serverTls.setLastTlsError(err.message);
+    return { success: false, message: err.message || 'Failed to apply TLS settings', status: getTlsStatusForUi() };
+  }
+});
+
+ipcMain.handle('generate-self-signed-cert', async (_event, payload = {}) => {
+  if (serverTls.hasEnvTlsOverride()) {
+    return { success: false, message: 'TLS is overridden by environment variables.' };
+  }
+  try {
+    const hostname = String(payload.hostname || payload.tlsDomain || '').trim();
+    const generated = await serverTls.generateSelfSignedCertificate({
+      certsDir: getTlsCertsDir(),
+      hostname
+    });
+    persistSetting('tlsMode', serverTls.TLS_MODES.SELFSIGNED);
+    persistSetting('tlsDomain', hostname);
+    if (payload.tlsRedirectHttp != null) {
+      persistSetting('tlsRedirectHttp', payload.tlsRedirectHttp ? '1' : '0');
+    }
+    if (isServerMode && payload.serverHttpPort != null && payload.serverHttpPort !== '') {
+      persistSetting('serverHttpPort', String(parseListenPort(payload.serverHttpPort, getServerListenPort())));
+    }
+    flushSettingsToDisk();
+    serverTls.setLastTlsError(null);
+    await syncPort80Server().catch(() => {});
+    const restart = await reloadTlsHttpListener();
+    if (!restart.success) throw new Error(restart.message);
+    return {
+      success: true,
+      message: 'Self-signed certificate generated (includes localhost and 127.0.0.1). Browsers and Chrome will warn until you trust it. ' + (restart.message || ''),
+      status: getTlsStatusForUi(),
+      paths: generated
+    };
+  } catch (err) {
+    serverTls.setLastTlsError(err.message);
+    return { success: false, message: err.message || 'Failed to generate certificate', status: getTlsStatusForUi() };
+  }
+});
+
 // Handle single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
 
@@ -2011,6 +2497,7 @@ if (!gotTheLock) {
       // across container restarts instead of being overwritten every startup.
       applyDockerEnvSettingIfNeeded('stlHome', process.env.STL_HOME);
       applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
+      applyDockerEnvSettingIfNeeded('serverHttpPort', process.env.PRINTVENTORY_PORT);
 
       // Clear leftover zip-extract temps off the critical path (can readdir a busy OS temp)
       setImmediate(() => {
@@ -2025,11 +2512,16 @@ if (!gotTheLock) {
       // Server mode: start HTTP server and create hidden window for IPC
       if (isServerMode) {
         try {
-          await startHttpServer(5000, false); // Full server mode - listen on all interfaces
+          await startHttpServer(getAppListenPort(), false); // Full server mode - listen on all interfaces
         } catch (err) {
           console.error('Server mode: failed to bind:', err.message);
           process.exit(1);
         }
+        setImmediate(() => {
+          maybeRenewLetsEncryptCertificate().catch((renewErr) => {
+            console.warn('[TLS] Startup renewal skipped:', renewErr.message);
+          });
+        });
         // Create a hidden BrowserWindow to handle IPC (preload script needs a window)
         await createHiddenWindow();
         // Schedule background hash generation for any existing models with missing hashes
@@ -2047,14 +2539,18 @@ if (!gotTheLock) {
           // Keep the app running in server mode
         });
       } else {
-        // Normal mode: start localhost-only HTTP server when Browser Extension or MCP is enabled
+        // Normal mode: start localhost-only HTTP server when MCP is enabled
         const extPort = getConfiguredHttpPort();
         if (localHttpServerShouldRun()) {
           const mcpOn = getSettingValueOr('enableMcpServer', '0') === '1';
-          const extOn = getSettingValueOr('enableBrowserExtension', '0') === '1';
-          console.log('[Local HTTP] Starting at startup on port', extPort, '(extension:', extOn, 'mcp:', mcpOn, ')');
+          console.log('[Local HTTP] Starting at startup on port', extPort, '(mcp:', mcpOn, ')');
           startHttpServer(extPort, true).then(() => {
             console.log('[Local HTTP] Server started successfully at startup');
+            setImmediate(() => {
+              maybeRenewLetsEncryptCertificate().catch((renewErr) => {
+                console.warn('[TLS] Startup renewal skipped:', renewErr.message);
+              });
+            });
           }).catch((err) => {
             console.error('[Local HTTP] Failed to start server at startup:', err.message);
             console.error('[Local HTTP] Run from Terminal to see this, or check entitlements (com.apple.security.network.server) and rebuild.');
@@ -2094,6 +2590,8 @@ if (!gotTheLock) {
         scheduleBackgroundThumbnailCompression('startup');
       }
       
+      startExtensionInboxWatcher();
+
       // Track application usage after initialization (skip in server mode; do not block ready)
       if (!isServerMode) {
         setImmediate(() => {
@@ -2124,6 +2622,11 @@ if (!gotTheLock) {
     
     // Create a backup of the database before updates
     app.on('before-quit', async () => {
+      try {
+        await stopPort80Server();
+      } catch (error) {
+        console.error('Error stopping TLS HTTP-01 listener:', error);
+      }
       try {
         await stopElectronUiServer();
       } catch (error) {
@@ -2661,11 +3164,22 @@ function initializeDefaultSettings() {
       { key: 'aiTagMergeStrategy', value: 'merge' }, // How to merge AI tags: 'replace', 'merge', 'append'
       { key: 'aiTagAllowRetagging', value: '0' }, // Allow re-tagging even if "AI Tagged" exists
       { key: 'aiTagConcurrency', value: '3' }, // Number of concurrent tag generation requests
-      { key: 'enableBrowserExtension', value: '0' }, // Browser extension local server disabled by default
-      { key: 'browserExtensionPort', value: '5000' }, // Port for browser extension / MCP local server (default 5000)
+      { key: 'enableBrowserExtension', value: '0' }, // Legacy: extension no longer starts the local HTTP server
+      { key: 'browserExtensionPort', value: '5000' }, // Port for MCP local server (default 5000)
+      { key: 'extensionInboxDirectory', value: '' }, // Empty = Downloads/PrintventoryInbox
+      { key: 'extensionInboxLastStatus', value: '' },
       { key: 'enableMcpServer', value: '0' }, // MCP listener disabled by default in desktop mode
       { key: 'spoolmanUrl', value: '' },
       { key: 'spoolmanApiToken', value: '' },
+      { key: 'tlsMode', value: 'off' },
+      { key: 'tlsCertPath', value: '' },
+      { key: 'tlsKeyPath', value: '' },
+      { key: 'tlsCaPath', value: '' },
+      { key: 'tlsDomain', value: '' },
+      { key: 'tlsEmail', value: '' },
+      { key: 'tlsAgreeTos', value: '0' },
+      { key: 'tlsUseStaging', value: '0' },
+      { key: 'tlsRedirectHttp', value: '0' },
     ];
     
     // Insert default settings if they don't exist
@@ -2770,6 +3284,14 @@ async function createWindow() {
         {
           label: 'Theme',
           click: () => mainWindow.webContents.send('open-theme-settings')
+        },
+        {
+          label: 'HTTPS / SSL',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('open-https-settings');
+            }
+          }
         }
       ]
     },
@@ -3046,6 +3568,14 @@ function createApplicationMenu() {
         {
           label: 'Theme',
           click: () => mainWindow.webContents.send('open-theme-settings')
+        },
+        {
+          label: 'HTTPS / SSL',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('open-https-settings');
+            }
+          }
         }
       ]
     },
@@ -8299,6 +8829,28 @@ async function getModelTagsHandler(event, modelId) {
 ipcMain.handle('get-model-tags', getModelTagsHandler);
 ipcHandlerRegistry.set('get-model-tags', getModelTagsHandler);
 
+async function getGroupTagsHandler(event, modelIds) {
+  try {
+    const ids = (Array.isArray(modelIds) ? modelIds : [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return db.prepare(`
+      SELECT DISTINCT t.name AS name
+      FROM tags t
+      JOIN model_tags mt ON mt.tag_id = t.id
+      WHERE mt.model_id IN (${placeholders})
+      ORDER BY t.name COLLATE NOCASE
+    `).all(...ids).map((row) => row.name).filter(Boolean);
+  } catch (error) {
+    console.error('Error getting group tags:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-group-tags', getGroupTagsHandler);
+ipcHandlerRegistry.set('get-group-tags', getGroupTagsHandler);
+
 // Add these handlers
 ipcMain.handle('quitApp', () => {
   app.quit();
@@ -8341,6 +8893,14 @@ ipcMain.handle('stop-extension-server', async () => {
 
 ipcMain.handle('sync-local-http-server', async (event, port) => {
   return syncLocalHttpServer(port);
+});
+
+ipcMain.handle('import-extension-inbox', async () => {
+  return runExtensionInboxImport('manual');
+});
+
+ipcMain.handle('get-default-extension-inbox-directory', async () => {
+  return extensionInbox.defaultInboxDirectory();
 });
 
 ipcMain.handle('get-mcp-connection-info', async () => {
@@ -11319,7 +11879,7 @@ async function trackAppUsage() {
     console.log(`  - Model Count: ${modelCount}`);
 
     await analytics.sendHit({
-      path: '/app/open',
+      path: `/app/open?v=${version}`,
       title: `Printventory ${version} (${osPlatform}, ${modelCount} models)`
     });
   } catch (error) {
@@ -11603,7 +12163,8 @@ async function saveModel(modelData) {
       rating,
       favorite,
       tags: rawTags,
-      filaments: rawFilaments
+      filaments: rawFilaments,
+      markAsNew
     } = modelData;
 
     // Extension path mapping (Docker: client path -> container path) and optional copy to NAS
@@ -11680,7 +12241,8 @@ async function saveModel(modelData) {
         rating,
         favorite,
         tags: rawTags,
-        filaments: rawFilaments
+        filaments: rawFilaments,
+        markAsNew
       };
       for (const entry of toAdd) {
         const entryPath = `${filePath}::${entry.name}`;
@@ -11742,8 +12304,8 @@ async function saveModel(modelData) {
           parentModel: finalParentModel,
           license: finalLicense
         };
-        let clearIsNew = modelUserFieldsChanged(existingModelData, finals);
-        if (!clearIsNew && rawTags !== undefined) {
+        let clearIsNew = !markAsNew && modelUserFieldsChanged(existingModelData, finals);
+        if (!markAsNew && !clearIsNew && rawTags !== undefined) {
           const existingTagRows = db.prepare(`
             SELECT t.name FROM model_tags mt
             JOIN tags t ON mt.tag_id = t.id
@@ -11771,7 +12333,7 @@ async function saveModel(modelData) {
             bundleKey = ?,
             bundleLabel = ?,
             bundleKind = ?,
-            isNew = CASE WHEN ? THEN 0 ELSE isNew END
+            isNew = CASE WHEN ? THEN 1 WHEN ? THEN 0 ELSE isNew END
           WHERE id = ?
         `);
         
@@ -11791,6 +12353,7 @@ async function saveModel(modelData) {
           bundle.bundleKey || null,
           bundle.bundleLabel || null,
           bundle.bundleKind || null,
+          markAsNew ? 1 : 0,
           clearIsNew ? 1 : 0,
           existingModel.id
         );

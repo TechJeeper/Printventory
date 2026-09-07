@@ -1,71 +1,48 @@
 'use strict';
 /**
- * One-off: write chrome-extension/icon48.png (48x48 RGBA solid #2d2d2d).
+ * Resize pwa-icon-512.png into chrome-extension icon16/48/128.
  * Run: node scripts/gen-extension-icon48.js
  */
-const fs = require('fs');
+const { spawnSync } = require('child_process');
 const path = require('path');
-const zlib = require('zlib');
 
-const w = 48;
-const h = 48;
-// PNG raw image data: filter 0 + RGBA per row
-const rowSize = 1 + w * 4;
-const raw = Buffer.alloc(h * rowSize);
-for (let y = 0; y < h; y++) {
-  const rowStart = y * rowSize;
-  raw[rowStart] = 0; // None filter
-  for (let x = 0; x < w; x++) {
-    const i = rowStart + 1 + x * 4;
-    raw[i] = 0x2d;
-    raw[i + 1] = 0x2d;
-    raw[i + 2] = 0x2d;
-    raw[i + 3] = 0xff;
+const root = path.join(__dirname, '..');
+const ps = `
+Add-Type -AssemblyName System.Drawing
+$srcPath = Join-Path (Get-Location) 'pwa-icon-512.png'
+$outDir = Join-Path (Get-Location) 'chrome-extension'
+function Save-Icon([int]$size, [string]$name, [bool]$iconOnly) {
+  $src = [System.Drawing.Image]::FromFile($srcPath)
+  $bmp = New-Object System.Drawing.Bitmap $size, $size
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+  $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+  $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+  if ($iconOnly) {
+    $cropH = [int]($src.Height * 0.70)
+    $cropY = [int]($src.Height * 0.03)
+    $cropW = $cropH
+    $cropX = [int](($src.Width - $cropW) / 2)
+    $dest = New-Object System.Drawing.Rectangle 0, 0, $size, $size
+    $g.DrawImage($src, $dest, $cropX, $cropY, $cropW, $cropH, [System.Drawing.GraphicsUnit]::Pixel)
+  } else {
+    $g.DrawImage($src, 0, 0, $size, $size)
   }
+  $bmp.Save((Join-Path $outDir $name), [System.Drawing.Imaging.ImageFormat]::Png)
+  $g.Dispose(); $bmp.Dispose(); $src.Dispose()
 }
+Save-Icon 16 'icon16.png' $true
+Save-Icon 48 'icon48.png' $false
+Save-Icon 128 'icon128.png' $false
+`;
 
-function crc32(buf) {
-  let c = 0xffffffff;
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let k = n;
-    for (let j = 0; j < 8; j++) {
-      k = (k & 1) ? (0xedb88320 ^ (k >>> 1)) : (k >>> 1);
-    }
-    table[n] = k >>> 0;
-  }
-  for (let i = 0; i < buf.length; i++) {
-    c = table[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  }
-  return (c ^ 0xffffffff) >>> 0;
+const result = spawnSync('powershell', ['-NoProfile', '-Command', ps], {
+  cwd: root,
+  encoding: 'utf8'
+});
+if (result.status !== 0) {
+  console.error(result.stderr || result.stdout);
+  process.exit(result.status || 1);
 }
-
-function be32(n) {
-  const b = Buffer.alloc(4);
-  b.writeUInt32BE(n >>> 0, 0);
-  return b;
-}
-
-function chunk(type, data) {
-  const t = Buffer.from(type, 'ascii');
-  const body = Buffer.concat([t, data]);
-  return Buffer.concat([be32(data.length), body, be32(crc32(body))]);
-}
-
-const ihdr = Buffer.concat([
-  be32(w),
-  be32(h),
-  Buffer.from([8, 6, 0, 0, 0]) // 8-bit RGBA
-]);
-const idat = zlib.deflateSync(raw, { level: 9 });
-const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const png = Buffer.concat([
-  signature,
-  chunk('IHDR', ihdr),
-  chunk('IDAT', idat),
-  chunk('IEND', Buffer.alloc(0))
-]);
-
-const out = path.join(__dirname, '..', 'chrome-extension', 'icon48.png');
-fs.writeFileSync(out, png);
-console.log('Wrote', out, png.length, 'bytes');
+console.log(result.stdout || 'Wrote chrome-extension icons from pwa-icon-512.png');

@@ -1,57 +1,74 @@
 'use strict';
 
-const DEFAULT_SERVER_URL = 'http://localhost:5000'; // Printventory listens here in normal and server mode
-
-function setStatus(state, text) {
-  const dot = document.getElementById('statusDot');
-  const msg = document.getElementById('statusText');
-  dot.className = 'status-dot ' + state;
-  msg.textContent = text;
+function setFolderStatus(kind, text) {
+  const el = document.getElementById('folderStatus');
+  el.className = 'folder-status' + (kind ? ' ' + kind : '');
+  el.textContent = text;
 }
 
-document.getElementById('save').addEventListener('click', () => {
-  const url = document.getElementById('serverUrl').value.trim() || DEFAULT_SERVER_URL;
-  const useUpload = document.getElementById('useUploadForServer').checked;
-  const debug = document.getElementById('extensionDebug').checked;
-  if (typeof pvSetDebug === 'function') pvSetDebug(debug);
-  chrome.storage.sync.set({ printventoryServerUrl: url, useUploadForServer: useUpload, extensionDebug: debug }, () => {
-    const el = document.getElementById('saved');
-    el.style.display = 'block';
-    setTimeout(() => { el.style.display = 'none'; }, 2000);
-    setStatus('unknown', 'Status: not checked');
-  });
-});
-
-document.getElementById('testConnection').addEventListener('click', () => {
-  const urlInput = document.getElementById('serverUrl').value.trim() || DEFAULT_SERVER_URL;
-  const btn = document.getElementById('testConnection');
-  setStatus('checking', 'Testing…');
-  btn.disabled = true;
-  chrome.runtime.sendMessage(
-    { action: 'testConnection', url: urlInput || undefined },
-    (response) => {
-      btn.disabled = false;
-      if (chrome.runtime.lastError) {
-        setStatus('error', 'Status: ' + (chrome.runtime.lastError.message || 'Error'));
+function refreshFolderStatus() {
+  chrome.storage.local.get(
+    { printventoryFolderConfigured: false, printventoryFolderName: '', printventoryFolderHasDb: false },
+    (items) => {
+      if (!items.printventoryFolderConfigured) {
+        setFolderStatus('', 'No folder selected yet. Inbox files will go to Downloads until you choose one.');
         return;
       }
-      if (response && response.ok) {
-        setStatus('connected', 'Status: connected');
+      const name = items.printventoryFolderName || 'selected folder';
+      if (items.printventoryFolderHasDb) {
+        setFolderStatus('ok', 'Using “' + name + '” (found printventory.db). Inbox: ' + name + '\\PrintventoryInbox');
       } else {
-        setStatus('error', 'Status: ' + (response && response.error ? response.error : 'Connection failed'));
+        setFolderStatus('warn', 'Using “' + name + '”, but printventory.db was not in that folder. Printventory must watch this same path, or pick the data folder that contains the database.');
       }
     }
   );
+}
+
+async function chooseFolder() {
+  if (!window.showDirectoryPicker) {
+    setFolderStatus('err', 'This browser cannot pick a folder. Use Chrome or Edge.');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ id: 'pv-printventory-dir', mode: 'readwrite' });
+    const granted = await PrintventoryFolder.ensureWritePermission(handle);
+    if (!granted) {
+      setFolderStatus('err', 'Permission was not granted for that folder.');
+      return;
+    }
+    const hasDb = await PrintventoryFolder.folderHasDatabase(handle);
+    await PrintventoryFolder.setDirectoryHandle(handle);
+    chrome.storage.local.set({
+      printventoryFolderConfigured: true,
+      printventoryFolderName: handle.name,
+      printventoryFolderHasDb: hasDb
+    }, refreshFolderStatus);
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    setFolderStatus('err', err && err.message ? err.message : String(err));
+  }
+}
+
+document.getElementById('chooseFolder').addEventListener('click', chooseFolder);
+
+document.getElementById('clearFolder').addEventListener('click', async () => {
+  await PrintventoryFolder.clearDirectoryHandle();
+  chrome.storage.local.set({
+    printventoryFolderConfigured: false,
+    printventoryFolderName: '',
+    printventoryFolderHasDb: false
+  }, refreshFolderStatus);
 });
 
-chrome.storage.sync.get(
-  { printventoryServerUrl: DEFAULT_SERVER_URL, useUploadForServer: false, extensionDebug: false },
-  (items) => {
-    document.getElementById('serverUrl').value = items.printventoryServerUrl || DEFAULT_SERVER_URL;
-    const cb = document.getElementById('useUploadForServer');
-    if (cb) cb.checked = !!items.useUploadForServer;
-    const dbg = document.getElementById('extensionDebug');
-    if (dbg) dbg.checked = !!items.extensionDebug;
-    if (typeof pvSetDebug === 'function') pvSetDebug(!!items.extensionDebug);
-  }
-);
+document.getElementById('extensionDebug').addEventListener('change', () => {
+  const debug = document.getElementById('extensionDebug').checked;
+  if (typeof pvSetDebug === 'function') pvSetDebug(debug);
+  chrome.storage.sync.set({ extensionDebug: debug });
+});
+
+chrome.storage.sync.get({ extensionDebug: false }, (items) => {
+  document.getElementById('extensionDebug').checked = !!items.extensionDebug;
+  if (typeof pvSetDebug === 'function') pvSetDebug(!!items.extensionDebug);
+});
+
+refreshFolderStatus();

@@ -9,7 +9,11 @@ services:
     container_name: printventory-server
     ports:
       - "5000:5000"
-      # For HTTPS inside the container, map 443 (or keep 5000) and set TLS env vars below.
+      # Host:container. If Settings → HTTPS / SSL listen port is not 5000 (or PRINTVENTORY_PORT),
+      # change both sides to match, e.g. "5001:5001". On Synology, avoid host 5000 (DSM uses it).
+      # Let's Encrypt HTTP-01 (Settings → HTTPS / SSL) needs port 80 published:
+      # - "80:80"
+      # Optional: map 443 to the app listen port when TLS is enabled (UI or env).
       # - "443:5000"
     volumes:
       # Persist database and application data to local directory
@@ -32,7 +36,8 @@ services:
       # Then uncomment: - /mnt/network-share:/mnt/network-share:ro
       # Option 3: Mount local directory (if files are on the Docker host)
       # - /path/to/local/files:/mnt/models:ro
-      # Optional: TLS certificate directory for PRINTVENTORY_TLS_* (see environment section)
+      # Optional: custom PEM files for Settings → HTTPS / SSL (custom mode) or PRINTVENTORY_TLS_*
+      # Let's Encrypt / self-signed certs are written under this data volume (./data), not ./certs.
       # - ./certs:/certs:ro
     environment:
       - DISPLAY=:99
@@ -60,17 +65,23 @@ services:
       # PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 to always apply env on every start — legacy behavior).
       # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
       - STL_HOME=/mnt/test_files
+      # Listen port inside the container (Settings → HTTPS / SSL). Default 5000. Map the same
+      # port in `ports:` above. PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 makes this win every start.
+      # - PRINTVENTORY_PORT=5001
       #
       # --- HTTPS (optional): TLS terminates in Printventory (no reverse proxy required) ---
-      # Mount PEM files and point env vars at them. Browser uses https:// and wss:// automatically.
+      # Preferred: open Settings → HTTPS / SSL in the UI (custom PEM paths, Let's Encrypt, or self-signed).
+      # Settings persist in ./data. Let's Encrypt also needs ports 80:80 published.
+      #
+      # Ops override (wins over the UI): mount PEMs and set these env vars.
       # - PRINTVENTORY_TLS_CERT=/certs/fullchain.pem
       # - PRINTVENTORY_TLS_KEY=/certs/privkey.pem
       # Optional intermediate CA bundle:
       # - PRINTVENTORY_TLS_CA=/certs/chain.pem
       # (SSL_CERT_FILE / SSL_KEY_FILE are also accepted.)
       #
-      # If you terminate TLS with Traefik/Caddy/nginx instead, leave these unset (container stays HTTP)
-      # and configure WebSocket upgrade (wss) on the proxy — otherwise the UI will misbehave over https://.
+      # If you terminate TLS with Traefik/Caddy/nginx instead, leave TLS unset in the UI and env
+      # (container stays HTTP) and configure WebSocket upgrade (wss) on the proxy.
     restart: unless-stopped
     # Give the container enough RAM. Under ~2G, hash/scan/preview work often OOMs Electron
     # (see "OOM error in V8: Zone Allocation failed"), which looks like WebSocket failures in the browser.

@@ -38,6 +38,11 @@ const filesToCopy = [
   'renderer.js',
   'index.html',
   'favicon.ico',
+  'manifest.webmanifest',
+  'sw.js',
+  'pwa.js',
+  'mobile-ui.js',
+  'mobile-ui.css',
   'styles.css',
   'preview-wall.css',
   'thumbnail-progress.css',
@@ -62,7 +67,9 @@ const filesToCopy = [
   'print-events.js',
   'print-history.js',
   'spoolman.js',
-  'mcp-server.js'
+  'mcp-server.js',
+  'server-tls.js',
+  'extension-inbox.js'
 ];
 
 // Copy files
@@ -121,13 +128,15 @@ This package contains everything needed to run Printventory in server mode using
    \`\`\`
 
 3. **Access the server:**
-   Open your browser to: http://localhost:5000 (or https:// if you enable TLS — see docker-compose comments)
+   Open your browser to: http://localhost:5000 (or https:// if you enable TLS)
 
 ## HTTPS in Docker (optional)
 
-Set \`PRINTVENTORY_TLS_CERT\` and \`PRINTVENTORY_TLS_KEY\` to PEM file paths inside the container (mount a volume for your certs). The app serves HTTPS on the same port; the browser bridge uses \`wss://\` automatically.
+Use **Settings → HTTPS / SSL** in the web UI to point at custom PEM files, generate a self-signed cert, or request Let's Encrypt. Issued/generated certs are stored in the data volume (\`./data\`).
 
-If you use a reverse proxy for HTTPS instead, do **not** set these — keep the container on HTTP and configure **WebSocket upgrade** on the proxy so \`wss://\` reaches port 5000.
+Let's Encrypt HTTP-01 needs the hostname reachable on **port 80** — publish \`80:80\` in compose. The app still serves on port 5000 (\`https://\` / \`wss://\`).
+
+Environment variables \`PRINTVENTORY_TLS_CERT\` and \`PRINTVENTORY_TLS_KEY\` still override the UI (mount PEMs and point the vars at them). If you terminate TLS on Traefik/Caddy/nginx instead, leave TLS unset and configure **WebSocket upgrade** on the proxy.
 
 ## Alternative: Build and Run Manually
 

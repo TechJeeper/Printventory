@@ -11,29 +11,9 @@ window.addEventListener('DOMContentLoaded', () => {
   console.log('[Renderer] DOMContentLoaded fired');
 });
 
-// If DOM is already loaded before this script executes (common in server-mode HTTP load),
-// force-dispatch DOMContentLoaded once so all late-registered listeners run.
+// Do not synthesize DOMContentLoaded. Dispatching it again re-runs every startup
+// listener (TOS, initializeApp, STL Home scan, WebGL thumbs) and can freeze the tab.
 console.log('[Renderer] document.readyState at load:', document.readyState);
-if (document.readyState !== 'loading' && !window.__forcedDomContentLoaded) {
-  window.__forcedDomContentLoaded = true;
-  setTimeout(() => {
-    console.log('[Renderer] Forcing DOMContentLoaded (doc already loaded)');
-    document.dispatchEvent(new Event('DOMContentLoaded'));
-  }, 0);
-} else {
-  document.addEventListener('DOMContentLoaded', () => {
-    window.__forcedDomContentLoaded = true;
-  });
-}
-
-// Safety: force a single DOMContentLoaded after a short delay if it never fired
-setTimeout(() => {
-  if (!window.__forcedDomContentLoaded) {
-    window.__forcedDomContentLoaded = true;
-    console.log('[Renderer] Forcing DOMContentLoaded after timeout');
-    document.dispatchEvent(new Event('DOMContentLoaded'));
-  }
-}, 500);
 
 // Scan STL Home + AI Config Test: delegated click handlers (Server/Docker - main block may run late)
 function _attachEarlyButtonHandlers() {
@@ -90,7 +70,7 @@ const earlyEventChannels = [
   'open-theme-settings', 'regenerate-thumbnails', 'generate-missing-thumbnails',
   'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-filament-manager', 'open-stats',
   'open-backup-restore', 'open-ai-config', 'open-file-type-settings', 'open-performance-settings',
-  'open-slicer-settings', 'open-browser-extension-settings', 'open-mcp-server-settings', 'open-purge-models',
+  'open-slicer-settings', 'open-browser-extension-settings', 'open-mcp-server-settings', 'open-https-settings', 'open-purge-models',
   'open-metadata-editor', 'open-system-report', 'open-manage-thumbnails',
   'open-settings', 'open-guide', 'open-about', 'open-keyboard-shortcuts',
   'open-server-mode-info',
@@ -140,6 +120,200 @@ window._openPerformanceSettingsDialog = async function _openPerformanceSettingsD
 window._electronRealEventHandlers['open-performance-settings'] = function() {
   window._openPerformanceSettingsDialog();
 };
+
+function selectedTlsMode() {
+  return document.getElementById('tls-mode')?.value || 'off';
+}
+
+function updateHttpsModePanels() {
+  const mode = selectedTlsMode();
+  const custom = document.getElementById('tls-panel-custom');
+  const le = document.getElementById('tls-panel-letsencrypt');
+  const self = document.getElementById('tls-panel-selfsigned');
+  if (custom) custom.hidden = mode !== 'custom';
+  if (le) le.hidden = mode !== 'letsencrypt';
+  if (self) self.hidden = mode !== 'selfsigned';
+}
+
+function collectHttpsSettingsPayload() {
+  return {
+    tlsMode: selectedTlsMode(),
+    tlsCertPath: document.getElementById('tls-cert-path')?.value.trim() || '',
+    tlsKeyPath: document.getElementById('tls-key-path')?.value.trim() || '',
+    tlsCaPath: document.getElementById('tls-ca-path')?.value.trim() || '',
+    tlsDomain: (selectedTlsMode() === 'selfsigned'
+      ? document.getElementById('tls-selfsigned-host')?.value
+      : document.getElementById('tls-domain')?.value || '').trim(),
+    tlsEmail: document.getElementById('tls-email')?.value.trim() || '',
+    tlsAgreeTos: !!document.getElementById('tls-agree-tos')?.checked,
+    tlsUseStaging: !!document.getElementById('tls-use-staging')?.checked,
+    tlsRedirectHttp: !!document.getElementById('tls-redirect-http')?.checked,
+    serverHttpPort: document.getElementById('tls-listen-port')?.value.trim() || ''
+  };
+}
+
+function updateTlsRedirectLabel(port) {
+  const label = document.getElementById('tls-redirect-http-label');
+  if (!label) return;
+  const n = parseInt(port, 10);
+  const listen = Number.isInteger(n) && n > 0 ? n : 5000;
+  label.textContent = 'Redirect HTTP on port 80 to https://<host>:' + listen;
+}
+
+function applyHttpsStatusToDialog(status) {
+  const statusEl = document.getElementById('https-settings-status');
+  const envNote = document.getElementById('https-settings-env-note');
+  const desktopNote = document.getElementById('https-settings-desktop-note');
+  const fields = document.getElementById('https-settings-fields');
+  const saveBtn = document.getElementById('save-https-settings');
+  const issueBtn = document.getElementById('tls-issue-letsencrypt');
+  const genBtn = document.getElementById('tls-generate-selfsigned');
+  const modeSelect = document.getElementById('tls-mode');
+  const portGroup = document.getElementById('tls-listen-port-group');
+  const portInput = document.getElementById('tls-listen-port');
+  if (!status) return;
+
+  const parts = [];
+  const appPort = status.appPort || 5000;
+  parts.push(status.serverMode ? 'Server / Docker mode' : 'Desktop mode');
+  parts.push(status.scheme === 'https'
+    ? ('Certificate ready for HTTPS on port ' + appPort)
+    : ('Certificate off — HTTP on port ' + appPort));
+  if (status.source && status.source !== 'none') parts.push('Certificate source: ' + status.source);
+  if (status.cert && status.cert.expiresAt) {
+    const days = status.cert.daysRemaining;
+    parts.push('Expires ' + status.cert.expiresAt.slice(0, 10) + (typeof days === 'number' ? ' (' + days + ' days)' : ''));
+  }
+  if (status.missingFiles) parts.push('Certificate files are missing.');
+  if (status.lastError) parts.push('Last error: ' + status.lastError);
+  if (statusEl) statusEl.textContent = parts.join(' · ');
+
+  const envLock = !!status.envOverride;
+  const desktop = !status.serverMode;
+  if (envNote) envNote.hidden = !envLock;
+  if (desktopNote) desktopNote.hidden = !desktop;
+  if (portGroup) portGroup.hidden = desktop;
+  if (fields) fields.setAttribute('data-disabled', envLock ? '1' : '0');
+  if (saveBtn) saveBtn.hidden = envLock;
+  if (issueBtn) issueBtn.disabled = envLock;
+  if (genBtn) genBtn.disabled = envLock;
+  if (modeSelect) modeSelect.disabled = envLock;
+  if (portInput) portInput.disabled = envLock || !!status.portEnvOverride;
+
+  const settings = status.settings || {};
+  const mode = status.tlsMode || 'off';
+  if (modeSelect) modeSelect.value = mode;
+  const certPath = document.getElementById('tls-cert-path');
+  const keyPath = document.getElementById('tls-key-path');
+  const caPath = document.getElementById('tls-ca-path');
+  const domain = document.getElementById('tls-domain');
+  const email = document.getElementById('tls-email');
+  const agree = document.getElementById('tls-agree-tos');
+  const staging = document.getElementById('tls-use-staging');
+  const redirect = document.getElementById('tls-redirect-http');
+  const selfHost = document.getElementById('tls-selfsigned-host');
+  if (certPath) certPath.value = settings.tlsCertPath || '';
+  if (keyPath) keyPath.value = settings.tlsKeyPath || '';
+  if (caPath) caPath.value = settings.tlsCaPath || '';
+  if (domain) domain.value = settings.tlsDomain || '';
+  if (email) email.value = settings.tlsEmail || '';
+  if (agree) agree.checked = !!settings.tlsAgreeTos;
+  if (staging) staging.checked = !!settings.tlsUseStaging;
+  if (redirect) redirect.checked = !!settings.tlsRedirectHttp;
+  if (selfHost && (mode === 'selfsigned' || !selfHost.value)) selfHost.value = settings.tlsDomain || '';
+  if (portInput) portInput.value = settings.serverHttpPort || appPort || 5000;
+  updateTlsRedirectLabel(portInput ? portInput.value : appPort);
+  updateHttpsModePanels();
+}
+
+async function populateHttpsSettingsDialog() {
+  const dialog = document.getElementById('https-settings-dialog');
+  if (!dialog) return;
+  let status = {};
+  try {
+    status = await window.electron.invoke('get-tls-status') || {};
+  } catch (err) {
+    console.error('get-tls-status failed:', err);
+    status = { lastError: err.message || String(err), settings: {}, tlsMode: 'off', serverMode: false };
+  }
+  applyHttpsStatusToDialog(status);
+}
+
+window.openHttpsSettings = async function openHttpsSettings() {
+  const dialog = document.getElementById('https-settings-dialog');
+  if (!dialog) {
+    window.electron.send('open-https-settings');
+    return;
+  }
+  bindHttpsSettingsDialog();
+  await populateHttpsSettingsDialog();
+  dialog.showModal();
+};
+
+window.saveHttpsSettingsFromDialog = async function saveHttpsSettingsFromDialog() {
+  const result = await window.electron.invoke('apply-tls-settings', collectHttpsSettingsPayload());
+  if (!result || !result.success) {
+    await window.electron.showMessage('HTTPS / SSL', (result && result.message) || 'Failed to apply TLS settings.');
+    if (result && result.status) applyHttpsStatusToDialog(result.status);
+    return;
+  }
+  await window.electron.showMessage('HTTPS / SSL', result.message || 'Settings applied. Reconnect with https:// if TLS is on.');
+  document.getElementById('https-settings-dialog')?.close();
+};
+
+window.issueLetsEncryptCertificate = async function issueLetsEncryptCertificate() {
+  const payload = collectHttpsSettingsPayload();
+  payload.tlsMode = 'letsencrypt';
+  payload.issueNow = true;
+  const result = await window.electron.invoke('apply-tls-settings', payload);
+  if (!result || !result.success) {
+    await window.electron.showMessage('Let\'s Encrypt', (result && result.message) || 'Certificate request failed.');
+    if (result && result.status) applyHttpsStatusToDialog(result.status);
+    return;
+  }
+  await window.electron.showMessage('Let\'s Encrypt', result.message || 'Certificate issued. Reopen the app as https://<domain>:<port>.');
+  document.getElementById('https-settings-dialog')?.close();
+};
+
+window.generateSelfSignedCertificate = async function generateSelfSignedCertificate() {
+  const payload = collectHttpsSettingsPayload();
+  const result = await window.electron.invoke('generate-self-signed-cert', {
+    hostname: document.getElementById('tls-selfsigned-host')?.value.trim() || payload.tlsDomain,
+    tlsDomain: payload.tlsDomain,
+    tlsRedirectHttp: payload.tlsRedirectHttp,
+    serverHttpPort: payload.serverHttpPort
+  });
+  if (!result || !result.success) {
+    await window.electron.showMessage('Self-signed certificate', (result && result.message) || 'Failed to generate certificate.');
+    if (result && result.status) applyHttpsStatusToDialog(result.status);
+    return;
+  }
+  await window.electron.showMessage('Self-signed certificate', result.message || 'Certificate generated. Reopen as https:// — the browser will warn until you trust it.');
+  document.getElementById('https-settings-dialog')?.close();
+};
+
+function bindHttpsSettingsDialog() {
+  if (window._httpsSettingsBound) return;
+  const modeSelect = document.getElementById('tls-mode');
+  if (!modeSelect) return;
+  window._httpsSettingsBound = true;
+  modeSelect.addEventListener('change', updateHttpsModePanels);
+  const portInput = document.getElementById('tls-listen-port');
+  if (portInput) {
+    portInput.addEventListener('input', () => updateTlsRedirectLabel(portInput.value));
+  }
+}
+
+window._electronRealEventHandlers['open-https-settings'] = async function() {
+  await window.openHttpsSettings();
+};
+if (window._electronPendingEvents && window._electronPendingEvents['open-https-settings']) {
+  window._electronPendingEvents['open-https-settings'].forEach((args) => {
+    window._electronRealEventHandlers['open-https-settings'].apply(null, args);
+  });
+  delete window._electronPendingEvents['open-https-settings'];
+}
+document.addEventListener('DOMContentLoaded', bindHttpsSettingsDialog);
 
 // File Type Settings: expose save early so Save button onclick works in Docker/server (before DOMContentLoaded block runs)
 window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromDialog() {
@@ -698,6 +872,12 @@ let currentGridView = 'detailed'; // Current grid view mode: 'list', 'preview', 
 let currentPreviewTileSize = 'm';
 const PREVIEW_TILE_PX = { s: 140, m: 180, l: 240 };
 const PREVIEW_COLUMNS = { s: 10, m: 6, l: 4 };
+const PREVIEW_COLUMNS_MOBILE = { s: 3, m: 2, l: 2 };
+
+function previewColumnCount() {
+  const table = document.body?.classList.contains('mobile-ui') ? PREVIEW_COLUMNS_MOBILE : PREVIEW_COLUMNS;
+  return table[currentPreviewTileSize] || table.m;
+}
 
 /**
  * Fixed preview columns per size; tile dimension scales to fill row width.
@@ -706,7 +886,7 @@ const PREVIEW_COLUMNS = { s: 10, m: 6, l: 4 };
 function computePreviewTilePxFromWidth(availableWidth, horizontalGap = 2) {
   const g = horizontalGap;
   const aw = Math.max(0, availableWidth);
-  const cols = PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
+  const cols = previewColumnCount();
   if (cols <= 0) return PREVIEW_TILE_PX.m;
 
   // Use fixed column count and scale tile so the row fills available width.
@@ -1429,7 +1609,7 @@ async function loadModel(filePath, options = {}) {
       // Use full URL for HTTP endpoint (Three.js loaders need absolute URLs)
       // In server mode (browser access), use current window origin
       // In non-server mode (Electron) with UNC paths, HTTP server runs on localhost:5000
-      const serverPort = 5000; // Should match the port in main.js startHttpServer()
+      const serverPort = (await window.electron.getSetting('browserExtensionPort').catch(() => null)) || 5000;
       if (serverMode && window.location.origin && window.location.origin !== 'null' && window.location.origin !== 'file://') {
         // Server mode with browser access - use current origin
         encodedFilePath = `${window.location.origin}/api/file/${encodedPath}`;
@@ -4717,8 +4897,31 @@ async function showManageThumbnailsModal(filePath) {
   }
 }
 
+function safeShowModal(dialog) {
+  if (!dialog) return false;
+  try {
+    if (dialog.open) return true;
+    dialog.showModal();
+    return true;
+  } catch (err) {
+    console.warn('showModal failed:', dialog.id || dialog, err);
+    return dialog.open === true;
+  }
+}
+
+function closeDialogSafe(dialog) {
+  if (!dialog) return;
+  try {
+    if (dialog.open) dialog.close();
+  } catch (_) { /* ignore */ }
+}
+
+let tosCheckPromise = null;
+
 // Update the checkTermsOfService function to return a promise
 async function checkTermsOfService() {
+  if (tosCheckPromise) return tosCheckPromise;
+  tosCheckPromise = (async () => {
   try {
     // Hidden server worker has no interactive UI; never block init on TOS.
     if (await isServerThumbnailWorkerContext()) {
@@ -4736,7 +4939,7 @@ async function checkTermsOfService() {
     }
 
     if (!tosAccepted) {
-      termsDialog.showModal();
+      safeShowModal(termsDialog);
       
       return new Promise((resolve) => {
         const acceptHandler = async () => {
@@ -4747,21 +4950,8 @@ async function checkTermsOfService() {
           // Save TOS acceptance to database
           await window.electron.saveSetting('tosAcceptedDate', new Date().toISOString());
           
-          // Close the terms dialog
-          termsDialog.close();
-          
-          // Small delay to ensure dialog closes before showing welcome
-          await new Promise(resolve => setTimeout(resolve, 200));
-          
-          // Show welcome dialog if this is the first run
-          const hasRunBefore = await window.electron.getSetting('hasRunBefore');
-          if (!hasRunBefore) {
-            const welcomeDialog = document.getElementById('welcome-message');
-            if (welcomeDialog) {
-              welcomeDialog.showModal();
-              await window.electron.saveSetting('hasRunBefore', 'true');
-            }
-          }
+          // Close the terms dialog so the document is no longer inert
+          closeDialogSafe(termsDialog);
           
           resolve(true); // Resolve promise when accepted
         };
@@ -4769,6 +4959,7 @@ async function checkTermsOfService() {
         const declineHandler = () => {
           acceptButton.removeEventListener('click', acceptHandler);
           declineButton.removeEventListener('click', declineHandler);
+          closeDialogSafe(termsDialog);
           window.electron.quitApp();
           resolve(false); // Resolve promise when declined
         };
@@ -4777,11 +4968,15 @@ async function checkTermsOfService() {
         declineButton.addEventListener('click', declineHandler);
       });
     }
+    closeDialogSafe(termsDialog);
     return true; // Return true if already accepted
   } catch (error) {
     console.error('Error checking Terms of Service:', error);
+    closeDialogSafe(document.getElementById('terms-of-service-dialog'));
     return false; // Return false on error
   }
+  })();
+  return tosCheckPromise;
 }
 
 // Function to create menu dropdown for server mode
@@ -5444,6 +5639,20 @@ async function loadAndShowAIConfig() {
       keyEl.disabled = false;
     }
     if (apiKeyGroup) apiKeyGroup.style.display = '';
+  } else if (selectedService === 'claude') {
+    if (endpointEl) {
+      endpointEl.value = endpointValue || 'https://api.anthropic.com/v1/';
+      endpointEl.required = true;
+    }
+    if (modelEl) {
+      modelEl.value = modelValue || 'claude-haiku-4-5';
+    }
+    if (keyEl) {
+      keyEl.value = apiKeyValue || '';
+      keyEl.required = true;
+      keyEl.disabled = false;
+    }
+    if (apiKeyGroup) apiKeyGroup.style.display = '';
   } else if (selectedService === 'gemini') {
     if (endpointEl) {
       endpointEl.value = endpointValue || 'https://generativelanguage.googleapis.com/v1beta/openai/';
@@ -5660,28 +5869,16 @@ async function createServerMenuBar() {
       }
     }},
     { label: '---', action: null },
-    ...(serverMode ? [{
-      label: 'Browser Extension',
-      action: () => {
-        window.open('https://chromewebstore.google.com/detail/pigngedngcegmemgfbkaiihjnbplaedj?utm_source=item-share-cb', '_blank', 'noopener,noreferrer');
-      }
-    }] : [{
+    {
       label: 'Browser Extension',
       action: async () => {
-        const dialog = document.getElementById('browser-extension-settings-dialog');
-        if (!dialog) {
-          window.electron.send('open-browser-extension-settings');
+        if (typeof window.openBrowserExtensionSettings === 'function') {
+          await window.openBrowserExtensionSettings();
           return;
         }
-        const enabled = await window.electron.getSetting('enableBrowserExtension');
-        const port = await window.electron.getSetting('browserExtensionPort');
-        const check = document.getElementById('enable-browser-extension');
-        const portInput = document.getElementById('browser-extension-port');
-        if (check) check.checked = enabled === '1';
-        if (portInput) portInput.value = port || '5000';
-        dialog.showModal();
+        window.electron.send('open-browser-extension-settings');
       }
-    }]),
+    },
     { label: 'MCP Server', action: async () => {
       if (typeof window.openMcpServerSettings === 'function') {
         await window.openMcpServerSettings();
@@ -5807,6 +6004,13 @@ async function createServerMenuBar() {
     }},
     { label: 'Theme', action: () => {
       window.electron.send('open-theme-settings');
+    }},
+    { label: 'HTTPS / SSL', action: async () => {
+      if (typeof window.openHttpsSettings === 'function') {
+        await window.openHttpsSettings();
+      } else {
+        window.electron.send('open-https-settings');
+      }
     }}
   ];
   const settingsMenu = createMenuDropdown('Settings', settingsMenuItems);
@@ -5872,7 +6076,7 @@ async function createServerMenuBar() {
   menuBar.appendChild(toolsMenu);
   menuBar.appendChild(settingsMenu);
   menuBar.appendChild(helpMenu);
-  
+
   document.body.insertBefore(menuBar, document.body.firstChild);
   document.body.classList.add('server-mode');
   if (document.documentElement) document.documentElement.classList.add('server-mode');
@@ -5910,6 +6114,8 @@ async function extract3MFThumbnail(filePath) {
 
 // Update the DOMContentLoaded event listener
 document.addEventListener('DOMContentLoaded', async () => {
+  if (window.__printventoryPrimaryUiInit) return;
+  window.__printventoryPrimaryUiInit = true;
   // In server mode, the loading overlay blocks UI. Hide it early.
   const initialOverlay = document.getElementById('loading-overlay');
   if (initialOverlay) initialOverlay.style.display = 'none';
@@ -6000,7 +6206,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (!hasRunBeforeVal) {
     const welcomeDialog = document.getElementById('welcome-message');
     if (welcomeDialog) {
-      welcomeDialog.showModal();
+      safeShowModal(welcomeDialog);
     }
     await window.electron.saveSetting('hasRunBefore', 'true');
   }
@@ -6230,7 +6436,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       console.log('[DEBUG] No directory path set and not in server mode, showing welcome');
       if (welcomeDialog) {
-        welcomeDialog.showModal();
+        safeShowModal(welcomeDialog);
       }
     }
 
@@ -6371,20 +6577,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       try {
         // Save tag and get the tag object back
         const savedTag = await window.electron.saveTag(newTagName);
-        // Add the new tag to the model immediately if in single edit mode
-        if (!isMultiSelectMode) {
-          console.log(`Single edit mode: Adding new tag '${savedTag.name}' to model-tags`); // Added log
-          // This line should handle adding the tag visually and saving
-          addTagToModel(savedTag.name, 'model-tags');
-        }
+        const sourceContainer = tagDialog.getAttribute('data-source-container')
+          || (isMultiSelectMode ? 'multi-tags' : 'model-tags');
+        console.log(`Adding new tag '${savedTag.name}' to ${sourceContainer}`);
+        addTagToModel(savedTag.name, sourceContainer);
         // Reset form state before closing
         tagDialog.querySelector('form').reset();
         newTagInput.value = '';
         tagDialog.close();
         
         // Only refresh the currently active dropdown
-        if (isMultiSelectMode) {
+        if (sourceContainer === 'multi-tags') {
           await populateTagSelect('multi-tag-select', 'multi-tags');
+        } else if (sourceContainer === 'bundle-tags') {
+          await populateTagSelect('bundle-tag-select', 'bundle-tags');
         } else {
           await populateTagSelect('tag-select', 'model-tags');
         }
@@ -7907,6 +8113,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Refresh tag dropdowns in edit view
         await populateTagSelect('tag-select', 'model-tags');
         await populateTagSelect('multi-tag-select', 'multi-tags');
+        await populateTagSelect('bundle-tag-select', 'bundle-tags');
         
         // Refresh tag filter dropdown
         await populateTagFilter();
@@ -10001,9 +10208,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (stlHome && stlHome.trim() !== "") {
     const serverModeStlHome = await window.electron.isServerMode().catch(() => false);
     if (serverModeStlHome) {
-      console.log("STL Home is set (server mode). Running initial background check, then on the configured interval.");
-      performSTLHomeScan(stlHome).catch(err => console.error('Background STL Home scan on server load:', err));
-      startPeriodicSTLHomeScan();
+      // Browser tabs share the Docker API. A scan on every page load freezes the tab
+      // (getAllModels + render). The Electron server window owns background scans.
+      const isElectronShell = /Electron/i.test(navigator.userAgent);
+      if (isElectronShell) {
+        console.log("STL Home is set (server window). Running initial background check, then on the configured interval.");
+        performSTLHomeScan(stlHome).catch(err => console.error('Background STL Home scan on server load:', err));
+        startPeriodicSTLHomeScan();
+      } else {
+        console.log("STL Home is set (browser client). Loading library from the database; scan stays on the server window.");
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        }
+      }
     } else {
       console.log("STL Home is set. Showing library from database; STL Home scan in background:", stlHome);
       if (typeof window.performCombinedSearch === 'function') {
@@ -10428,31 +10645,58 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('file-type-settings-dialog')?.close();
   });
 
-  // Browser Extension Settings: not shown in Docker/Server mode (menu item hidden there)
-  window._electronRealEventHandlers['open-browser-extension-settings'] = async function() {
-    const serverMode = await window.electron.isServerMode().catch(() => false);
-    if (serverMode) return;
+  async function fillBrowserExtensionDialog() {
     const dialog = document.getElementById('browser-extension-settings-dialog');
-    if (!dialog) return;
-    const enabled = await window.electron.getSetting('enableBrowserExtension');
-    const port = await window.electron.getSetting('browserExtensionPort');
+    if (!dialog) return null;
+    const inboxDir = await window.electron.getSetting('extensionInboxDirectory');
     const uploadDir = await window.electron.getSetting('extensionUploadDirectory');
     const clientPrefix = await window.electron.getSetting('extensionClientPathPrefix');
     const containerPrefix = await window.electron.getSetting('extensionContainerPathPrefix');
     const copyToNas = await window.electron.getSetting('extensionCopyToNasPath');
-    const check = document.getElementById('enable-browser-extension');
-    const portInput = document.getElementById('browser-extension-port');
+    const lastStatus = await window.electron.getSetting('extensionInboxLastStatus');
+    const inboxInput = document.getElementById('extension-inbox-directory');
     const uploadDirInput = document.getElementById('extension-upload-directory');
     const clientPrefixInput = document.getElementById('extension-client-path-prefix');
     const containerPrefixInput = document.getElementById('extension-container-path-prefix');
     const copyToNasInput = document.getElementById('extension-copy-to-nas-path');
-    if (check) check.checked = enabled === '1';
-    if (portInput) portInput.value = port || '5000';
+    const statusEl = document.getElementById('extension-inbox-last-status');
+    if (inboxInput) {
+      inboxInput.value = inboxDir || '';
+      if (window.electron.getDefaultExtensionInboxDirectory) {
+        const def = await window.electron.getDefaultExtensionInboxDirectory().catch(() => '');
+        if (def) inboxInput.placeholder = def;
+      }
+    }
     if (uploadDirInput) uploadDirInput.value = uploadDir || '';
     if (clientPrefixInput) clientPrefixInput.value = clientPrefix || '';
     if (containerPrefixInput) containerPrefixInput.value = containerPrefix || '';
     if (copyToNasInput) copyToNasInput.value = copyToNas || '';
+    if (statusEl) {
+      let text = 'Last import: none yet.';
+      if (lastStatus) {
+        try {
+          const s = JSON.parse(lastStatus);
+          const parts = [];
+          if (s.at) parts.push(s.at);
+          if (s.imported != null) parts.push(s.imported + ' imported');
+          if (s.failed) parts.push(s.failed + ' failed');
+          text = 'Last import: ' + parts.join(' · ');
+          if (s.errors && s.errors.length) text += ' — ' + s.errors[0];
+        } catch (_) { /* keep default */ }
+      }
+      statusEl.textContent = text;
+    }
+    return dialog;
+  }
+
+  window.openBrowserExtensionSettings = async function openBrowserExtensionSettings() {
+    const dialog = await fillBrowserExtensionDialog();
+    if (!dialog) return;
     dialog.showModal();
+  };
+
+  window._electronRealEventHandlers['open-browser-extension-settings'] = async function() {
+    await window.openBrowserExtensionSettings();
   };
   if (window._electronPendingEvents['open-browser-extension-settings']) {
     window._electronPendingEvents['open-browser-extension-settings'].forEach((args) => {
@@ -10463,30 +10707,41 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('save-browser-extension-settings')?.addEventListener('click', async (event) => {
     event.preventDefault();
-    const check = document.getElementById('enable-browser-extension');
-    const portInput = document.getElementById('browser-extension-port');
+    const inboxInput = document.getElementById('extension-inbox-directory');
     const uploadDirInput = document.getElementById('extension-upload-directory');
     const clientPrefixInput = document.getElementById('extension-client-path-prefix');
     const containerPrefixInput = document.getElementById('extension-container-path-prefix');
     const copyToNasInput = document.getElementById('extension-copy-to-nas-path');
-    const enabled = check?.checked ? '1' : '0';
-    const port = Math.min(65535, Math.max(1024, parseInt(portInput?.value || '5000', 10) || 5000));
-    await window.electron.saveSetting('enableBrowserExtension', enabled);
-    await window.electron.saveSetting('browserExtensionPort', String(port));
+    await window.electron.saveSetting('extensionInboxDirectory', (inboxInput?.value || '').trim());
     await window.electron.saveSetting('extensionUploadDirectory', (uploadDirInput?.value || '').trim());
     await window.electron.saveSetting('extensionClientPathPrefix', (clientPrefixInput?.value || '').trim());
     await window.electron.saveSetting('extensionContainerPathPrefix', (containerPrefixInput?.value || '').trim());
     await window.electron.saveSetting('extensionCopyToNasPath', (copyToNasInput?.value || '').trim());
-    if (enabled === '1') {
-      const result = await window.electron.startExtensionServer(port);
-      if (result && !result.success) {
-        await window.electron.showMessage('Browser Extension Server', result.message || 'Failed to start server. On macOS, check the main process console (run from Terminal) or ensure the app was built with com.apple.security.network.server entitlement.');
-        return;
-      }
-    } else {
-      await window.electron.stopExtensionServer();
-    }
     document.getElementById('browser-extension-settings-dialog').close();
+  });
+
+  document.getElementById('choose-extension-inbox-directory')?.addEventListener('click', async () => {
+    const paths = await window.electron.openFileDialog();
+    const chosen = Array.isArray(paths) ? paths[0] : paths;
+    if (!chosen) return;
+    const inboxInput = document.getElementById('extension-inbox-directory');
+    if (inboxInput) inboxInput.value = chosen;
+  });
+
+  document.getElementById('import-extension-inbox-now')?.addEventListener('click', async () => {
+    const inboxInput = document.getElementById('extension-inbox-directory');
+    await window.electron.saveSetting('extensionInboxDirectory', (inboxInput?.value || '').trim());
+    const result = await window.electron.importExtensionInbox();
+    const statusEl = document.getElementById('extension-inbox-last-status');
+    if (statusEl && result) {
+      const parts = [];
+      if (result.imported != null) parts.push(result.imported + ' imported');
+      if (result.failed) parts.push(result.failed + ' failed');
+      if (result.skipped) parts.push(result.skipped + ' skipped');
+      let text = 'Last import: just now · ' + (parts.join(' · ') || 'nothing to import');
+      if (result.errors && result.errors.length) text += ' — ' + result.errors[0];
+      statusEl.textContent = text;
+    }
   });
 
   document.getElementById('cancel-browser-extension-settings')?.addEventListener('click', () => {
@@ -10549,10 +10804,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   function updateMcpDialogPreview(info, serverMode) {
     const check = document.getElementById('enable-mcp-server');
     const port = getMcpDialogPort();
-    let url = `http://127.0.0.1:${port}/mcp`;
+    const scheme = (info && info.url && String(info.url).startsWith('https:')) ? 'https' : 'http';
+    let url = `${scheme}://127.0.0.1:${port}/mcp`;
     if (serverMode && window.location && window.location.origin) {
       url = String(window.location.origin).replace(/\/$/, '') + '/mcp';
-    } else if (!serverMode && info && info.url && String(info.url).includes(':' + String(info.port || port))) {
+    } else if (!serverMode && info && info.url) {
       url = String(info.url).replace(/:\d+(\/mcp)?$/, ':' + port + '/mcp');
     }
     const urlInput = document.getElementById('mcp-server-url');
@@ -10667,6 +10923,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
   document.getElementById('enable-mcp-server')?.addEventListener('change', refreshMcpDialogPreview);
   document.getElementById('mcp-server-port')?.addEventListener('input', refreshMcpDialogPreview);
+
+  bindHttpsSettingsDialog();
 
   document.getElementById('copy-mcp-server-url')?.addEventListener('click', async () => {
     const url = document.getElementById('mcp-server-url')?.value || '';
@@ -12022,6 +12280,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (selectedService === 'openai') {
       endpointEl.value = 'https://api.openai.com/v1';
       modelEl.value = 'gpt-4o-mini';
+      if (apiKeyEl) {
+        apiKeyEl.required = true;
+        apiKeyEl.disabled = false;
+      }
+      if (apiKeyGroup) apiKeyGroup.style.display = '';
+    } else if (selectedService === 'claude') {
+      endpointEl.value = 'https://api.anthropic.com/v1/';
+      modelEl.value = 'claude-haiku-4-5';
       if (apiKeyEl) {
         apiKeyEl.required = true;
         apiKeyEl.disabled = false;
@@ -15835,9 +16101,22 @@ async function initializeTags() {
     }
   });
 
+  const bundleTagSelect = document.getElementById('bundle-tag-select');
+  if (bundleTagSelect && !bundleTagSelect.dataset.tagChangeBound) {
+    bundleTagSelect.dataset.tagChangeBound = '1';
+    bundleTagSelect.addEventListener('change', () => {
+      const selectedTag = bundleTagSelect.value;
+      if (selectedTag) {
+        addTagToModel(selectedTag, 'bundle-tags');
+        bundleTagSelect.value = '';
+      }
+    });
+  }
+
   // Initial population of tag dropdowns
   await populateTagSelect('tag-select', 'model-tags');
   await populateTagSelect('multi-tag-select', 'multi-tags');
+  await populateTagSelect('bundle-tag-select', 'bundle-tags');
   if (typeof window.populateFilamentSelect === 'function') {
     await window.populateFilamentSelect('filament-select', 'model-filaments');
     await window.populateFilamentSelect('multi-filament-select', 'multi-filaments');
@@ -15846,6 +16125,7 @@ async function initializeTags() {
 
 async function populateTagSelect(selectId = 'tag-select', containerId = 'model-tags') {
   const tagSelect = document.getElementById(selectId);
+  if (!tagSelect) return;
   const currentTags = Array.from(document.querySelectorAll(`#${containerId} .tag`))
     .map(tag => tag.getAttribute('data-tag-name'));
   
@@ -16097,6 +16377,8 @@ async function addTagToModel(tagName, containerId, options = {}) {
       // Note: This sets all selected models to have exactly the tags remaining in the UI.
       // Use replaceTags: true to replace tags instead of merging
       await autoSaveMultipleModels('tags', currentTags, { replaceTags: true }); 
+    } else if (containerId === 'bundle-tags') {
+      await applyBundleTagChange({ removeTags: [tagName] });
     } else {
       // Single edit mode save
       const filePath = getModelFilePath();
@@ -16119,6 +16401,8 @@ async function addTagToModel(tagName, containerId, options = {}) {
     // For multi-edit ADD, only save the *newly added tag* to append it
     console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
     await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
+  } else if (containerId === 'bundle-tags') {
+    await applyBundleTagChange({ addTags: [tagName] });
   } else {
     // For single-edit ADD, save the full list for that model
     const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
@@ -17860,11 +18144,14 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
   // Adjust position if menu goes off screen
   const rect = menu.getBoundingClientRect();
   if (rect.right > window.innerWidth) {
-    menu.style.left = `${x - rect.width}px`;
+    menu.style.left = `${Math.max(8, x - rect.width)}px`;
   }
   if (rect.bottom > window.innerHeight) {
-    menu.style.top = `${y - rect.height}px`;
+    menu.style.top = `${Math.max(8, y - rect.height)}px`;
   }
+  const adjusted = menu.getBoundingClientRect();
+  if (adjusted.left < 8) menu.style.left = '8px';
+  if (adjusted.top < 8) menu.style.top = '8px';
   
   // Close menu when clicking outside
   const closeMenu = (e) => {
@@ -18061,6 +18348,57 @@ function addContextMenuHandler(fileElement, filePath) {
   // For other views, use bubble phase
   const useCapture = fileElement.classList.contains('file-item-list');
   fileElement.addEventListener('contextmenu', handler, useCapture);
+
+  fileElement.removeEventListener('touchstart', fileElement._longPressStart);
+  fileElement.removeEventListener('touchmove', fileElement._longPressMove);
+  fileElement.removeEventListener('touchend', fileElement._longPressEnd);
+  fileElement.removeEventListener('touchcancel', fileElement._longPressEnd);
+  let longPressTimer = null;
+  let longPressX = 0;
+  let longPressY = 0;
+  fileElement._longPressStart = (e) => {
+    if (!e.touches || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    longPressX = t.clientX;
+    longPressY = t.clientY;
+    clearTimeout(longPressTimer);
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      fileElement._suppressTap = true;
+      handler({
+        preventDefault() {},
+        stopPropagation() {},
+        clientX: longPressX,
+        clientY: longPressY,
+        target: fileElement
+      });
+    }, 550);
+  };
+  fileElement._longPressMove = (e) => {
+    if (!longPressTimer || !e.touches || !e.touches[0]) return;
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - longPressX) > 14 || Math.abs(t.clientY - longPressY) > 14) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  };
+  fileElement._longPressEnd = () => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  };
+  fileElement.addEventListener('touchstart', fileElement._longPressStart, { passive: true });
+  fileElement.addEventListener('touchmove', fileElement._longPressMove, { passive: true });
+  fileElement.addEventListener('touchend', fileElement._longPressEnd);
+  fileElement.addEventListener('touchcancel', fileElement._longPressEnd);
+  fileElement.addEventListener('click', (e) => {
+    if (fileElement._suppressTap) {
+      e.preventDefault();
+      e.stopPropagation();
+      fileElement._suppressTap = false;
+    }
+  }, true);
 }
 
 // Update the exit multi-edit mode functionality
@@ -18541,6 +18879,14 @@ function initializeListButtons() {
 
 // First, declare all initialization functions outside of any event listeners
 async function initializeApp() {
+  if (window.__printventoryInitializeAppPromise) {
+    return window.__printventoryInitializeAppPromise;
+  }
+  window.__printventoryInitializeAppPromise = initializeAppOnce();
+  return window.__printventoryInitializeAppPromise;
+}
+
+async function initializeAppOnce() {
   try {
     if (await isServerThumbnailWorkerContext()) {
       console.log('[Server thumbnails] Worker window: skipping initializeApp');
@@ -21802,6 +22148,8 @@ function hideBundleDetailsPanel() {
   if (panel) panel.classList.add('hidden');
   currentBundleDetailsGroupKey = null;
   currentBundleDetailsRecord = null;
+  const tagsContainer = document.getElementById('bundle-tags');
+  if (tagsContainer) tagsContainer.innerHTML = '';
   const container = document.querySelector('.file-grid');
   if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
 }
@@ -21892,6 +22240,8 @@ async function showBundleDetails(groupRecord) {
     };
     showPathBtn.disabled = !containerPath;
   }
+
+  await loadBundleDetailsTags(groupRecord);
 
   panel.classList.remove('hidden');
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -21984,6 +22334,103 @@ function parseTagInput(tagInput) {
     .map(tag => tag.trim())
     .filter(Boolean)
     .filter((tag, index, array) => array.indexOf(tag) === index);
+}
+
+function getGroupChildModelIds(groupRecord) {
+  return (groupRecord?.children || [])
+    .map((child) => Number(child?.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+}
+
+function normalizeTagNameList(tags) {
+  if (!Array.isArray(tags)) return [];
+  const names = tags
+    .map((tag) => (typeof tag === 'string' ? tag : (tag?.name || tag)))
+    .map((tag) => String(tag || '').trim())
+    .filter(Boolean);
+  return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+}
+
+async function getGroupTagNames(groupRecord) {
+  const ids = getGroupChildModelIds(groupRecord);
+  if (ids.length && typeof window.electron.getGroupTags === 'function') {
+    try {
+      const names = await window.electron.getGroupTags(ids);
+      return normalizeTagNameList(names);
+    } catch (error) {
+      console.error('Failed loading group tags:', error);
+    }
+  }
+  const modelsWithTags = await getGroupModelsWithTags(groupRecord);
+  const union = new Set();
+  for (const entry of modelsWithTags) {
+    normalizeTagNameList(entry.tags).forEach((tag) => union.add(tag));
+  }
+  return Array.from(union).sort((a, b) => a.localeCompare(b));
+}
+
+async function loadBundleDetailsTags(groupRecord) {
+  const tagsContainer = document.getElementById('bundle-tags');
+  if (!tagsContainer) return;
+  tagsContainer.innerHTML = '';
+  const tagNames = await getGroupTagNames(groupRecord);
+  for (const tagName of tagNames) {
+    await addTagToModel(tagName, 'bundle-tags', { skipSave: true });
+  }
+  await populateTagSelect('bundle-tag-select', 'bundle-tags');
+}
+
+async function applyBundleTagChange({ addTags = [], removeTags = [] } = {}) {
+  const groupRecord = currentBundleDetailsRecord;
+  if (!groupRecord?.children?.length) {
+    console.error('No archive group selected for tagging');
+    return false;
+  }
+
+  const addSet = new Set(normalizeTagNameList(addTags));
+  const removeSet = new Set(normalizeTagNameList(removeTags));
+  if (!addSet.size && !removeSet.size) return false;
+
+  const modelsWithTags = await getGroupModelsWithTags(groupRecord);
+  if (!modelsWithTags.length) return false;
+
+  const modelDataBatch = [];
+  for (const { model, tags } of modelsWithTags) {
+    const next = new Set(normalizeTagNameList(tags));
+    addSet.forEach((tag) => next.add(tag));
+    removeSet.forEach((tag) => next.delete(tag));
+    model.tags = Array.from(next).sort((a, b) => a.localeCompare(b));
+    modelDataBatch.push(model);
+  }
+
+  try {
+    const success = await window.electron.updateModelsBatch(modelDataBatch);
+    if (!success) throw new Error('Bulk update returned false');
+  } catch (error) {
+    console.error('Error saving archive tags, falling back to individual saves:', error);
+    for (const model of modelDataBatch) {
+      try {
+        await window.electron.saveModel(model);
+      } catch (saveError) {
+        console.error('Error saving archive child tags:', model.filePath, saveError);
+      }
+    }
+  }
+
+  const gridContainer = document.querySelector('.file-grid');
+  if (gridContainer?.currentModels) {
+    const byPath = new Map(
+      modelDataBatch.map((model) => [normalizePathForComparison(model.filePath), model])
+    );
+    for (let i = 0; i < gridContainer.currentModels.length; i++) {
+      const existing = gridContainer.currentModels[i];
+      const updated = byPath.get(normalizePathForComparison(existing?.filePath || existing?.id || ''));
+      if (updated) gridContainer.currentModels[i] = { ...existing, ...updated };
+    }
+  }
+  if (gridContainer?.renderVisibleItemsFn) gridContainer.renderVisibleItemsFn();
+  await populateTagSelect('bundle-tag-select', 'bundle-tags');
+  return true;
 }
 
 async function getGroupModelsWithTags(groupRecord) {
@@ -22165,6 +22612,19 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   details.appendChild(titleRow);
   details.appendChild(meta);
 
+  if (view === 'detailed' || view === 'list') {
+    const tagsRow = document.createElement('div');
+    tagsRow.className = 'parent-model-group-tags tags-info';
+    tagsRow.style.display = 'none';
+    details.appendChild(tagsRow);
+    getGroupTagNames(groupRecord).then((names) => {
+      if (!names.length || !tagsRow.isConnected) return;
+      fillTagsWithFilterLinks(tagsRow, names);
+      tagsRow.style.display = '';
+      tagsRow.setAttribute('title', names.join(', '));
+    }).catch((error) => console.error('Error loading archive tags:', error));
+  }
+
   item.appendChild(thumbnailWrap);
   item.appendChild(details);
 
@@ -22217,6 +22677,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   item.addEventListener('click', (event) => {
     if (event.target.closest('.parent-model-group-chevron')) return;
     if (event.target.closest('.model-engagement-bar')) return;
+    if (event.target.closest('.tag-filter-link')) return;
     event.preventDefault();
     event.stopPropagation();
     expandGroupAndShowDetails();
@@ -22399,8 +22860,9 @@ function renderVirtualGrid(models) {
   const containerRect = container.getBoundingClientRect();
   const viewportHeight = window.innerHeight;
   const containerTop = containerRect.top;
-  container.style.height = `calc(100vh - ${containerTop}px)`;
-  container.style.maxHeight = `calc(100vh - ${containerTop}px)`;
+  const mobileChrome = document.body.classList.contains('mobile-ui') ? 64 : 0;
+  container.style.height = `calc(100vh - ${containerTop}px - ${mobileChrome}px)`;
+  container.style.maxHeight = `calc(100vh - ${containerTop}px - ${mobileChrome}px)`;
 
   // Assume fixed item size (in pixels) - optimized gaps
   const paddingVertical = currentGridView === 'preview' ? 8 : 10;
@@ -22437,7 +22899,12 @@ function renderVirtualGrid(models) {
       currentGridView === 'preview' && previewTilePx != null
         ? { width: previewTilePx, height: previewTilePx, itemWidth: previewTilePx }
         : getPreviewTileDims(),
-    'detailed': { width: 300, height: 490, itemWidth: 300 }
+    'detailed': document.body.classList.contains('mobile-ui')
+      ? (() => {
+          const w = Math.max(148, Math.floor((containerWidth - 24) / 2));
+          return { width: w, height: Math.round(w + 132), itemWidth: w };
+        })()
+      : { width: 300, height: 490, itemWidth: 300 }
   };
 
   const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];
@@ -22452,7 +22919,7 @@ function renderVirtualGrid(models) {
     columns = 1;
   } else if (currentGridView === 'preview') {
     // Keep fixed column count by preview size; tile dimensions scale to fit width.
-    columns = PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
+    columns = previewColumnCount();
   } else {
     // For detailed view, calculate columns and center the grid
     const availableWidth = containerWidth - (paddingHorizontal * 2);
@@ -22568,7 +23035,7 @@ function renderVirtualGrid(models) {
           container._previewTilePx = effectivePreviewTilePx;
           container.style.setProperty('--preview-tile', `${effectivePreviewTilePx}px`);
           effectiveItemHeight = effectivePreviewTilePx;
-          currentColumns = PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
+          currentColumns = previewColumnCount();
         } else {
           const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
           currentColumns = Math.max(Math.floor(currentAvailableWidth / itemWidth), 1);

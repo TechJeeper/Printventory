@@ -4,6 +4,15 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-09-07
+
+### Added
+
+- **HTTPS / SSL settings** — Settings → HTTPS / SSL for server, Docker, and the desktop Browser Extension / MCP listener. Custom PEM paths, Let's Encrypt (HTTP-01), or a self-signed cert (defaults to localhost). Env `PRINTVENTORY_TLS_*` still overrides the UI.
+- Server/Docker **HTTPS / SSL** settings include a listen port (default 5000) so the app can bind something other than DSM's port 5000. Map the same port on the host (`PRINTVENTORY_PORT` seeds the setting when empty).
+- **PWA / mobile UI** — Server and Docker can be installed as a PWA; phones get a compact layout.
+- **Browser Extension inbox** — Printventory Watcher can queue model pages/downloads without the app running; Settings imports from the inbox folder.
+
 ## [2.2.3] - 2026-09-05
 
 ### Added
