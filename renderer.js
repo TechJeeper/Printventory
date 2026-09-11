@@ -374,13 +374,20 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
   }
 };
 
-// Tag Manager & DeDup: fullscreen toggle (expose early so Full Screen button works in Docker/server mode)
+// Tag Manager & DeDup: fullscreen toggle (expose early so the icon works in Docker/server mode)
+window.syncTagManagerFullscreenButton = function syncTagManagerFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('tag-manager-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
 window.toggleTagManagerFullscreen = function toggleTagManagerFullscreen() {
   const dialog = document.getElementById('tag-manager-dialog');
-  const btn = document.getElementById('tag-manager-fullscreen-toggle');
-  if (!dialog || !btn) return;
+  if (!dialog) return;
   dialog.classList.toggle('modal-fullscreen');
-  btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
+  window.syncTagManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
 };
 window.toggleDedupFullscreen = function toggleDedupFullscreen() {
   const dialog = document.getElementById('dedup-dialog');
@@ -5898,8 +5905,9 @@ async function createServerMenuBar() {
       const dialog = document.getElementById('tag-manager-dialog');
       if (dialog) {
         dialog.classList.remove('modal-fullscreen');
-        const fullscreenBtn = document.getElementById('tag-manager-fullscreen-toggle');
-        if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
+        if (typeof window.syncTagManagerFullscreenButton === 'function') {
+          window.syncTagManagerFullscreenButton(false);
+        }
         dialog.showModal();
       } else {
         // Fallback: trigger the event which will open the dialog via the listener
@@ -8052,8 +8060,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const tagManagerDialog = document.getElementById('tag-manager-dialog');
     if (!tagManagerDialog) return;
     tagManagerDialog.classList.remove('modal-fullscreen');
-    const fullscreenBtn = document.getElementById('tag-manager-fullscreen-toggle');
-    if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
+    if (typeof window.syncTagManagerFullscreenButton === 'function') {
+      window.syncTagManagerFullscreenButton(false);
+    }
     refreshTagManagerList();
     tagManagerDialog.showModal();
     const searchEl = document.getElementById('tag-manager-search');
@@ -12259,10 +12268,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   window.electron.on('select-model-by-filepath', (filePath) => {
-    // You already have a function (e.g. showModelDetails or toggleModelSelection)
-    // Use it to select and highlight the model.
-    // For single edit mode, simply select the model and call the function to load its details:
-    showModelDetails(filePath);
+    // Context menu highlights the file only. Details open from the Details control.
+    highlightModelWithoutDetails(filePath);
   });
 
   // Fetch models without thumbnails
@@ -13670,8 +13677,62 @@ function clearTagsOnSelectionChange() {
   previousSelectionHash = currentSelectionHash;
 }
 
+function isMobileUiActive() {
+  return document.body.classList.contains('mobile-ui');
+}
+
+function clearMobileTileFocus() {
+  document.querySelectorAll('.is-mobile-focus').forEach((el) => el.classList.remove('is-mobile-focus'));
+}
+
+function focusMobileTile(fileElement) {
+  clearMobileTileFocus();
+  fileElement.classList.add('is-mobile-focus');
+}
+
+function selectSingleModel(fileElement, filePath) {
+  selectedModels.clear();
+  document.querySelectorAll('.file-item').forEach((item) => item.classList.remove('selected'));
+  addToSelectedModels(filePath);
+  fileElement.classList.add('selected');
+  if (isMobileUiActive()) focusMobileTile(fileElement);
+}
+
+function highlightModelWithoutDetails(filePath) {
+  if (!filePath) return;
+  const normalized = normalizePathForComparison(filePath);
+  let item = null;
+  document.querySelectorAll('.file-item').forEach((el) => {
+    const p = el.getAttribute('data-filepath') || el.dataset.filepath || '';
+    if (p && normalizePathForComparison(p) === normalized) item = el;
+  });
+  if (item) {
+    selectSingleModel(item, filePath);
+    return;
+  }
+  selectedModels.clear();
+  addToSelectedModels(filePath);
+}
+
+function openModelDetailsFromTile(fileElement, filePath) {
+  if (fileElement?._suppressTap) return;
+  if (isMultiSelectMode) {
+    toggleModelSelection(fileElement, filePath);
+    return;
+  }
+  selectSingleModel(fileElement, filePath);
+  showModelDetails(filePath);
+}
+
+function openModelPreviewFromTile(filePath) {
+  if (typeof window.openPreview === 'function') {
+    window.openPreview(filePath);
+  }
+}
+
 // Update the toggleModelSelection function`
 async function toggleModelSelection(fileElement, filePath) {
+  if (fileElement?._suppressTap) return;
   if (!isMultiSelectMode) {
     const wasSelected = fileElement.classList.contains('selected');
     
@@ -16846,21 +16907,42 @@ function createSVGIcon(svgString, size = 16) {
   return iconContainer;
 }
 
-/** List view: column visibility + widths (persisted via listViewColumnLayout) */
+/** List view: column visibility, widths, and order (persisted via listViewColumnLayout) */
 const LIST_VIEW_COLUMN_DEFS = [
   { id: 'name', label: 'Name', defaultWidth: 140, min: 80, max: 800 },
   { id: 'size', label: 'Size', defaultWidth: 75, min: 50, max: 200 },
   { id: 'dateadded', label: 'Date Added', defaultWidth: 110, min: 90, max: 240 },
-  { id: 'directory', label: 'Parent Directory', defaultWidth: 130, min: 80, max: 500 },
+  { id: 'directory', label: 'Parent Directory', defaultWidth: 150, min: 90, max: 500 },
   { id: 'designer', label: 'Designer', defaultWidth: 120, min: 60, max: 400 },
   { id: 'parentmodel', label: 'Parent Model', defaultWidth: 120, min: 60, max: 400 },
-  { id: 'printed', label: 'Printed', defaultWidth: 100, min: 70, max: 200 },
+  { id: 'printed', label: 'Print Status', defaultWidth: 140, min: 100, max: 260 },
   { id: 'tags', label: 'Tags', defaultWidth: 180, min: 80, max: 600 },
   { id: 'archive', label: 'Archive', defaultWidth: 100, min: 70, max: 200 }
 ];
 
 let listViewColumnState = null;
 let listViewColumnsPopoverEl = null;
+
+function getDefaultListViewColumnOrder() {
+  return LIST_VIEW_COLUMN_DEFS.map(col => col.id);
+}
+
+function normalizeListViewColumnOrder(savedOrder) {
+  const known = getDefaultListViewColumnOrder();
+  const knownSet = new Set(known);
+  const order = [];
+  if (Array.isArray(savedOrder)) {
+    for (const id of savedOrder) {
+      if (typeof id === 'string' && knownSet.has(id) && !order.includes(id)) {
+        order.push(id);
+      }
+    }
+  }
+  for (const id of known) {
+    if (!order.includes(id)) order.push(id);
+  }
+  return order;
+}
 
 function getDefaultListViewColumnState() {
   const visibility = {};
@@ -16869,7 +16951,7 @@ function getDefaultListViewColumnState() {
     visibility[col.id] = true;
     widths[col.id] = col.defaultWidth;
   }
-  return { visibility, widths };
+  return { visibility, widths, order: getDefaultListViewColumnOrder() };
 }
 
 function mergeListViewColumnState(saved) {
@@ -16890,6 +16972,11 @@ function mergeListViewColumnState(saved) {
       }
     }
   }
+  base.order = normalizeListViewColumnOrder(saved.order);
+  // Old default width (100) clips the longer "Print Status" label.
+  if (!Array.isArray(saved.order) && saved.widths && saved.widths.printed === 100) {
+    base.widths.printed = 130;
+  }
   return base;
 }
 
@@ -16900,8 +16987,8 @@ function ensureListViewColumnState() {
   return listViewColumnState;
 }
 
-function listViewColDisplayMode(colId) {
-  return colId === 'name' ? '' : 'flex';
+function listViewColDisplayMode(_colId) {
+  return 'flex';
 }
 
 function applyListViewColumnToElement(el, colId) {
@@ -16915,20 +17002,110 @@ function applyListViewColumnToElement(el, colId) {
     el.style.display = 'none';
     return;
   }
-  const mode = listViewColDisplayMode(colId);
-  if (mode) {
-    el.style.display = mode;
-  } else {
-    el.style.removeProperty('display');
-  }
+  el.style.display = listViewColDisplayMode(colId);
+  el.style.flex = `0 0 ${w}px`;
   el.style.flexShrink = '0';
   el.style.width = `${w}px`;
   el.style.minWidth = `${w}px`;
-  if (colId === 'tags') {
-    el.style.maxWidth = `${w}px`;
-  } else {
-    el.style.removeProperty('maxWidth');
+  el.style.maxWidth = `${w}px`;
+  el.style.overflow = 'hidden';
+  el.style.boxSizing = 'border-box';
+}
+
+function isListViewColumnRow(el) {
+  return !!(el && (el.classList.contains('list-view-header-info') || el.classList.contains('file-info')));
+}
+
+function applyListViewColumnOrderToSubtree(root) {
+  if (!root) return;
+  const state = ensureListViewColumnState();
+  const rank = new Map((state.order || []).map((id, i) => [id, i]));
+  const parents = new Set();
+  root.querySelectorAll('[data-list-col]').forEach(el => {
+    const parent = el.parentElement;
+    if (isListViewColumnRow(parent)) parents.add(parent);
+  });
+  parents.forEach(parent => {
+    const cols = Array.from(parent.children).filter(el => el.hasAttribute('data-list-col'));
+    if (cols.length < 2) return;
+    cols.sort((a, b) => {
+      const ra = rank.has(a.getAttribute('data-list-col')) ? rank.get(a.getAttribute('data-list-col')) : 999;
+      const rb = rank.has(b.getAttribute('data-list-col')) ? rank.get(b.getAttribute('data-list-col')) : 999;
+      return ra - rb;
+    });
+    cols.forEach(el => parent.appendChild(el));
+  });
+}
+
+function sharedGroupChildValue(children, getter) {
+  const values = [];
+  for (const child of children || []) {
+    const raw = getter(child);
+    const value = raw == null ? '' : String(raw).trim();
+    if (value && !values.includes(value)) values.push(value);
   }
+  if (values.length === 0) return '';
+  if (values.length === 1) return values[0];
+  return 'Multiple';
+}
+
+function summarizeListViewGroupColumns(groupRecord) {
+  const children = groupRecord?.children || [];
+  let totalSize = 0;
+  let hasSize = false;
+  let latestDateMs = null;
+  for (const child of children) {
+    const size = Number(child?.size);
+    if (Number.isFinite(size) && size > 0) {
+      totalSize += size;
+      hasSize = true;
+    }
+    const dateRaw = child?.dateAdded || child?.modifiedDate;
+    if (dateRaw) {
+      const ms = new Date(dateRaw).getTime();
+      if (Number.isFinite(ms) && (latestDateMs == null || ms > latestDateMs)) {
+        latestDateMs = ms;
+      }
+    }
+  }
+
+  const firstPath = children.find(child => child?.filePath)?.filePath || '';
+  const pathForDirectory = firstPath.includes('::') ? firstPath.split('::')[0] : firstPath;
+  const directory = pathForDirectory ? getDirectoryDisplayLabel(pathForDirectory) : '';
+  const directoryFull = pathForDirectory
+    ? (getParentDirectoryFullPath(pathForDirectory) || directory)
+    : '';
+
+  return {
+    size: hasSize ? formatFileSize(totalSize) : '',
+    dateAdded: latestDateMs != null
+      ? new Date(latestDateMs).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' })
+      : '',
+    dateAddedTitle: latestDateMs != null ? new Date(latestDateMs).toLocaleString() : '',
+    directory,
+    directoryFull,
+    designer: sharedGroupChildValue(children, child => child.designer),
+    parentModel: groupRecord?.groupKind === 'parentModel'
+      ? (groupRecord.groupLabel || '')
+      : sharedGroupChildValue(children, child => child.parentModel)
+  };
+}
+
+function createListViewColumnCell(colId, className, text) {
+  const el = document.createElement('div');
+  if (className) el.className = className;
+  el.setAttribute('data-list-col', colId);
+  if (text != null) {
+    const span = document.createElement('span');
+    span.textContent = text;
+    span.style.fontSize = '12px';
+    span.style.color = text === '—' ? '#666' : '#aaa';
+    span.style.overflow = 'hidden';
+    span.style.textOverflow = 'ellipsis';
+    span.style.whiteSpace = 'nowrap';
+    el.appendChild(span);
+  }
+  return el;
 }
 
 function applyListViewColumnLayoutToSubtree(root) {
@@ -16936,6 +17113,7 @@ function applyListViewColumnLayoutToSubtree(root) {
   root.querySelectorAll('[data-list-col]').forEach(el => {
     applyListViewColumnToElement(el, el.getAttribute('data-list-col'));
   });
+  applyListViewColumnOrderToSubtree(root);
 }
 
 function applyListViewColumnLayoutToGrid() {
@@ -16950,7 +17128,11 @@ async function persistListViewColumnState() {
   try {
     await window.electron.saveSetting(
       'listViewColumnLayout',
-      JSON.stringify({ visibility: state.visibility, widths: state.widths })
+      JSON.stringify({
+        visibility: state.visibility,
+        widths: state.widths,
+        order: state.order
+      })
     );
   } catch (err) {
     console.error('Error saving list view column layout:', err);
@@ -17020,7 +17202,14 @@ function toggleListViewColumnsPopover(anchorBtn) {
   const pop = document.createElement('div');
   pop.className = 'list-view-columns-popover';
   pop.setAttribute('role', 'menu');
-  LIST_VIEW_COLUMN_DEFS.forEach(col => {
+  const hint = document.createElement('div');
+  hint.className = 'list-view-columns-popover-hint';
+  hint.textContent = 'Drag column headers to reorder. Drag a column edge to resize.';
+  pop.appendChild(hint);
+  const colsById = new Map(LIST_VIEW_COLUMN_DEFS.map(col => [col.id, col]));
+  normalizeListViewColumnOrder(listViewColumnState.order).forEach(colId => {
+    const col = colsById.get(colId);
+    if (!col) return;
     const row = document.createElement('label');
     row.className = 'list-view-columns-popover-row';
     const cb = document.createElement('input');
@@ -17085,6 +17274,105 @@ function attachListViewColumnResizeHandle(wrapEl, colId) {
     document.addEventListener('mouseup', onUp);
   });
   wrapEl.appendChild(handle);
+}
+
+function clearListViewColumnDropIndicators(headerInfo) {
+  if (!headerInfo) return;
+  headerInfo.querySelectorAll('.list-view-col-drop-before, .list-view-col-drop-after').forEach(el => {
+    el.classList.remove('list-view-col-drop-before', 'list-view-col-drop-after');
+  });
+}
+
+function getListViewColumnDropTarget(headerInfo, clientX, fromId) {
+  const wraps = Array.from(headerInfo.children).filter(el => {
+    return el.hasAttribute('data-list-col')
+      && el.style.display !== 'none'
+      && el.getAttribute('data-list-col') !== fromId;
+  });
+  if (wraps.length === 0) return null;
+  for (const el of wraps) {
+    const rect = el.getBoundingClientRect();
+    if (clientX < rect.left + rect.width / 2) {
+      return { el, id: el.getAttribute('data-list-col'), place: 'before' };
+    }
+  }
+  const last = wraps[wraps.length - 1];
+  return { el: last, id: last.getAttribute('data-list-col'), place: 'after' };
+}
+
+function reorderListViewColumn(fromId, targetId, place) {
+  const state = ensureListViewColumnState();
+  const current = normalizeListViewColumnOrder(state.order);
+  if (fromId === targetId) return false;
+  const order = current.filter(id => id !== fromId);
+  let idx = order.indexOf(targetId);
+  if (idx < 0) return false;
+  if (place === 'after') idx += 1;
+  order.splice(idx, 0, fromId);
+  const unchanged = order.length === current.length && order.every((id, i) => id === current[i]);
+  if (unchanged) return false;
+  state.order = order;
+  return true;
+}
+
+function suppressClickAfterColumnReorder(wrapEl) {
+  const suppress = (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    wrapEl.removeEventListener('click', suppress, true);
+  };
+  wrapEl.addEventListener('click', suppress, true);
+}
+
+function attachListViewColumnReorderOnHeader(headerInfo) {
+  if (!headerInfo || headerInfo.dataset.colReorderAttached === '1') return;
+  headerInfo.dataset.colReorderAttached = '1';
+  headerInfo.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('.list-view-col-resize-handle')) return;
+    const wrap = e.target.closest('[data-list-col]');
+    if (!wrap || wrap.parentElement !== headerInfo) return;
+    const fromId = wrap.getAttribute('data-list-col');
+    if (!fromId) return;
+
+    const startX = e.clientX;
+    let dragging = false;
+    let dropTarget = null;
+
+    function onMove(ev) {
+      if (!dragging && Math.abs(ev.clientX - startX) < 8) return;
+      if (!dragging) {
+        dragging = true;
+        wrap.classList.add('is-dragging');
+        document.body.classList.add('list-view-col-reorder-active');
+      }
+      ev.preventDefault();
+      dropTarget = getListViewColumnDropTarget(headerInfo, ev.clientX, fromId);
+      clearListViewColumnDropIndicators(headerInfo);
+      if (dropTarget?.el) {
+        dropTarget.el.classList.add(
+          dropTarget.place === 'before' ? 'list-view-col-drop-before' : 'list-view-col-drop-after'
+        );
+      }
+    }
+
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      clearListViewColumnDropIndicators(headerInfo);
+      wrap.classList.remove('is-dragging');
+      document.body.classList.remove('list-view-col-reorder-active');
+      if (!dragging || !dropTarget) return;
+      suppressClickAfterColumnReorder(wrap);
+      if (reorderListViewColumn(fromId, dropTarget.id, dropTarget.place)) {
+        applyListViewColumnLayoutToGrid();
+        persistListViewColumnState();
+      }
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 }
 
 // Function to create list view header
@@ -17231,15 +17519,17 @@ function createListViewHeader() {
   header.style.zIndex = '10';
   header.style.marginBottom = '4px';
   
-  // Thumbnail column header (spacer for alignment)
+  // Thumbnail column header (spacer matches list-row thumb + margin)
   const thumbnailHeader = document.createElement('div');
+  thumbnailHeader.className = 'list-view-thumb-spacer';
   thumbnailHeader.style.flexShrink = '0';
-  thumbnailHeader.style.width = '48px';
+  thumbnailHeader.style.width = '60px';
   thumbnailHeader.style.height = '20px';
   header.appendChild(thumbnailHeader);
   
   // File info container (matches fileInfo structure)
   const headerInfo = document.createElement('div');
+  headerInfo.className = 'list-view-header-info';
   headerInfo.style.flex = '1';
   headerInfo.style.display = 'flex';
   headerInfo.style.flexDirection = 'row';
@@ -17436,12 +17726,12 @@ function createListViewHeader() {
   attachListViewColumnResizeHandle(parentWrap, 'parentmodel');
   headerInfo.appendChild(parentWrap);
   
-  // Printed column header (sortable - backend supports printed sorting)
+  // Print Status column header (sortable)
   const printedWrap = document.createElement('div');
   printedWrap.className = 'list-view-col';
   printedWrap.dataset.listCol = 'printed';
   printedWrap.style.position = 'relative';
-  const printedHeader = createSortableHeader('Printed', 'printed', '100%', { textAlign: 'center' });
+  const printedHeader = createSortableHeader('Print Status', 'printstatus', '100%', { textAlign: 'center' });
   printedHeader.style.width = '100%';
   printedWrap.appendChild(printedHeader);
   attachListViewColumnResizeHandle(printedWrap, 'printed');
@@ -17492,6 +17782,7 @@ function createListViewHeader() {
   archiveWrap.appendChild(archiveHeader);
   attachListViewColumnResizeHandle(archiveWrap, 'archive');
   headerInfo.appendChild(archiveWrap);
+  attachListViewColumnReorderOnHeader(headerInfo);
   
   header.appendChild(headerInfo);
   
@@ -17914,14 +18205,15 @@ async function populateParentModelFilter() {
   }
 }
 
+function removeHtmlContextMenu() {
+  document.getElementById('html-context-menu')?.remove();
+  document.getElementById('html-context-menu-backdrop')?.remove();
+}
+
 // Function to show HTML context menu (for server mode browser access)
 function showHtmlContextMenu(menuData, x, y, options = {}) {
   const showClose = options.showClose === true;
-  // Remove any existing context menu
-  const existingMenu = document.getElementById('html-context-menu');
-  if (existingMenu) {
-    existingMenu.remove();
-  }
+  removeHtmlContextMenu();
   
   // Create menu container
   const menu = document.createElement('div');
@@ -17934,7 +18226,7 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
     border: 1px solid #555;
     border-radius: 4px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-    z-index: 10000;
+    z-index: 13000;
     min-width: 200px;
     padding: ${showClose ? '20px 0 4px 0' : '4px 0'};
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -17958,7 +18250,7 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
     `;
     closeButton.addEventListener('click', (e) => {
       e.stopPropagation();
-      menu.remove();
+      removeHtmlContextMenu();
     });
     menu.appendChild(closeButton);
   }
@@ -18068,7 +18360,7 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
                   e.stopPropagation();
                   try {
                     await window.electron.executeContextMenuAction(menuData.requestId, index, subIndex);
-                    menu.remove();
+                    removeHtmlContextMenu();
                   } catch (error) {
                     console.error('Error executing menu action:', error);
                     alert('Error: ' + error.message);
@@ -18126,7 +18418,7 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
           e.stopPropagation();
           try {
             await window.electron.executeContextMenuAction(menuData.requestId, index, null);
-            menu.remove();
+            removeHtmlContextMenu();
           } catch (error) {
             console.error('Error executing menu action:', error);
             alert('Error: ' + error.message);
@@ -18138,7 +18430,24 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
     menu.appendChild(menuItem);
   });
   
-  // Add to document
+  const backdrop = document.createElement('div');
+  backdrop.id = 'html-context-menu-backdrop';
+  backdrop.style.cssText = `
+    position: fixed;
+    inset: 0;
+    z-index: 12999;
+    background: transparent;
+  `;
+  const dismissFromOutside = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    removeHtmlContextMenu();
+    document.removeEventListener('keydown', handleEscape);
+  };
+  backdrop.addEventListener('pointerdown', dismissFromOutside);
+  backdrop.addEventListener('touchstart', dismissFromOutside, { passive: false });
+  backdrop.addEventListener('click', dismissFromOutside);
+  document.body.appendChild(backdrop);
   document.body.appendChild(menu);
   
   // Adjust position if menu goes off screen
@@ -18153,30 +18462,13 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
   if (adjusted.left < 8) menu.style.left = '8px';
   if (adjusted.top < 8) menu.style.top = '8px';
   
-  // Close menu when clicking outside
-  const closeMenu = (e) => {
-    if (!menu.contains(e.target)) {
-      menu.remove();
-      document.removeEventListener('click', closeMenu);
-      document.removeEventListener('contextmenu', closeMenu);
-    }
-  };
-  
-  // Close on escape key
   const handleEscape = (e) => {
     if (e.key === 'Escape') {
-      menu.remove();
+      removeHtmlContextMenu();
       document.removeEventListener('keydown', handleEscape);
-      document.removeEventListener('click', closeMenu);
-      document.removeEventListener('contextmenu', closeMenu);
     }
   };
-  
-  setTimeout(() => {
-    document.addEventListener('click', closeMenu);
-    document.addEventListener('contextmenu', closeMenu);
-    document.addEventListener('keydown', handleEscape);
-  }, 10);
+  document.addEventListener('keydown', handleEscape);
 }
 
 // Register a global listener for hash-generation-progress that works even if dialog isn't shown
@@ -18306,12 +18598,31 @@ function addThumbnailMenuButton(thumbnailContainer, filePath) {
 }
 
 // Add this function near other file rendering functions
+function suppressTileTap(fileElement, ms = 600) {
+  if (!fileElement) return;
+  fileElement._suppressTap = true;
+  clearTimeout(fileElement._suppressTapTimer);
+  fileElement._suppressTapTimer = setTimeout(() => {
+    fileElement._suppressTap = false;
+  }, ms);
+}
+
+function wasTileTapSuppressed(fileElement, e) {
+  if (!fileElement?._suppressTap) return false;
+  if (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  return true;
+}
+
 function addContextMenuHandler(fileElement, filePath) {
   // Remove any existing context menu handler to avoid duplicates
   fileElement.removeEventListener('contextmenu', fileElement._contextMenuHandler);
   
   // Create the handler function
   const handler = async (e) => {
+    suppressTileTap(fileElement);
     e.preventDefault(); // Prevent default context menu
     
     // For list view, ensure the entire element is clickable
@@ -18349,6 +18660,18 @@ function addContextMenuHandler(fileElement, filePath) {
   const useCapture = fileElement.classList.contains('file-item-list');
   fileElement.addEventListener('contextmenu', handler, useCapture);
 
+  attachTileLongPress(fileElement, (x, y) => {
+    handler({
+      preventDefault() {},
+      stopPropagation() {},
+      clientX: x,
+      clientY: y,
+      target: fileElement
+    });
+  });
+}
+
+function attachTileLongPress(fileElement, onLongPress) {
   fileElement.removeEventListener('touchstart', fileElement._longPressStart);
   fileElement.removeEventListener('touchmove', fileElement._longPressMove);
   fileElement.removeEventListener('touchend', fileElement._longPressEnd);
@@ -18364,14 +18687,8 @@ function addContextMenuHandler(fileElement, filePath) {
     clearTimeout(longPressTimer);
     longPressTimer = setTimeout(() => {
       longPressTimer = null;
-      fileElement._suppressTap = true;
-      handler({
-        preventDefault() {},
-        stopPropagation() {},
-        clientX: longPressX,
-        clientY: longPressY,
-        target: fileElement
-      });
+      suppressTileTap(fileElement);
+      onLongPress(longPressX, longPressY);
     }, 550);
   };
   fileElement._longPressMove = (e) => {
@@ -18382,10 +18699,13 @@ function addContextMenuHandler(fileElement, filePath) {
       longPressTimer = null;
     }
   };
-  fileElement._longPressEnd = () => {
+  fileElement._longPressEnd = (e) => {
     if (longPressTimer) {
       clearTimeout(longPressTimer);
       longPressTimer = null;
+    }
+    if (fileElement._suppressTap && e && typeof e.preventDefault === 'function') {
+      e.preventDefault();
     }
   };
   fileElement.addEventListener('touchstart', fileElement._longPressStart, { passive: true });
@@ -18393,11 +18713,7 @@ function addContextMenuHandler(fileElement, filePath) {
   fileElement.addEventListener('touchend', fileElement._longPressEnd);
   fileElement.addEventListener('touchcancel', fileElement._longPressEnd);
   fileElement.addEventListener('click', (e) => {
-    if (fileElement._suppressTap) {
-      e.preventDefault();
-      e.stopPropagation();
-      fileElement._suppressTap = false;
-    }
+    wasTileTapSuppressed(fileElement, e);
   }, true);
 }
 
@@ -20850,7 +21166,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     parentModelColumn.appendChild(parentModelText);
     fileInfo.appendChild(parentModelColumn);
     
-    // Printed column (status badge only, no icon)
+    // Print Status column (status badge only, no icon)
     const printStatusColumn = document.createElement('div');
     printStatusColumn.className = 'print-status-column';
     printStatusColumn.setAttribute('data-list-col', 'printed');
@@ -20979,6 +21295,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     
     // Add click event handler for model selection
     item.addEventListener('click', (e) => {
+      if (wasTileTapSuppressed(item, e)) return;
       // Check if ctrl or cmd key is pressed for multi-select
       if (e.ctrlKey || e.metaKey) {
         handleFileClick(e, model.filePath);
@@ -21031,20 +21348,33 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     if (isZipFile) {
       nameRow.classList.add('zip-file');
     }
+    const actions = document.createElement('div');
+    actions.className = 'preview-tile-actions';
     const openBtn = document.createElement('button');
     openBtn.type = 'button';
     openBtn.className = 'preview-tile-open-btn';
-    openBtn.textContent = '3D Preview';
+    openBtn.textContent = '3D';
     openBtn.title = 'Open 3D preview';
     openBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      if (typeof window.openPreview === 'function') {
-        window.openPreview(model.filePath);
-      }
+      selectSingleModel(item, model.filePath);
+      openModelPreviewFromTile(model.filePath);
     });
+    const detailsBtn = document.createElement('button');
+    detailsBtn.type = 'button';
+    detailsBtn.className = 'preview-tile-details-btn';
+    detailsBtn.textContent = 'Details';
+    detailsBtn.title = 'Open model details';
+    detailsBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openModelDetailsFromTile(item, model.filePath);
+    });
+    actions.appendChild(openBtn);
+    actions.appendChild(detailsBtn);
     overlay.appendChild(nameRow);
-    overlay.appendChild(openBtn);
+    overlay.appendChild(actions);
 
     item.appendChild(checkEl);
     item.appendChild(overlay);
@@ -21063,11 +21393,21 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     });
 
     item.addEventListener('click', (e) => {
+      if (wasTileTapSuppressed(item, e)) return;
+      if (e.target.closest('.preview-tile-open-btn, .preview-tile-details-btn')) return;
       if (e.ctrlKey || e.metaKey) {
         handleFileClick(e, model.filePath);
-      } else {
-        toggleModelSelection(item, model.filePath);
+        return;
       }
+      if (isMobileUiActive() && !isMultiSelectMode) {
+        if (item.classList.contains('is-mobile-focus')) {
+          openModelPreviewFromTile(model.filePath);
+          return;
+        }
+        selectSingleModel(item, model.filePath);
+        return;
+      }
+      toggleModelSelection(item, model.filePath);
     });
 
     addContextMenuHandler(item, model.filePath);
@@ -21470,6 +21810,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
   // Add click event handler for model selection
   item.addEventListener('click', (e) => {
+    if (wasTileTapSuppressed(item, e)) return;
     // Check if ctrl or cmd key is pressed for multi-select
     if (e.ctrlKey || e.metaKey) {
       handleFileClick(e, model.filePath);
@@ -22168,6 +22509,7 @@ async function showBundleDetails(groupRecord) {
 
   const panel = document.getElementById('bundle-details');
   if (!panel) return;
+  panel._bundleRecord = groupRecord;
 
   const bundleKind = groupRecord.children[0]?.bundleKind
     || deriveBundleFieldsForModel(groupRecord.children[0]).bundleKind
@@ -22599,34 +22941,147 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   const bundlePrint = window.PrintHistory?.bundleSummary(groupRecord.children);
   const printedCount = bundlePrint ? bundlePrint.printedCount : groupRecord.children.filter(child => Boolean(child.printed)).length;
   const childCount = groupRecord.children.length;
-  const meta = document.createElement('div');
-  meta.className = 'parent-model-group-meta';
-  if (groupRecord?.groupKind === 'bundle') {
-    const kindLabel = bundleKind === 'zip' ? 'zip archive' : 'folder';
-    meta.textContent = `${childCount} part${childCount === 1 ? '' : 's'} • ${kindLabel} • ${bundlePrint ? bundlePrint.label : `${printedCount}/${childCount} printed`}`;
-    meta.title = 'Right-click for Preview and more options';
-  } else {
-    meta.textContent = `${childCount} model${childCount === 1 ? '' : 's'} • ${bundlePrint ? bundlePrint.label : `${printedCount}/${childCount} printed`}`;
-  }
+  const printLabel = bundlePrint ? bundlePrint.label : `${printedCount}/${childCount} printed`;
+  const isBundleGroup = groupRecord?.groupKind === 'bundle' || groupRecord?.groupKind === 'zip';
+  const kindLabel = bundleKind === 'zip' || groupRecord?.groupKind === 'zip' ? 'zip archive' : (groupRecord?.groupKind === 'bundle' ? 'folder' : '');
 
-  details.appendChild(titleRow);
-  details.appendChild(meta);
+  if (view === 'list') {
+    const fileInfo = document.createElement('div');
+    fileInfo.className = 'file-info';
+    fileInfo.style.flex = '1';
+    fileInfo.style.display = 'flex';
+    fileInfo.style.flexDirection = 'row';
+    fileInfo.style.alignItems = 'center';
+    fileInfo.style.gap = '12px';
+    fileInfo.style.minWidth = '0';
 
-  if (view === 'detailed' || view === 'list') {
+    const nameCol = document.createElement('div');
+    nameCol.className = 'file-name';
+    nameCol.setAttribute('data-list-col', 'name');
+    nameCol.style.alignItems = 'center';
+    nameCol.style.gap = '8px';
+    nameCol.appendChild(titleRow);
+    fileInfo.appendChild(nameCol);
+    const groupCols = summarizeListViewGroupColumns(groupRecord);
+    fileInfo.appendChild(createListViewColumnCell('size', 'file-size-column', groupCols.size || '—'));
+    const dateCol = createListViewColumnCell('dateadded', 'date-added-column', groupCols.dateAdded || '—');
+    if (groupCols.dateAddedTitle) dateCol.title = groupCols.dateAddedTitle;
+    fileInfo.appendChild(dateCol);
+    const directoryCol = createListViewColumnCell('directory', 'directory-info-column', groupCols.directory || '—');
+    if (groupCols.directoryFull || groupCols.directory) {
+      directoryCol.title = groupCols.directoryFull || groupCols.directory;
+    }
+    fileInfo.appendChild(directoryCol);
+    const designerCol = createListViewColumnCell('designer', 'designer-info-column', groupCols.designer || '—');
+    if (groupCols.designer) designerCol.title = groupCols.designer;
+    fileInfo.appendChild(designerCol);
+    const parentCol = createListViewColumnCell(
+      'parentmodel',
+      'parent-model-column',
+      groupCols.parentModel || '—'
+    );
+    if (groupCols.parentModel) parentCol.title = groupCols.parentModel;
+    fileInfo.appendChild(parentCol);
+
+    const printedCol = createListViewColumnCell('printed', 'print-status-column', null);
+    const printedBadge = document.createElement('span');
+    printedBadge.className = printedCount > 0 ? 'print-status printed' : 'print-status';
+    printedBadge.textContent = printLabel;
+    printedCol.appendChild(printedBadge);
+    fileInfo.appendChild(printedCol);
+
+    const tagsCol = createListViewColumnCell('tags', 'tags-info-column', null);
     const tagsRow = document.createElement('div');
     tagsRow.className = 'parent-model-group-tags tags-info';
     tagsRow.style.display = 'none';
-    details.appendChild(tagsRow);
+    tagsCol.appendChild(tagsRow);
+    fileInfo.appendChild(tagsCol);
     getGroupTagNames(groupRecord).then((names) => {
       if (!names.length || !tagsRow.isConnected) return;
       fillTagsWithFilterLinks(tagsRow, names);
       tagsRow.style.display = '';
       tagsRow.setAttribute('title', names.join(', '));
     }).catch((error) => console.error('Error loading archive tags:', error));
+
+    const archiveText = isBundleGroup
+      ? `${childCount} part${childCount === 1 ? '' : 's'}${kindLabel ? ` • ${kindLabel}` : ''}`
+      : `${childCount} model${childCount === 1 ? '' : 's'}`;
+    const archiveCol = createListViewColumnCell('archive', 'archive-status-column', archiveText);
+    archiveCol.title = isBundleGroup ? 'Right-click for Preview and more options' : archiveText;
+    fileInfo.appendChild(archiveCol);
+
+    item.appendChild(thumbnailWrap);
+    item.appendChild(fileInfo);
+    applyListViewColumnLayoutToSubtree(fileInfo);
+  } else {
+    const meta = document.createElement('div');
+    meta.className = 'parent-model-group-meta';
+    if (groupRecord?.groupKind === 'bundle') {
+      meta.textContent = `${childCount} part${childCount === 1 ? '' : 's'} • ${kindLabel || 'folder'} • ${printLabel}`;
+      meta.title = 'Right-click for Preview and more options';
+    } else {
+      meta.textContent = `${childCount} model${childCount === 1 ? '' : 's'} • ${printLabel}`;
+    }
+
+    details.appendChild(titleRow);
+    details.appendChild(meta);
+
+    if (view === 'detailed') {
+      const tagsRow = document.createElement('div');
+      tagsRow.className = 'parent-model-group-tags tags-info';
+      tagsRow.style.display = 'none';
+      details.appendChild(tagsRow);
+      getGroupTagNames(groupRecord).then((names) => {
+        if (!names.length || !tagsRow.isConnected) return;
+        fillTagsWithFilterLinks(tagsRow, names);
+        tagsRow.style.display = '';
+        tagsRow.setAttribute('title', names.join(', '));
+      }).catch((error) => console.error('Error loading archive tags:', error));
+    }
+
+    item.appendChild(thumbnailWrap);
+    item.appendChild(details);
   }
 
-  item.appendChild(thumbnailWrap);
-  item.appendChild(details);
+  if (view === 'preview') {
+    const overlay = document.createElement('div');
+    overlay.className = 'preview-tile-overlay';
+    const nameRow = document.createElement('div');
+    nameRow.className = 'preview-tile-name';
+    nameRow.textContent = groupLabel;
+    const actions = document.createElement('div');
+    actions.className = 'preview-tile-actions';
+    const isBundle = groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+    if (isBundle) {
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'preview-tile-open-btn';
+      openBtn.textContent = '3D';
+      openBtn.title = 'Open 3D preview';
+      openBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (typeof window.openBundlePreview === 'function') {
+          window.openBundlePreview(groupRecord);
+        }
+      });
+      actions.appendChild(openBtn);
+    }
+    const detailsBtn = document.createElement('button');
+    detailsBtn.type = 'button';
+    detailsBtn.className = 'preview-tile-details-btn';
+    detailsBtn.textContent = 'Details';
+    detailsBtn.title = 'Open details';
+    detailsBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      expandGroupAndShowDetails();
+    });
+    actions.appendChild(detailsBtn);
+    overlay.appendChild(nameRow);
+    overlay.appendChild(actions);
+    item.appendChild(overlay);
+  }
 
   if (view === 'detailed') {
     const engagementBar = createModelEngagementBar(null, {
@@ -22675,11 +23130,26 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   });
 
   item.addEventListener('click', (event) => {
+    if (wasTileTapSuppressed(item, event)) return;
     if (event.target.closest('.parent-model-group-chevron')) return;
     if (event.target.closest('.model-engagement-bar')) return;
     if (event.target.closest('.tag-filter-link')) return;
+    if (event.target.closest('.preview-tile-open-btn, .preview-tile-details-btn')) return;
     event.preventDefault();
     event.stopPropagation();
+    const isBundle = groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+    if (isMobileUiActive() && view === 'preview') {
+      if (item.classList.contains('is-mobile-focus')) {
+        if (isBundle && typeof window.openBundlePreview === 'function') {
+          window.openBundlePreview(groupRecord);
+          return;
+        }
+        expandGroupAndShowDetails();
+        return;
+      }
+      focusMobileTile(item);
+      return;
+    }
     expandGroupAndShowDetails();
   });
   item.addEventListener('keydown', (event) => {
@@ -22689,6 +23159,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     }
   });
   item.addEventListener('contextmenu', async (event) => {
+    suppressTileTap(item);
     event.preventDefault();
     event.stopPropagation();
     const paths = (groupRecord.children || []).map(c => c && c.filePath).filter(Boolean);
@@ -22711,6 +23182,14 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     } catch (error) {
       console.error('Error showing context menu for group:', error);
     }
+  });
+  attachTileLongPress(item, (x, y) => {
+    item.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y
+    }));
   });
 
   return item;

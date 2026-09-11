@@ -27,7 +27,9 @@ body.mobile-ui.mobile-sheet-open {
 #mobile-ui-overlay,
 #mobile-search-bar,
 #mobile-drawer-head,
-.mobile-panel-close {
+.mobile-panel-close,
+.mobile-details-actions,
+.mobile-details-preview-btn {
   display: none;
   pointer-events: none;
 }
@@ -406,6 +408,87 @@ body.mobile-ui .model-details > h3 {
   font-size: 17px;
 }
 
+body.mobile-ui .mobile-details-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  pointer-events: auto;
+}
+
+body.mobile-ui .mobile-details-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  min-width: 44px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: none;
+  background: var(--primary-accent, #00d4ff);
+  color: #0a0a0a;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+body.mobile-ui .preview-tile-overlay {
+  opacity: 1;
+  pointer-events: none;
+  min-height: 0;
+  padding: 18px 6px 5px;
+  gap: 4px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0.2) 70%, transparent 100%);
+}
+
+body.mobile-ui .preview-tile-name {
+  font-size: 10px;
+  line-height: 1.2;
+  -webkit-line-clamp: 1;
+}
+
+body.mobile-ui .preview-tile-actions {
+  display: none;
+}
+
+body.mobile-ui .preview-tile.is-mobile-focus .preview-tile-overlay,
+body.mobile-ui .parent-model-group.is-mobile-focus .preview-tile-overlay {
+  pointer-events: auto;
+}
+
+body.mobile-ui .preview-tile.is-mobile-focus .preview-tile-actions,
+body.mobile-ui .parent-model-group.is-mobile-focus .preview-tile-actions {
+  display: flex;
+}
+
+body.mobile-ui .preview-tile-open-btn,
+body.mobile-ui .preview-tile-details-btn {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 7px;
+}
+
+body.mobile-ui #preview-dialog.preview-modal {
+  width: 100vw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+  margin: 0;
+  border-radius: 0;
+}
+
+body.mobile-ui .preview-instructions p {
+  font-size: 0;
+}
+
+body.mobile-ui .preview-instructions p::before {
+  content: "Drag to rotate • Pinch to zoom";
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* Folders overlay */
 body.mobile-ui .folder-rail {
   top: calc(56px + env(safe-area-inset-top, 0px)) !important;
@@ -518,6 +601,7 @@ body.mobile-ui dialog button {
 }
 
 body.mobile-ui #html-context-menu {
+  z-index: 13000 !important;
   min-width: min(280px, 92vw) !important;
   max-width: 92vw;
   max-height: 70dvh;

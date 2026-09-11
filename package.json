@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.4",
+  "version": "2.2.5",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -184,7 +184,8 @@
   },
   "overrides": {
     "tar": "^6.2.1",
-    "node-abi": "^3.94.0"
+    "node-abi": "^3.94.0",
+    "basic-ftp": "5.2.0"
   },
   "dependencies": {
     "acme-client": "^5.4.0",

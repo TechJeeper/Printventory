@@ -290,10 +290,7 @@ function refreshPrintDerivedFields(db, modelId) {
   if (!model) return null;
   const printCount = Number(successful?.count) || 0;
   const lastPrintedAt = successful?.last_at || null;
-  let status = normalizePrintStatus(model.print_status);
-  if (printCount === 0 && status === 'printed') {
-    status = 'unprinted';
-  }
+  const status = normalizePrintStatus(model.print_status);
   const printed = derivedPrinted(status, printCount);
   db.prepare(`
     UPDATE models
@@ -363,11 +360,15 @@ function deletePrintEvent(db, eventId) {
   const id = Number(eventId);
   if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid print event');
   return db.transaction(() => {
-    const row = db.prepare('SELECT id, model_id FROM print_events WHERE id = ?').get(id);
+    const row = db.prepare('SELECT id, model_id, outcome FROM print_events WHERE id = ?').get(id);
     if (!row) throw new Error('Print event not found');
     db.prepare('DELETE FROM print_event_filaments WHERE event_id = ?').run(id);
     db.prepare('DELETE FROM print_events WHERE id = ?').run(id);
-    const model = refreshPrintDerivedFields(db, row.model_id);
+    let model = refreshPrintDerivedFields(db, row.model_id);
+    if (row.outcome === 'printed' && model && Number(model.print_count) === 0 && model.print_status === 'printed') {
+      db.prepare('UPDATE models SET print_status = ?, printed = ? WHERE id = ?').run('unprinted', 0, row.model_id);
+      model = refreshPrintDerivedFields(db, row.model_id);
+    }
     return { deleted: true, model };
   })();
 }

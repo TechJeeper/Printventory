@@ -139,6 +139,18 @@ test('status-only change does not create a history row', () => {
   db.close();
 });
 
+test('status-only Printed sticks without a dated history row', () => {
+  const db = createDb();
+  const id = insertModel(db, { filePath: 'f-printed.stl', printed: 0, print_status: 'unprinted', print_count: 0 });
+  const result = printEvents.setPrintStatus(db, { modelId: id, printStatus: 'printed' });
+  assert.strictEqual(result.print_status, 'printed');
+  assert.strictEqual(result.printed, 1);
+  assert.strictEqual(result.print_count, 0);
+  assert.strictEqual(result.last_printed_at, null);
+  assert.strictEqual(printEvents.getPrintEvents(db, id).length, 0);
+  db.close();
+});
+
 test('derived printed stays true after a later failed reprint', () => {
   const db = createDb();
   const id = insertModel(db, { filePath: 'g.stl', printed: 0, print_status: 'unprinted', print_count: 0 });

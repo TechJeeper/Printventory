@@ -4,6 +4,20 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.5] - 2026-09-11
+
+### Added
+
+- **List view columns** — Show/hide columns, drag header edges to resize, and drag headers to reorder. The layout is saved.
+- Zip/group list rows use the same columns, with aggregated size, date added, parent directory, designer, parent model, print status, and tags.
+- **AI Tagging: Claude** — Settings → AI Tagging includes Claude alongside OpenAI, Gemini, and Puter (default model `claude-haiku-4-5`).
+- **MCP** — Additional library tools for tags, filaments, print events, parent models, metadata rename/delete, thumbnails, duplicates, and hash status.
+
+### Changed
+
+- List view **Printed** column is now **Print Status**.
+- List sort headers show an arrow only (no background highlight).
+
 ## [2.2.4] - 2026-09-07
 
 ### Added

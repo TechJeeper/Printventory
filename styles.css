@@ -1141,8 +1141,12 @@ main {
   margin: 0;
 }
 
-.file-item-list .print-status {
+.file-item-list .print-status,
+.parent-model-group-list .print-status {
   position: static !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
   display: inline-block;
   background: rgba(0, 0, 0, 0.5);
   padding: 2px 6px;
@@ -1153,16 +1157,19 @@ main {
   transition: background-color 0.2s ease, transform 0.1s ease;
 }
 
-.file-item-list .print-status:hover {
+.file-item-list .print-status:hover,
+.parent-model-group-list .print-status:hover {
   background: rgba(0, 0, 0, 0.75);
   transform: scale(1.05);
 }
 
-.file-item-list .print-status.printed {
+.file-item-list .print-status.printed,
+.parent-model-group-list .print-status.printed {
   background: rgba(46, 204, 113, 0.6);
 }
 
-.file-item-list .print-status.printed:hover {
+.file-item-list .print-status.printed:hover,
+.parent-model-group-list .print-status.printed:hover {
   background: rgba(46, 204, 113, 0.85);
 }
 
@@ -1183,13 +1190,22 @@ main {
   flex-direction: row;
   align-items: center;
   gap: 12px;
-  overflow: visible;
+  overflow: hidden;
+  padding: 0;
+  width: auto;
 }
 
-.file-item-list .file-name {
+.file-item-list [data-list-col],
+.parent-model-group-list [data-list-col] {
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.file-item-list .file-name,
+.parent-model-group-list .file-name {
+  display: flex;
+  align-items: center;
   font-size: 13px;
-  flex-shrink: 0;
-  width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   color: #fff;
@@ -1245,6 +1261,7 @@ main {
   flex-direction: row !important;
   align-items: center;
   gap: 12px;
+  width: 100%;
   padding: 12px 16px !important;
   height: 44px !important;
   border-bottom: 2px solid rgba(255, 255, 255, 0.1);
@@ -1257,6 +1274,45 @@ main {
   margin-bottom: 6px;
   box-sizing: border-box;
   border-radius: 12px 12px 0 0;
+  overflow: hidden;
+}
+
+.list-view-header-info {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.list-view-header [data-list-col] {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.list-view-header [data-list-col="size"],
+.list-view-header [data-list-col="dateadded"],
+.list-view-header [data-list-col="printed"],
+.list-view-header [data-list-col="archive"] {
+  justify-content: center;
+}
+
+.list-view-header [data-list-col] .sortable-header {
+  width: auto !important;
+  max-width: 100%;
+  flex: 0 0 auto;
+}
+
+.list-view-header [data-list-col] .sortable-header,
+.list-view-header [data-list-col] > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list-view-header svg {
@@ -1271,12 +1327,13 @@ main {
 }
 
 .list-view-header .sortable-header:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: transparent;
+  color: #fff;
 }
 
 .list-view-header .sortable-header.sort-active {
   color: #fff !important;
-  background-color: rgba(255, 255, 255, 0.15);
+  background-color: transparent;
 }
 
 .list-view-header .sort-indicator {
@@ -1407,6 +1464,41 @@ main {
   box-sizing: border-box;
 }
 
+.list-view-header .list-view-col {
+  cursor: grab;
+}
+
+.list-view-header .list-view-col.is-dragging {
+  opacity: 0.4;
+}
+
+.list-view-header .list-view-col.list-view-col-drop-before::before,
+.list-view-header .list-view-col.list-view-col-drop-after::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  background: #4a9eff;
+  border-radius: 2px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.list-view-header .list-view-col.list-view-col-drop-before::before {
+  left: -2px;
+}
+
+.list-view-header .list-view-col.list-view-col-drop-after::after {
+  right: -2px;
+}
+
+body.list-view-col-reorder-active,
+body.list-view-col-reorder-active * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
 .list-view-col-resize-handle {
   position: absolute;
   right: 0;
@@ -1430,6 +1522,15 @@ main {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.list-view-columns-popover-hint {
+  margin: 0 0 8px;
+  padding: 0 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  line-height: 1.35;
+  color: #9aa0b4;
 }
 
 .list-view-columns-popover-row {
@@ -1720,13 +1821,48 @@ main {
 }
 
 .parent-model-group-list {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 56px;
   padding: 8px 16px;
   border-radius: 12px;
+  box-sizing: border-box;
 }
 
 .parent-model-group-list .parent-model-group-thumbnail {
-  width: 40px;
-  height: 40px;
+  flex-shrink: 0;
+  width: 60px;
+  height: 48px;
+}
+
+.parent-model-group-list .file-info {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  width: auto;
+}
+
+.parent-model-group-list .file-name {
+  display: flex;
+  align-items: center;
+  margin: 0;
+}
+
+.parent-model-group-list .parent-model-group-title-row {
+  min-width: 0;
+  flex: 1;
+}
+
+.parent-model-group-list .parent-model-group-title {
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .parent-model-group-list .parent-model-group-corner-badge {
@@ -3888,13 +4024,14 @@ dialog:not([open]) {
   border-color: rgba(255, 255, 255, 0.3);
 }
 
-/* Modal fullscreen state */
+/* Modal fullscreen state — inset:0 so native <dialog> actually fills the viewport */
 .modal.modal-fullscreen {
   width: 100vw;
   max-width: 100vw;
   height: 100vh;
   max-height: 100vh;
   margin: 0;
+  inset: 0;
   border-radius: 0;
   padding: 24px;
   box-sizing: border-box;
@@ -4096,6 +4233,57 @@ dialog:not([open]) {
 /* Tag Manager Styles */
 #tag-manager-dialog {
   min-width: 400px;
+}
+
+#tag-manager-dialog .modal-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 16px;
+  flex-shrink: 0;
+}
+
+#tag-manager-dialog .modal-header-row h3 {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+#tag-manager-dialog .modal-fullscreen-icon-btn {
+  margin: 0;
+}
+
+#tag-manager-dialog .dialog-buttons {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+#tag-manager-dialog .dialog-buttons button {
+  width: auto;
+  min-width: 88px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 20px;
+}
+
+.modal-fullscreen-icon-btn svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.modal-fullscreen-icon-btn .fullscreen-icon-shrink {
+  display: none;
+}
+
+.modal.modal-fullscreen .modal-fullscreen-icon-btn .fullscreen-icon-expand {
+  display: none;
+}
+
+.modal.modal-fullscreen .modal-fullscreen-icon-btn .fullscreen-icon-shrink {
+  display: block;
 }
 
 #tag-manager-search {
@@ -5791,8 +5979,11 @@ dialog:not([open]) {
   padding: 8px 0;
 }
 .print-history-item {
-  position: relative;
-  padding: 8px 28px 8px 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 6px;
+  row-gap: 2px;
+  padding: 8px;
   margin-bottom: 6px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
@@ -5804,14 +5995,22 @@ dialog:not([open]) {
 .print-history-item.outcome-cancelled {
   border-left-color: rgba(149, 165, 166, 0.9);
 }
+.print-history-item-main,
+.print-history-filaments,
+.print-history-notes {
+  grid-column: 1;
+  min-width: 0;
+}
 .print-history-item-main {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 8px;
   font-size: 13px;
 }
 .print-history-outcome {
   font-weight: 600;
+  flex-shrink: 0;
 }
 .print-history-when,
 .print-history-filaments,
@@ -5820,10 +6019,30 @@ dialog:not([open]) {
   color: #bbb;
   margin-top: 2px;
 }
-.print-history-delete {
-  position: absolute;
-  top: 4px;
-  right: 4px;
+.print-history-when {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.print-history-delete.icon-button {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  position: static;
+  top: auto;
+  right: auto;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: none;
+}
+.print-history-delete.icon-button:hover {
+  transform: none;
 }
 .print-status-menu {
   position: fixed;

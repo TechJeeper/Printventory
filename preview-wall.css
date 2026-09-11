@@ -323,25 +323,44 @@
   color: #4ade80;
 }
 
-.preview-tile-open-btn {
+.preview-tile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.preview-tile-open-btn,
+.preview-tile-details-btn {
   align-self: flex-start;
   padding: 4px 10px;
   font-size: 10px;
   font-weight: 600;
-  color: #0a0a0a;
-  background: var(--primary-accent, #00d4ff);
   border: none;
   border-radius: 4px;
   cursor: pointer;
   pointer-events: auto;
 }
 
-.preview-tile-open-btn:hover {
+.preview-tile-open-btn {
+  color: #0a0a0a;
+  background: var(--primary-accent, #00d4ff);
+}
+
+.preview-tile-details-btn {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.preview-tile-open-btn:hover,
+.preview-tile-details-btn:hover {
   filter: brightness(1.08);
 }
 
 /* Parent model group — wall layout: full-width image on top, compact text strip below (no side-by-side squeeze) */
 .file-grid.preview-wall .parent-model-group.file-item-preview {
+  position: relative;
   width: var(--preview-tile, 180px) !important;
   height: var(--preview-tile, 180px) !important;
   min-height: var(--preview-tile, 180px) !important;

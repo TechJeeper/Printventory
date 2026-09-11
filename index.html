@@ -314,7 +314,7 @@
     </div>
 
     <div id="model-details" class="model-details hidden">
-      <h3>Model Details <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
+      <h3>Model Details <span class="mobile-details-actions"><button type="button" class="mobile-details-preview-btn" id="mobile-details-open-preview">3D</button><button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></span></h3>
       <div class="form-group print-lifecycle-group">
         <label for="model-print-status">Print status</label>
         <div class="print-lifecycle-controls">
@@ -430,7 +430,7 @@
     </div>
 
     <div id="bundle-details" class="model-details bundle-details hidden">
-      <h3 id="bundle-details-title">Bundle Details <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
+      <h3 id="bundle-details-title">Bundle Details <span class="mobile-details-actions"><button type="button" class="mobile-details-preview-btn" id="mobile-bundle-open-preview">3D</button><button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></span></h3>
       <p id="bundle-details-subtitle" class="bundle-details-subtitle"></p>
       <div class="form-group">
         <label>Container path</label>
@@ -1053,7 +1053,7 @@
             <div class="dialog-buttons mcp-inline-actions">
               <button type="button" id="copy-mcp-server-config">Copy config</button>
             </div>
-            <p class="setting-description">Place this under <code>mcpServers</code> in your MCP client settings. The agent can then list models missing thumbnails, render images locally, and call <code>set_thumbnail</code> with a PNG or JPEG.</p>
+            <p class="setting-description">Place this under <code>mcpServers</code> in your MCP client settings. The agent can search the library, manage tags, find duplicates, scan folders, update metadata, and set thumbnails.</p>
             <p id="mcp-server-tools" class="setting-description"></p>
           </div>
         </div>
@@ -1366,7 +1366,7 @@
           <button type="button" data-preview-size="m" class="active" title="Medium tiles">M</button>
           <button type="button" data-preview-size="l" title="Large tiles">L</button>
         </div>
-        <button type="button" id="list-view-columns-toolbar-btn" class="list-view-columns-toolbar-btn" title="Choose visible columns; drag column borders in the list header to resize" hidden>
+        <button type="button" id="list-view-columns-toolbar-btn" class="list-view-columns-toolbar-btn" title="Show or hide columns. Drag column headers to reorder; drag a column edge to resize." hidden>
           Show/Hide columns
         </button>
       </div>
@@ -1639,7 +1639,7 @@
                 
                 <p><strong>Or build and run manually:</strong></p>
                 <pre><code>docker build -t printventory:latest .
-docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root/.config/Printventory printventory:latest</code></pre>
+docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root/.config/printventory printventory:latest</code></pre>
                 
                 <h4>Accessing Network Shares:</h4>
                 <p>Docker containers cannot directly access Windows UNC paths. You need to mount network shares:</p>
@@ -1830,7 +1830,17 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
 
       <dialog id="tag-manager-dialog" class="modal">
         <form method="dialog">
-          <h3>Tag Manager</h3>
+          <div class="modal-header-row">
+            <h3>Tag Manager</h3>
+            <button type="button" id="tag-manager-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleTagManagerFullscreen==='function')window.toggleTagManagerFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
           <div class="form-group">
             <label>Create New Tag</label>
             <div class="input-with-icon">
@@ -1849,7 +1859,6 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             </div>
           </div>
           <div class="dialog-buttons">
-            <button type="button" id="tag-manager-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleTagManagerFullscreen==='function')window.toggleTagManagerFullscreen()">Full Screen</button>
             <button type="button" onclick="document.getElementById('tag-manager-dialog')?.close()">Close</button>
           </div>
         </form>

@@ -17,9 +17,9 @@ services:
       # - "443:5000"
     volumes:
       # Persist database and application data to local directory
-      # Server mode stores the SQLite DB at /root/.config/Printventory/data/printventory.db
+      # Server mode stores the SQLite DB at /root/.config/printventory/data/printventory.db
       # (host path: ./data/data/printventory.db). Optional: PRINTVENTORY_DB_PATH to override.
-      - ./data:/root/.config/Printventory
+      - ./data:/root/.config/printventory
       - C:/test_files:/mnt/test_files
       # Mount network shares for accessing files
       # For Windows Docker Desktop:

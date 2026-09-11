@@ -261,6 +261,18 @@
         syncOverlay();
       });
     });
+    document.getElementById('mobile-details-open-preview')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const path = document.getElementById('path-tree-container')?.getAttribute('data-file-path');
+      if (path && typeof window.openPreview === 'function') window.openPreview(path);
+    });
+    document.getElementById('mobile-bundle-open-preview')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const record = document.getElementById('bundle-details')?._bundleRecord;
+      if (record && typeof window.openBundlePreview === 'function') window.openBundlePreview(record);
+    });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && document.body.classList.contains('mobile-ui')) closeAllSheets();
     });

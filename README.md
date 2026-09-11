@@ -1,6 +1,6 @@
 # Printventory
 
-**Version 2.2.4**
+**Version 2.2.5**
 
 Printventory is an Electron-based desktop application for managing your 3D printing model collection. It helps you organize, catalog, and manage STL and 3MF files with powerful features including automatic scanning, thumbnail generation, tagging, and duplicate detection.
 
@@ -54,9 +54,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent feature additions and migration note
 ### Pre-built Releases
 
 Download the latest release for your platform:
-- **Windows**: `Printventory-Setup-2.2.4.exe` (NSIS installer)
+- **Windows**: `Printventory-Setup-2.2.5.exe` (NSIS installer)
 - **macOS**: Universal binary (Intel and Apple Silicon) DMG
-- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.2.4.zip`)
+- **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.2.5.zip`)
 
 ### Data Storage
 
@@ -168,7 +168,7 @@ For more information about Server Mode, use the **Help > Server Mode Info** menu
 
 ## MCP Server
 
-Printventory can expose a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) endpoint so a local AI agent (Cursor, Claude Desktop, VS Code Copilot, and similar) can search the library, read model details, update metadata, and write thumbnails from outside the app.
+Printventory can expose a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) endpoint so a local AI agent (Cursor, Claude Desktop, VS Code Copilot, and similar) can search the library, manage tags and filaments, find duplicates, scan folders, update metadata, record print history, and write thumbnails from outside the app.
 
 This is an **experimental** feature. By enabling or using it, you assume the risk: the API may change or break, and any client that can reach the endpoint can read and change library data.
 
@@ -203,7 +203,7 @@ http://<your-host>:5000/mcp
 
 ### Tools
 
-Agents can call `search_models`, `get_model`, `update_model`, `get_library_stats`, `get_folder_tree`, `list_tags`, `add_tag`, `list_designers`, `list_licenses`, `get_models_missing_thumbnails`, `get_thumbnails`, `set_thumbnail`, and `add_thumbnail`.
+Agents can call the library, tag, filament, print-history, thumbnail, DeDup, scan, metadata, slicer, and backup tools listed in **Tools → MCP Server**. Destructive actions (`remove_model`, `trash_file`, `move_files`) require `confirm: true`.
 
 To generate thumbnails outside Printventory: list models with `get_models_missing_thumbnails`, open each `filePath` on disk, render an image, then call `set_thumbnail` with a PNG or JPEG data URL or raw base64.
 
@@ -350,7 +350,7 @@ The image is available on Docker Hub at: [https://hub.docker.com/r/printventory/
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v ./data:/root/.config/Printventory \
+  -v ./data:/root/.config/printventory \
   --restart unless-stopped \
   printventory/printventory:latest
 ```
@@ -365,7 +365,7 @@ net use Z: \\server\share /persistent:yes
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v ./data:/root/.config/Printventory \
+  -v ./data:/root/.config/printventory \
   -v Z:/:/mnt/network-share:ro \
   -e STL_HOME=/mnt/network-share/models \
   --restart unless-stopped \
@@ -387,7 +387,7 @@ sudo mount -t cifs //server/share /mnt/network-share -o username=user,password=p
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v ./data:/root/.config/Printventory \
+  -v ./data:/root/.config/printventory \
   -v /mnt/network-share:/mnt/network-share:ro \
   -e STL_HOME=/mnt/network-share/models \
   --restart unless-stopped \
@@ -421,7 +421,7 @@ services:
       # - "443:5000"
     volumes:
       # Persist DB and app data (host ./data → container config dir)
-      - ./data:/root/.config/Printventory
+      - ./data:/root/.config/printventory
 
       # Mount model files (pick one). Use the *container* path in Printventory / STL_HOME.
       # Windows mapped drive: net use Z: \\server\share /persistent:yes
@@ -584,7 +584,7 @@ docker rm printventory-server
 docker pull printventory/printventory:latest
 docker stop printventory-server
 docker rm printventory-server
-docker run -d --name printventory-server -p 5000:5000 -v ./data:/root/.config/Printventory --restart unless-stopped printventory/printventory:latest
+docker run -d --name printventory-server -p 5000:5000 -v ./data:/root/.config/printventory --restart unless-stopped printventory/printventory:latest
 ```
 
 #### Using Network Paths
@@ -633,7 +633,7 @@ docker build -t printventory:latest .
 docker run -d \
   --name printventory-server \
   -p 5000:5000 \
-  -v ./data:/root/.config/Printventory \
+  -v ./data:/root/.config/printventory \
   --restart unless-stopped \
   printventory:latest
 ```
@@ -725,7 +725,7 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./data:/root/.config/Printventory
+      - ./data:/root/.config/printventory
       - Z:/:/mnt/network-share:ro  # Windows mapped drive
     environment:
       - STL_HOME=/mnt/network-share/models
@@ -847,7 +847,7 @@ Docker volume mounts use the format: `host-path:/container-path:options`
 2. **Add the volume mount to docker-compose.yml:**
    ```yaml
    volumes:
-     - ./data:/root/.config/Printventory
+     - ./data:/root/.config/printventory
      - Z:/:/mnt/network-share:ro
    ```
    This maps Windows drive `Z:` to `/mnt/network-share` inside the container.
@@ -873,7 +873,7 @@ Docker volume mounts use the format: `host-path:/container-path:options`
 3. **Add the volume mount to docker-compose.yml:**
    ```yaml
    volumes:
-     - ./data:/root/.config/Printventory
+     - ./data:/root/.config/printventory
      - /mnt/network-share:/mnt/network-share:ro
    ```
    This maps the host mount point to the same path inside the container.
@@ -903,7 +903,7 @@ Docker volume mounts use the format: `host-path:/container-path:options`
 3. **Add the mount to docker-compose.yml:**
    ```yaml
    volumes:
-     - ./data:/root/.config/Printventory
+     - ./data:/root/.config/printventory
      - /mnt/network-share:/mnt/network-share:ro
    ```
 
@@ -917,7 +917,7 @@ If your files are on the Docker host machine:
 
 ```yaml
 volumes:
-  - ./data:/root/.config/Printventory
+  - ./data:/root/.config/printventory
   # Maps host /host/path/to/models to /mnt/models inside container
   - /host/path/to/models:/mnt/models:ro
 ```

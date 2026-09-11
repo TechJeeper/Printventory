@@ -148,7 +148,7 @@ docker build -t printventory:latest .
 docker run -d \\
   --name printventory-server \\
   -p 5000:5000 \\
-  -v printventory-data:/root/.config/Printventory \\
+  -v printventory-data:/root/.config/printventory \\
   --restart unless-stopped \\
   printventory:latest
 \`\`\`

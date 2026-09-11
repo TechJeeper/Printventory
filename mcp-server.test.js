@@ -30,7 +30,7 @@ function test(name, fn) {
 
 function mockCtx(overrides) {
   return Object.assign({
-    getVersion: () => '2.2.4',
+    getVersion: () => '2.2.5',
     searchModels: async (filters) => ({ models: [], filters }),
     getModel: async (args) => ({ id: args.id || 1, filePath: args.filePath || '/m.stl' }),
     updateModel: async (args) => ({ ok: true, id: args.id }),
@@ -38,12 +38,47 @@ function mockCtx(overrides) {
     getFolderTree: async () => ({ roots: [] }),
     listTags: async () => [{ id: 1, name: 'benchy' }],
     addTag: async (name) => ({ id: 2, name }),
+    renameTag: async (args) => ({ ok: true, name: args.newName }),
+    deleteTag: async (args) => ({ ok: true, id: args.id, name: args.name }),
+    addModelTags: async (args) => ({ ok: true, tags: args.tags }),
+    removeModelTags: async (args) => ({ ok: true, tags: args.tags }),
+    listFilaments: async () => [{ id: 1, name: 'PLA' }],
+    saveFilament: async (filament) => filament,
+    deleteFilament: async (id) => ({ ok: true, id }),
+    setModelFilaments: async (args) => ({ ok: true, filaments: args.filaments }),
+    getPrintEvents: async () => ({ events: [] }),
+    logPrintEvent: async (args) => ({ eventId: 1, outcome: args.outcome }),
+    deletePrintEvent: async (eventId) => ({ deleted: true, eventId }),
+    listParentModels: async () => ['kit'],
+    renameMetadata: async (args) => ({ success: true, type: args.type }),
+    deleteMetadata: async (args) => ({ success: true, type: args.type }),
     listDesigners: async () => ['A'],
     listLicenses: async () => ['CC'],
     getModelsMissingThumbnails: async (limit) => [{ id: 1, limit }],
     getThumbnails: async () => ({ thumbnails: [] }),
     setThumbnail: async () => ({ ok: true }),
-    addThumbnail: async () => ({ ok: true })
+    addThumbnail: async () => ({ ok: true }),
+    setDefaultThumbnail: async (args) => ({ ok: true, index: args.index }),
+    deleteThumbnail: async (args) => ({ ok: true, index: args.index }),
+    findDuplicates: async (args) => ({ groupCount: 0, groups: [], includeZip: args.includeZip }),
+    getHashStatus: async () => ({ generating: false, missingHash: 0 }),
+    calculateMissingHashes: async () => ({ started: true, total: 0 }),
+    checkFilesExist: async () => ({ checked: 0, missingCount: 0, results: [] }),
+    getAllMetadata: async () => [],
+    pull3mfMetadata: async () => ({ success: true }),
+    generateTags: async () => ({ tags: [] }),
+    updateModelsBatch: async (models) => ({ success: true, count: models.length }),
+    logPrintEventsBatch: async () => [],
+    getModelsByDirectory: async (args) => ({ count: 0, directory: args.directory, models: [] }),
+    scanDirectory: async (args) => ({ success: true, directory: args.directory }),
+    removeModel: async (args) => ({ success: true, confirm: args.confirm }),
+    trashFile: async (args) => ({ success: true, confirm: args.confirm }),
+    listSlicers: async () => [],
+    openInSlicer: async () => ({ success: true }),
+    moveFiles: async () => ({ success: true }),
+    exportLibrary: async () => ({ success: true }),
+    backupDatabase: async () => ({ success: true }),
+    syncSpoolmanFilaments: async () => ({ success: true, created: 0, updated: 0 })
   }, overrides);
 }
 
@@ -53,6 +88,18 @@ test('lists expected tools', () => {
   assert.ok(names.includes('get_model'));
   assert.ok(names.includes('set_thumbnail'));
   assert.ok(names.includes('get_models_missing_thumbnails'));
+  assert.ok(names.includes('delete_tag'));
+  assert.ok(names.includes('rename_tag'));
+  assert.ok(names.includes('add_model_tags'));
+  assert.ok(names.includes('delete_filament'));
+  assert.ok(names.includes('delete_print_event'));
+  assert.ok(names.includes('delete_thumbnail'));
+  assert.ok(names.includes('find_duplicates'));
+  assert.ok(names.includes('calculate_missing_hashes'));
+  assert.ok(names.includes('remove_model'));
+  assert.ok(names.includes('trash_file'));
+  assert.ok(names.includes('scan_directory'));
+  assert.ok(names.includes('pull_3mf_metadata'));
 });
 
 test('buildMcpClientConfig uses streamable HTTP url', () => {
@@ -76,7 +123,7 @@ async function runAsync() {
     }, mockCtx());
     assert.strictEqual(res.result.protocolVersion, MCP_PROTOCOL_VERSION);
     assert.strictEqual(res.result.serverInfo.name, 'printventory');
-    assert.strictEqual(res.result.serverInfo.version, '2.2.4');
+    assert.strictEqual(res.result.serverInfo.version, '2.2.5');
     assert.ok(res.result.capabilities.tools);
   });
 
@@ -143,6 +190,56 @@ async function runAsync() {
     assert.ok(received.image.startsWith('data:image/png;base64,'));
     assert.strictEqual(received.id, 9);
     assert.ok(res.result.content[0].text.includes('ok'));
+  });
+
+  await test('tools/call delete_tag', async () => {
+    let received;
+    const res = await handleMcpJsonRpc({
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: { name: 'delete_tag', arguments: { name: 'obsolete' } }
+    }, mockCtx({
+      deleteTag: async (args) => {
+        received = args;
+        return { success: true, name: args.name };
+      }
+    }));
+    assert.strictEqual(received.name, 'obsolete');
+    assert.strictEqual(res.result.isError, undefined);
+    assert.ok(res.result.content[0].text.includes('obsolete'));
+  });
+
+  await test('tools/call rename_tag', async () => {
+    const res = await handleMcpJsonRpc({
+      jsonrpc: '2.0',
+      id: 8,
+      method: 'tools/call',
+      params: { name: 'rename_tag', arguments: { id: 3, newName: 'boat' } }
+    }, mockCtx({
+      renameTag: async (args) => {
+        assert.strictEqual(args.id, 3);
+        assert.strictEqual(args.newName, 'boat');
+        return { success: true, name: args.newName };
+      }
+    }));
+    assert.ok(res.result.content[0].text.includes('boat'));
+  });
+
+  await test('tools/call find_duplicates', async () => {
+    const res = await handleMcpJsonRpc({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: { name: 'find_duplicates', arguments: { includeZip: true, limit: 10 } }
+    }, mockCtx({
+      findDuplicates: async (args) => {
+        assert.strictEqual(args.includeZip, true);
+        assert.strictEqual(args.limit, 10);
+        return { groupCount: 1, groups: [{ hash: 'abc', files: [] }] };
+      }
+    }));
+    assert.ok(res.result.content[0].text.includes('abc'));
   });
 }
 

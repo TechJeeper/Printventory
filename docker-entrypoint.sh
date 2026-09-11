@@ -87,8 +87,8 @@ filter_electron_stderr() {
 }
 
 # Ensure config directory exists with proper permissions
-mkdir -p /root/.config/Printventory
-chmod -R 755 /root/.config/Printventory
+mkdir -p /root/.config/printventory
+chmod -R 755 /root/.config/printventory
 
 # Start Electron in server mode
 echo "Starting Printventory server mode..."
