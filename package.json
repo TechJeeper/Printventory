@@ -185,7 +185,27 @@
   "overrides": {
     "tar": "^6.2.1",
     "node-abi": "^3.94.0",
-    "basic-ftp": "5.2.0"
+    "@puppeteer/browsers": {
+      "basic-ftp": "5.3.1"
+    },
+    "basic-ftp": {
+      "basic-ftp": "5.3.1"
+    },
+    "get-uri": {
+      "basic-ftp": "5.3.1"
+    },
+    "pac-proxy-agent": {
+      "basic-ftp": "5.3.1"
+    },
+    "proxy-agent": {
+      "basic-ftp": "5.3.1"
+    },
+    "puppeteer": {
+      "basic-ftp": "5.3.1"
+    },
+    "puppeteer-core": {
+      "basic-ftp": "5.3.1"
+    }
   },
   "dependencies": {
     "acme-client": "^5.4.0",
