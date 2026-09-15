@@ -140,7 +140,7 @@ AI Tagging uses artificial intelligence to automatically suggest tags for your 3
 ### Setting Up AI Tagging
 
 1. Go to **Settings > AI Config**
-2. Enter your API key (OpenAI or compatible service)
+2. Enter your API key if the provider requires one (OpenAI, Claude, Gemini). Local OpenAI-compatible servers such as Ollama or LM Studio can leave this blank.
 3. Select your preferred AI model
 4. Configure tagging options:
    - Maximum number of tags
@@ -161,7 +161,7 @@ AI Tagging uses artificial intelligence to automatically suggest tags for your 3
 Printventory offers comprehensive settings to customize your experience:
 
 ### AI Config
-- API key and endpoint configuration
+- API key (optional for local OpenAI-compatible servers) and endpoint configuration
 - AI model selection (GPT-4o-mini, GPT-4, etc.)
 - Tag generation options (max tags, categories, detail level)
 - Tag merging strategies

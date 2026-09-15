@@ -8,6 +8,27 @@ let openaiClient = null;
 let currentService = 'openai';
 let puterIPC = null; // Will be set to IPC handler function for puter calls
 
+// OpenAI SDK requires a non-empty apiKey string even when the server ignores it.
+const PLACEHOLDER_API_KEY = 'not-needed';
+const OFFICIAL_CLOUD_AI_HOSTS = [
+  'api.openai.com',
+  'api.anthropic.com',
+  'generativelanguage.googleapis.com'
+];
+
+function requiresApiKey(service, baseURL) {
+  const normalizedService = service ? String(service).toLowerCase().trim() : 'openai';
+  if (normalizedService === 'puter' || normalizedService === 'custom') return false;
+  const url = baseURL ? String(baseURL).trim().toLowerCase() : '';
+  if (!url) return normalizedService === 'openai' || normalizedService === 'claude' || normalizedService === 'gemini';
+  return OFFICIAL_CLOUD_AI_HOSTS.some((host) => url.includes(host));
+}
+
+function apiKeyForClient(apiKey) {
+  const trimmed = apiKey && typeof apiKey === 'string' ? apiKey.trim() : '';
+  return trimmed || PLACEHOLDER_API_KEY;
+}
+
 // Default configuration options
 const DEFAULT_OPTIONS = {
   maxTags: 10,
@@ -31,9 +52,11 @@ function initializeOpenAI(apiKey, baseURL, service = 'openai', puterIPCHandler =
     return;
   }
   
-  // Validate API key for non-Puter services
-  if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
-    throw new Error('API key is required for ' + normalizedService + ' service');
+  // Cloud OpenAI/Claude/Gemini need a key; local OpenAI-compatible servers do not
+  if (requiresApiKey(normalizedService, baseURL)) {
+    if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
+      throw new Error('API key is required for ' + normalizedService + ' service');
+    }
   }
   
   // Safety check: Never create OpenAI client for Puter.com (double-check after normalization)
@@ -50,7 +73,7 @@ function initializeOpenAI(apiKey, baseURL, service = 'openai', puterIPCHandler =
   
   // Configure client based on service type
   const config = {
-    apiKey: apiKey,
+    apiKey: apiKeyForClient(apiKey),
     dangerouslyAllowBrowser: true
   };
   
@@ -641,9 +664,8 @@ async function testAIConfig(apiKey, baseURL, model, service = 'openai', puterIPC
     };
   }
   
-  // For other services, validate API key is provided before initializing
-  if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
-    console.error('[AITagging] API key is required for non-Puter services');
+  if (requiresApiKey(normalizedService, baseURL) && (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === ''))) {
+    console.error('[AITagging] API key is required for', normalizedService);
     return { success: false, error: 'API key is required for ' + normalizedService + ' service' };
   }
   
@@ -713,5 +735,6 @@ module.exports = {
   parseTagsFromResponse,
   normalizeTag,
   deduplicateTags,
-  getDefaultPrompt
+  getDefaultPrompt,
+  requiresApiKey
 };

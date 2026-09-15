@@ -282,28 +282,43 @@
   bottom: 28px;
 }
 
-/* Hover overlay */
+/* Filename caption is always visible; 3D/Details stay on hover */
 .preview-tile-overlay {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  min-height: 42%;
-  padding: 10px 8px 8px;
+  min-height: 0;
+  padding: 18px 8px 6px;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
   gap: 6px;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.45) 55%, transparent 100%);
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.86) 0%, rgba(0, 0, 0, 0.4) 65%, transparent 100%);
   z-index: 13;
   opacity: 0;
-  transition: opacity 0.18s ease;
+  transition: opacity 0.18s ease, min-height 0.18s ease, padding 0.18s ease;
   pointer-events: none;
 }
 
-.preview-tile:hover .preview-tile-overlay {
+.preview-tile .preview-tile-overlay {
   opacity: 1;
-  pointer-events: auto;
+}
+
+.preview-tile:hover .preview-tile-overlay,
+.preview-tile:focus-within .preview-tile-overlay {
+  min-height: 42%;
+  padding: 10px 8px 8px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.45) 55%, transparent 100%);
+}
+
+.preview-tile .preview-tile-actions {
+  display: none;
+}
+
+.preview-tile:hover .preview-tile-actions,
+.preview-tile:focus-within .preview-tile-actions {
+  display: flex;
 }
 
 .preview-tile-name {
@@ -324,7 +339,6 @@
 }
 
 .preview-tile-actions {
-  display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;

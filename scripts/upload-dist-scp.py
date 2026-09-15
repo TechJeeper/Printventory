@@ -1,5 +1,6 @@
 """Upload dist bundles using credentials from .scp (host/user/password/path)."""
 from pathlib import Path
+import json
 import sys
 import paramiko
 
@@ -17,10 +18,11 @@ password = cfg.get("password") or cfg.get("pass")
 port = int(cfg.get("port") or 22)
 remote_dir = cfg.get("path") or cfg.get("remote") or cfg.get("remotedir") or "."
 
+version = json.loads(Path("package.json").read_text(encoding="utf-8"))["version"]
 files = [Path(p) for p in sys.argv[1:]] or [
-    Path("dist/Printventory-Setup-2.2.4.exe"),
-    Path("dist/printventory-2.2.4.AppImage"),
-    Path("dist/printventory-2.2.4-universal.dmg"),
+    Path(f"dist/Printventory-Setup-{version}.exe"),
+    Path(f"dist/printventory-{version}.AppImage"),
+    Path(f"dist/printventory-{version}-universal.dmg"),
 ]
 
 for f in files:

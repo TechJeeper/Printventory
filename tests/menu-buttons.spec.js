@@ -189,7 +189,21 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#add-tag-manager-button')).toBeVisible();
     await expect(window.locator('#tag-manager-search')).toBeVisible();
     await expect(window.locator('#clear-tag-search')).toBeVisible();
+    await expect(window.locator('#tag-manager-dialog')).toContainText('Click a tag to rename');
     await expect(window.locator('#tag-manager-fullscreen-toggle')).toBeVisible();
+    await expect(window.locator('#tag-manager-fullscreen-toggle .fullscreen-icon-expand')).toBeVisible();
+
+    await window.locator('#tag-manager-fullscreen-toggle').click();
+    await expect(window.locator('#tag-manager-dialog')).toHaveClass(/modal-fullscreen/);
+    await expect(window.locator('#tag-manager-fullscreen-toggle')).not.toHaveText(/Full Screen|Exit Full Screen/);
+    await expect(window.locator('#tag-manager-fullscreen-toggle .fullscreen-icon-shrink')).toBeVisible();
+    const fullBox = await window.locator('#tag-manager-dialog').boundingBox();
+    expect(fullBox).toBeTruthy();
+    expect(fullBox.width).toBeGreaterThan(500);
+    expect(fullBox.height).toBeGreaterThan(400);
+
+    await window.locator('#tag-manager-fullscreen-toggle').click();
+    await expect(window.locator('#tag-manager-dialog')).not.toHaveClass(/modal-fullscreen/);
     await closeDialog('tag-manager-dialog', 'button:has-text("Close")');
   });
 
@@ -270,6 +284,7 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#exit-multi-edit-button')).toBeVisible();
     await expect(window.locator('#select-all-button')).toBeVisible();
     await expect(window.locator('#clear-selection-button')).toBeVisible();
+    await expect(window.locator('#multi-edit-tags-button')).toBeVisible();
     await expect(window.locator('#multi-save-button')).toBeAttached();
     await window.locator('#exit-multi-edit-button').click();
   });

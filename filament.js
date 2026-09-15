@@ -178,14 +178,6 @@
       delete window._electronPendingEvents['open-filament-manager'];
     }
 
-    document.getElementById('filament-manager-fullscreen-toggle')?.addEventListener('click', () => {
-      const dialog = document.getElementById('filament-manager-dialog');
-      const btn = document.getElementById('filament-manager-fullscreen-toggle');
-      if (!dialog || !btn) return;
-      dialog.classList.toggle('modal-fullscreen');
-      btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
-    });
-
     document.getElementById('filament-manager-search')?.addEventListener('input', (e) => {
       refreshFilamentManagerList(e.target.value.trim());
     });

@@ -4,6 +4,24 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.6] - 2026-09-15
+
+### Added
+
+- **Tag Manager rename** — Click a tag to rename it across the library (for example a typo). Clear the name and press Enter to delete it ([#82](https://github.com/TechJeeper/Printventory/issues/82)).
+- Multi-Edit **Edit Tags** opens Tag Manager. Untag from selected models stays on that panel.
+
+### Changed
+
+- Preview tiles show filenames without hovering ([#81](https://github.com/TechJeeper/Printventory/issues/81)).
+- Click an expanded folder or ZIP group to collapse it. Click empty grid space to deselect the selected model.
+- **AI Tagging** — Local OpenAI-compatible servers (Custom, Ollama, LM Studio, and similar) no longer require an API key.
+
+### Fixed
+
+- Tag Manager Full Screen resizes the dialog and keeps existing tags visible ([#80](https://github.com/TechJeeper/Printventory/issues/80)).
+- The library grid no longer stays empty on launch until you switch views.
+
 ## [2.2.5] - 2026-09-11
 
 ### Added

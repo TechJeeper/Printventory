@@ -668,14 +668,15 @@
           </div>
           <div id="multi-tags" class="tags-list" style="display: none;"></div>
           <div style="margin-top: 8px;">
-            <label for="multi-tag-remove-select" style="display: block; margin-bottom: 4px;">Remove Tag:</label>
+            <label for="multi-tag-remove-select" style="display: block; margin-bottom: 4px;">Remove from selected:</label>
             <div class="tags-input-container">
               <select id="multi-tag-remove-select">
                 <option value="">Select a tag to remove...</option>
               </select>
-              <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-remove-select" data-mode="multi" data-remove="true" title="Search tags to remove">☰</button>
+              <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-remove-select" data-mode="multi" data-remove="true" title="Search tags to remove from selected models">☰</button>
             </div>
           </div>
+          <button type="button" id="multi-edit-tags-button" class="full-width-button">Edit Tags</button>
         </div>
       </div>
       <div class="form-group">
@@ -1148,7 +1149,7 @@
       <form method="dialog">
         <h3>AI Configuration</h3>
         <p class="setting-description">
-          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Claude, Deepseek, Gemini, Puter.com, etc. The selected model must support image analysis (e.g., gpt-4-o). Puter.com does not require an API key, but may have limitations. You can use the Test button to check that your AI is properly configured. 
+          This feature uses your own AI service that supports the OpenAI API. You can configure it to work with services such as OpenAI, Claude, Deepseek, Gemini, Puter.com, or a local server (Ollama, LM Studio, and similar). The selected model must support image analysis (e.g., gpt-4o). Puter.com and local OpenAI-compatible servers do not require an API key. You can use the Test button to check that your AI is properly configured. 
         </p>
         <div class="form-group">
           <label for="ai-service-select">AI Service:</label>
@@ -1157,12 +1158,13 @@
             <option value="claude">Claude</option>
             <option value="gemini">Gemini</option>
             <option value="puter" selected>Puter.com</option>
-            <option value="custom">Custom</option>
+            <option value="custom">Custom (local / OpenAI-compatible)</option>
           </select>
         </div>
         <div class="form-group">
           <label for="ai-api-key">API Key:</label>
-          <input type="password" id="ai-api-key" required>
+          <input type="password" id="ai-api-key" autocomplete="off">
+          <small id="ai-api-key-hint">Required for OpenAI, Claude, and Gemini. Optional for local OpenAI-compatible servers (Ollama, LM Studio, etc.).</small>
         </div>
         <div class="form-group">
           <label for="ai-endpoint">API Endpoint:</label>
@@ -1848,8 +1850,9 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
               <button type="button" id="add-tag-manager-button" class="icon-button">+</button>
             </div>
           </div>
-          <div class="form-group">
+          <div class="form-group tag-manager-existing-group">
             <label>Existing Tags</label>
+            <p class="tag-manager-hint">Click a tag to rename it. Clear the name and press Enter to delete.</p>
             <div class="input-with-icon">
               <input type="text" id="tag-manager-search" placeholder="Search tags...">
               <button type="button" id="clear-tag-search" class="icon-button" title="Clear search">×</button>

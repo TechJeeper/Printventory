@@ -101,4 +101,18 @@ test.describe('Archive tagging', () => {
       expect(tags).not.toContain('archive-tag');
     }
   });
+
+  test('Archive group: clicking the header again collapses it', async () => {
+    const group = window.locator('.file-grid .parent-model-group').first();
+    await expect(group).toBeVisible({ timeout: 15000 });
+    if ((await group.getAttribute('aria-expanded')) !== 'true') {
+      await group.click();
+    }
+    await expect(group).toHaveAttribute('aria-expanded', 'true');
+    await expect(window.locator('#bundle-details')).not.toHaveClass(/hidden/);
+
+    await window.locator('.file-grid .parent-model-group').first().click();
+    await expect(window.locator('.file-grid .parent-model-group').first()).toHaveAttribute('aria-expanded', 'false');
+    await expect(window.locator('#bundle-details')).toHaveClass(/hidden/);
+  });
 });

@@ -86,6 +86,35 @@ test.describe('Printventory features', () => {
     await expect(window.locator('.view-button[data-view="detailed"]')).toBeVisible();
   });
 
+  test('View modes: Preview tiles show filenames', async () => {
+    const previewBtn = window.locator('.view-button[data-view="preview"]');
+    await previewBtn.click();
+    await window.waitForTimeout(400);
+    const tileName = window.locator('.file-grid .preview-tile .preview-tile-name').first();
+    if (await window.locator('.file-grid .preview-tile').count() > 0) {
+      await expect(tileName).toBeVisible();
+      const label = (await tileName.textContent())?.trim() || '';
+      expect(label.length).toBeGreaterThan(0);
+    }
+    await window.locator('.view-button[data-view="detailed"]').click();
+  });
+
+  test('Selection: clicking empty grid space deselects the selected item', async () => {
+    const item = window.locator('.file-grid .file-item:not(.parent-model-group)').first();
+    if (await item.count() === 0) return;
+    await item.click();
+    await expect(window.locator('.file-grid .file-item.selected')).toHaveCount(1);
+    await expect(window.locator('#model-details')).not.toHaveClass(/hidden/);
+
+    await window.evaluate(() => {
+      const grid = document.querySelector('.file-grid');
+      if (!grid) return;
+      grid.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    await expect(window.locator('.file-grid .file-item.selected')).toHaveCount(0);
+    await expect(window.locator('#model-details')).toHaveClass(/hidden/);
+  });
+
   test('Multi-Edit: toggle exists and panel can be shown', async () => {
     await expect(window.locator('#edit-mode-toggle')).toBeAttached();
     await window.keyboard.press('Control+e');

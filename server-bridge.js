@@ -504,6 +504,7 @@
     'getParentModels': 'get-parent-models',
     'getAllTags': 'get-all-tags',
     'saveTag': 'save-tag',
+    'renameTag': 'rename-tag',
     'deleteTag': 'delete-tag',
     'getTagModelCount': 'get-tag-model-count',
     'getAllFilaments': 'get-all-filaments',

@@ -608,6 +608,34 @@ test.describe('Printventory full application E2E', () => {
     await window.locator('#tag-manager-search').fill('manager-e2e');
     await window.waitForTimeout(300);
     await expect(window.locator('#tag-manager-dialog')).toContainText('manager-e2e-tag');
+
+    const created = window.locator('#tag-manager-list .tag[data-tag-name="manager-e2e-tag"]');
+    await expect(created).toBeVisible();
+    await created.locator('.tag-text').click();
+    const editInput = created.locator('input.tag-edit-input');
+    await expect(editInput).toBeVisible();
+    await editInput.fill('manager-e2e-renamed');
+    await editInput.press('Enter');
+    await expect(window.locator('#tag-manager-list .tag[data-tag-name="manager-e2e-renamed"]')).toBeVisible();
+    await expect(window.locator('#tag-manager-list .tag[data-tag-name="manager-e2e-tag"]')).toHaveCount(0);
+
+    await closeDialog(window, 'tag-manager-dialog', 'button:has-text("Close")');
+  });
+
+  test('Tools: Tag Manager fullscreen expands the dialog', async () => {
+    await openDialog(window, 'tag-manager-dialog');
+    await expect(window.locator('#tag-manager-dialog')).toBeVisible();
+    const dialog = window.locator('#tag-manager-dialog');
+    const toggle = window.locator('#tag-manager-fullscreen-toggle');
+    await toggle.click();
+    await expect(dialog).toHaveClass(/modal-fullscreen/);
+    await expect(toggle.locator('svg.fullscreen-icon-shrink')).toBeVisible();
+    const box = await dialog.boundingBox();
+    expect(box).toBeTruthy();
+    expect(box.width).toBeGreaterThan(500);
+    expect(box.height).toBeGreaterThan(400);
+    await toggle.click();
+    await expect(dialog).not.toHaveClass(/modal-fullscreen/);
     await closeDialog(window, 'tag-manager-dialog', 'button:has-text("Close")');
   });
 

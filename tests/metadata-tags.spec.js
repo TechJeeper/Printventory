@@ -213,6 +213,36 @@ test.describe('Metadata and tags', () => {
     expect(listTagNames).toContain('list-tag');
   });
 
+  test('Tag Manager: rename a tag updates tagged models', async () => {
+    const filePath = await getFirstModelPath();
+    await window.evaluate(async (path) => {
+      const model = await window.electron.getModel(path);
+      const tags = Array.isArray(model.tags) ? model.tags.slice() : [];
+      if (!tags.includes('Mlitary')) tags.push('Mlitary');
+      await window.electron.saveModel({ ...model, tags });
+    }, filePath);
+
+    await window.locator('#tag-button').click();
+    await expect(window.locator('#tag-manager-dialog')).toBeVisible();
+    const tagChip = window.locator('#tag-manager-list .tag[data-tag-name="Mlitary"]');
+    await expect(tagChip).toBeVisible();
+    await tagChip.locator('.tag-text').click();
+    const input = tagChip.locator('input.tag-edit-input');
+    await expect(input).toBeVisible();
+    await input.fill('Military');
+    await input.press('Enter');
+    await expect(window.locator('#tag-manager-list .tag[data-tag-name="Military"]')).toBeVisible();
+    await expect(window.locator('#tag-manager-list .tag[data-tag-name="Mlitary"]')).toHaveCount(0);
+
+    const updated = await getModelData(filePath);
+    const names = (updated.tags || []).map((t) => (typeof t === 'string' ? t : t.name));
+    expect(names).toContain('Military');
+    expect(names).not.toContain('Mlitary');
+
+    await window.locator('#tag-manager-dialog button:has-text("Close")').click();
+    await expect(window.locator('#tag-manager-dialog')).toBeHidden();
+  });
+
   // --- Multi-edit: metadata and tags ---
   test('Multi-edit: enter mode and select all', async () => {
     await window.keyboard.press('Control+e');
@@ -282,6 +312,18 @@ test.describe('Metadata and tags', () => {
     const m1 = await getModelData(path1);
     const tagNames = (m1.tags || []).map((t) => (typeof t === 'string' ? t : t.name));
     expect(tagNames).toContain('multi-tag');
+  });
+
+  test('Multi-edit: Edit Tags opens Tag Manager', async () => {
+    await window.keyboard.press('Control+e');
+    await window.waitForTimeout(300);
+    await expect(window.locator('#multi-edit-panel')).not.toHaveClass(/hidden/);
+    await expect(window.locator('#multi-edit-tags-button')).toBeVisible();
+    await window.locator('#multi-edit-tags-button').click();
+    await expect(window.locator('#tag-manager-dialog')).toBeVisible();
+    await expect(window.locator('#tag-manager-list .tag').first()).toBeVisible();
+    await window.locator('#tag-manager-dialog button:has-text("Close")').click();
+    await expect(window.locator('#tag-manager-dialog')).toBeHidden();
   });
 
   test('Multi-edit: set license and parent then save', async () => {

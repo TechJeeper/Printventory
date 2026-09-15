@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld('electron', {
   getParentModels: () => ipcRenderer.invoke('get-parent-models'),
   getAllTags: () => ipcRenderer.invoke('get-all-tags'),
   saveTag: (tagName) => ipcRenderer.invoke('save-tag', tagName),
+  renameTag: (tagId, newName) => ipcRenderer.invoke('rename-tag', tagId, newName),
   deleteTag: (tagId) => ipcRenderer.invoke('delete-tag', tagId),
   getTagModelCount: (tagId) => ipcRenderer.invoke('get-tag-model-count', tagId),
   onOpenTagManager: (callback) => ipcRenderer.on('open-tag-manager', callback),

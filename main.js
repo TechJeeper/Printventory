@@ -5985,6 +5985,17 @@ async function saveTagHandler(event, tagName) {
 ipcMain.handle('save-tag', saveTagHandler);
 ipcHandlerRegistry.set('save-tag', saveTagHandler);
 
+async function renameTagHandler(event, tagId, newName) {
+  try {
+    return renameTagForMcp({ id: tagId, newName });
+  } catch (error) {
+    console.error('Error renaming tag:', error);
+    throw error;
+  }
+}
+ipcMain.handle('rename-tag', renameTagHandler);
+ipcHandlerRegistry.set('rename-tag', renameTagHandler);
+
 function getFilamentsForModel(modelId) {
   if (modelId == null) return [];
   return db.prepare(`
@@ -8385,9 +8396,13 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
   // Check AI service type
   const aiServiceRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiService');
   const aiService = aiServiceRow ? aiServiceRow.value : 'openai';
+  const apiEndpointRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('apiEndpoint');
+  const apiEndpoint = apiEndpointRow ? apiEndpointRow.value : null;
+  const aitaggingForMenu = require('./aitagging');
   
-  // Add "Generate Tags" option if API key exists OR if using Puter (which doesn't need API key)
-  if (apiKey || aiService === 'puter') {
+  // Add "Generate Tags" when a key is set, or when the selected service/endpoint does not need one
+  // (Puter, Custom, and local OpenAI-compatible servers such as Ollama / LM Studio)
+  if (apiKey || !aitaggingForMenu.requiresApiKey(aiService, apiEndpoint)) {
     // Capture event.sender for use in the click handler (needed for desktop mode)
     const sender = event.sender;
     menuItems.push({

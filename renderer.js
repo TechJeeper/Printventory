@@ -386,6 +386,8 @@ window.syncTagManagerFullscreenButton = function syncTagManagerFullscreenButton(
 window.toggleTagManagerFullscreen = function toggleTagManagerFullscreen() {
   const dialog = document.getElementById('tag-manager-dialog');
   if (!dialog) return;
+  // Single handler: HTML onclick calls this. Do not also bind click in JS or the
+  // class toggles twice (no resize) and textContent wipes the icon SVGs.
   dialog.classList.toggle('modal-fullscreen');
   window.syncTagManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
 };
@@ -546,6 +548,46 @@ window.importLibraryFromDialog = async function importLibraryFromDialog() {
 };
 
 // AI Config: Test and Save (early for Docker/server)
+const AI_OFFICIAL_CLOUD_HOSTS = ['api.openai.com', 'api.anthropic.com', 'generativelanguage.googleapis.com'];
+
+function aiApiKeyIsRequired(service, endpoint) {
+  const s = (service || '').toLowerCase().trim();
+  if (s === 'puter' || s === 'custom') return false;
+  const url = (endpoint || '').trim().toLowerCase();
+  if (!url) return s === 'openai' || s === 'claude' || s === 'gemini';
+  return AI_OFFICIAL_CLOUD_HOSTS.some((host) => url.indexOf(host) !== -1);
+}
+
+function syncAiApiKeyField(service) {
+  const apiKeyEl = document.getElementById('ai-api-key');
+  const endpointEl = document.getElementById('ai-endpoint');
+  const apiKeyGroup = apiKeyEl && apiKeyEl.closest('.form-group');
+  const apiKeyLabel = document.querySelector('label[for="ai-api-key"]');
+  const hintEl = document.getElementById('ai-api-key-hint');
+  if (!apiKeyEl) return;
+
+  if (service === 'puter') {
+    apiKeyEl.required = false;
+    apiKeyEl.disabled = true;
+    apiKeyEl.value = '';
+    if (apiKeyGroup) apiKeyGroup.style.display = 'none';
+    return;
+  }
+
+  apiKeyEl.disabled = false;
+  if (apiKeyGroup) apiKeyGroup.style.display = '';
+  const required = aiApiKeyIsRequired(service, endpointEl && endpointEl.value);
+  apiKeyEl.required = required;
+  if (apiKeyLabel) {
+    apiKeyLabel.textContent = required ? 'API Key:' : 'API Key (optional):';
+  }
+  if (hintEl) {
+    hintEl.textContent = required
+      ? 'Required for this cloud service.'
+      : 'Optional for local OpenAI-compatible servers (Ollama, LM Studio, and similar).';
+  }
+}
+
 window.testAIConfigFromDialog = async function testAIConfigFromDialog() {
   const resultDiv = document.getElementById('ai-config-result');
   if (resultDiv) resultDiv.textContent = 'Testing...';
@@ -968,6 +1010,51 @@ async function applyViewForCurrentFolder() {
 
 window.savePerFolderView = savePerFolderView;
 window.applyViewForCurrentFolder = applyViewForCurrentFolder;
+
+function persistGridViewPreference(view) {
+  if (!window.electron?.saveSetting) return;
+  window.electron.saveSetting('gridView', view).catch((err) => {
+    console.warn('save gridView:', err);
+  });
+  if (!window.viewingEntireLibrary && window.currentDirectoryFilter && typeof window.savePerFolderView === 'function') {
+    window.savePerFolderView(window.currentDirectoryFilter, view).catch((err) => {
+      console.warn('save perFolderView:', err);
+    });
+  }
+}
+
+function invalidateVirtualGridRenderer(container) {
+  if (!container) return;
+  container._gridRenderGeneration = (container._gridRenderGeneration || 0) + 1;
+  if (container.resizeObserver) {
+    try { container.resizeObserver.disconnect(); } catch (_) { /* ignore */ }
+    container.resizeObserver = null;
+  }
+  if (container.virtualScrollHandler) {
+    container.removeEventListener('scroll', container.virtualScrollHandler);
+    container.virtualScrollHandler = null;
+  }
+  container.renderVisibleItemsFn = null;
+  container.pendingModels = null;
+  container.isRendering = false;
+}
+
+function rebuildVirtualGridFromCache(container, cachedModels) {
+  invalidateVirtualGridRenderer(container);
+  if (typeof closeListViewColumnsPopover === 'function') {
+    closeListViewColumnsPopover();
+  }
+  if (container) {
+    container.innerHTML = '';
+    container.currentModels = null;
+    container.currentDisplayRecords = null;
+  }
+  if (cachedModels && cachedModels.length > 0) {
+    renderVirtualGrid(cachedModels);
+    return true;
+  }
+  return false;
+}
 
 let currentPage = 0;
 let isVirtualScrolling = false; // Flag to track if virtual scrolling is active
@@ -5536,7 +5623,6 @@ async function loadAndShowAIConfig() {
   const serviceEl = document.getElementById('ai-service-select');
   const endpointEl = document.getElementById('ai-endpoint');
   const modelEl = document.getElementById('ai-model');
-  const apiKeyGroup = keyEl?.closest('.form-group');
   
   if (!serviceEl) {
     console.error('ai-service-select element not found.');
@@ -5628,10 +5714,7 @@ async function loadAndShowAIConfig() {
     }
     if (keyEl) {
       keyEl.value = '';
-      keyEl.required = false;
-      keyEl.disabled = true;
     }
-    if (apiKeyGroup) apiKeyGroup.style.display = 'none';
   } else if (selectedService === 'openai') {
     if (endpointEl) {
       endpointEl.value = endpointValue || 'https://api.openai.com/v1';
@@ -5642,10 +5725,7 @@ async function loadAndShowAIConfig() {
     }
     if (keyEl) {
       keyEl.value = apiKeyValue || '';
-      keyEl.required = true;
-      keyEl.disabled = false;
     }
-    if (apiKeyGroup) apiKeyGroup.style.display = '';
   } else if (selectedService === 'claude') {
     if (endpointEl) {
       endpointEl.value = endpointValue || 'https://api.anthropic.com/v1/';
@@ -5656,10 +5736,7 @@ async function loadAndShowAIConfig() {
     }
     if (keyEl) {
       keyEl.value = apiKeyValue || '';
-      keyEl.required = true;
-      keyEl.disabled = false;
     }
-    if (apiKeyGroup) apiKeyGroup.style.display = '';
   } else if (selectedService === 'gemini') {
     if (endpointEl) {
       endpointEl.value = endpointValue || 'https://generativelanguage.googleapis.com/v1beta/openai/';
@@ -5670,12 +5747,9 @@ async function loadAndShowAIConfig() {
     }
     if (keyEl) {
       keyEl.value = apiKeyValue || '';
-      keyEl.required = true;
-      keyEl.disabled = false;
     }
-    if (apiKeyGroup) apiKeyGroup.style.display = '';
   } else {
-    // Custom service
+    // Custom service (local / OpenAI-compatible)
     if (endpointEl) {
       endpointEl.value = endpointValue || '';
       endpointEl.required = true;
@@ -5685,11 +5759,9 @@ async function loadAndShowAIConfig() {
     }
     if (keyEl) {
       keyEl.value = apiKeyValue || '';
-      keyEl.required = true;
-      keyEl.disabled = false;
     }
-    if (apiKeyGroup) apiKeyGroup.style.display = '';
   }
+  syncAiApiKeyField(selectedService);
   
   // Add input event listeners for real-time persistence (only if not already added)
   if (keyEl && !keyEl.dataset.listenerAdded) {
@@ -5701,6 +5773,8 @@ async function loadAndShowAIConfig() {
   if (endpointEl && !endpointEl.dataset.listenerAdded) {
     endpointEl.addEventListener('input', async () => {
       await window.electron.saveSetting('apiEndpoint', endpointEl.value).catch(() => {});
+      const currentServiceEl = document.getElementById('ai-service-select');
+      syncAiApiKeyField(currentServiceEl && currentServiceEl.value);
     });
     endpointEl.dataset.listenerAdded = 'true';
   }
@@ -5902,15 +5976,9 @@ async function createServerMenuBar() {
       }
     }},
     { label: 'Tag Manager', action: () => {
-      const dialog = document.getElementById('tag-manager-dialog');
-      if (dialog) {
-        dialog.classList.remove('modal-fullscreen');
-        if (typeof window.syncTagManagerFullscreenButton === 'function') {
-          window.syncTagManagerFullscreenButton(false);
-        }
-        dialog.showModal();
+      if (typeof window.openTagManager === 'function') {
+        window.openTagManager();
       } else {
-        // Fallback: trigger the event which will open the dialog via the listener
         window.electron.send('open-tag-manager');
       }
     }},
@@ -6248,6 +6316,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       button.classList.add('active');
     }
     button.addEventListener('click', async () => {
+      if (view === currentGridView) return;
       const container = document.querySelector('.file-grid');
       // Capture current models BEFORE clearing so we can re-render without a round-trip (Docker/Server)
       const cachedModels = container?.currentModels ? [...container.currentModels] : null;
@@ -6276,23 +6345,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       button.classList.add('active');
       currentGridView = view;
       updateListViewColumnsToolbarButton();
-      await window.electron.saveSetting('gridView', view);
-      // When viewing a folder (not entire library), remember this view for this folder
-      if (!window.viewingEntireLibrary && window.currentDirectoryFilter) {
-        await window.savePerFolderView(window.currentDirectoryFilter, view);
-      }
+      // Persist in the background — Docker IPC await here left the old virtual grid
+      // applying the new view to leftover list/preview cells (blank/huge tiles).
+      persistGridViewPreference(view);
 
-      // Clear grid so new view is applied
-      if (container) {
-        container.innerHTML = '';
-        container.currentModels = null;
-        container.isRendering = false;
-      }
-
-      // Re-render from cached models when possible to avoid backend round-trip (Docker/Server)
-      if (cachedModels && cachedModels.length > 0) {
-        renderVirtualGrid(cachedModels);
-      } else if (typeof window.performCombinedSearch === 'function') {
+      if (rebuildVirtualGridFromCache(container, cachedModels)) return;
+      if (typeof window.performCombinedSearch === 'function') {
         await window.performCombinedSearch();
       } else {
         const sortSelect = document.getElementById('sort-select');
@@ -6322,19 +6380,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!s || s === currentPreviewTileSize) return;
         currentPreviewTileSize = s;
         syncPreviewSizeSwitcherActive();
-        try {
-          await window.electron.saveSetting('previewTileSize', s);
-        } catch (err) {
-          console.warn('save previewTileSize:', err);
+        if (window.electron?.saveSetting) {
+          window.electron.saveSetting('previewTileSize', s).catch((err) => {
+            console.warn('save previewTileSize:', err);
+          });
         }
         const grid = document.querySelector('.file-grid');
         const cached = grid?.currentModels ? [...grid.currentModels] : null;
-        if (grid && cached && cached.length > 0) {
-          grid.innerHTML = '';
-          grid.currentModels = null;
-          grid.isRendering = false;
-          renderVirtualGrid(cached);
-        } else if (typeof window.performCombinedSearch === 'function') {
+        if (!rebuildVirtualGridFromCache(grid, cached) && typeof window.performCombinedSearch === 'function') {
           await window.performCombinedSearch();
         }
       });
@@ -6375,6 +6428,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   debugLog('DOM fully loaded and parsed');
 
   const fileGrid = document.querySelector('.file-grid');
+  if (typeof bindGridBackgroundDeselect === 'function') {
+    bindGridBackgroundDeselect();
+  }
   const settingsDialog = document.getElementById('settings-dialog');
   const aboutDialog = document.getElementById('about-dialog');
   const tagDialog = document.getElementById('new-tag-dialog');
@@ -8056,17 +8112,49 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Add Tag Manager functionality
-  window._electronRealEventHandlers['open-tag-manager'] = function() {
+  let allTags = []; // Store all tags for filtering
+
+  async function refreshTagManagerRelatedUi() {
+    try {
+      await populateTagSelect('tag-select', 'model-tags');
+      await populateTagSelect('multi-tag-select', 'multi-tags');
+      await populateTagSelect('bundle-tag-select', 'bundle-tags');
+      await populateTagFilter();
+      if (typeof populateRemoveTagSelect === 'function') {
+        await populateRemoveTagSelect();
+      }
+      const currentModelPath = getCurrentModelFilePath() || currentModelDetailsPath;
+      if (currentModelPath) {
+        await loadModelTags(currentModelPath);
+        if (typeof window.loadModelFilaments === 'function') {
+          await window.loadModelFilaments(currentModelPath);
+        }
+      }
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch();
+      }
+    } catch (error) {
+      console.error('Error refreshing tag-related UI:', error);
+    }
+  }
+
+  function openTagManager() {
     const tagManagerDialog = document.getElementById('tag-manager-dialog');
     if (!tagManagerDialog) return;
     tagManagerDialog.classList.remove('modal-fullscreen');
     if (typeof window.syncTagManagerFullscreenButton === 'function') {
       window.syncTagManagerFullscreenButton(false);
     }
+    allTags = [];
     refreshTagManagerList();
     tagManagerDialog.showModal();
     const searchEl = document.getElementById('tag-manager-search');
     if (searchEl) searchEl.value = '';
+  }
+  window.openTagManager = openTagManager;
+
+  window._electronRealEventHandlers['open-tag-manager'] = function() {
+    openTagManager();
   };
   if (window._electronPendingEvents['open-tag-manager']) {
     window._electronPendingEvents['open-tag-manager'].forEach((args) => {
@@ -8074,15 +8162,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     delete window._electronPendingEvents['open-tag-manager'];
   }
-
-  // Fullscreen toggle for DeDup and Tag Manager modals
-  document.getElementById('dedup-fullscreen-toggle')?.addEventListener('click', () => {
-    const dialog = document.getElementById('dedup-dialog');
-    const btn = document.getElementById('dedup-fullscreen-toggle');
-    if (!dialog || !btn) return;
-    dialog.classList.toggle('modal-fullscreen');
-    btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
-  });
 
   document.getElementById('dedup-easy-button')?.addEventListener('click', () => window.dedupEasyFromDialog());
   document.getElementById('dedup-clear-button')?.addEventListener('click', () => window.dedupClearFromDialog());
@@ -8095,14 +8174,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     teardownDedupVirtualList();
     const groupsEl = document.querySelector('#dedup-dialog .duplicate-groups');
     if (groupsEl) groupsEl.innerHTML = '';
-  });
-
-  document.getElementById('tag-manager-fullscreen-toggle')?.addEventListener('click', () => {
-    const dialog = document.getElementById('tag-manager-dialog');
-    const btn = document.getElementById('tag-manager-fullscreen-toggle');
-    if (!dialog || !btn) return;
-    dialog.classList.toggle('modal-fullscreen');
-    btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
   });
 
   // Add close event handler to refresh UI when tag manager closes
@@ -8126,6 +8197,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         // Refresh tag filter dropdown
         await populateTagFilter();
+        if (typeof populateRemoveTagSelect === 'function') {
+          await populateRemoveTagSelect();
+        }
         if (typeof window.populateFilamentSelect === 'function') {
           await window.populateFilamentSelect('filament-select', 'model-filaments');
           await window.populateFilamentSelect('multi-filament-select', 'multi-filaments');
@@ -8168,8 +8242,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  let allTags = []; // Store all tags for filtering
-
   async function refreshTagManagerList(searchTerm = '') {
     const tagList = document.getElementById('tag-manager-list');
     tagList.innerHTML = '';
@@ -8183,7 +8255,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Filter tags based on search term
       const filteredTags = searchTerm 
         ? allTags.filter(tag => tag.name.toLowerCase().includes(searchTerm.toLowerCase()))
-        : allTags;
+        : allTags.slice();
       
       // Sort tags alphabetically by name
       filteredTags.sort((a, b) => a.name.localeCompare(b.name));
@@ -8191,54 +8263,58 @@ document.addEventListener('DOMContentLoaded', async () => {
       filteredTags.forEach(tag => {
         const tagElement = document.createElement('div');
         tagElement.className = 'tag';
-        tagElement.setAttribute('title', tag.name); // Show full tag name on hover
-        tagElement.innerHTML = `
-          <span class="tag-text">${tag.name}</span>
-          <span class="tag-count">${tag.model_count}</span>
-          <span class="tag-remove">×</span>
-        `;
-        
-        tagElement.querySelector('.tag-remove')?.addEventListener('click', async () => {
+        tagElement.dataset.tagId = String(tag.id);
+        tagElement.dataset.tagName = tag.name;
+        tagElement.title = `${tag.name} — click to rename`;
+
+        const textSpan = document.createElement('span');
+        textSpan.className = 'tag-text';
+        textSpan.textContent = tag.name;
+
+        const countSpan = document.createElement('span');
+        countSpan.className = 'tag-count';
+        countSpan.textContent = String(tag.model_count);
+
+        const removeSpan = document.createElement('span');
+        removeSpan.className = 'tag-remove';
+        removeSpan.textContent = '×';
+        removeSpan.title = 'Delete tag';
+
+        tagElement.appendChild(textSpan);
+        tagElement.appendChild(countSpan);
+        tagElement.appendChild(removeSpan);
+
+        const deleteThisTag = async () => {
           if (tag.model_count > 0) {
             const response = await window.electron.showMessage(
               'Delete Tag',
               `This tag is used by ${tag.model_count} model(s). Are you sure you want to delete it?`,
               ['Yes', 'No']
             );
-            if (response !== 'Yes') return;
+            if (response !== 'Yes') return false;
           }
-          
+          await window.electron.deleteTag(tag.id);
+          return true;
+        };
+
+        removeSpan.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
           try {
-            await window.electron.deleteTag(tag.id);
-            allTags = []; // Reset tags cache to force refresh
+            const deleted = await deleteThisTag();
+            if (!deleted) return;
+            allTags = [];
             await refreshTagManagerList(searchTerm);
-            // Also refresh other tag-related UI elements
-            await populateTagSelect('tag-select', 'model-tags');
-            await populateTagSelect('multi-tag-select', 'multi-tags');
-            await populateTagFilter();
-            
-            // Refresh tag list in edit view if a model is currently being edited
-            const currentModelPath = getCurrentModelFilePath() || currentModelDetailsPath;
-            if (currentModelPath) {
-              await loadModelTags(currentModelPath);
-          if (typeof window.loadModelFilaments === 'function') {
-            await window.loadModelFilaments(currentModelPath);
-          }
-            }
-            
-            // Refresh the grid to show updated tags on model cards
-            if (typeof window.performCombinedSearch === 'function') {
-              await window.performCombinedSearch();
-            } else {
-              // Fallback: Get current sort option and refresh the grid
-              const sortSelect = document.getElementById('sort-select');
-              const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
-              await renderFiles(models);
-            }
+            await refreshTagManagerRelatedUi();
           } catch (error) {
             console.error('Error deleting tag:', error);
             await window.electron.showMessage('Error', 'Failed to delete tag');
           }
+        });
+
+        tagElement.addEventListener('click', (e) => {
+          if (e.target.closest('.tag-remove') || tagElement.querySelector('.tag-edit-input')) return;
+          startTagInlineEdit(tagElement, tag, searchTerm);
         });
         
         tagList.appendChild(tagElement);
@@ -8247,6 +8323,110 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error loading tags:', error);
     }
   }
+
+  function startTagInlineEdit(tagElement, tag, searchTerm) {
+    const textSpan = tagElement.querySelector('.tag-text');
+    if (!textSpan || tagElement.querySelector('.tag-edit-input')) return;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tag-edit-input';
+    input.value = tag.name;
+    input.setAttribute('aria-label', `Rename tag ${tag.name}`);
+    input.spellcheck = false;
+    textSpan.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let finished = false;
+
+    const restoreText = () => {
+      const span = document.createElement('span');
+      span.className = 'tag-text';
+      span.textContent = tag.name;
+      if (input.parentNode) input.replaceWith(span);
+    };
+
+    const commit = async () => {
+      if (finished) return;
+      finished = true;
+      const newName = input.value.trim();
+      if (newName === tag.name) {
+        restoreText();
+        return;
+      }
+
+      try {
+        if (!newName) {
+          const message = tag.model_count > 0
+            ? `This tag is used by ${tag.model_count} model(s). Delete "${tag.name}"?`
+            : `Delete the tag "${tag.name}"?`;
+          const response = await window.electron.showMessage('Delete Tag', message, ['Yes', 'No']);
+          if (response !== 'Yes') {
+            finished = false;
+            restoreText();
+            return;
+          }
+          await window.electron.deleteTag(tag.id);
+        } else {
+          const existing = allTags.find((item) =>
+            item.id !== tag.id && item.name.toLowerCase() === newName.toLowerCase()
+          );
+          if (existing) {
+            const response = await window.electron.showMessage(
+              'Merge Tags',
+              `A tag named "${existing.name}" already exists. Merge "${tag.name}" into "${existing.name}"? Models that had either tag will keep "${existing.name}".`,
+              ['Merge', 'Cancel']
+            );
+            if (response !== 'Merge') {
+              finished = false;
+              restoreText();
+              return;
+            }
+          }
+          if (typeof window.electron.renameTag !== 'function') {
+            throw new Error('Tag rename is not available');
+          }
+          await window.electron.renameTag(tag.id, newName);
+        }
+        allTags = [];
+        await refreshTagManagerList(searchTerm);
+        await refreshTagManagerRelatedUi();
+      } catch (error) {
+        console.error('Error updating tag:', error);
+        finished = false;
+        restoreText();
+        await window.electron.showMessage('Error', 'Failed to update tag');
+      }
+    };
+
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        commit();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (finished) return;
+        finished = true;
+        restoreText();
+      }
+    });
+    input.addEventListener('blur', () => {
+      commit();
+    });
+  }
+
+  // Prevent Enter in tag fields from closing the dialog
+  document.querySelector('#tag-manager-dialog form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+  });
+
+  document.getElementById('multi-edit-tags-button')?.addEventListener('click', () => {
+    openTagManager();
+  });
 
   // Add search functionality
   document.getElementById('tag-manager-search').addEventListener('input', debounce(async (e) => {
@@ -8260,7 +8440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await refreshTagManagerList();
   });
 
-  document.getElementById('add-tag-manager-button')?.addEventListener('click', async () => {
+  async function createTagFromManagerInput() {
     const input = document.getElementById('new-tag-manager-name');
     const tagName = input.value.trim();
     
@@ -8271,13 +8451,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         allTags = []; // Reset tags cache to force refresh
         const searchTerm = document.getElementById('tag-manager-search').value.trim();
         await refreshTagManagerList(searchTerm);
-        // Also refresh other tag-related UI elements
         await populateTagSelect();
         await populateTagFilter();
       } catch (error) {
         console.error('Error saving tag:', error);
         await window.electron.showMessage('Error', 'Failed to create tag');
       }
+    }
+  }
+
+  document.getElementById('add-tag-manager-button')?.addEventListener('click', createTagFromManagerInput);
+  document.getElementById('new-tag-manager-name')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      createTagFromManagerInput();
     }
   });
 
@@ -12281,33 +12469,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const endpointEl = document.getElementById('ai-endpoint');
     const modelEl = document.getElementById('ai-model');
     const apiKeyEl = document.getElementById('ai-api-key');
-    const apiKeyLabel = document.querySelector('label[for="ai-api-key"]');
-    const apiKeyGroup = apiKeyEl?.closest('.form-group');
 
     if (selectedService === 'openai') {
       endpointEl.value = 'https://api.openai.com/v1';
       modelEl.value = 'gpt-4o-mini';
-      if (apiKeyEl) {
-        apiKeyEl.required = true;
-        apiKeyEl.disabled = false;
-      }
-      if (apiKeyGroup) apiKeyGroup.style.display = '';
     } else if (selectedService === 'claude') {
       endpointEl.value = 'https://api.anthropic.com/v1/';
       modelEl.value = 'claude-haiku-4-5';
-      if (apiKeyEl) {
-        apiKeyEl.required = true;
-        apiKeyEl.disabled = false;
-      }
-      if (apiKeyGroup) apiKeyGroup.style.display = '';
     } else if (selectedService === 'gemini') {
       endpointEl.value = 'https://generativelanguage.googleapis.com/v1beta/openai/';
       modelEl.value = 'gemini-2.5-flash';
-      if (apiKeyEl) {
-        apiKeyEl.required = true;
-        apiKeyEl.disabled = false;
-      }
-      if (apiKeyGroup) apiKeyGroup.style.display = '';
     } else if (selectedService === 'puter') {
       // Load Puter.js when user selects Puter service
       loadPuterJS().catch(err => {
@@ -12316,26 +12487,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       endpointEl.value = 'https://js.puter.com/v2/';
       modelEl.value = 'gpt-5-nano';
-      if (apiKeyEl) {
-        apiKeyEl.required = false;
-        apiKeyEl.disabled = true;
-        apiKeyEl.value = '';
-      }
-      if (apiKeyGroup) apiKeyGroup.style.display = 'none';
     } else if (selectedService === 'custom') {
       endpointEl.value = '';
       modelEl.value = '';
-      if (apiKeyEl) {
-        apiKeyEl.required = true;
-        apiKeyEl.disabled = false;
-      }
-      if (apiKeyGroup) apiKeyGroup.style.display = '';
     }
-    
-    // Clear the API key field if not puter
+
     if (apiKeyEl && selectedService !== 'puter') {
       apiKeyEl.value = '';
     }
+    syncAiApiKeyField(selectedService);
     
     // Save the new values to the database
     await window.electron.saveSetting('apiEndpoint', endpointEl.value).catch(err => console.error('Error saving endpoint:', err));
@@ -13696,6 +13856,60 @@ function selectSingleModel(fileElement, filePath) {
   addToSelectedModels(filePath);
   fileElement.classList.add('selected');
   if (isMobileUiActive()) focusMobileTile(fileElement);
+}
+
+function isGridBackgroundClickTarget(target) {
+  if (!(target instanceof Element)) return false;
+  if (target.closest('dialog, .modal, #html-context-menu, #html-context-menu-backdrop')) return false;
+  if (target.closest('.file-item, .parent-model-group, .list-view-header')) return false;
+  if (target.closest('.sidebar, #folder-rail, #folder-tree-popover, .grid-view-selector')) return false;
+  if (target.closest('#model-details, #bundle-details, #multi-edit-panel')) return false;
+  if (target.closest('button, a, input, select, textarea, label')) return false;
+  return Boolean(
+    target.classList.contains('file-grid') ||
+    target.classList.contains('virtual-spacer') ||
+    target.classList.contains('virtual-content') ||
+    target.closest('.file-grid')
+  );
+}
+
+function isFileGridScrollbarClick(event, grid) {
+  if (!grid) return false;
+  const rect = grid.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  return x >= grid.clientWidth || y >= grid.clientHeight;
+}
+
+function clearGridItemSelection() {
+  currentModelDetailsAbort = true;
+  selectedModels.clear();
+  document.querySelectorAll('.file-item.selected').forEach((item) => item.classList.remove('selected'));
+  clearMobileTileFocus();
+  document.getElementById('model-details')?.classList.add('hidden');
+  const bundlePanel = document.getElementById('bundle-details');
+  if (bundlePanel && !bundlePanel.classList.contains('hidden') && typeof hideBundleDetailsPanel === 'function') {
+    hideBundleDetailsPanel();
+  }
+  updateSelectedCount();
+}
+
+function bindGridBackgroundDeselect() {
+  const grid = document.querySelector('.file-grid');
+  if (!grid || grid._backgroundDeselectBound) return;
+  grid._backgroundDeselectBound = true;
+  grid.addEventListener('click', (event) => {
+    if (isMultiSelectMode) return;
+    if (isFileGridScrollbarClick(event, grid)) return;
+    if (!isGridBackgroundClickTarget(event.target)) return;
+    clearGridItemSelection();
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bindGridBackgroundDeselect);
+} else {
+  bindGridBackgroundDeselect();
 }
 
 function highlightModelWithoutDetails(filePath) {
@@ -23091,12 +23305,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     item.appendChild(engagementBar);
   }
 
-  const toggleGroup = () => {
-    if (expandedSet.has(groupRecord.groupKey)) {
-      expandedSet.delete(groupRecord.groupKey);
-    } else {
-      expandedSet.add(groupRecord.groupKey);
-    }
+  const refreshGroupGrid = () => {
     const container = document.querySelector('.file-grid');
     if (container?.renderVisibleItemsFn) {
       container.renderVisibleItemsFn();
@@ -23105,22 +23314,38 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     }
   };
 
-  const expandGroupAndShowDetails = () => {
-    const isBundle = groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
-    if (isBundle) {
-      // Expand (don't toggle) so a single click both opens children and the details panel.
-      // Avoid expand→collapse from click+click before dblclick.
-      expandedSet.add(groupRecord.groupKey);
-      const container = document.querySelector('.file-grid');
-      if (container?.renderVisibleItemsFn) {
-        container.renderVisibleItemsFn();
-      } else {
-        renderVirtualGrid(container?.currentModels || []);
+  const isBundleGroupKind = () =>
+    groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+
+  const toggleGroup = () => {
+    if (expandedSet.has(groupRecord.groupKey)) {
+      expandedSet.delete(groupRecord.groupKey);
+      if (isBundleGroupKind() && currentBundleDetailsGroupKey === groupRecord.groupKey) {
+        hideBundleDetailsPanel();
+        return;
       }
+    } else {
+      expandedSet.add(groupRecord.groupKey);
+    }
+    refreshGroupGrid();
+  };
+
+  const expandGroupAndShowDetails = () => {
+    if (!expandedSet.has(groupRecord.groupKey)) {
+      expandedSet.add(groupRecord.groupKey);
+      refreshGroupGrid();
+    }
+    if (isBundleGroupKind()) {
       showBundleDetails(groupRecord);
+    }
+  };
+
+  const toggleGroupFromCard = () => {
+    if (expandedSet.has(groupRecord.groupKey)) {
+      toggleGroup();
       return;
     }
-    toggleGroup();
+    expandGroupAndShowDetails();
   };
 
   chevron.addEventListener('click', (event) => {
@@ -23135,9 +23360,10 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (event.target.closest('.model-engagement-bar')) return;
     if (event.target.closest('.tag-filter-link')) return;
     if (event.target.closest('.preview-tile-open-btn, .preview-tile-details-btn')) return;
+    if (event.target.closest('.thumbnail-nav-left, .thumbnail-nav-right, .thumbnail-menu-button')) return;
     event.preventDefault();
     event.stopPropagation();
-    const isBundle = groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+    const isBundle = isBundleGroupKind();
     if (isMobileUiActive() && view === 'preview') {
       if (item.classList.contains('is-mobile-focus')) {
         if (isBundle && typeof window.openBundlePreview === 'function') {
@@ -23150,12 +23376,12 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
       focusMobileTile(item);
       return;
     }
-    expandGroupAndShowDetails();
+    toggleGroupFromCard();
   });
   item.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      expandGroupAndShowDetails();
+      toggleGroupFromCard();
     }
   });
   item.addEventListener('contextmenu', async (event) => {
@@ -23199,6 +23425,10 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
 function renderVirtualGrid(models) {
   const container = document.querySelector('.file-grid');
   if (!container) return;
+
+  const previousVirtualView = container._virtualGridView;
+  const gridViewForThisRender = currentGridView;
+  const viewStructureChanged = !!(previousVirtualView && previousVirtualView !== gridViewForThisRender);
 
   models = dedupeModelsForVirtualGrid(models || []);
   pruneBundleExpandedGroups(models);
@@ -23264,8 +23494,8 @@ function renderVirtualGrid(models) {
   // Models changed if either the set changed or the order changed (unless only appending to the list)
   const modelsChanged = (modelsSetChanged || orderChanged) && !progressiveAppend;
   
-  // Only clear if models actually changed
-  if (modelsChanged) {
+  // Only clear if models actually changed or the view structure does not match
+  if (modelsChanged || viewStructureChanged) {
     console.log('renderVirtualGrid: Models changed! Clearing container and re-rendering.');
     console.log('Current model count:', currentModels.length, 'New model count:', models.length);
     container.innerHTML = ''; // clear existing content
@@ -23314,7 +23544,7 @@ function renderVirtualGrid(models) {
   
   // If grid structure exists and models haven't changed, just trigger re-render
   // But if order changed, we need to re-render even if the set is the same
-  if (spacer && virtualContent && !modelsChanged) {
+  if (spacer && virtualContent && !modelsChanged && !viewStructureChanged) {
     container.isRendering = false;
     // Store renderVisibleItems function reference if it exists
     if (container.renderVisibleItemsFn) {
@@ -23329,6 +23559,12 @@ function renderVirtualGrid(models) {
     }
     return;
   }
+
+  // Invalidate in-flight rAF paints only when installing a new renderer.
+  // Bumping this on every call (including progressive appends) made the first
+  // launch paint no-op until the user switched views.
+  const gridGeneration = (container._gridRenderGeneration = (container._gridRenderGeneration || 0) + 1);
+  container._virtualGridView = gridViewForThisRender;
   
   container.style.position = 'relative';
   container.style.overflowY = 'auto';
@@ -23467,6 +23703,9 @@ function renderVirtualGrid(models) {
   
   // Function to (re)render only the visible rows (plus a small buffer)
   function renderVisibleItems() {
+    if (container._gridRenderGeneration !== gridGeneration) return;
+    if (currentGridView !== gridViewForThisRender) return;
+
     // Cancel any pending render
     if (renderTimeout) {
       cancelAnimationFrame(renderTimeout);
@@ -23495,6 +23734,11 @@ function renderVirtualGrid(models) {
     
     // Use requestAnimationFrame for smooth updates
     renderTimeout = requestAnimationFrame(() => {
+      if (container._gridRenderGeneration !== gridGeneration || currentGridView !== gridViewForThisRender) {
+        isRendering = false;
+        renderTimeout = null;
+        return;
+      }
       isRendering = true;
       
       try {
@@ -23645,7 +23889,8 @@ function renderVirtualGrid(models) {
             const existingGroup = findExistingLayoutItem(row.key);
             if (existingGroup &&
                 existingGroup.dataset.childCount === String(row.record.children.length) &&
-                existingGroup.dataset.expanded === (row.record.expanded ? '1' : '0')) {
+                existingGroup.dataset.expanded === (row.record.expanded ? '1' : '0') &&
+                existingGroup.classList.contains(`file-item-${gridViewForThisRender}`)) {
               positionGroupItem(existingGroup, row);
               continue;
             }
@@ -23668,7 +23913,8 @@ function renderVirtualGrid(models) {
             if (record.type === 'group') {
               if (existingItem &&
                   existingItem.dataset.childCount === String(record.children.length) &&
-                  existingItem.dataset.expanded === (record.expanded ? '1' : '0')) {
+                  existingItem.dataset.expanded === (record.expanded ? '1' : '0') &&
+                  existingItem.classList.contains(`file-item-${gridViewForThisRender}`)) {
                 positionModelItem(existingItem, row, col);
                 continue;
               }
@@ -23698,7 +23944,8 @@ function renderVirtualGrid(models) {
               const existingFilePath = existingItem.getAttribute('data-filepath');
               const normalizedExistingPath = normalizePathForComparison(existingFilePath);
               const normalizedExpectedPath = normalizePathForComparison(model.filePath);
-              if (normalizedExistingPath === normalizedExpectedPath) {
+              if (normalizedExistingPath === normalizedExpectedPath &&
+                  existingItem.classList.contains(`file-item-${gridViewForThisRender}`)) {
                 applyParentGroupHighlightClasses(existingItem, record, recordIndex);
                 positionModelItem(existingItem, row, col);
                 syncModelNewBadge(existingItem, model);
