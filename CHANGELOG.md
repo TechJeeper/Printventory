@@ -4,6 +4,23 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.7] - 2026-09-17
+
+### Added
+
+- **3D Preview Studio** — Lighting, materials, backdrops, reflections, shadows, and save image from the preview dialog.
+- **Sit on face** — Pick a surface on the model so that plane sits flat on the studio floor, with reset pose.
+- Multi-part 3MF **part picker** and click-to-focus in preview.
+
+### Changed
+
+- Preview tiles keep **3D** on hover and no longer show a Details button.
+
+### Fixed
+
+- 3MF previews skip negative/modifier parts, use Z-up seating, and sit on the studio floor instead of floating.
+- Studio backdrop chips, wireframe, and the preview close control match the rest of the header.
+
 ## [2.2.6] - 2026-09-15
 
 ### Added

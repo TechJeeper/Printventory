@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('electron', {
   saveModelBatch: (modelDataBatch) => ipcRenderer.invoke('save-model-batch', modelDataBatch),
   updateModelsBatch: (modelDataBatch) => ipcRenderer.invoke('update-models-batch', modelDataBatch),
   saveThumbnail: (filePath, thumbnail) => ipcRenderer.invoke('save-thumbnail', filePath, thumbnail),
+  setThumbnailGenerationActive: (active) => ipcRenderer.invoke('set-thumbnail-generation-active', !!active),
   getDesigners: () => ipcRenderer.invoke('get-designers'),
   getLicenses: () => ipcRenderer.invoke('get-licenses'),
   getModelsByDesigner: (designer) => ipcRenderer.invoke('get-models-by-designer', designer),

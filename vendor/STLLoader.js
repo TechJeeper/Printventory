@@ -102,9 +102,14 @@
 				const n_faces = reader.getUint32( 80, true );
 				const expect = 80 + 32 / 8 + n_faces * face_size;
 
-				if ( expect === reader.byteLength ) {
+				if ( n_faces > 0 && n_faces <= 10000000 ) {
 
-					return true;
+					const leftover = reader.byteLength - expect;
+					if ( leftover >= 0 && leftover <= 4096 ) {
+
+						return true;
+
+					}
 
 				} // An ASCII STL data must begin with 'solid ' as the first six bytes.
 				// However, ASCII STLs lacking the SPACE after the 'd' are known to be
@@ -116,16 +121,21 @@
 
 
 				const solid = [ 115, 111, 108, 105, 100 ];
+				const SOLID = [ 83, 79, 76, 73, 68 ];
 
 				for ( let off = 0; off < 5; off ++ ) {
 
 					// If "solid" text is matched to the current offset, declare it to be an ASCII STL.
 					if ( matchDataViewAt( solid, reader, off ) ) return false;
+					if ( matchDataViewAt( SOLID, reader, off ) ) return false;
 
-				} // Couldn't find "solid" text at the beginning; it is binary STL.
+				}
 
-
-				return true;
+				// Size mismatch: do NOT assume binary. THREE used to fall through to
+				// parseBinary, which allocates Float32Array(n_faces * 9) from whatever
+				// uint32 sits at offset 80 (often ASCII text) and throws
+				// "Invalid typed array length".
+				return false;
 
 			}
 
@@ -146,6 +156,14 @@
 
 				const reader = new DataView( data );
 				const faces = reader.getUint32( 80, true );
+				const expectedLength = 84 + faces * 50;
+				const leftover = reader.byteLength - expectedLength;
+				if ( ! Number.isFinite( faces ) || faces <= 0 || faces > 10000000 || leftover < 0 || leftover > 4096 ) {
+
+					throw new Error( 'Invalid binary STL (triangle count does not match file size)' );
+
+				}
+
 				let r,
 					g,
 					b,
@@ -337,6 +355,12 @@
 			}
 
 			function ensureBinary( buffer ) {
+
+				if ( ArrayBuffer.isView( buffer ) ) {
+
+					return buffer.buffer.slice( buffer.byteOffset, buffer.byteOffset + buffer.byteLength );
+
+				}
 
 				if ( typeof buffer === 'string' ) {
 

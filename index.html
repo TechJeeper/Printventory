@@ -1291,15 +1291,173 @@
       <div class="preview-container">
         <div class="preview-header">
           <h3 id="preview-model-name">Model Preview</h3>
-          <button type="button" id="close-preview" class="preview-close-button" title="Close">×</button>
+          <div class="preview-header-actions">
+            <button type="button" id="preview-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.togglePreviewFullscreen==='function')window.togglePreviewFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+            <button type="button" id="close-preview" class="icon-button modal-fullscreen-icon-btn" title="Close" aria-label="Close">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M18 6 6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
         </div>
         <div class="preview-content">
-          <div id="preview-canvas-container" class="preview-canvas-container">
-            <div id="preview-loading" class="preview-loading">
-              <div class="loader"></div>
-              <p>Loading model...</p>
+          <div class="preview-stage">
+            <aside id="preview-studio-panel" class="preview-studio-panel hidden" aria-label="Preview studio">
+              <div class="preview-studio-header">
+                <h4>Studio</h4>
+                <button type="button" id="preview-studio-close" class="preview-studio-close" title="Hide studio">×</button>
+              </div>
+
+              <section class="preview-studio-section">
+                <h5>Appearance</h5>
+                <label class="preview-studio-color">
+                  <span>Model color</span>
+                  <input type="color" id="preview-studio-color" value="#4a9eff" title="Model color">
+                </label>
+                <div class="preview-studio-select">
+                  <span>Finish</span>
+                  <div id="preview-studio-finish" class="preview-view-chips" role="radiogroup" aria-label="Finish">
+                    <button type="button" role="radio" data-finish="original" aria-checked="false">Original</button>
+                    <button type="button" role="radio" data-finish="matte" class="active" aria-checked="true">Matte</button>
+                    <button type="button" role="radio" data-finish="gloss" aria-checked="false">Gloss</button>
+                    <button type="button" role="radio" data-finish="metal" aria-checked="false">Metal</button>
+                    <button type="button" role="radio" data-finish="chrome" aria-checked="false">Chrome</button>
+                  </div>
+                </div>
+                <label class="preview-studio-slider">
+                  <span>Finish intensity</span>
+                  <input type="range" id="preview-studio-finish-intensity" min="0" max="100" value="100">
+                </label>
+                <label class="preview-studio-check">
+                  <input type="checkbox" id="preview-studio-wireframe">
+                  <span>Wireframe</span>
+                </label>
+                <label class="preview-studio-check">
+                  <input type="checkbox" id="preview-studio-edges">
+                  <span>Edges</span>
+                </label>
+                <label class="preview-studio-check">
+                  <input type="checkbox" id="preview-studio-autorotate">
+                  <span>Auto rotate</span>
+                </label>
+                <label class="preview-studio-slider" id="preview-studio-rotate-speed-wrap" hidden>
+                  <span>Rotate speed</span>
+                  <input type="range" id="preview-studio-rotate-speed" min="10" max="250" value="100">
+                </label>
+              </section>
+
+              <section class="preview-studio-section">
+                <h5>Studio</h5>
+                <div class="preview-studio-select">
+                  <span>Background</span>
+                  <div id="preview-studio-bg" class="preview-view-chips" role="radiogroup" aria-label="Background">
+                    <button type="button" role="radio" data-bg="solid" class="active" aria-checked="true">Solid</button>
+                    <button type="button" role="radio" data-bg="gradient" aria-checked="false">Gradient</button>
+                  </div>
+                </div>
+                <div class="preview-studio-select">
+                  <span>Backdrop</span>
+                  <div id="preview-studio-backdrop" class="preview-view-chips" role="radiogroup" aria-label="Backdrop">
+                    <button type="button" role="radio" data-backdrop="white" aria-checked="false">White</button>
+                    <button type="button" role="radio" data-backdrop="gray" aria-checked="false">Cool gray</button>
+                    <button type="button" role="radio" data-backdrop="blue" aria-checked="false">Sky blue</button>
+                    <button type="button" role="radio" data-backdrop="pink" aria-checked="false">Blush pink</button>
+                    <button type="button" role="radio" data-backdrop="mint" aria-checked="false">Mint</button>
+                    <button type="button" role="radio" data-backdrop="sand" aria-checked="false">Warm sand</button>
+                    <button type="button" role="radio" data-backdrop="charcoal" class="active" aria-checked="true">Charcoal</button>
+                    <button type="button" role="radio" data-backdrop="black" aria-checked="false">Black</button>
+                    <button type="button" role="radio" data-backdrop="custom" aria-checked="false">Custom…</button>
+                  </div>
+                </div>
+                <label class="preview-studio-color">
+                  <span>Custom backdrop</span>
+                  <input type="color" id="preview-studio-custom-bg" value="#ffffff">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Reflection</span>
+                  <input type="range" id="preview-studio-reflection" min="0" max="100" value="0">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Reflection gap</span>
+                  <input type="range" id="preview-studio-reflection-gap" min="0" max="20" value="2" step="0.5">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Shadow strength</span>
+                  <input type="range" id="preview-studio-shadow" min="0" max="100" value="55">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Shadow smoothness</span>
+                  <input type="range" id="preview-studio-shadow-smooth" min="0" max="100" value="45">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Light rotation</span>
+                  <input type="range" id="preview-studio-light-rot" min="0" max="360" value="45">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Light height</span>
+                  <input type="range" id="preview-studio-light-height" min="10" max="85" value="48">
+                </label>
+                <label class="preview-studio-slider">
+                  <span>Light intensity</span>
+                  <input type="range" id="preview-studio-light" min="0" max="200" value="100">
+                </label>
+                <label class="preview-studio-check">
+                  <input type="checkbox" id="preview-studio-even">
+                  <span>Even lighting</span>
+                </label>
+                <label class="preview-studio-check">
+                  <input type="checkbox" id="preview-studio-grid">
+                  <span>Grid</span>
+                </label>
+                <label class="preview-studio-check">
+                  <input type="checkbox" id="preview-studio-transparent">
+                  <span>Transparent PNG</span>
+                </label>
+              </section>
+
+              <section class="preview-studio-section">
+                <h5>Placement</h5>
+                <p class="preview-studio-hint">Click a surface on the model to sit that plane flat on the floor.</p>
+                <div class="preview-studio-actions">
+                  <button type="button" id="preview-studio-sit-face">Sit on face</button>
+                  <button type="button" id="preview-studio-reset-pose">Reset pose</button>
+                </div>
+              </section>
+
+              <section class="preview-studio-section">
+                <h5>Camera</h5>
+                <div class="preview-studio-select">
+                  <span>View</span>
+                  <div id="preview-camera-view" class="preview-view-chips" role="radiogroup" aria-label="Camera view">
+                    <button type="button" role="radio" data-view="iso" class="active" aria-checked="true">ISO</button>
+                    <button type="button" role="radio" data-view="front" aria-checked="false">Front</button>
+                    <button type="button" role="radio" data-view="back" aria-checked="false">Back</button>
+                    <button type="button" role="radio" data-view="left" aria-checked="false">Left</button>
+                    <button type="button" role="radio" data-view="right" aria-checked="false">Right</button>
+                    <button type="button" role="radio" data-view="top" aria-checked="false">Top</button>
+                    <button type="button" role="radio" data-view="fit" aria-checked="false">Fit</button>
+                  </div>
+                </div>
+                <label class="preview-studio-slider">
+                  <span>Field of view</span>
+                  <input type="range" id="preview-studio-fov" min="20" max="75" value="42">
+                </label>
+              </section>
+            </aside>
+            <div id="preview-canvas-container" class="preview-canvas-container">
+              <div id="preview-loading" class="preview-loading">
+                <div class="loader"></div>
+                <p>Loading model...</p>
+              </div>
+              <canvas id="preview-canvas"></canvas>
             </div>
-            <canvas id="preview-canvas"></canvas>
           </div>
           <div class="preview-controls">
             <div class="preview-control-group">
@@ -1309,15 +1467,23 @@
               <button type="button" id="preview-reset-view" class="preview-control-button" title="Reset View">
                 <span>🔄</span> Reset View
               </button>
-              <button type="button" id="preview-toggle-wireframe" class="preview-control-button" title="Toggle Wireframe">
-                <span>🔲</span> Wireframe
+              <button type="button" id="preview-toggle-studio" class="preview-control-button" title="Studio lighting and materials">
+                <span>🎛️</span> Studio
               </button>
-              <button type="button" id="preview-toggle-axes" class="preview-control-button" title="Toggle Axes">
-                <span>📐</span> Axes
+              <button type="button" id="preview-save-image" class="preview-control-button" title="Save a picture of this preview">
+                <span>💾</span> Save Image
               </button>
             </div>
             <div id="preview-slicer-menu" class="preview-slicer-menu hidden" role="menu" aria-label="Choose slicer"></div>
+            <div id="preview-save-menu" class="preview-slicer-menu hidden" role="menu" aria-label="Save preview image">
+              <button type="button" class="preview-slicer-menu-item" id="preview-save-with-backdrop">Save with backdrop</button>
+              <button type="button" class="preview-slicer-menu-item" id="preview-save-transparent">Save transparent PNG</button>
+            </div>
             <div class="preview-info">
+              <label id="preview-part-picker" class="preview-part-picker hidden">
+                <span>Part</span>
+                <select id="preview-part-select" aria-label="Focus preview part"></select>
+              </label>
               <span id="preview-file-type"></span>
               <span id="preview-dimensions"></span>
               <span id="preview-simplified-note" class="preview-simplified-note" style="display:none;"></span>
@@ -1325,7 +1491,7 @@
           </div>
         </div>
         <div class="preview-instructions">
-          <p><strong>Controls:</strong> Left click + drag to rotate • Right click + drag to pan • Scroll to zoom</p>
+          <p><strong>Controls:</strong> Left click + drag to orbit • Right click + drag to pan • Scroll to zoom • Click a part to focus</p>
         </div>
       </div>
     </dialog>

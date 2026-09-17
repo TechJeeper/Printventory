@@ -402,6 +402,44 @@ function extractAllMeshesFast(modelXmlParts, targetTriangles = PREVIEW_3MF_TARGE
   };
 }
 
+function extractAllMeshesAsParts(modelXmlParts, targetTriangles = PREVIEW_3MF_TARGET_TRIANGLES) {
+  const parts = [];
+  let totalSourceTriangles = 0;
+  let anySimplified = false;
+  let keptTriangles = 0;
+  let index = 0;
+
+  for (const xml of modelXmlParts) {
+    for (const meshBody of listMeshBodies(xml)) {
+      const positions = parseVerticesFast(meshBody);
+      if (positions.length === 0) continue;
+      const tri = extractTrianglesFromMeshBody(meshBody);
+      if (tri.keptTriangles <= 0) continue;
+      totalSourceTriangles += tri.sourceTriangles;
+      const simplified = simplifyForPreview(positions, tri.indices, targetTriangles);
+      anySimplified = anySimplified || simplified.simplified;
+      keptTriangles += simplified.keptTriangles;
+      index += 1;
+      parts.push({
+        name: `Object ${index}`,
+        positions: simplified.positions,
+        indices: simplified.indices
+      });
+    }
+  }
+
+  if (!parts.length) {
+    throw new Error('No geometry data found in 3MF model');
+  }
+
+  return {
+    parts,
+    sourceTriangles: totalSourceTriangles,
+    keptTriangles,
+    simplified: anySimplified
+  };
+}
+
 function shouldUseFastPath(modelXmlParts) {
   let totalBytes = 0;
   let totalTriangles = 0;
@@ -475,6 +513,8 @@ return {
   countTrianglesInXml,
   extractMeshFromXml,
   extractAllMeshesFast,
+  extractAllMeshesAsParts,
+  countMeshesInXmlParts,
   simplifyForPreview,
   shouldUseFastPath,
   modelHasPlacementTransforms,

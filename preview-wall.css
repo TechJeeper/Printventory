@@ -282,7 +282,7 @@
   bottom: 28px;
 }
 
-/* Filename caption is always visible; 3D/Details stay on hover */
+/* Filename caption is always visible; 3D stays on hover */
 .preview-tile-overlay {
   position: absolute;
   left: 0;
@@ -344,8 +344,7 @@
   align-items: center;
 }
 
-.preview-tile-open-btn,
-.preview-tile-details-btn {
+.preview-tile-open-btn {
   align-self: flex-start;
   padding: 4px 10px;
   font-size: 10px;
@@ -354,21 +353,11 @@
   border-radius: 4px;
   cursor: pointer;
   pointer-events: auto;
-}
-
-.preview-tile-open-btn {
   color: #0a0a0a;
   background: var(--primary-accent, #00d4ff);
 }
 
-.preview-tile-details-btn {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.22);
-}
-
-.preview-tile-open-btn:hover,
-.preview-tile-details-btn:hover {
+.preview-tile-open-btn:hover {
   filter: brightness(1.08);
 }
 

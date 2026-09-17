@@ -38,6 +38,7 @@
   function setBackgroundVisible(ui, visible) {
     if (!ui.background) return;
     ui.background.hidden = !visible;
+    ui.background.style.display = visible ? '' : 'none';
     ui.background.disabled = false;
     ui.background.textContent = 'Background';
   }

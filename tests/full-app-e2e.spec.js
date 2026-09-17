@@ -440,8 +440,14 @@ test.describe('Printventory full application E2E', () => {
     await clickContextMenuItem(window, 'Preview');
     await expect(window.locator('#preview-dialog')).toBeVisible({ timeout: 15000 });
     await window.locator('#preview-reset-view').click();
-    await window.locator('#preview-toggle-wireframe').click();
-    await window.locator('#preview-toggle-axes').click();
+    await window.locator('#preview-toggle-studio').click();
+    await expect(window.locator('#preview-studio-panel')).toBeVisible();
+    await window.locator('#preview-studio-finish [data-finish="metal"]').click();
+    await window.locator('#preview-studio-backdrop [data-backdrop="white"]').click();
+    await window.locator('#preview-save-image').click();
+    await expect(window.locator('#preview-save-menu')).toBeVisible();
+    await window.locator('#preview-toggle-studio').click();
+    await expect(window.locator('#preview-studio-panel')).toBeHidden();
     await window.locator('#close-preview').click();
     await window.waitForTimeout(400);
   });

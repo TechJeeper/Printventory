@@ -462,8 +462,7 @@ body.mobile-ui .parent-model-group.is-mobile-focus .preview-tile-actions {
   display: flex;
 }
 
-body.mobile-ui .preview-tile-open-btn,
-body.mobile-ui .preview-tile-details-btn {
+body.mobile-ui .preview-tile-open-btn {
   min-height: 28px;
   padding: 4px 8px;
   font-size: 11px;
@@ -477,6 +476,20 @@ body.mobile-ui #preview-dialog.preview-modal {
   max-height: 100dvh;
   margin: 0;
   border-radius: 0;
+}
+
+body.mobile-ui .preview-studio-panel:not(.hidden) {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 8;
+  width: min(300px, 86vw);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.45);
+}
+
+body.mobile-ui .preview-control-group {
+  flex-wrap: wrap;
 }
 
 body.mobile-ui .preview-instructions p {

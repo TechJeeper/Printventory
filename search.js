@@ -155,145 +155,178 @@ async function getCombinedFilteredModels(overrides = {}) {
   }
 }
 
-async function performCombinedSearch() {
+function setLibrarySelectValue(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value;
+}
+
+/** Reset sidebar / query-builder filters to the unfiltered library. */
+function clearAllLibraryFilters() {
+  setLibrarySelectValue("designer-select", "");
+  setLibrarySelectValue("license-select", "");
+  setLibrarySelectValue("parent-select", "");
+  setLibrarySelectValue("printed-select", "all");
+  setLibrarySelectValue("new-select", "all");
+  setLibrarySelectValue("favorite-select", "all");
+  setLibrarySelectValue("rating-select", "all");
+  setLibrarySelectValue("rating-min-select", "all");
+  setLibrarySelectValue("tag-filter", "");
+  setLibrarySelectValue("filament-filter", "");
+  setLibrarySelectValue("filetype-select", "");
+  if (typeof window.queryBuilderClearAllMultiChips === "function") {
+    window.queryBuilderClearAllMultiChips();
+  }
+  if (typeof window.clearSearchClauseList === "function") {
+    window.clearSearchClauseList();
+  }
+  const searchInput = document.getElementById("search-filter-input");
+  const clearSearchButton = document.getElementById("clear-filter-search-button");
+  if (searchInput) searchInput.value = "";
+  if (clearSearchButton) clearSearchButton.style.display = "none";
+  window.currentDirectoryFilter = "";
+  window.dateAddedFilter = null;
+  window._lastDateAddedFilter = null;
+  lastSearchTerm = "";
+  resetCurrentFilterPanelShell();
+  if (window.invertedFilters) {
+    window.invertedFilters.tag = false;
+    window.invertedFilters.filament = false;
+    window.invertedFilters.designer = false;
+    window.invertedFilters.license = false;
+    window.invertedFilters.parentModel = false;
+    window.invertedFilters.search = false;
+  }
+  const invertBtn = document.getElementById("invert-filter-button");
+  if (invertBtn) {
+    invertBtn.classList.remove("active");
+    invertBtn.title = "Invert the current filter (NOT equal instead of equal)";
+  }
+  window.viewingEntireLibrary = true;
+}
+
+function yieldForProgressiveLibraryLoad() {
+  return new Promise((r) => {
+    if (typeof requestIdleCallback !== "undefined") {
+      requestIdleCallback(() => r(), { timeout: 100 });
+    } else {
+      setTimeout(r, 48);
+    }
+  });
+}
+
+function syncSelectionAfterFilteredLoad(models) {
+  if (typeof window.syncSelectionWithFilteredModels !== "function") return;
+  window.syncSelectionWithFilteredModels(models);
+  requestAnimationFrame(() => {
+    if (typeof window.syncSelectionWithFilteredModels === "function") {
+      window.syncSelectionWithFilteredModels(models);
+    }
+  });
+}
+
+async function performCombinedSearch(options) {
+  const force = !!(options && options.force);
+  let myGeneration = 0;
   try {
-    // If a filtering operation is already in progress, don't start another one
-    if (isFilteringInProgress) {
+    if (isFilteringInProgress && !force) {
       console.log("Filtering operation already in progress, ignoring new request");
       return;
     }
 
-    const myGeneration = ++searchGeneration;
-
-    // Detect if we're loading full library (no filters) - e.g. after "Clear All Filters"
-    const designer = document.getElementById("designer-select")?.value || "";
-    const license = document.getElementById("license-select")?.value || "";
-    const parentModel = document.getElementById("parent-select")?.value || "";
-    const printStatus = document.getElementById("printed-select")?.value || "all";
-    const newStatus = document.getElementById("new-select")?.value || "all";
-    const favoriteStatus = document.getElementById("favorite-select")?.value || "all";
-    const ratingStatus = document.getElementById("rating-select")?.value || "all";
-    const ratingMinStatus = document.getElementById("rating-min-select")?.value || "all";
-    const tagFilter = document.getElementById("tag-filter")?.value || "";
-  const filamentFilter = document.getElementById("filament-filter")?.value || "";
-    const fileType = document.getElementById("filetype-select")?.value || "";
-    const qbClauses =
-      typeof window.queryBuilderHasActiveSearchClauses === "function" &&
-      window.queryBuilderHasActiveSearchClauses();
-    const qbMulti =
-      typeof window.queryBuilderHasActiveMultiFilters === "function" &&
-      window.queryBuilderHasActiveMultiFilters();
-    const noFiltersActive = !designer && !license && !parentModel && printStatus === "all" &&
-      newStatus === "all" &&
-      favoriteStatus === "all" &&
-      ratingStatus === "all" &&
-      ratingMinStatus === "all" &&
-      !tagFilter && !fileType && !qbClauses && !qbMulti &&
-      !window.currentDirectoryFilter && !window.dateAddedFilter;
-    
-    // Set the filtering flag to prevent concurrent operations
+    myGeneration = ++searchGeneration;
     isFilteringInProgress = true;
-    
-    // When clearing filters (full library load), skip spinner so UI feels responsive
-    if (!noFiltersActive) {
-      const spinner = document.getElementById('spinner');
-      if (spinner) spinner.classList.remove('hidden');
-      toggleFilterControls(false);
-    }
-    
-    console.log("Performing combined search...", window.dateAddedFilter ? `dateAddedFilter: ${window.dateAddedFilter}` : 'no dateAddedFilter');
-    
+    window._progressiveLibraryLoadActive = true;
+
+    console.log("Performing combined search...", window.dateAddedFilter ? `dateAddedFilter: ${window.dateAddedFilter}` : "no dateAddedFilter");
+
     // CRITICAL: If dateAddedFilter was set but is now null, restore it
     // This prevents it from being cleared by other code
     if (!window.dateAddedFilter && window._lastDateAddedFilter) {
       console.warn("dateAddedFilter was cleared! Restoring from _lastDateAddedFilter:", window._lastDateAddedFilter);
       window.dateAddedFilter = window._lastDateAddedFilter;
     }
-    
-    const viewLibMsg = document.getElementById("view-library-message");
-    if (viewLibMsg) { viewLibMsg.style.display = "none"; }
 
-    // Full library (no filters): load in chunks so we do not pull/render tens of thousands of rows in one IPC pass.
-    // Cannot use SQL LIMIT when tag filter is active — main process applies tags after the query.
+    const filtersActive = libraryFiltersAreActive();
+
+    // When clearing filters (full library load), skip spinner so UI feels responsive
+    if (filtersActive) {
+      const spinner = document.getElementById("spinner");
+      if (spinner) spinner.classList.remove("hidden");
+      toggleFilterControls(false);
+    }
+
+    const viewLibMsg = document.getElementById("view-library-message");
+    if (viewLibMsg) viewLibMsg.style.display = "none";
+
+    // Filtered and unfiltered views both page in SQL. Tags/filaments are already in the WHERE clause.
     const PROGRESSIVE_INITIAL = 500;
     const PROGRESSIVE_CHUNK = 1200;
-    const useProgressiveFullLibrary = noFiltersActive;
 
-    let filteredModels;
-    if (useProgressiveFullLibrary) {
-      filteredModels = await getCombinedFilteredModels({ limit: PROGRESSIVE_INITIAL });
-      if (searchGeneration !== myGeneration) return;
-      if (filteredModels.length === 0) {
-        // Empty library is normal; do not reopen the onboarding welcome dialog here —
-        // that caused a loop (dismiss → search → 0 models → showModal again).
-        const viewLibMsg = document.getElementById('view-library-message');
-        if (viewLibMsg) viewLibMsg.style.display = 'none';
-        updateFilterIndicator(0);
-        await window.renderFiles(filteredModels);
-        isFilteringInProgress = false;
-        return;
-      }
-      updateFilterIndicator(filteredModels.length);
+    const filteredModels = await getCombinedFilteredModels({ limit: PROGRESSIVE_INITIAL });
+    if (searchGeneration !== myGeneration) return;
+
+    if (filteredModels.length === 0) {
+      // Empty library is normal; do not reopen the onboarding welcome dialog here —
+      // that caused a loop (dismiss → search → 0 models → showModal again).
+      const emptyMsg = document.getElementById("view-library-message");
+      if (emptyMsg) emptyMsg.style.display = "none";
+      window._progressiveLibraryLoadActive = false;
+      updateFilterIndicator(0);
       await window.renderFiles(filteredModels);
-      isFilteringInProgress = false;
-
-      (async () => {
-        try {
-          let acc = filteredModels.slice();
-          let offset = acc.length;
-          while (true) {
-            const chunk = await getCombinedFilteredModels({
-              limit: PROGRESSIVE_CHUNK,
-              offset
-            });
-            if (searchGeneration !== myGeneration) return;
-            if (!chunk || chunk.length === 0) break;
-            acc = acc.concat(chunk);
-            offset += chunk.length;
-            updateFilterIndicator(acc.length);
-            await window.renderFiles(acc);
-            // Yield so layout, thumbnail decode, and input can run between large virtual-grid updates.
-            await new Promise((r) => {
-              if (typeof requestIdleCallback !== 'undefined') {
-                requestIdleCallback(() => r(), { timeout: 100 });
-              } else {
-                setTimeout(r, 48);
-              }
-            });
-          }
-        } catch (err) {
-          console.error("Progressive library load failed:", err);
-        }
-      })();
+      if (filtersActive) syncSelectionAfterFilteredLoad(filteredModels);
       return;
     }
 
-    filteredModels = await getCombinedFilteredModels();
-    console.log(`Got ${filteredModels.length} filtered models, rendering...`, window.dateAddedFilter ? `(filtered by dateAdded)` : '');
     updateFilterIndicator(filteredModels.length);
     await window.renderFiles(filteredModels);
-    // renderer.js sync can lose to rAF/layout; run again after paint (stale Model Details path/name)
-    if (typeof window.syncSelectionWithFilteredModels === 'function') {
-      window.syncSelectionWithFilteredModels(filteredModels);
-      requestAnimationFrame(() => {
-        if (typeof window.syncSelectionWithFilteredModels === 'function') {
-          window.syncSelectionWithFilteredModels(filteredModels);
-        }
-      });
+    if (searchGeneration !== myGeneration) return;
+
+    if (filteredModels.length < PROGRESSIVE_INITIAL) {
+      window._progressiveLibraryLoadActive = false;
+      if (filtersActive) syncSelectionAfterFilteredLoad(filteredModels);
+      return;
     }
- 
+
+    (async () => {
+      try {
+        let acc = filteredModels.slice();
+        let offset = acc.length;
+        while (true) {
+          const chunk = await getCombinedFilteredModels({
+            limit: PROGRESSIVE_CHUNK,
+            offset
+          });
+          if (searchGeneration !== myGeneration) return;
+          if (!chunk || chunk.length === 0) break;
+          acc = acc.concat(chunk);
+          offset += chunk.length;
+          updateFilterIndicator(acc.length);
+          await window.renderFiles(acc);
+          if (chunk.length < PROGRESSIVE_CHUNK) break;
+          await yieldForProgressiveLibraryLoad();
+        }
+        if (searchGeneration !== myGeneration) return;
+        window._progressiveLibraryLoadActive = false;
+        if (filtersActive) syncSelectionAfterFilteredLoad(acc);
+      } catch (err) {
+        console.error("Progressive library load failed:", err);
+        if (searchGeneration === myGeneration) {
+          window._progressiveLibraryLoadActive = false;
+        }
+      }
+    })();
   } catch (error) {
     console.error("Error performing combined search:", error);
+    if (myGeneration && searchGeneration === myGeneration) {
+      window._progressiveLibraryLoadActive = false;
+    }
   } finally {
-    // Re-enable filter controls
-    toggleFilterControls(true);
-    
-    // Hide loading spinner
-    const spinner = document.getElementById('spinner');
-    if (spinner) spinner.classList.add('hidden');
-    
-    // Reset the filtering flag
-    isFilteringInProgress = false;
+    if (myGeneration && searchGeneration === myGeneration) {
+      toggleFilterControls(true);
+      const spinner = document.getElementById("spinner");
+      if (spinner) spinner.classList.add("hidden");
+      isFilteringInProgress = false;
+    }
   }
 }
 
@@ -582,57 +615,7 @@ function updateFilterIndicator(count) {
 
   if (clearFilterButton) {
     clearFilterButton.onclick = async () => {
-      // Reset all filter dropdowns
-      if (designer) document.getElementById("designer-select").value = "";
-      if (license) document.getElementById("license-select").value = "";
-      if (parentModel) document.getElementById("parent-select").value = "";
-      if (printStatus !== "all") document.getElementById("printed-select").value = "all";
-      if (newStatus !== "all") document.getElementById("new-select").value = "all";
-      if (favoriteStatus !== "all") document.getElementById("favorite-select").value = "all";
-      if (ratingStatus !== "all") document.getElementById("rating-select").value = "all";
-      if (ratingMinStatus !== "all") document.getElementById("rating-min-select").value = "all";
-      if (tagFilter) document.getElementById("tag-filter").value = "";
-      if (filamentFilter) document.getElementById("filament-filter").value = "";
-      if (fileType) document.getElementById("filetype-select").value = "";
-      if (typeof window.queryBuilderClearAllMultiChips === "function") {
-        window.queryBuilderClearAllMultiChips();
-      }
-      if (typeof window.clearSearchClauseList === "function") {
-        window.clearSearchClauseList();
-      }
-      
-      // Clear the search input and update its clear button
-      const searchInput = document.getElementById("search-filter-input");
-      const clearSearchButton = document.getElementById("clear-filter-search-button");
-      if (searchInput) {
-        searchInput.value = "";
-        if (clearSearchButton) {
-          clearSearchButton.style.display = "none";
-        }
-      }
-      
-      // Clear the directory filter if it exists
-      window.currentDirectoryFilter = "";
-      
-      // Clear date-added filter so "Clear All Filters" really clears everything
-      window.dateAddedFilter = null;
-      window._lastDateAddedFilter = null;
-      
-      // Clear the last search term
-      lastSearchTerm = "";
-      
-      resetCurrentFilterPanelShell();
-
-      // Clear inverted flags
-      if (window.invertedFilters) {
-        window.invertedFilters.tag = false;
-        window.invertedFilters.filament = false;
-        window.invertedFilters.designer = false;
-        window.invertedFilters.license = false;
-        window.invertedFilters.parentModel = false;
-        window.invertedFilters.search = false;
-      }
-      
+      clearAllLibraryFilters();
       // Let the cleared UI paint first, then run the search (reduces perceived delay)
       await new Promise(r => requestAnimationFrame(r));
       if (typeof window.resetFilterSelectionAndDetails === 'function') {
@@ -1050,6 +1033,7 @@ window.libraryFiltersAreActive = libraryFiltersAreActive;
 window.describeLibraryFilters = describeLibraryFilters;
 window.getCombinedFilteredModels = getCombinedFilteredModels;
 window.resetCurrentFilterPanelShell = resetCurrentFilterPanelShell;
+window.clearAllLibraryFilters = clearAllLibraryFilters;
 window.updateFilterIndicator = updateFilterIndicator;
 window.performCombinedSearch = performCombinedSearch;
 window.initializeCombinedSearch = initializeCombinedSearch;

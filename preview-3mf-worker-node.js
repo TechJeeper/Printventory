@@ -25,11 +25,13 @@ parentPort.on('message', async (message) => {
       return;
     }
 
-    if (jsonData.geometries && jsonData.geometries[0]) {
-      jsonData.object.geometry = jsonData.geometries[0].uuid;
-    }
-    if (jsonData.materials && jsonData.materials[0]) {
-      jsonData.object.material = jsonData.materials[0].uuid;
+    if (jsonData.object && jsonData.object.type !== 'Group') {
+      if (jsonData.geometries && jsonData.geometries[0]) {
+        jsonData.object.geometry = jsonData.geometries[0].uuid;
+      }
+      if (jsonData.materials && jsonData.materials[0]) {
+        jsonData.object.material = jsonData.materials[0].uuid;
+      }
     }
 
     postStatus('Building preview...');

@@ -12,7 +12,8 @@ const {
   extractAllMeshesFast,
   shouldUseFastPath
 } = require('../threemf-mesh-extract.js');
-const { Simple3MFLoader } = require('../threemf-loader-simple.js');
+const { Simple3MFLoader, collectSlicerSkipIds } = require('../threemf-loader-simple.js');
+const { parseSvgPathContours } = require('../threemf-svg-extrude.js');
 
 function cubeModelXml(objectId = '1') {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -106,6 +107,45 @@ describe('3MF Production Extension (MeshyAI / Bambu)', () => {
     assert.ok(mesh.positions.length >= 9);
     assert.equal(mesh.sourceTriangles, 12);
     assert.equal(mesh.indices.length, 36);
+  });
+
+  test('collectSlicerSkipIds finds Bambu negative volumes', () => {
+    const enc = new TextEncoder();
+    const unzipped = {
+      'Metadata/model_settings.config': enc.encode(`<?xml version="1.0"?>
+<config>
+  <object id="2">
+    <part id="1" subtype="Normal_Part"/>
+    <part id="8" subtype="Negative_Volume"/>
+    <part id="9" subtype="Modifier"/>
+    <part id="2" subtype="negative_part"/>
+  </object>
+</config>`)
+    };
+    const skip = collectSlicerSkipIds(unzipped);
+    assert.equal(skip.has('8'), true);
+    assert.equal(skip.has('9'), true);
+    assert.equal(skip.has('2'), true);
+    assert.equal(skip.has('1'), false);
+  });
+
+  test('collectSlicerSkipIds matches compacted volume types', () => {
+    const enc = new TextEncoder();
+    const unzipped = {
+      'Metadata/model_settings.config': enc.encode(`<config>
+        <part id="12" subtype="NegativeVolume"/>
+        <metadata id="13" key="volume_type" value="Negative_Volume"/>
+      </config>`)
+    };
+    const skip = collectSlicerSkipIds(unzipped);
+    assert.equal(skip.has('12'), true);
+    assert.equal(skip.has('13'), true);
+  });
+
+  test('parseSvgPathContours samples curves', () => {
+    const contours = parseSvgPathContours('M 0 0 C 0 10 10 10 10 0 Z', 8);
+    assert.ok(contours.length >= 1);
+    assert.ok(contours[0].length > 4);
   });
 
   test('Simple3MFLoader parses a Meshy-style split 3MF', () => {

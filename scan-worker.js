@@ -228,6 +228,14 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   /** Every file-type dirent seen while walking the tree (matches legacy totalFiles meaning). */
   let traversedFileEntries = 0;
   const extSet = buildScanExtensionSet(scanExtensions);
+  const SCAN_FLUSH_BATCH = 400;
+
+  const flushDiscoveredFiles = (force = false) => {
+    while (files.length >= SCAN_FLUSH_BATCH || (force && files.length > 0)) {
+      const chunk = files.splice(0, Math.min(SCAN_FLUSH_BATCH, files.length));
+      parentPort.postMessage({ type: 'batch', files: chunk });
+    }
+  };
 
   const shouldQueueFile = (fileName) => {
     // Skip Printventory zip-extract temps if they somehow land under a scanned tree
@@ -269,7 +277,8 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
           processed: traversedFileEntries
         });
       }
-      resolveDone({ files, totalFiles: traversedFileEntries });
+      flushDiscoveredFiles(true);
+      resolveDone({ files: [], totalFiles: traversedFileEntries });
       return;
     }
 
@@ -343,6 +352,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
             hash: null, // Calculate later if needed
             isZipArchive: false
           });
+          flushDiscoveredFiles();
         }
       } else if (enableZipArchives && ext === '.zip') {
           // Scan inside ZIP using same scanExtensions
@@ -351,6 +361,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
         if (stats.size <= maxFileSize) {
           const zipFiles = await scanZipFile(filePath, maxFileSize, extSet);
           files.push(...zipFiles);
+          flushDiscoveredFiles();
         }
       }
       // For all other files, do nothing - no stat() call!

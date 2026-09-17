@@ -36,6 +36,21 @@ async function fetchText(url) {
   return res.text();
 }
 
+function tightArrayBuffer(data) {
+  if (!data) return null;
+  let view = null;
+  if (data instanceof ArrayBuffer) {
+    view = new Uint8Array(data);
+  } else if (ArrayBuffer.isView(data)) {
+    view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  } else {
+    return null;
+  }
+  const out = new ArrayBuffer(view.byteLength);
+  new Uint8Array(out).set(view);
+  return out;
+}
+
 self.onmessage = async function(e) {
   const { fileExtension, url, id, arrayBuffer: modelBuffer } = e.data;
 
@@ -44,31 +59,35 @@ self.onmessage = async function(e) {
       const loader = new THREE.STLLoader();
       const MAX_STL_TRIANGLES = 10000000;
 
-      const buffer = modelBuffer instanceof ArrayBuffer ? modelBuffer : await fetchArrayBuffer(url);
+      const buffer = tightArrayBuffer(modelBuffer) || await fetchArrayBuffer(url);
 
-      if (buffer.byteLength < 84) {
+      if (buffer.byteLength < 15) {
         throw new Error('STL file too small to be valid');
       }
-      const dv = new DataView(buffer);
-      const triangleCount = dv.getUint32(80, true);
-      const expectedBinarySize = 84 + triangleCount * 50;
-      if (expectedBinarySize === buffer.byteLength && triangleCount > MAX_STL_TRIANGLES) {
-        throw new Error(
-          `STL has too many triangles (${triangleCount.toLocaleString()}). Max ${MAX_STL_TRIANGLES.toLocaleString()}.`
-        );
+      if (buffer.byteLength >= 84) {
+        const triangleCount = new DataView(buffer).getUint32(80, true);
+        const expectedBinarySize = 84 + triangleCount * 50;
+        const leftover = buffer.byteLength - expectedBinarySize;
+        if (triangleCount > 0 && triangleCount <= MAX_STL_TRIANGLES && leftover >= 0 && leftover <= 4096) {
+          const exact = leftover === 0 ? buffer : buffer.slice(0, expectedBinarySize);
+          const object = loader.parse(exact);
+          processObject(object, id);
+          return;
+        }
       }
 
       const object = loader.parse(buffer);
       processObject(object, id);
     } else if (fileExtension === '3mf') {
       THREE.ThreeMFLoader.fflate = fflate;
-      const buffer = modelBuffer instanceof ArrayBuffer ? modelBuffer : await fetchArrayBuffer(url);
+      const buffer = tightArrayBuffer(modelBuffer) || await fetchArrayBuffer(url);
       const object = parse3mfDocument(buffer);
       processObject(object, id);
     } else if (fileExtension === 'obj') {
       const loader = new THREE.OBJLoader();
-      const text = modelBuffer instanceof ArrayBuffer
-        ? new TextDecoder().decode(modelBuffer)
+      const objBuffer = tightArrayBuffer(modelBuffer);
+      const text = objBuffer
+        ? new TextDecoder().decode(objBuffer)
         : await fetchText(url);
       const object = loader.parse(text);
       processObject(object, id);

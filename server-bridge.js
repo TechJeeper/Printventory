@@ -494,6 +494,7 @@
     'saveModelBatch': 'save-model-batch',
     'updateModelsBatch': 'update-models-batch',
     'saveThumbnail': 'save-thumbnail',
+    'setThumbnailGenerationActive': 'set-thumbnail-generation-active',
     'getDesigners': 'get-designers',
     'getLicenses': 'get-licenses',
     'getModelsByDesigner': 'get-models-by-designer',

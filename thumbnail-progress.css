@@ -128,6 +128,14 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
 }
 
+/* Author `button { display:flex }` and `.tp-background { display:inline-flex }`
+   beat the UA `[hidden]` rule, so the Background control stayed clickable but
+   had no handler on desktop. Force hidden to actually hide. */
+.tp-background[hidden],
+.tp-cancel[hidden] {
+  display: none !important;
+}
+
 .tp-cancel:disabled,
 .tp-background:disabled {
   opacity: 0.5;

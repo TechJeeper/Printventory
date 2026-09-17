@@ -1793,21 +1793,43 @@ async function loadModel(filePath, options = {}) {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
 
-    // Read file bytes via main process (same as 3D preview) — avoids fragile file:// fetch in the worker.
+    // Prefer HTTP /api/file (or /api/download for zip entries) so server-mode
+    // WebSocket IPC does not base64 the entire STL/3MF. Fall back to IPC.
     let modelArrayBuffer = null;
-    if (window.electron && typeof window.electron.readModelFile === 'function') {
+    const loadBuffer = window.loadLibraryFileBuffer;
+    if (typeof loadBuffer === 'function') {
+      try {
+        modelArrayBuffer = await loadBuffer(filePath);
+      } catch (e) {
+        console.warn('loadModel: loadLibraryFileBuffer failed, worker will use URL:', e);
+      }
+    } else if (window.electron && typeof window.electron.readModelFile === 'function') {
       try {
         const raw = await window.electron.readModelFile(filePath);
         if (raw) {
-          modelArrayBuffer = raw instanceof ArrayBuffer
-            ? raw
-            : raw.buffer
-              ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)
-              : null;
+          if (raw instanceof ArrayBuffer) {
+            modelArrayBuffer = raw;
+          } else if (ArrayBuffer.isView(raw)) {
+            modelArrayBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+          } else if (raw.buffer) {
+            modelArrayBuffer = raw.buffer.slice(raw.byteOffset || 0, (raw.byteOffset || 0) + (raw.byteLength || raw.length || 0));
+          }
         }
       } catch (e) {
         console.warn('loadModel: readModelFile failed, worker will use URL:', e);
       }
+    }
+
+    if (modelArrayBuffer && ArrayBuffer.isView(modelArrayBuffer)) {
+      modelArrayBuffer = modelArrayBuffer.buffer.slice(
+        modelArrayBuffer.byteOffset,
+        modelArrayBuffer.byteOffset + modelArrayBuffer.byteLength
+      );
+    }
+    if (modelArrayBuffer instanceof ArrayBuffer && modelArrayBuffer.byteLength > 0) {
+      const copy = new ArrayBuffer(modelArrayBuffer.byteLength);
+      new Uint8Array(copy).set(new Uint8Array(modelArrayBuffer));
+      modelArrayBuffer = copy;
     }
 
     return new Promise((resolve, reject) => {
@@ -2207,6 +2229,7 @@ function mergeModelIntoGridCurrentModels(model) {
   );
   if (idx === -1) return false;
   container.currentModels[idx] = model;
+  invalidateVirtualGridLayoutCache(container);
   return true;
 }
 
@@ -8062,54 +8085,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     delete window._electronPendingEvents['open-dedup'];
   }
 
-  // Add this with other event listeners in the DOMContentLoaded section
-  document.getElementById('view-library-button')?.addEventListener('click', async () => {
-    try {
-      window.disableGridRefresh = false; // Ensure user-initiated view always shows models (e.g. after scan in docker mode)
-      // Reset all filter dropdowns
-      document.getElementById('designer-select').value = '';
-      document.getElementById('license-select').value = '';
-      document.getElementById('parent-select').value = '';
-      document.getElementById('printed-select').value = 'all';
-      const newSelView = document.getElementById('new-select');
-      if (newSelView) newSelView.value = 'all';
-      document.getElementById('tag-filter').value = '';
-      document.getElementById('filetype-select').value = '';
-      document.getElementById('search-filter-input').value = '';
-      
-      // Explicitly clear the directory filter
-      window.currentDirectoryFilter = "";
-      
-      // Hide the "Showing 100 Newest Models" message
-      const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) {
-        viewLibMsg.style.display = "none";
-      }
-      
-      // Flag that we're viewing the entire library
-      window.viewingEntireLibrary = true;
-      
-      if (typeof window.resetCurrentFilterPanelShell === "function") {
-        window.resetCurrentFilterPanelShell();
-      } else {
-        const filterIndicator = document.getElementById("current-filter");
-        if (filterIndicator) {
-          filterIndicator.innerHTML = "";
-          filterIndicator.classList.remove("visible");
-        }
-      }
-      
-      // Use the combined search function to retrieve and display models with all filters applied correctly
-      if (typeof window.performCombinedSearch === 'function') {
-        await window.performCombinedSearch();
-      }
-      
-      console.log("Viewing entire library");
-    } catch (error) {
-      console.error('Error loading library:', error);
-      await window.electron.showMessage('Error', 'Failed to load library.');
-    }
-  });
+  // View Entire Library is bound once later (see onViewEntireLibraryClick).
 
   // Add Tag Manager functionality
   let allTags = []; // Store all tags for filtering
@@ -9292,17 +9268,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Force grid to refetch and re-render (Docker/server: performCombinedSearch alone often doesn't update the grid)
+  // Null currentModels so the virtual grid cannot treat a refetch as unchanged (Docker/server).
   async function forceGridRefresh() {
     window.disableGridRefresh = false;
     const gridEl = document.querySelector('.file-grid');
-    if (gridEl) gridEl.currentModels = null; // force renderVirtualGrid to treat as changed and re-render
+    if (gridEl) gridEl.currentModels = null;
     if (typeof populateFileTypeFilter === 'function') await populateFileTypeFilter();
-    const sortSelect = document.getElementById('sort-select');
-    const sortOption = sortSelect ? sortSelect.value : 'date-desc';
     try {
-      const models = await window.electron.getAllModels(sortOption, 0);
-      if (typeof renderFiles === 'function') await renderFiles(models);
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch({ force: true });
+      }
     } catch (err) {
       console.error('[forceGridRefresh]', err);
     }
@@ -9314,7 +9289,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.disableGridRefresh = false;
     const gridEl = document.querySelector('.file-grid');
     if (gridEl) gridEl.currentModels = null;
-    if (typeof populateFileTypeFilter === 'function') await populateFileTypeFilter();
     // Preserve dateAddedFilter if it's set
     const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
     if (preservedDateAddedFilter) {
@@ -9325,35 +9299,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     selectedModels.clear();
     document.querySelectorAll('.file-item.selected').forEach(item => item.classList.remove('selected'));
 
-    // Match search.js: any active filter must reload via performCombinedSearch — forceGridRefresh uses
-    // getAllModels() and would drop search/tag/etc. (e.g. after "Remove from Library" while filtered).
-    const designer = document.getElementById('designer-select')?.value || '';
-    const license = document.getElementById('license-select')?.value || '';
-    const parentModel = document.getElementById('parent-select')?.value || '';
-    const printStatus = document.getElementById('printed-select')?.value || 'all';
-    const newStatus = document.getElementById('new-select')?.value || 'all';
-    const tagFilter = document.getElementById('tag-filter')?.value || '';
-    const fileType = document.getElementById('filetype-select')?.value || '';
-    const searchTerm = (document.getElementById('search-filter-input')?.value || '').trim();
-    const qbClauses =
-      typeof window.queryBuilderHasActiveSearchClauses === 'function' &&
-      window.queryBuilderHasActiveSearchClauses();
-    const qbMulti =
-      typeof window.queryBuilderHasActiveMultiFilters === 'function' &&
-      window.queryBuilderHasActiveMultiFilters();
-    const hasActiveFilters = Boolean(
-      designer || license || parentModel || printStatus !== 'all' ||
-      newStatus !== 'all' ||
-      tagFilter || fileType || searchTerm || qbClauses || qbMulti ||
-      window.currentDirectoryFilter || window.dateAddedFilter
-    );
-
-    if (typeof window.performCombinedSearch === 'function' && hasActiveFilters) {
-      await window.performCombinedSearch();
-    } else if (typeof window.forceGridRefresh === 'function') {
+    if (typeof window.forceGridRefresh === 'function') {
       await window.forceGridRefresh();
     } else if (typeof window.performCombinedSearch === 'function') {
-      await window.performCombinedSearch();
+      await window.performCombinedSearch({ force: true });
     }
   });
 
@@ -10448,7 +10397,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await window.updateScanStlHomeButtonVisibility();
   }
 
-  // Add event listener for "View Entire Library" button
+  // Add event listener for "View Entire Library" button (single handler)
   const viewLibraryButton = document.getElementById('view-library-button');
   if (viewLibraryButton) {
     viewLibraryButton.addEventListener('click', async () => {
@@ -10456,44 +10405,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         window.disableGridRefresh = false;
         const gridEl = document.querySelector('.file-grid');
         if (gridEl) gridEl.currentModels = null;
-        // Reset all filter dropdowns
-        document.getElementById('designer-select').value = '';
-        document.getElementById('license-select').value = '';
-        document.getElementById('parent-select').value = '';
-        document.getElementById('printed-select').value = 'all';
-        const newSelVl = document.getElementById('new-select');
-        if (newSelVl) newSelVl.value = 'all';
-        document.getElementById('tag-filter').value = '';
-        const filamentFilterClear = document.getElementById('filament-filter');
-        if (filamentFilterClear) filamentFilterClear.value = '';
-        document.getElementById('filetype-select').value = '';
-        document.getElementById('search-filter-input').value = '';
-        if (typeof window.queryBuilderClearAllMultiChips === 'function') {
-          window.queryBuilderClearAllMultiChips();
+        if (typeof window.clearAllLibraryFilters === 'function') {
+          window.clearAllLibraryFilters();
         }
-        if (typeof window.clearSearchClauseList === 'function') {
-          window.clearSearchClauseList();
-        }
-        window.currentDirectoryFilter = "";
-        window.dateAddedFilter = null;
-        window._lastDateAddedFilter = null;
         const viewLibMsg = document.getElementById("view-library-message");
         if (viewLibMsg) viewLibMsg.style.display = "none";
-        window.viewingEntireLibrary = true;
-        if (typeof window.resetCurrentFilterPanelShell === "function") {
-          window.resetCurrentFilterPanelShell();
-        } else {
-          const filterIndicator = document.getElementById("current-filter");
-          if (filterIndicator) {
-            filterIndicator.innerHTML = "";
-            filterIndicator.classList.remove("visible");
-          }
-        }
-        // Force refetch and re-render so grid updates in Docker/server
         if (typeof window.forceGridRefresh === 'function') {
           await window.forceGridRefresh();
         } else if (typeof window.performCombinedSearch === 'function') {
-          await window.performCombinedSearch();
+          await window.performCombinedSearch({ force: true });
         }
         console.log("Viewing entire library");
       } catch (error) {
@@ -13352,48 +13272,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   let currentPage = 0;
   let isVirtualScrolling = false;
 
-  // Update the view-library-button click handler
-  document.getElementById('view-library-button')?.addEventListener('click', async () => {
-    try {
-      window.disableGridRefresh = false;
-      const gridEl = document.querySelector('.file-grid');
-      if (gridEl) gridEl.currentModels = null;
-      window.dateAddedFilter = null;
-      window._lastDateAddedFilter = null;
-      document.getElementById('designer-select').value = '';
-      document.getElementById('license-select').value = '';
-      document.getElementById('parent-select').value = '';
-      document.getElementById('printed-select').value = 'all';
-      const newSelVl2 = document.getElementById('new-select');
-      if (newSelVl2) newSelVl2.value = 'all';
-      document.getElementById('tag-filter').value = '';
-      document.getElementById('filetype-select').value = '';
-      document.getElementById('search-filter-input').value = '';
-      window.currentDirectoryFilter = "";
-      const viewLibMsg = document.getElementById("view-library-message");
-      if (viewLibMsg) viewLibMsg.style.display = "none";
-      window.viewingEntireLibrary = true;
-      if (typeof window.resetCurrentFilterPanelShell === "function") {
-        window.resetCurrentFilterPanelShell();
-      } else {
-        const filterIndicator = document.getElementById("current-filter");
-        if (filterIndicator) {
-          filterIndicator.innerHTML = "";
-          filterIndicator.classList.remove("visible");
-        }
-      }
-      if (typeof window.forceGridRefresh === 'function') {
-        await window.forceGridRefresh();
-      } else if (typeof window.performCombinedSearch === 'function') {
-        await window.performCombinedSearch();
-      }
-      console.log("Viewing entire library");
-    } catch (error) {
-      console.error('Error loading library:', error);
-      await window.electron.showMessage('Error', 'Failed to load library.');
-    }
-  });
-
   // New function to initialize virtual scrolling
   async function initializeVirtualScrolling(modelRefs) {
     try {
@@ -14584,119 +14462,12 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
 // Process 2: Model Display and Management
 async function refreshModelDisplay() {
   try {
-    // Get current filter values
-    const designer = document.getElementById('designer-select').value;
-    const license = document.getElementById('license-select').value;
-    const parentModel = document.getElementById('parent-select').value;
-    const printStatus = document.getElementById('printed-select').value;
-    const newStatus = document.getElementById('new-select')?.value || 'all';
-    const favoriteStatus = document.getElementById('favorite-select')?.value || 'all';
-    const ratingStatus = document.getElementById('rating-select')?.value || 'all';
-    const ratingMinStatus = document.getElementById('rating-min-select')?.value || 'all';
-    const tagFilter = document.getElementById('tag-filter').value;
-    const sortOption = document.getElementById('sort-select').value;
-    const fileType = document.getElementById('filetype-select').value; // Add this line
-    const searchInput = document.getElementById("search-filter-input");
-    const searchTerm = searchInput ? searchInput.value.trim() : "";
-
-    
-
-    
-    // Restore filter selections
-    document.getElementById('designer-select').value = designer;
-    document.getElementById('license-select').value = license;
-    document.getElementById('parent-select').value = parentModel;
-    document.getElementById('printed-select').value = printStatus;
-    const newSelRestore = document.getElementById('new-select');
-    if (newSelRestore) newSelRestore.value = newStatus;
-    const favSelRestore = document.getElementById('favorite-select');
-    if (favSelRestore) favSelRestore.value = favoriteStatus;
-    const ratingSelRestore = document.getElementById('rating-select');
-    if (ratingSelRestore) ratingSelRestore.value = ratingStatus;
-    const ratingMinSelRestore = document.getElementById('rating-min-select');
-    if (ratingMinSelRestore) ratingMinSelRestore.value = ratingMinStatus;
-    document.getElementById('tag-filter').value = tagFilter;
-    document.getElementById('filetype-select').value = fileType; // Add this line
-
-    // Get all models with current sort option
-    let models = await window.electron.getAllModels(sortOption, 0);
-
-    // Add file type filter
-    if (fileType) {
-      if (fileType.toLowerCase() === 'zip') {
-        // For zip filter, show all models inside ZIP archives (entries with :: separator)
-        models = models.filter(model => 
-          model.filePath && model.filePath.includes('::')
-        );
-      } else {
-        models = models.filter(model => 
-          model.fileName.toLowerCase().endsWith(`.${fileType.toLowerCase()}`)
-        );
-      }
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch({ force: true });
+      return;
     }
-
-    // Apply filters
-    if (designer) {
-      if (designer === '__none__') {
-        models = models.filter(model => !model.designer || model.designer.trim() === '');
-      } else {
-        models = models.filter(model =>
-          model.designer &&
-          model.designer.trim().toLowerCase() === designer.trim().toLowerCase()
-        );
-      }
-    }
-    if (license) {
-      if (license === '__none__') {
-        models = models.filter(model => !model.license || model.license.trim() === '');
-      } else {
-        models = models.filter(model => model.license === license);
-      }
-    }
-    if (parentModel) {
-      if (parentModel === '__none__') {
-        models = models.filter(model => !model.parentModel || model.parentModel.trim() === '');
-      } else {
-        models = models.filter(model => model.parentModel === parentModel);
-      }
-    }
-    if (printStatus && printStatus !== 'all') {
-      models = models.filter((model) => window.PrintHistory
-        ? window.PrintHistory.modelMatchesPrintFilter(model, printStatus)
-        : (printStatus === 'printed' ? !!model.printed : printStatus === 'not-printed' ? !model.printed : true));
-    }
-    if (newStatus === 'new') {
-      models = models.filter(model => isModelNew(model));
-    } else if (newStatus === 'not-new') {
-      models = models.filter(model => !isModelNew(model));
-    }
-    if (favoriteStatus === 'favorited') {
-      models = models.filter(model => Boolean(model.favorite));
-    } else if (favoriteStatus === 'not-favorited') {
-      models = models.filter(model => !model.favorite);
-    }
-    if (ratingStatus === 'unrated') {
-      models = models.filter(model => normalizeModelRatingValue(model.rating) === 0);
-    } else if (ratingStatus !== 'all' && /^[1-5]$/.test(ratingStatus)) {
-      const exact = parseInt(ratingStatus, 10);
-      models = models.filter(model => normalizeModelRatingValue(model.rating) === exact);
-    }
-    if (ratingMinStatus !== 'all' && /^[1-5]$/.test(ratingMinStatus)) {
-      const min = parseInt(ratingMinStatus, 10);
-      models = models.filter(model => normalizeModelRatingValue(model.rating) >= min);
-    }
-    if (tagFilter) {
-      models = await Promise.all(models.map(async (model) => {
-        const modelTags = await window.electron.getModelTags(model.id);
-        if (modelTags && modelTags.some(tag => tag.name === tagFilter)) {
-          return model;
-        }
-        return null;
-      }));
-      models = models.filter(model => model !== null);
-    }
-
-    // Display filtered models
+    const getFilteredModels = await waitForGetCombinedFilteredModels();
+    const models = await getFilteredModels();
     await displayModels(models);
   } catch (error) {
     console.error('Error refreshing model display:', error);
@@ -14830,18 +14601,16 @@ async function waitForGetCombinedFilteredModels(maxWait = 5000) {
 async function handleFilterChange() {
   try {
     resetFilterSelectionAndDetails();
-
-    // Get and display filtered models
-    // Wait for getCombinedFilteredModels to be available (handles module loading race condition)
-    console.log('handleFilterChange: About to get filtered models. invertedFilters:', invertedFilters);
+    if (typeof window.performCombinedSearch === 'function') {
+      await window.performCombinedSearch({ force: true });
+      return;
+    }
     const getFilteredModels = await waitForGetCombinedFilteredModels();
     const models = await getFilteredModels();
-    console.log('handleFilterChange: Got', models.length, 'models. About to display them.');
     await displayModels(models);
     if (window.updateFilterIndicator) {
       window.updateFilterIndicator(models.length);
     }
-    console.log('handleFilterChange: Models displayed.');
   } catch (error) {
     console.error("Error applying filters:", error);
   }
@@ -15649,8 +15418,12 @@ function isInSelectedModels(filePath) {
   return false;
 }
 
-/** Match search.js: full-library progressive load returns partial rows — do not clear selection in that case. */
+/** Progressive chunks are a partial result set — do not clear selection until search.js finishes the load. */
 function shouldSyncSelectionWithFilteredList() {
+  if (window._progressiveLibraryLoadActive) return false;
+  if (typeof window.libraryFiltersAreActive === 'function') {
+    return window.libraryFiltersAreActive();
+  }
   const designer = document.getElementById('designer-select')?.value || '';
   const license = document.getElementById('license-select')?.value || '';
   const parentModel = document.getElementById('parent-select')?.value || '';
@@ -15669,8 +15442,7 @@ function shouldSyncSelectionWithFilteredList() {
     newStatus === 'all' &&
     !tagFilter && !fileType && !searchTerm && !qbClauses && !qbMulti &&
     !window.currentDirectoryFilter && !window.dateAddedFilter;
-  const useProgressiveFullLibrary = noFiltersActive;
-  return !useProgressiveFullLibrary;
+  return !noFiltersActive;
 }
 
 function clearModelDetailsSidebar() {
@@ -18034,31 +17806,11 @@ function createListViewHeader() {
 
 // Update the tag filter to support multiple tags
 function updateTagFilter() {
-  const selectedTags = Array.from(document.querySelectorAll('#tag-filter .tag'))
-    .map(tag => tag.getAttribute('data-tag-name'));
-  
-  if (selectedTags.length === 0) {
-    // If no tags selected, show all models
-    window.electron.getAllModels().then(displayModels);
+  if (typeof window.performCombinedSearch === 'function') {
+    window.performCombinedSearch({ force: true });
     return;
   }
-
-  // Filter models that have ALL selected tags
-  window.electron.getAllModels().then(async models => {
-    const filteredModels = [];
-    
-    for (const model of models) {
-      const modelTags = await window.electron['get-model-tags'](model.id);
-      const modelTagNames = modelTags.map(tag => tag.name);
-      
-      // Check if model has all selected tags
-      if (selectedTags.every(tag => modelTagNames.includes(tag))) {
-        filteredModels.push(model);
-      }
-    }
-    
-    await displayModels(filteredModels);
-  });
+  waitForGetCombinedFilteredModels().then((getFilteredModels) => getFilteredModels()).then(displayModels);
 }
 
 // Add tag filter functionality
@@ -18424,6 +18176,32 @@ function removeHtmlContextMenu() {
   document.getElementById('html-context-menu-backdrop')?.remove();
 }
 
+function contextMenuFileBasename(filePath) {
+  const parts = String(filePath || '').split(/[/\\]/);
+  return parts[parts.length - 1] || String(filePath || '');
+}
+
+async function confirmHtmlContextDestructiveAction(item, menuData) {
+  const label = item && item.label;
+  if (label !== 'Delete from Disk' && label !== 'Remove from Library') {
+    return true;
+  }
+  const paths = Array.isArray(menuData?.filePaths) ? menuData.filePaths.filter(Boolean) : [];
+  const count = paths.length || 1;
+  const maxFilesToShow = 20;
+  const fileList = paths.slice(0, maxFilesToShow).map(contextMenuFileBasename).join('\n');
+  const extra = paths.length > maxFilesToShow
+    ? `\n... and ${paths.length - maxFilesToShow} more file${paths.length - maxFilesToShow === 1 ? '' : 's'}`
+    : '';
+  const isDelete = label === 'Delete from Disk';
+  const title = isDelete ? 'Confirm Delete' : 'Confirm Remove';
+  const message = isDelete
+    ? `Are you sure you want to DELETE ${count} file${count !== 1 ? 's' : ''} from disk?\nThis will permanently delete the files and cannot be undone!\n\nFiles:\n${fileList}${extra}`
+    : `Are you sure you want to remove ${count} file${count !== 1 ? 's' : ''} from the library?\nFiles will remain on disk but will be removed from Printventory.\n\nFiles:\n${fileList}${extra}`;
+  const result = await window.electron.showMessage(title, message, ['Yes', 'No']);
+  return result === 'Yes';
+}
+
 // Function to show HTML context menu (for server mode browser access)
 function showHtmlContextMenu(menuData, x, y, options = {}) {
   const showClose = options.showClose === true;
@@ -18573,6 +18351,10 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
                 subMenuItem.addEventListener('click', async (e) => {
                   e.stopPropagation();
                   try {
+                    if (!(await confirmHtmlContextDestructiveAction(subItem, menuData))) {
+                      removeHtmlContextMenu();
+                      return;
+                    }
                     await window.electron.executeContextMenuAction(menuData.requestId, index, subIndex);
                     removeHtmlContextMenu();
                   } catch (error) {
@@ -18631,6 +18413,10 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
         menuItem.addEventListener('click', async (e) => {
           e.stopPropagation();
           try {
+            if (!(await confirmHtmlContextDestructiveAction(item, menuData))) {
+              removeHtmlContextMenu();
+              return;
+            }
             await window.electron.executeContextMenuAction(menuData.requestId, index, null);
             removeHtmlContextMenu();
           } catch (error) {
@@ -21575,18 +21361,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       selectSingleModel(item, model.filePath);
       openModelPreviewFromTile(model.filePath);
     });
-    const detailsBtn = document.createElement('button');
-    detailsBtn.type = 'button';
-    detailsBtn.className = 'preview-tile-details-btn';
-    detailsBtn.textContent = 'Details';
-    detailsBtn.title = 'Open model details';
-    detailsBtn.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      openModelDetailsFromTile(item, model.filePath);
-    });
     actions.appendChild(openBtn);
-    actions.appendChild(detailsBtn);
     overlay.appendChild(nameRow);
     overlay.appendChild(actions);
 
@@ -21608,7 +21383,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
     item.addEventListener('click', (e) => {
       if (wasTileTapSuppressed(item, e)) return;
-      if (e.target.closest('.preview-tile-open-btn, .preview-tile-details-btn')) return;
+      if (e.target.closest('.preview-tile-open-btn')) return;
       if (e.ctrlKey || e.metaKey) {
         handleFileClick(e, model.filePath);
         return;
@@ -22104,6 +21879,12 @@ function isProgressiveModelListExtension(prevModels, nextModels) {
 const parentModelExpandedGroups = new Set();
 const zipArchiveExpandedGroups = new Set();
 const bundleExpandedGroups = new Set();
+let virtualGridGroupLayoutGen = 0;
+
+function invalidateVirtualGridLayoutCache(container = document.querySelector('.file-grid')) {
+  virtualGridGroupLayoutGen += 1;
+  if (container) container._virtualLayoutCache = null;
+}
 let groupThumbnailPreferencesLoaded = false;
 let groupThumbnailPreferencesLoading = null;
 const groupThumbnailPreferences = {};
@@ -22983,6 +22764,7 @@ async function applyBundleTagChange({ addTags = [], removeTags = [] } = {}) {
       const updated = byPath.get(normalizePathForComparison(existing?.filePath || existing?.id || ''));
       if (updated) gridContainer.currentModels[i] = { ...existing, ...updated };
     }
+    invalidateVirtualGridLayoutCache(gridContainer);
   }
   if (gridContainer?.renderVisibleItemsFn) gridContainer.renderVisibleItemsFn();
   await populateTagSelect('bundle-tag-select', 'bundle-tags');
@@ -23281,19 +23063,8 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
       });
       actions.appendChild(openBtn);
     }
-    const detailsBtn = document.createElement('button');
-    detailsBtn.type = 'button';
-    detailsBtn.className = 'preview-tile-details-btn';
-    detailsBtn.textContent = 'Details';
-    detailsBtn.title = 'Open details';
-    detailsBtn.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      expandGroupAndShowDetails();
-    });
-    actions.appendChild(detailsBtn);
     overlay.appendChild(nameRow);
-    overlay.appendChild(actions);
+    if (actions.childElementCount) overlay.appendChild(actions);
     item.appendChild(overlay);
   }
 
@@ -23307,6 +23078,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
 
   const refreshGroupGrid = () => {
     const container = document.querySelector('.file-grid');
+    invalidateVirtualGridLayoutCache(container);
     if (container?.renderVisibleItemsFn) {
       container.renderVisibleItemsFn();
     } else {
@@ -23359,7 +23131,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (event.target.closest('.parent-model-group-chevron')) return;
     if (event.target.closest('.model-engagement-bar')) return;
     if (event.target.closest('.tag-filter-link')) return;
-    if (event.target.closest('.preview-tile-open-btn, .preview-tile-details-btn')) return;
+    if (event.target.closest('.preview-tile-open-btn')) return;
     if (event.target.closest('.thumbnail-nav-left, .thumbnail-nav-right, .thumbnail-menu-button')) return;
     event.preventDefault();
     event.stopPropagation();
@@ -23431,9 +23203,13 @@ function renderVirtualGrid(models) {
   const viewStructureChanged = !!(previousVirtualView && previousVirtualView !== gridViewForThisRender);
 
   models = dedupeModelsForVirtualGrid(models || []);
+  const expandSizeBefore = parentModelExpandedGroups.size + zipArchiveExpandedGroups.size + bundleExpandedGroups.size;
   pruneBundleExpandedGroups(models);
   pruneParentModelExpandedGroups(models);
   pruneZipArchiveExpandedGroups(models);
+  if (parentModelExpandedGroups.size + zipArchiveExpandedGroups.size + bundleExpandedGroups.size !== expandSizeBefore) {
+    invalidateVirtualGridLayoutCache(container);
+  }
 
   if (currentGridView === 'preview') {
     container.classList.add('preview-wall');
@@ -23499,6 +23275,8 @@ function renderVirtualGrid(models) {
     console.log('renderVirtualGrid: Models changed! Clearing container and re-rendering.');
     console.log('Current model count:', currentModels.length, 'New model count:', models.length);
     container.innerHTML = ''; // clear existing content
+    container._virtualLayoutCache = null;
+    container._virtualLayoutItemsByKey = new Map();
     // Drop queued hydrate jobs whose cells were just destroyed (in-flight jobs keep pending).
     pruneDisconnectedRenderTasks();
     
@@ -23775,17 +23553,50 @@ function renderVirtualGrid(models) {
           }
         }
 
-        const currentDisplayRecords = buildParentModelDisplayRecords(currentModels);
         const layoutRowHeight =
           currentGridView === 'preview' ? effectiveItemHeight : itemHeight;
-        const layout = buildParentModelLayoutRows(
-          currentDisplayRecords,
-          currentColumns,
-          currentGridView,
-          layoutRowHeight,
-          paddingVertical,
-          currentVerticalGap
-        );
+        const cache = container._virtualLayoutCache;
+        let currentDisplayRecords;
+        let layout;
+        if (
+          cache &&
+          cache.modelsRef === currentModels &&
+          cache.modelsLen === currentModels.length &&
+          cache.expandGen === virtualGridGroupLayoutGen &&
+          cache.width === currentContainerWidth &&
+          cache.columns === currentColumns &&
+          cache.view === currentGridView &&
+          cache.rowHeight === layoutRowHeight &&
+          cache.verticalGap === currentVerticalGap
+        ) {
+          currentDisplayRecords = cache.displayRecords;
+          layout = cache.layout;
+        } else {
+          currentDisplayRecords = buildParentModelDisplayRecords(currentModels);
+          currentDisplayRecords.forEach((record, index) => {
+            record._displayIndex = index;
+          });
+          layout = buildParentModelLayoutRows(
+            currentDisplayRecords,
+            currentColumns,
+            currentGridView,
+            layoutRowHeight,
+            paddingVertical,
+            currentVerticalGap
+          );
+          container._virtualLayoutCache = {
+            modelsRef: currentModels,
+            modelsLen: currentModels.length,
+            expandGen: virtualGridGroupLayoutGen,
+            width: currentContainerWidth,
+            columns: currentColumns,
+            view: currentGridView,
+            rowHeight: layoutRowHeight,
+            verticalGap: currentVerticalGap,
+            displayRecords: currentDisplayRecords,
+            layout
+          };
+        }
         container.currentDisplayRecords = currentDisplayRecords;
         spacer.style.height = layout.totalHeight + 'px';
 
@@ -23806,11 +23617,16 @@ function renderVirtualGrid(models) {
           }
         });
 
+        const layoutItemsByKey = container._virtualLayoutItemsByKey || (container._virtualLayoutItemsByKey = new Map());
+
         // Remove items that are no longer visible
         const existingItems = Array.from(virtualContent.children);
         existingItems.forEach(item => {
           const layoutKey = item.dataset.layoutKey;
           if (!layoutKey || !visibleKeys.has(layoutKey)) {
+            if (layoutKey && layoutItemsByKey.get(layoutKey) === item) {
+              layoutItemsByKey.delete(layoutKey);
+            }
             item.remove();
           }
         });
@@ -23820,7 +23636,19 @@ function renderVirtualGrid(models) {
         refreshThumbnailQueuePriorities();
 
         const findExistingLayoutItem = (layoutKey) => {
-          return Array.from(virtualContent.children).find(item => item.dataset.layoutKey === layoutKey) || null;
+          const existing = layoutItemsByKey.get(layoutKey);
+          if (existing && existing.parentNode === virtualContent) return existing;
+          if (existing) layoutItemsByKey.delete(layoutKey);
+          return null;
+        };
+
+        const registerLayoutItem = (layoutKey, item) => {
+          const prevKey = item.dataset.layoutKey;
+          if (prevKey && prevKey !== layoutKey && layoutItemsByKey.get(prevKey) === item) {
+            layoutItemsByKey.delete(prevKey);
+          }
+          item.dataset.layoutKey = layoutKey;
+          layoutItemsByKey.set(layoutKey, item);
         };
 
         const positionModelItem = (item, row, col) => {
@@ -23894,10 +23722,15 @@ function renderVirtualGrid(models) {
               positionGroupItem(existingGroup, row);
               continue;
             }
-            if (existingGroup) existingGroup.remove();
+            if (existingGroup) {
+              if (layoutItemsByKey.get(row.key) === existingGroup) {
+                layoutItemsByKey.delete(row.key);
+              }
+              existingGroup.remove();
+            }
 
             const item = createParentModelGroupItem(row.record, currentGridView);
-            item.dataset.layoutKey = row.key;
+            registerLayoutItem(row.key, item);
             item.style.position = 'absolute';
             item.style.pointerEvents = 'auto';
             positionGroupItem(item, row);
@@ -23907,7 +23740,9 @@ function renderVirtualGrid(models) {
 
           for (let col = 0; col < row.records.length; col++) {
             const record = row.records[col];
-            const recordIndex = currentDisplayRecords.indexOf(record);
+            const recordIndex = Number.isInteger(record._displayIndex)
+              ? record._displayIndex
+              : currentDisplayRecords.indexOf(record);
             const existingItem = findExistingLayoutItem(record.key);
 
             if (record.type === 'group') {
@@ -23918,10 +23753,15 @@ function renderVirtualGrid(models) {
                 positionModelItem(existingItem, row, col);
                 continue;
               }
-              if (existingItem) existingItem.remove();
+              if (existingItem) {
+                if (layoutItemsByKey.get(record.key) === existingItem) {
+                  layoutItemsByKey.delete(record.key);
+                }
+                existingItem.remove();
+              }
 
               const item = createParentModelGroupItem(record, currentGridView);
-              item.dataset.layoutKey = record.key;
+              registerLayoutItem(record.key, item);
               item.style.position = 'absolute';
               positionModelItem(item, row, col);
               item.style.pointerEvents = 'auto';
@@ -23963,13 +23803,16 @@ function renderVirtualGrid(models) {
                 }
                 continue;
               }
+              if (layoutItemsByKey.get(record.key) === existingItem) {
+                layoutItemsByKey.delete(record.key);
+              }
               existingItem.remove();
             }
 
             // Create new item — prioritize thumbnails for cells in/near the viewport
             const item = createModelItem(model, currentGridView, thumbPriority);
             item.dataset.index = String(recordIndex);
-            item.dataset.layoutKey = record.key;
+            registerLayoutItem(record.key, item);
             applyParentGroupHighlightClasses(item, record, recordIndex);
             item.style.position = 'absolute';
             // Note: Header offset is handled by virtualContent top position for list view

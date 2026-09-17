@@ -4764,6 +4764,101 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
       
       const worker = new Worker(workerPath);
 
+      // Preserve existing hash when scan doesn't provide one (worker sends null to avoid slow scans).
+      // Otherwise every scan would overwrite hashes with '' and trigger full hash regeneration on each start.
+      const updateExisting = db.prepare(`
+        UPDATE models 
+        SET hash = COALESCE(NULLIF(?, ''), hash),
+            size = ?,
+            modifiedDate = ?,
+            bundleKey = ?,
+            bundleLabel = ?,
+            bundleKind = ?
+        WHERE filePath = ?
+      `);
+
+      const insertNew = db.prepare(`
+        INSERT INTO models (
+          filePath, fileName, hash, size, modifiedDate, dateAdded, isNew,
+          bundleKey, bundleLabel, bundleKind
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `);
+
+      const ingestState = {
+        files: [],
+        existingFilePaths: new Set(),
+        newFilesCount: 0
+      };
+      let ingestChain = Promise.resolve();
+      const enqueueIngest = (task) => {
+        ingestChain = ingestChain.then(task);
+        return ingestChain;
+      };
+
+      const fileModifiedIso = (file) => {
+        if (file.mtime instanceof Date) return file.mtime.toISOString();
+        if (typeof file.mtime === 'string' && file.mtime) return file.mtime;
+        return new Date().toISOString();
+      };
+
+      const ingestFileBatch = (batch) => enqueueIngest(() => {
+        if (!batch || batch.length === 0) return;
+
+        const unknown = [];
+        for (const file of batch) {
+          if (!ingestState.existingFilePaths.has(file.filePath)) {
+            unknown.push(file.filePath);
+          }
+        }
+        const existenceCheckBatchSize = 500;
+        for (let i = 0; i < unknown.length; i += existenceCheckBatchSize) {
+          const pathBatch = unknown.slice(i, i + existenceCheckBatchSize);
+          const placeholders = pathBatch.map(() => '?').join(',');
+          const existing = db.prepare(`SELECT filePath FROM models WHERE filePath IN (${placeholders})`).all(...pathBatch);
+          existing.forEach(row => ingestState.existingFilePaths.add(row.filePath));
+        }
+
+        db.transaction(() => {
+          for (const file of batch) {
+            const bundle = deriveBundleFromFilePath(file.filePath);
+            const modifiedDate = fileModifiedIso(file);
+            if (ingestState.existingFilePaths.has(file.filePath)) {
+              updateExisting.run(
+                file.hash || '',
+                file.size,
+                modifiedDate,
+                bundle.bundleKey || null,
+                bundle.bundleLabel || null,
+                bundle.bundleKind || null,
+                file.filePath
+              );
+            } else {
+              insertNew.run(
+                file.filePath,
+                file.fileName,
+                file.hash || '',
+                file.size,
+                modifiedDate,
+                new Date().toISOString(),
+                bundle.bundleKey || null,
+                bundle.bundleLabel || null,
+                bundle.bundleKind || null
+              );
+              ingestState.newFilesCount++;
+              ingestState.existingFilePaths.add(file.filePath);
+            }
+            ingestState.files.push(file);
+          }
+        })();
+
+        try {
+          event.sender.send('db-progress', {
+            total: ingestState.files.length,
+            processed: ingestState.files.length
+          });
+        } catch (_) { /* sender may be gone */ }
+      });
+
       // Set up worker message handling
       worker.on('message', async (message) => {
         if (message.type === 'progress') {
@@ -4771,93 +4866,19 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
           event.sender.send('scan-progress', {
             processed: message.processed
           });
+        } else if (message.type === 'batch') {
+          ingestFileBatch(message.files);
         } else if (message.type === 'done') {
-          const { files, totalFiles } = message.result;
-          
           try {
-            // Process files in larger batches for better performance
-            const batchSize = 100; // Increased batch size
-            // Preserve existing hash when scan doesn't provide one (worker sends null to avoid slow scans).
-            // Otherwise every scan would overwrite hashes with '' and trigger full hash regeneration on each start.
-            const updateExisting = db.prepare(`
-              UPDATE models 
-              SET hash = COALESCE(NULLIF(?, ''), hash),
-                  size = ?,
-                  modifiedDate = ?,
-                  bundleKey = ?,
-                  bundleLabel = ?,
-                  bundleKind = ?
-              WHERE filePath = ?
-            `);
-            
-            const insertNew = db.prepare(`
-              INSERT INTO models (
-                filePath, fileName, hash, size, modifiedDate, dateAdded, isNew,
-                bundleKey, bundleLabel, bundleKind
-              ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-            `);
-
-            // Track count of newly inserted files
-            let newFilesCount = 0;
-            
-            // OPTIMIZATION: Batch check existence of all files at once instead of N+1 queries
-            // This dramatically improves performance, especially in Docker environments
-            const allFilePaths = files.map(f => f.filePath);
-            const existingFilePaths = new Set();
-            
-            // Query all existing filePaths in batches to avoid SQLite parameter limits
-            const existenceCheckBatchSize = 500; // SQLite supports up to 999 parameters
-            for (let i = 0; i < allFilePaths.length; i += existenceCheckBatchSize) {
-              const pathBatch = allFilePaths.slice(i, i + existenceCheckBatchSize);
-              const placeholders = pathBatch.map(() => '?').join(',');
-              const existing = db.prepare(`SELECT filePath FROM models WHERE filePath IN (${placeholders})`).all(...pathBatch);
-              existing.forEach(row => existingFilePaths.add(row.filePath));
+            if (Array.isArray(message.result?.files) && message.result.files.length > 0) {
+              ingestFileBatch(message.result.files);
             }
-            
-            // Use a transaction for better performance
-            db.transaction(() => {
-              for (let i = 0; i < files.length; i += batchSize) {
-                const batch = files.slice(i, i + batchSize);
-                
-                for (const file of batch) {
-                  const bundle = deriveBundleFromFilePath(file.filePath);
-                  // Use Set lookup instead of database query - O(1) vs O(log n) database query
-                  if (existingFilePaths.has(file.filePath)) {
-                    updateExisting.run(
-                      file.hash || '',
-                      file.size,
-                      file.mtime.toISOString(),
-                      bundle.bundleKey || null,
-                      bundle.bundleLabel || null,
-                      bundle.bundleKind || null,
-                      file.filePath
-                    );
-                  } else {
-                    const dateAdded = new Date().toISOString();
-                    insertNew.run(
-                      file.filePath,
-                      file.fileName,
-                      file.hash || '',
-                      file.size,
-                      file.mtime.toISOString(),
-                      dateAdded,
-                      bundle.bundleKey || null,
-                      bundle.bundleLabel || null,
-                      bundle.bundleKind || null
-                    );
-                    newFilesCount++;
-                    // Add to set so we don't try to insert duplicates within the same transaction
-                    existingFilePaths.add(file.filePath);
-                  }
-                }
-                
-                // Send batch progress to renderer
-                event.sender.send('db-progress', {
-                  total: files.length,
-                  processed: Math.min(i + batchSize, files.length)
-                });
-              }
-            })();
+            await ingestChain;
+
+            const files = ingestState.files;
+            const totalFiles = message.result.totalFiles;
+            const newFilesCount = ingestState.newFilesCount;
+            const allFilePaths = files.map(f => f.filePath);
 
             worker.terminate();
 
@@ -4869,11 +4890,11 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
                 console.error('Path metadata from folder (STL Home):', pathMetaErr);
               }
             }
-            
+
             resolve({ files, totalFiles, newFilesCount });
 
             scheduleBackgroundHashGeneration('scan-directory');
-            
+
             // Send refresh-grid event to update the UI after scanning completes
             // Use setTimeout to ensure the promise resolves first and database is fully updated
             setTimeout(() => {
@@ -6381,12 +6402,6 @@ const saveSettingHandler = async (event, key, value) => {
     // Verify the save worked
     const verify = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
     console.log(`Verified setting '${key}' saved as:`, verify?.value);
-    
-    // Force a sync to disk to ensure the change is persisted for all settings
-    // This is especially important in server mode where multiple clients might be accessing the database
-    db.pragma('synchronous = FULL');
-    db.pragma('journal_mode = WAL');
-    db.prepare('PRAGMA wal_checkpoint(FULL)').run();
     
     // Verify the update
     if (key === 'CollectUsage') {
@@ -10637,7 +10652,7 @@ const parse3mfPreviewHandler = async (event, filePath, requestId) => {
   cancelAllPreview3mfWorkers();
 
   // Bump preview cache version when simplification/placement logic changes
-  const cacheKey = fileStat ? `v3|${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
+  const cacheKey = fileStat ? `v8|${filePath}|${fileStat.size}|${fileStat.mtimeMs}` : null;
   const cacheDir = getPreview3mfCacheDir();
   const cacheHash = cacheKey ? crypto.createHash('sha256').update(cacheKey).digest('hex') : null;
   const cachePath = cacheHash ? path.join(cacheDir, `${cacheHash}.json`) : null;
