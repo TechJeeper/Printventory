@@ -46,6 +46,22 @@ verify.spec.js
 printventory.db
 *.db-journal
 
+# Local runtime / test data (Windows lock files break docker build context)
+data/
+data-docker-ipc-test/
+CLEANUP/
+thumbs/
+backups/
+dist-linux-out/
+dist-temp/
+tests/smoke-user-data/
+tests/smoke-native-userdata/
+tests/mobile-ui-shots/
+tests/test-user-data/
+**/SingletonCookie
+**/SingletonLock
+**/SingletonSocket
+
 # Temporary files
 *.tmp
 *.log
