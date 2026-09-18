@@ -11,7 +11,7 @@ const MODEL_PATH =
   '/mnt/test_files/BOB_Knitted_Short_Wide_Bowl - Copy (2).3mf';
 
 test.describe('Docker 3MF preview typed arrays (#72)', () => {
-  test.setTimeout(180000);
+  test.setTimeout(300000);
 
   test('parse3MFPreview returns Array.isArray geometry buffers', async () => {
     const browser = await chromium.launch({
@@ -37,10 +37,12 @@ test.describe('Docker 3MF preview typed arrays (#72)', () => {
 
     const result = await page.evaluate(async (filePath) => {
       const requestId = `issue72_${Date.now()}`;
+      const started = performance.now();
       const json = await window.electron.parse3MFPreview(filePath, requestId);
-      if (!json) return { ok: false, error: 'null result' };
+      const elapsedMs = Math.round(performance.now() - started);
+      if (!json) return { ok: false, error: 'null result', elapsedMs };
       if (!json.geometries || !json.geometries.length) {
-        return { ok: false, error: 'no geometries', keys: Object.keys(json) };
+        return { ok: false, error: 'no geometries', keys: Object.keys(json), elapsedMs };
       }
 
       const geom = json.geometries[0];
@@ -64,7 +66,8 @@ test.describe('Docker 3MF preview typed arrays (#72)', () => {
         rebuiltLength: rebuilt ? rebuilt.length : 0,
         normalIsArray: !!(normal && Array.isArray(normal.array)),
         indexIsArray: !!(index && Array.isArray(index.array)),
-        indexLength: index && Array.isArray(index.array) ? index.array.length : 0
+        indexLength: index && Array.isArray(index.array) ? index.array.length : 0,
+        elapsedMs
       };
     }, MODEL_PATH);
 

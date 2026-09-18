@@ -151,6 +151,7 @@ const {
   THUMBNAIL_MAX_STORED_CHARS,
   THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS
 } = require('./thumbnail-compress');
+const { extractLysPreviewEntry } = require('./extract-lys-preview');
 
 // Additional file types for scan/library (alphabetical by label). id used in settings; extensions for scan/filter.
 const ADDITIONAL_FILE_TYPES_CATALOG = [
@@ -729,6 +730,9 @@ ${bridgeCode}
       if (filePath.endsWith('.webmanifest') || filePath.endsWith('manifest.json')) {
         res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
       }
+      if (filePath.endsWith('.wasm')) {
+        res.setHeader('Content-Type', 'application/wasm');
+      }
       if (filePath.endsWith(`${path.sep}sw.js`) || filePath.endsWith('/sw.js') || filePath.endsWith('sw.js')) {
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
         res.setHeader('Service-Worker-Allowed', '/');
@@ -989,7 +993,8 @@ ${bridgeCode}
         '.svg': 'image/svg+xml',
         '.ico': 'image/x-icon',
         '.bmp': 'image/bmp',
-        '.webp': 'image/webp'
+        '.webp': 'image/webp',
+        '.wasm': 'application/wasm'
       };
       if (mimeTypes[ext]) {
         res.setHeader('Content-Type', mimeTypes[ext]);
@@ -1466,7 +1471,8 @@ function startElectronUiServer() {
         '.svg': 'image/svg+xml',
         '.ico': 'image/x-icon',
         '.bmp': 'image/bmp',
-        '.webp': 'image/webp'
+        '.webp': 'image/webp',
+        '.wasm': 'application/wasm'
       };
       if (mimeTypes[ext]) {
         res.setHeader('Content-Type', mimeTypes[ext]);
@@ -3872,14 +3878,6 @@ async function createWindow() {
         {
           label: 'Theme',
           click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
-          label: 'HTTPS / SSL',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('open-https-settings');
-            }
-          }
         }
       ]
     },
@@ -3902,11 +3900,24 @@ async function createWindow() {
         }]),
         {
           label: 'MCP Server',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('open-mcp-server-settings');
+          submenu: [
+            {
+              label: 'Settings',
+              click: () => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send('open-mcp-server-settings');
+                }
+              }
+            },
+            {
+              label: 'HTTPS / SSL',
+              click: () => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send('open-https-settings');
+                }
+              }
             }
-          }
+          ]
         },
         { type: 'separator' },
         {
@@ -4156,14 +4167,6 @@ function createApplicationMenu() {
         {
           label: 'Theme',
           click: () => mainWindow.webContents.send('open-theme-settings')
-        },
-        {
-          label: 'HTTPS / SSL',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('open-https-settings');
-            }
-          }
         }
       ]
     },
@@ -4186,11 +4189,24 @@ function createApplicationMenu() {
         }]),
         {
           label: 'MCP Server',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('open-mcp-server-settings');
+          submenu: [
+            {
+              label: 'Settings',
+              click: () => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send('open-mcp-server-settings');
+                }
+              }
+            },
+            {
+              label: 'HTTPS / SSL',
+              click: () => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send('open-https-settings');
+                }
+              }
             }
-          }
+          ]
         },
         { type: 'separator' },
         {
@@ -8007,7 +8023,8 @@ function getPreviewableExtension(filePath) {
 
 function isPreviewableModelFile(filePath) {
   const ext = getPreviewableExtension(filePath);
-  return ext === '.stl' || ext === '.3mf';
+  return ext === '.stl' || ext === '.3mf' || ext === '.obj' || ext === '.ply'
+    || ext === '.step' || ext === '.stp' || ext === '.lys' || ext === '.igs' || ext === '.iges';
 }
 
 function sendPreviewBundleEvent(event, payload) {
@@ -10509,6 +10526,59 @@ ipcMain.handle('get3MFImages', async (event, filePath, options = {}) => {
     console.error('Error reading 3MF images:', error);
     console.error('Error details:', error.message);
     console.error('Error stack:', error.stack);
+    return [];
+  }
+});
+
+ipcMain.handle('getLYSImages', async (event, filePath, options = {}) => {
+  if (isUrlModel(filePath)) return [];
+  if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
+    return [];
+  }
+
+  const opts = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+  const compress = opts.compress !== false;
+
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+
+  if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+    return [];
+  }
+
+  if (pathInfo.isZipEntry) {
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    } catch (error) {
+      console.error('Error extracting zip entry for LYS preview:', error);
+      return [];
+    }
+  }
+
+  try {
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return [];
+    }
+
+    const data = await fs.promises.readFile(actualFilePath);
+    const entry = extractLysPreviewEntry(new Uint8Array(data));
+    if (!entry || !entry.bytes || !entry.bytes.length) {
+      return [];
+    }
+
+    const ext = path.extname(entry.name || '').toLowerCase().replace(/^\./, '') || 'png';
+    const mimeMap = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', webp: 'webp', bmp: 'bmp' };
+    const mimeType = mimeMap[ext] || 'png';
+    let dataUrl = `data:image/${mimeType};base64,${Buffer.from(entry.bytes).toString('base64')}`;
+    if (compress) {
+      try {
+        dataUrl = compressDataUrl(dataUrl) || dataUrl;
+      } catch (_) { /* keep original */ }
+    }
+    return [dataUrl];
+  } catch (error) {
+    console.error('Error reading LYS preview:', error);
     return [];
   }
 });

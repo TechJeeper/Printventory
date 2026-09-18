@@ -182,6 +182,9 @@ contextBridge.exposeInMainWorld('electron', {
   get3MFImages: (filePath, options) => {
     return ipcRenderer.invoke('get3MFImages', filePath, options);
   },
+  getLYSImages: (filePath, options) => {
+    return ipcRenderer.invoke('getLYSImages', filePath, options);
+  },
   get3MFSTL: (filePath) => {
     console.log('preload: get3MFSTL called with:', filePath);
     return ipcRenderer.invoke('get3MFSTL', filePath);

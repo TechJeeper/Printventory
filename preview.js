@@ -876,9 +876,13 @@ console.log('[Preview] preview.js script loaded');
     return pathForExt.split('.').pop().toLowerCase();
   }
 
+  function isPreviewableExtension(ext) {
+    return ext === 'stl' || ext === '3mf' || ext === 'obj' || ext === 'ply'
+      || ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'igs' || ext === 'iges';
+  }
+
   function isPreviewableModelPath(filePath) {
-    const ext = getPreviewExtension(filePath);
-    return ext === 'stl' || ext === '3mf';
+    return isPreviewableExtension(getPreviewExtension(filePath));
   }
 
   function applyPartTint(object, index, total) {
@@ -907,8 +911,39 @@ console.log('[Preview] preview.js script loaded');
     }
 
     const ext = getPreviewExtension(filePath);
-    if (ext !== 'stl' && ext !== '3mf') {
+    if (!isPreviewableExtension(ext)) {
       throw new Error(`Unsupported file type: ${ext}`);
+    }
+
+    if (ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'obj' || ext === 'ply' || ext === 'igs' || ext === 'iges') {
+      if (typeof window.loadModel !== 'function') {
+        throw new Error('3D loader is not available');
+      }
+      const loading = document.getElementById('preview-loading');
+      if (loading && loading.querySelector('p')) {
+        const cad = ext === 'lys'
+          ? 'Parsing LYS mesh...\nLarge supported scenes can take a moment.'
+          : (ext === 'igs' || ext === 'iges')
+            ? 'Tessellating IGES file...\nThis can take time for large CAD models.'
+            : (ext === 'step' || ext === 'stp')
+              ? 'Tessellating STEP file...\nThis can take time for large CAD models.'
+              : `Loading ${ext.toUpperCase()} mesh...`;
+        loading.querySelector('p').textContent = cad;
+      }
+      const object = await window.loadModel(filePath);
+      if (loadToken !== previewLoadToken) {
+        throw new Error('Preview cancelled');
+      }
+      if (!object) {
+        throw new Error(`Failed to parse ${ext.toUpperCase()} geometry`);
+      }
+      previewFrom3mf = false;
+      if (!hasColorData(object)) {
+        applyDefaultMetalMaterial(object);
+      } else {
+        ensureLitMaterials(object);
+      }
+      return object;
     }
 
     if (ext === 'stl') {
@@ -1020,8 +1055,8 @@ console.log('[Preview] preview.js script loaded');
     setSitOnFaceMode(false);
     console.log('Loading model type:', ext);
 
-    if (ext !== 'stl' && ext !== '3mf') {
-      throw new Error('Preview not available for this file type. Only STL and 3MF models can be previewed in 3D.');
+    if (!isPreviewableExtension(ext)) {
+      throw new Error('Preview not available for this file type. Only STL, 3MF, OBJ, PLY, STEP, IGES, and LYS models can be previewed in 3D.');
     }
 
     const object = await createPreviewObjectFromPath(filePath, loadToken);

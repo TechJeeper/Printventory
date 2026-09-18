@@ -1455,6 +1455,12 @@ function getModelColor() {
 // Extensions that are valid for library (scan/add). Used for isValidFile.
 const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.lys', '.lyt', '.obj', '.ply', '.step', '.stp', '.svg', '.x3d']);
 
+function isRenderable3dExtension(extension) {
+  const ext = (extension || '').toLowerCase().replace(/^\./, '');
+  return ext === 'stl' || ext === '3mf' || ext === 'obj' || ext === 'ply'
+    || ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'igs' || ext === 'iges';
+}
+
 // Map file extension (with or without dot) to label for typed placeholder
 const EXTENSION_TO_PLACEHOLDER_LABEL = {
   '3ds': '3DS', 'amf': 'AMF', 'blender': 'Blender', 'dae': 'DAE', 'dxf': 'DXF', 'dwg': 'DWG',
@@ -1521,7 +1527,7 @@ function isFailurePlaceholderThumbnail(thumb) {
   try {
     if (thumb === generateCorruptedPlaceholder()) return true;
     // Bulk-gen used to save typed STL/3MF/OBJ placeholders "to prevent future attempts"
-    for (const ext of ['stl', '3mf', 'obj']) {
+    for (const ext of ['stl', '3mf', 'obj', 'ply', 'step', 'stp', 'lys', 'lyt', 'igs', 'iges']) {
       if (thumb === generateTypedPlaceholder(ext)) return true;
     }
   } catch (_) { /* ignore */ }
@@ -1626,6 +1632,92 @@ async function saveThumbnailIfReal(filePath, thumbnail) {
   return true;
 }
 
+const stepParseJobHandlers = new Map();
+let sharedStepParseWorker = null;
+
+function coerceModelArrayBuffer(raw) {
+  if (!raw) return null;
+  if (raw instanceof ArrayBuffer) return raw.byteLength ? raw : null;
+  if (ArrayBuffer.isView(raw)) {
+    return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+  }
+  if (raw.buffer) {
+    return raw.buffer.slice(raw.byteOffset || 0, (raw.byteOffset || 0) + (raw.byteLength || raw.length || 0));
+  }
+  return null;
+}
+
+async function readModelArrayBuffer(pathToRead) {
+  if (typeof window.loadLibraryFileBuffer === 'function') {
+    try {
+      const buf = coerceModelArrayBuffer(await window.loadLibraryFileBuffer(pathToRead));
+      if (buf) return buf;
+    } catch (_) { /* try IPC */ }
+  }
+  if (window.electron && typeof window.electron.readModelFile === 'function') {
+    try {
+      return coerceModelArrayBuffer(await window.electron.readModelFile(pathToRead));
+    } catch (_) { /* ignore */ }
+  }
+  return null;
+}
+
+async function collectStepAssemblyBuffers(rootPath, rootBuffer) {
+  const list = window.StepAssembly && window.StepAssembly.listStepExternalFileNames;
+  const sibling = window.StepAssembly && window.StepAssembly.siblingStepPath;
+  if (typeof list !== 'function' || typeof sibling !== 'function' || !rootBuffer) return [];
+
+  const maxFiles = 24;
+  const visited = new Set();
+  const leaves = [];
+
+  async function walk(filePath, buffer) {
+    if (!buffer || leaves.length >= maxFiles) return;
+    const key = String(filePath).toLowerCase();
+    if (visited.has(key)) return;
+    visited.add(key);
+    const names = list(buffer);
+    if (!names.length) {
+      if (filePath !== rootPath) leaves.push(buffer);
+      return;
+    }
+    for (const name of names) {
+      if (leaves.length >= maxFiles) return;
+      const childPath = sibling(filePath, name);
+      if (!childPath) continue;
+      const childBuf = await readModelArrayBuffer(childPath);
+      if (!childBuf) continue;
+      await walk(childPath, childBuf);
+    }
+  }
+
+  await walk(rootPath, rootBuffer);
+  return leaves;
+}
+
+function getSharedStepParseWorker() {
+  if (sharedStepParseWorker) return sharedStepParseWorker;
+  const worker = new Worker('parse-worker.js');
+  worker.onmessage = function(e) {
+    const handler = stepParseJobHandlers.get(e.data && e.data.id);
+    if (handler) handler(e);
+  };
+  worker.onerror = function(error) {
+    console.error('Shared STEP parse worker failed:', error.message);
+    const pending = [...stepParseJobHandlers.entries()];
+    stepParseJobHandlers.clear();
+    try { worker.terminate(); } catch (_) { /* ignore */ }
+    sharedStepParseWorker = null;
+    pending.forEach(([id, handler]) => {
+      try {
+        handler({ data: { id, success: false, error: error.message || 'STEP worker failed' } });
+      } catch (_) { /* ignore */ }
+    });
+  };
+  sharedStepParseWorker = worker;
+  return worker;
+}
+
 async function loadModel(filePath, options = {}) {
   if (filePath && filePath.startsWith('url::')) {
     return null;
@@ -1661,8 +1753,8 @@ async function loadModel(filePath, options = {}) {
       return null;
     }
     
-    // Only STL, 3MF, and OBJ are loadable for 3D preview; other types use typed placeholder
-    if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj') {
+    // Only mesh-loadable types are rendered; other types use typed placeholders
+    if (!isRenderable3dExtension(fileExtension)) {
       return null;
     }
     
@@ -1789,7 +1881,7 @@ async function loadModel(filePath, options = {}) {
     }
     
     // If no embedded image found, proceed with 3D loading using Web Worker
-    if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj') {
+    if (!isRenderable3dExtension(fileExtension)) {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
 
@@ -1832,94 +1924,141 @@ async function loadModel(filePath, options = {}) {
       modelArrayBuffer = copy;
     }
 
-    return new Promise((resolve, reject) => {
-      const worker = new Worker('parse-worker.js');
-      const jobId = Date.now().toString() + Math.random().toString();
+    let stepExtraBuffers = [];
+    if ((fileExtension === 'step' || fileExtension === 'stp') && modelArrayBuffer) {
+      try {
+        stepExtraBuffers = await collectStepAssemblyBuffers(filePath, modelArrayBuffer);
+        if (stepExtraBuffers.length) {
+          console.log(`[DEBUG] loadModel: STEP assembly resolved ${stepExtraBuffers.length} part file(s) for ${filePath}`);
+        }
+      } catch (assemblyError) {
+        console.warn('loadModel: STEP assembly resolve failed:', assemblyError);
+      }
+    }
 
-      worker.onmessage = function(e) {
+    return new Promise((resolve, reject) => {
+      const reuseWorker = fileExtension === 'step' || fileExtension === 'stp'
+        || fileExtension === 'igs' || fileExtension === 'iges';
+      const worker = reuseWorker ? getSharedStepParseWorker() : new Worker('parse-worker.js');
+      const jobId = Date.now().toString() + Math.random().toString();
+      let settled = false;
+
+      const cleanupJob = () => {
+        if (reuseWorker) stepParseJobHandlers.delete(jobId);
+      };
+
+      const finish = (fn) => {
+        if (settled) return;
+        settled = true;
+        cleanupJob();
+        if (!reuseWorker) {
+          try { worker.terminate(); } catch (_) { /* ignore */ }
+        }
+        fn();
+      };
+
+      const handleMessage = function(e) {
         const data = e.data;
         if (data.id !== jobId) return;
 
-        worker.terminate();
-
-        if (!data.success) {
-          const errMsg = data.error || 'Unknown worker parse error';
-          console.error('Worker error:', errMsg, filePath);
-          if (tempFilePath) {
-            window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
-          }
-          reject(new Error(errMsg));
-          return;
-        }
-
-        try {
-          const group = new THREE.Group();
-          const material = new THREE.MeshStandardMaterial({
-            color: getModelColor(),
-            metalness: 0.3,
-            roughness: 0.4
-          });
-
-          data.geometries.forEach(geoData => {
-            if (!geoData.position || geoData.position.length < 9) return;
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
-            if (geoData.normal && geoData.normal.length >= geoData.position.length) {
-              geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
-            } else {
-              geometry.computeVertexNormals();
-            }
-            if (geoData.uv && geoData.uv.length >= (geoData.position.length / 3) * 2) {
-              geometry.setAttribute('uv', new THREE.BufferAttribute(geoData.uv, 2));
-            }
-            if (geoData.index) geometry.setIndex(new THREE.BufferAttribute(geoData.index, 1));
-
-            const mesh = new THREE.Mesh(geometry, material);
-            if (geoData.matrix) {
-              mesh.applyMatrix4(new THREE.Matrix4().fromArray(geoData.matrix));
-            }
-            group.add(mesh);
-          });
-
-          if (group.children.length === 0) {
+        finish(() => {
+          if (!data.success) {
+            const errMsg = data.error || 'Unknown worker parse error';
+            console.error('Worker error:', errMsg, filePath);
             if (tempFilePath) {
               window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
             }
-            reject(new Error('Model contains no drawable mesh geometry'));
+            reject(new Error(errMsg));
             return;
           }
 
-          if (fileExtension === 'stl' || fileExtension === '3mf' || fileExtension === 'obj') {
-            group.rotation.x = -Math.PI / 2;
-          }
+          try {
+            const group = new THREE.Group();
+            const material = new THREE.MeshStandardMaterial({
+              color: getModelColor(),
+              metalness: 0.3,
+              roughness: 0.4
+            });
 
-          resolve(group);
-        } catch (err) {
-          console.error('loadModel: Error processing geometries from worker:', err);
-          if (tempFilePath) {
-            window.electron.deleteTempFile?.(tempFilePath).catch(err2 => console.error(err2));
+            data.geometries.forEach(geoData => {
+              if (!geoData.position || geoData.position.length < 9) return;
+              const geometry = new THREE.BufferGeometry();
+              geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
+              if (geoData.normal && geoData.normal.length >= geoData.position.length) {
+                geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
+              } else {
+                geometry.computeVertexNormals();
+              }
+              if (geoData.uv && geoData.uv.length >= (geoData.position.length / 3) * 2) {
+                geometry.setAttribute('uv', new THREE.BufferAttribute(geoData.uv, 2));
+              }
+              if (geoData.index) geometry.setIndex(new THREE.BufferAttribute(geoData.index, 1));
+
+              const meshMaterial = (geoData.color && geoData.color.length >= 3)
+                ? new THREE.MeshStandardMaterial({
+                    color: new THREE.Color(geoData.color[0], geoData.color[1], geoData.color[2]),
+                    metalness: 0.3,
+                    roughness: 0.4
+                  })
+                : material;
+              const mesh = new THREE.Mesh(geometry, meshMaterial);
+              if (geoData.matrix) {
+                mesh.applyMatrix4(new THREE.Matrix4().fromArray(geoData.matrix));
+              }
+              group.add(mesh);
+            });
+
+            if (group.children.length === 0) {
+              if (tempFilePath) {
+                window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
+              }
+              reject(new Error('Model contains no drawable mesh geometry'));
+              return;
+            }
+
+            if (isRenderable3dExtension(fileExtension)) {
+              group.rotation.x = -Math.PI / 2;
+            }
+
+            resolve(group);
+          } catch (err) {
+            console.error('loadModel: Error processing geometries from worker:', err);
+            if (tempFilePath) {
+              window.electron.deleteTempFile?.(tempFilePath).catch(err2 => console.error(err2));
+            }
+            reject(err);
           }
-          reject(err);
-        }
+        });
       };
 
-      worker.onerror = function(error) {
-        console.error('Worker failed:', error.message, filePath);
-        worker.terminate();
-        if (tempFilePath) {
-          window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
-        }
-        reject(error);
-      };
+      if (reuseWorker) {
+        stepParseJobHandlers.set(jobId, handleMessage);
+      } else {
+        worker.onmessage = handleMessage;
+        worker.onerror = function(error) {
+          console.error('Worker failed:', error.message, filePath);
+          finish(() => {
+            if (tempFilePath) {
+              window.electron.deleteTempFile?.(tempFilePath).catch(err => console.error(err));
+            }
+            reject(error);
+          });
+        };
+      }
 
       const payload = {
         id: jobId,
         fileExtension,
         url: encodedFilePath,
-        arrayBuffer: modelArrayBuffer || undefined
+        arrayBuffer: modelArrayBuffer || undefined,
+        extraBuffers: stepExtraBuffers.length ? stepExtraBuffers : undefined
       };
-      const transfer = modelArrayBuffer && modelArrayBuffer instanceof ArrayBuffer ? [modelArrayBuffer] : undefined;
-      if (transfer) {
+      const transfer = [];
+      if (modelArrayBuffer && modelArrayBuffer instanceof ArrayBuffer) transfer.push(modelArrayBuffer);
+      stepExtraBuffers.forEach((buf) => {
+        if (buf instanceof ArrayBuffer) transfer.push(buf);
+      });
+      if (transfer.length) {
         worker.postMessage(payload, transfer);
       } else {
         worker.postMessage(payload);
@@ -5115,6 +5254,36 @@ function createMenuDropdown(label, items) {
       const separator = document.createElement('div');
       separator.style.cssText = 'height: 1px; background-color: #444; margin: 4px 0;';
       dropdown.appendChild(separator);
+    } else if (item.submenu && item.submenu.length) {
+      const menuItem = document.createElement('div');
+      menuItem.style.cssText = 'position: relative; padding: 8px 12px; color: #e0e0e0; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 16px;';
+      menuItem.innerHTML = `<span>${item.label}</span><span aria-hidden="true">›</span>`;
+      const submenu = document.createElement('div');
+      submenu.style.cssText = 'display: none; position: absolute; top: 0; left: 100%; background-color: #2c2c2c; border: 1px solid #444; border-radius: 4px; min-width: 160px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+      item.submenu.forEach((subItem) => {
+        const subEl = document.createElement('div');
+        subEl.textContent = subItem.label;
+        subEl.style.cssText = 'padding: 8px 12px; color: #e0e0e0; cursor: pointer; font-size: 13px;';
+        subEl.onmouseover = () => subEl.style.backgroundColor = '#3a3a3a';
+        subEl.onmouseout = () => subEl.style.backgroundColor = 'transparent';
+        subEl.onclick = (e) => {
+          e.stopPropagation();
+          if (subItem.action) subItem.action();
+          dropdown.style.display = 'none';
+          submenu.style.display = 'none';
+        };
+        submenu.appendChild(subEl);
+      });
+      menuItem.appendChild(submenu);
+      menuItem.onmouseover = () => {
+        menuItem.style.backgroundColor = '#3a3a3a';
+        submenu.style.display = 'block';
+      };
+      menuItem.onmouseout = () => {
+        menuItem.style.backgroundColor = 'transparent';
+        submenu.style.display = 'none';
+      };
+      dropdown.appendChild(menuItem);
     } else {
       const menuItem = document.createElement('div');
       menuItem.textContent = item.label;
@@ -5983,13 +6152,25 @@ async function createServerMenuBar() {
         window.electron.send('open-browser-extension-settings');
       }
     },
-    { label: 'MCP Server', action: async () => {
-      if (typeof window.openMcpServerSettings === 'function') {
-        await window.openMcpServerSettings();
-      } else {
-        window.electron.send('open-mcp-server-settings');
-      }
-    }},
+    {
+      label: 'MCP Server',
+      submenu: [
+        { label: 'Settings', action: async () => {
+          if (typeof window.openMcpServerSettings === 'function') {
+            await window.openMcpServerSettings();
+          } else {
+            window.electron.send('open-mcp-server-settings');
+          }
+        }},
+        { label: 'HTTPS / SSL', action: async () => {
+          if (typeof window.openHttpsSettings === 'function') {
+            await window.openHttpsSettings();
+          } else {
+            window.electron.send('open-https-settings');
+          }
+        }}
+      ]
+    },
     { label: '---', action: null },
     { label: 'Filament Management', action: () => {
       if (typeof window.openFilamentManager === 'function') {
@@ -6103,13 +6284,6 @@ async function createServerMenuBar() {
     }},
     { label: 'Theme', action: () => {
       window.electron.send('open-theme-settings');
-    }},
-    { label: 'HTTPS / SSL', action: async () => {
-      if (typeof window.openHttpsSettings === 'function') {
-        await window.openHttpsSettings();
-      } else {
-        window.electron.send('open-https-settings');
-      }
     }}
   ];
   const settingsMenu = createMenuDropdown('Settings', settingsMenuItems);
@@ -6208,6 +6382,23 @@ async function extract3MFThumbnail(filePath) {
   } catch (error) {
     console.error('extract3MFThumbnail error:', error);
     return null; // Or return null to indicate failure
+  }
+}
+
+async function extractLYSThumbnail(filePath) {
+  try {
+    if (typeof window.electron.getLYSImages !== 'function') return null;
+    console.log(`[DEBUG] extractLYSThumbnail: Extracting preview from ${filePath}`);
+    const images = await window.electron.getLYSImages(filePath);
+    if (images && images.length > 0) {
+      console.log(`[DEBUG] extractLYSThumbnail: Found ${images.length} image(s) in LYS file`);
+      return images;
+    }
+    console.log(`[DEBUG] extractLYSThumbnail: No preview found in LYS file`);
+    return null;
+  } catch (error) {
+    console.error('extractLYSThumbnail error:', error);
+    return null;
   }
 }
 
@@ -11681,7 +11872,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // For 3MF files, try to get primary thumbnail from database if not found in model.thumbnail
         // Load asynchronously to avoid blocking — never getAllThumbnails for a single display slot
         (async () => {
-          if (!thumbnailSrc && model.filePath && model.filePath.toLowerCase().endsWith('.3mf')) {
+          if (!thumbnailSrc && model.filePath && /\.(3mf|lys)$/i.test(model.filePath)) {
             try {
               const primary = await fetchPrimaryThumbnailForGrid(model.filePath);
               if (primary) {
@@ -13056,7 +13247,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         try {
           // 0. Non-previewable types: use typed placeholder (file type label)
-          if (fileExt !== 'stl' && fileExt !== '3mf' && fileExt !== 'obj' && fileExt !== 'svg') {
+          if (!isRenderable3dExtension(fileExt) && fileExt !== 'svg' && fileExt !== 'lys') {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             if (!skipHash && (!model.hash || model.hash === '')) {
@@ -13084,6 +13275,28 @@ document.addEventListener('DOMContentLoaded', async () => {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
             return;
+          }
+
+          // 0c. LYS: pull embedded preview.png; otherwise render the mesh
+          if (fileExt === 'lys') {
+            try {
+              const embeddedImages = await extractLYSThumbnail(model.filePath);
+              if (embeddedImages && embeddedImages.length > 0) {
+                const validImages = embeddedImages.filter(
+                  (im) => typeof im === 'string' && im.startsWith('data:image')
+                );
+                if (validImages.length > 0) {
+                  thumbnail = validImages[0];
+                  await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  if (!skipHash && (!model.hash || model.hash === '')) {
+                    try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
+                  }
+                  return;
+                }
+              }
+            } catch (embeddedError) {
+              console.error(`Error extracting embedded image from LYS: ${model.filePath}`, embeddedError);
+            }
           }
           
           // 1. Try to get embedded images for 3MF (all packed into DB for Manage Thumbnails)
@@ -14202,11 +14415,13 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
               const fileExtension = file.filePath.split('.').pop().toLowerCase();
               let thumbnail = null;
               
-              if (fileExtension === '3mf') {
+              if (fileExtension === '3mf' || fileExtension === 'lys') {
                 try {
-                  const images = await window.electron.get3MFImages(file.filePath);
+                  const images = fileExtension === 'lys'
+                    ? await window.electron.getLYSImages(file.filePath)
+                    : await window.electron.get3MFImages(file.filePath);
                   if (images && images.length > 0) {
-                    console.log(`[DEBUG] Found ${images.length} embedded image(s) in 3MF: ${file.filePath}`);
+                    console.log(`[DEBUG] Found ${images.length} embedded image(s) in ${fileExtension.toUpperCase()}: ${file.filePath}`);
                     // Add all images to model's thumbnails at once using batch function
                     const addResult = await window.electron.addMultipleThumbnails(file.filePath, images);
                     // Use first image as thumbnail for display
@@ -14790,12 +15005,14 @@ async function renderFile(file, container, skipThumbnail = false) {
 
   if (!file.thumbnail &&!skipThumbnail) {
     const fileExtension = file.filePath.split('.').pop().toLowerCase();
-    if (fileExtension === '3mf') {
+    if (fileExtension === '3mf' || fileExtension === 'lys') {
       try {
-        const images = await window.electron.get3MFImages(file.filePath);
+        const images = fileExtension === 'lys'
+          ? await window.electron.getLYSImages(file.filePath)
+          : await window.electron.get3MFImages(file.filePath);
         if (images && images.length > 0) {
           const firstImage = images[0];
-          console.log(`[DEBUG] renderFile: Using ${images.length} embedded image(s) from 3MF: ${file.filePath}`);
+          console.log(`[DEBUG] renderFile: Using ${images.length} embedded image(s) from ${fileExtension.toUpperCase()}: ${file.filePath}`);
           const img = document.createElement('img');
           img.src = firstImage;
           img.className = 'model-thumbnail';
@@ -15056,14 +15273,16 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     fileExtension = filePath.split('.').pop().toLowerCase();
   }
   
-  if (fileExtension === '3mf') {
+  if (fileExtension === '3mf' || fileExtension === 'lys') {
     try {
       // Scroll hydrate only needs a few top-scoring plate/cover images.
       // Fetching every embedded PNG over the WebSocket bridge OOMs Docker on large libraries.
-      const images = await window.electron.get3MFImages(filePath, {
-        maxImages: 3,
-        quiet: true
-      });
+      const images = fileExtension === 'lys'
+        ? await window.electron.getLYSImages(filePath, { quiet: true })
+        : await window.electron.get3MFImages(filePath, {
+            maxImages: 3,
+            quiet: true
+          });
       // Cell scrolled away while we extracted — abandon (will re-queue if it returns).
       // Scan/batch jobs use a detached dummy container on purpose (retainDetached).
       if (container && !container.isConnected && !retainDetached) {
@@ -15164,7 +15383,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
   }
 
   // Non-previewable types: show typed placeholder (file type label on image)
-  if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj' && fileExtension !== 'svg') {
+  if (!isRenderable3dExtension(fileExtension) && fileExtension !== 'svg') {
     const dataUrl = generateTypedPlaceholder(fileExtension);
     const img = document.createElement('img');
     img.src = dataUrl;
@@ -18017,7 +18236,32 @@ async function generateThumbnail(file) {
       throw new Error("generateThumbnail: filePath is undefined");
     }
 
-    // 1. Try to get embedded thumbnail for 3MF
+    // 1. Try to get embedded thumbnail for 3MF / LYS
+    const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
+    const thumbExt = pathForExt.split('.').pop().toLowerCase();
+    if (thumbExt === 'lys') {
+        console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded preview for ${filePath}`);
+        try {
+            const images = await extractLYSThumbnail(filePath);
+            if (images && images.length > 0) {
+                const validImages = images.filter(
+                  (im) => typeof im === 'string' && im.startsWith('data:image')
+                );
+                if (validImages.length > 0) {
+                    await window.electron.addMultipleThumbnails(filePath, validImages);
+                    try {
+                      await window.electron.calculateFileHash(filePath);
+                    } catch (hashError) {
+                      console.error(`Error calculating hash for ${filePath}:`, hashError);
+                    }
+                    return validImages[0];
+                }
+            }
+        } catch (e) {
+            console.error('Error extracting LYS thumbnail:', e);
+        }
+    }
+
     if (filePath.toLowerCase().endsWith('.3mf')) {
         console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded thumbnail for ${filePath}`);
         try {
@@ -20415,7 +20659,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     fetchPrimaryThumbnailForGrid(model.filePath).then(async (thumb) => {
       if (!img.isConnected) return;
 
-      if (thumb) {
+      if (thumb && !isFailurePlaceholderThumbnail(thumb)) {
         img.src = thumb;
         model.thumbnail = thumb;
         model.hasThumbnail = true;

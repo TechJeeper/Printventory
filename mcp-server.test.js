@@ -30,7 +30,7 @@ function test(name, fn) {
 
 function mockCtx(overrides) {
   return Object.assign({
-    getVersion: () => '2.2.7',
+    getVersion: () => '2.2.8',
     searchModels: async (filters) => ({ models: [], filters }),
     getModel: async (args) => ({ id: args.id || 1, filePath: args.filePath || '/m.stl' }),
     updateModel: async (args) => ({ ok: true, id: args.id }),
@@ -123,7 +123,7 @@ async function runAsync() {
     }, mockCtx());
     assert.strictEqual(res.result.protocolVersion, MCP_PROTOCOL_VERSION);
     assert.strictEqual(res.result.serverInfo.name, 'printventory');
-    assert.strictEqual(res.result.serverInfo.version, '2.2.7');
+    assert.strictEqual(res.result.serverInfo.version, '2.2.8');
     assert.ok(res.result.capabilities.tools);
   });
 

@@ -20,6 +20,7 @@
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
   <script src="vendor/OBJLoader.js"></script>
+  <script src="vendor/PLYLoader.js"></script>
   <script src="vendor/OrbitControls.js"></script>
   <script src="vendor/fflate.min.js"></script>
   <!-- Local vendor copies — CDN scripts blocked first paint / ready-to-show on cold install -->
@@ -1023,7 +1024,7 @@
       <form method="dialog">
         <h3>MCP Server</h3>
         <p class="warning-text">Experimental feature. MCP Server is unfinished and may change, break, or expose library data to any client that can reach the endpoint. By enabling or using it, you assume all risk.</p>
-        <p class="setting-description">Connect a local AI agent (Cursor, Claude Desktop, VS Code, and similar) to search your library, read model details, and write thumbnails while Printventory is running. The URL uses <code>https://</code> when TLS is enabled under Settings → HTTPS / SSL.</p>
+        <p class="setting-description">Connect a local AI agent (Cursor, Claude Desktop, VS Code, and similar) to search your library, read model details, and write thumbnails while Printventory is running. The URL uses <code>https://</code> when TLS is enabled under Tools → MCP Server → HTTPS / SSL.</p>
         <div class="settings-group">
           <div id="mcp-server-desktop-controls">
             <div class="form-group checkbox-container">
@@ -1780,7 +1781,7 @@
                   <li>Server Mode requires <strong>UNC (Universal Naming Convention) paths</strong> for all file operations</li>
                   <li>UNC paths use the format: <code>\\\\server\\share\\path\\to\\file</code></li>
                   <li>Local drive paths (C:\, D:\, etc.) will <strong>not work</strong> in Server Mode</li>
-                  <li>The server listens on all network interfaces (0.0.0.0). Default port is 5000; change it under Settings → HTTPS / SSL</li>
+                  <li>The server listens on all network interfaces (0.0.0.0). Default port is 5000; change it under Tools → MCP Server → HTTPS / SSL</li>
                 </ul>
               </div>
             </div>
@@ -1792,7 +1793,7 @@
                 <p><strong>http://&lt;your-computer-ip&gt;:5000</strong></p>
                 <p>For example, if your computer's IP address is 192.168.1.100:</p>
                 <p><strong>http://192.168.1.100:5000</strong></p>
-                <p>To serve HTTPS, open <strong>Settings → HTTPS / SSL</strong>. You can point at your own PEM files, generate a self-signed certificate for LAN use, or request a Let's Encrypt certificate for a public domain (requires inbound port 80). Set the listen port there if 5000 is already in use (for example Synology DSM). After TLS is on, use <strong>https://&lt;host&gt;:&lt;port&gt;</strong>.</p>
+                <p>To serve HTTPS, open <strong>Tools → MCP Server → HTTPS / SSL</strong>. You can point at your own PEM files, generate a self-signed certificate for LAN use, or request a Let's Encrypt certificate for a public domain (requires inbound port 80). Set the listen port there if 5000 is already in use (for example Synology DSM). After TLS is on, use <strong>https://&lt;host&gt;:&lt;port&gt;</strong>.</p>
               </div>
             </div>
 
@@ -2204,6 +2205,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="search.js"></script>
   <script src="sidebar-layout.js"></script>
   <script src="folder-tree.js"></script>
+  <script src="step-assembly.js"></script>
   <script src="renderer.js"></script>
   <script src="filament.js"></script>
   <script src="print-history.js"></script>

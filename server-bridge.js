@@ -415,12 +415,16 @@
       });
     }
 
-    // Heavy file IPC needs longer timeouts in Docker (UNC/CIFS + base64 over WS).
-    // Default 30s caused mass read-model-file timeouts → "corrupted"/STL placeholders.
+    // Heavy file IPC needs longer timeouts in Docker (UNC/CIFS + parse + JSON over WS).
+    // Default 30s caused mass read-model-file timeouts → "corrupted"/STL placeholders,
+    // and parse-3mf-preview timeouts on ~25MB multi-color 3MFs.
     var heavyIpcChannels = {
       'read-model-file': 180000,
       'extract-model-from-zip': 180000,
+      'parse-3mf-preview': 300000,
+      'get3MFSTL': 180000,
       'get3MFImages': 120000,
+      'getLYSImages': 120000,
       'get-file-stats': 120000,
       'calculate-file-hash': 300000,
       'generateMissingHashes': 600000,
@@ -554,6 +558,7 @@
     'getModelCountByFileTypeIds': 'get-model-count-by-file-type-ids',
     'removeModelsByFileTypeIds': 'remove-models-by-file-type-ids',
     'get3MFImages': 'get3MFImages',
+    'getLYSImages': 'getLYSImages',
     'get3MFSTL': 'get3MFSTL',
     'extractModelFromZip': 'extract-model-from-zip',
     'extractZipArchive': 'extract-zip-archive',

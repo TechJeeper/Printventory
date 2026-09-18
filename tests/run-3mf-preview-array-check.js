@@ -9,7 +9,7 @@ const MODEL_PATH =
   process.env.PRINTVENTORY_3MF_PATH ||
   '/mnt/test_files/BOB_Knitted_Short_Wide_Bowl - Copy (2).3mf';
 
-function invoke(ws, channel, args, timeoutMs = 120000) {
+function invoke(ws, channel, args, timeoutMs = 300000) {
   return new Promise((resolve, reject) => {
     const id = `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const timer = setTimeout(() => {
