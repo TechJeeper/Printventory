@@ -108,13 +108,14 @@ COPY server-bridge.js scan-worker.js parse-worker.js ./
 COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
 COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js thumbnail-compress.js filament.js print-events.js print-history.js spoolman.js ./
 COPY folder-tree-lib.js folder-tree.js sidebar-layout.js mcp-server.js server-tls.js extension-inbox.js ./
+COPY extract-lys-preview.js parse-lys-geometry.js step-assembly.js ./
 COPY vendor/ ./vendor/
 COPY favicon.ico ./
 COPY *.png *.jpg *.bmp ./
 COPY guide/ ./guide/
 
 # Fail the build if required app modules were omitted from COPY above
-RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js server-tls.js extension-inbox.js sidebar-layout.js folder-tree.js manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css; do \
+RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js server-tls.js extension-inbox.js sidebar-layout.js folder-tree.js extract-lys-preview.js parse-lys-geometry.js step-assembly.js manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css; do \
       test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
     done
 
