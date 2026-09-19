@@ -152,6 +152,7 @@ const {
   THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS
 } = require('./thumbnail-compress');
 const { extractLysPreviewEntry } = require('./extract-lys-preview');
+const { extractF3dPreviewEntry } = require('./extract-f3d-preview');
 
 // Additional file types for scan/library (alphabetical by label). id used in settings; extensions for scan/filter.
 const ADDITIONAL_FILE_TYPES_CATALOG = [
@@ -6306,9 +6307,11 @@ async function syncSpoolmanFilamentsHandler(event, url, token) {
 ipcMain.handle('sync-spoolman-filaments', syncSpoolmanFilamentsHandler);
 
 // Add error handling to the getSetting handler
-ipcMain.handle('get-additional-file-types-catalog', async () => {
+async function getAdditionalFileTypesCatalogHandler() {
   return ADDITIONAL_FILE_TYPES_CATALOG;
-});
+}
+ipcMain.handle('get-additional-file-types-catalog', getAdditionalFileTypesCatalogHandler);
+ipcHandlerRegistry.set('get-additional-file-types-catalog', getAdditionalFileTypesCatalogHandler);
 
 /** Get extensions (e.g. ['.obj']) for catalog ids (e.g. ['obj']). Used to find/remove models by file type. */
 function getExtensionsForCatalogIds(catalogIds) {
@@ -8024,7 +8027,8 @@ function getPreviewableExtension(filePath) {
 function isPreviewableModelFile(filePath) {
   const ext = getPreviewableExtension(filePath);
   return ext === '.stl' || ext === '.3mf' || ext === '.obj' || ext === '.ply'
-    || ext === '.step' || ext === '.stp' || ext === '.lys' || ext === '.igs' || ext === '.iges';
+    || ext === '.step' || ext === '.stp' || ext === '.lys' || ext === '.igs' || ext === '.iges'
+    || ext === '.f3d';
 }
 
 function sendPreviewBundleEvent(event, payload) {
@@ -10580,6 +10584,71 @@ ipcMain.handle('getLYSImages', async (event, filePath, options = {}) => {
   } catch (error) {
     console.error('Error reading LYS preview:', error);
     return [];
+  }
+});
+
+ipcMain.handle('getF3DImages', async (event, filePath, options = {}) => {
+  if (isUrlModel(filePath)) return [];
+  if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
+    return [];
+  }
+
+  const opts = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+  const compress = opts.compress !== false;
+
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+
+  if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+    return [];
+  }
+
+  if (pathInfo.isZipEntry) {
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    } catch (error) {
+      console.error('Error extracting zip entry for F3D preview:', error);
+      return [];
+    }
+  }
+
+  let fh;
+  try {
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return [];
+    }
+
+    fh = await fs.promises.open(actualFilePath, 'r');
+    const { size } = await fh.stat();
+    const handle = fh;
+    const entry = await extractF3dPreviewEntry({
+      size,
+      read: async (offset, length) => {
+        const buf = Buffer.alloc(Math.max(0, Math.min(length, size - offset)));
+        const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+        return new Uint8Array(buf.subarray(0, bytesRead));
+      }
+    });
+    if (!entry || !entry.bytes || !entry.bytes.length) {
+      return [];
+    }
+
+    const ext = path.extname(entry.name || '').toLowerCase().replace(/^\./, '') || 'png';
+    const mimeMap = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', webp: 'webp', bmp: 'bmp' };
+    const mimeType = mimeMap[ext] || 'png';
+    let dataUrl = `data:image/${mimeType};base64,${Buffer.from(entry.bytes).toString('base64')}`;
+    if (compress) {
+      try {
+        dataUrl = compressDataUrl(dataUrl) || dataUrl;
+      } catch (_) { /* keep original */ }
+    }
+    return [dataUrl];
+  } catch (error) {
+    console.error('Error reading F3D preview:', error);
+    return [];
+  } finally {
+    await fh?.close();
   }
 });
 

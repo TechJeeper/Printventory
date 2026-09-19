@@ -315,6 +315,37 @@ if (window._electronPendingEvents && window._electronPendingEvents['open-https-s
 }
 document.addEventListener('DOMContentLoaded', bindHttpsSettingsDialog);
 
+const FILE_TYPE_CATALOG_FALLBACK = [
+  { id: '3ds', label: '3DS (.3ds)' },
+  { id: 'amf', label: 'AMF (.amf)' },
+  { id: 'blender', label: 'Blender (.blender)' },
+  { id: 'dae', label: 'DAE (.dae)' },
+  { id: 'dxf', label: 'DXF (.dxf)' },
+  { id: 'dwg', label: 'DWG (.dwg)' },
+  { id: 'fbx', label: 'FBX (.fbx)' },
+  { id: 'f3d', label: 'F3D (.f3d)' },
+  { id: 'f3z', label: 'F3Z (.f3z)' },
+  { id: 'gcode', label: 'G-code (.gcode)' },
+  { id: 'igs', label: 'IGES (.igs/.iges)' },
+  { id: 'lys', label: 'LYS/LYT (.lys/.lyt)' },
+  { id: 'obj', label: 'OBJ (.obj)' },
+  { id: 'ply', label: 'PLY (.ply)' },
+  { id: 'step', label: 'STEP (.step/.stp)' },
+  { id: 'svg', label: 'SVG (.svg)' },
+  { id: 'x3d', label: 'X3D (.x3d)' }
+];
+
+async function getFileTypesCatalogForUi() {
+  const fn = window.electron?.getAdditionalFileTypesCatalog;
+  if (typeof fn === 'function') {
+    try {
+      const catalog = await fn();
+      if (Array.isArray(catalog) && catalog.length) return catalog;
+    } catch (e) { /* fall through */ }
+  }
+  return FILE_TYPE_CATALOG_FALLBACK;
+}
+
 // File Type Settings: expose save early so Save button onclick works in Docker/server (before DOMContentLoaded block runs)
 window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromDialog() {
   const dialogEl = document.getElementById('file-type-settings-dialog');
@@ -338,7 +369,7 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
     if (uncheckedIds.length > 0 && window.electron?.getModelCountByFileTypeIds && window.electron?.removeModelsByFileTypeIds) {
       const count = await window.electron.getModelCountByFileTypeIds(uncheckedIds);
       if (count > 0) {
-        const catalog = await window.electron.getAdditionalFileTypesCatalog().catch(() => []);
+        const catalog = await getFileTypesCatalogForUi();
         const labels = uncheckedIds.map(id => (catalog.find(e => e.id === id) || {}).label || id).join(', ');
         const message = count === 1
           ? `Unchecking "${labels}" will remove 1 file of that type from the library. This cannot be undone. Continue?`
@@ -6385,6 +6416,37 @@ async function extract3MFThumbnail(filePath) {
   }
 }
 
+async function extractF3DThumbnail(filePath) {
+  try {
+    if (typeof window.electron.getF3DImages !== 'function') return null;
+    console.log(`[DEBUG] extractF3DThumbnail: Extracting preview from ${filePath}`);
+    const images = await window.electron.getF3DImages(filePath);
+    if (images && images.length > 0) {
+      console.log(`[DEBUG] extractF3DThumbnail: Found ${images.length} image(s) in F3D file`);
+      return images;
+    }
+    console.log(`[DEBUG] extractF3DThumbnail: No preview found in F3D file`);
+    return null;
+  } catch (error) {
+    console.error('extractF3DThumbnail error:', error);
+    return null;
+  }
+}
+
+async function extractEmbeddedPreviewImages(filePath, fileExtension, options) {
+  const ext = (fileExtension || '').toLowerCase();
+  if (ext === 'lys' && typeof window.electron.getLYSImages === 'function') {
+    return window.electron.getLYSImages(filePath, options);
+  }
+  if (ext === 'f3d' && typeof window.electron.getF3DImages === 'function') {
+    return window.electron.getF3DImages(filePath, options);
+  }
+  if (ext === '3mf' && typeof window.electron.get3MFImages === 'function') {
+    return window.electron.get3MFImages(filePath, options);
+  }
+  return null;
+}
+
 async function extractLYSThumbnail(filePath) {
   try {
     if (typeof window.electron.getLYSImages !== 'function') return null;
@@ -10860,7 +10922,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (scanTypesRaw && typeof scanTypesRaw === 'string') scanTypes = JSON.parse(scanTypesRaw);
         if (!Array.isArray(scanTypes)) scanTypes = [];
       } catch (e) { /* ignore */ }
-      const catalog = await (window.electron.getAdditionalFileTypesCatalog && window.electron.getAdditionalFileTypesCatalog()) || [];
+      const catalog = await getFileTypesCatalogForUi();
       const enabledIds = new Set(scanTypes);
       const options = [
         { value: '', label: 'All Types' },
@@ -10911,7 +10973,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (uncheckedIds.length > 0 && window.electron?.getModelCountByFileTypeIds && window.electron?.removeModelsByFileTypeIds) {
         const count = await window.electron.getModelCountByFileTypeIds(uncheckedIds);
         if (count > 0) {
-          const catalog = await window.electron.getAdditionalFileTypesCatalog().catch(() => []);
+          const catalog = await getFileTypesCatalogForUi();
           const labels = uncheckedIds.map(id => (catalog.find(e => e.id === id) || {}).label || id).join(', ');
           const message = count === 1
             ? `Unchecking "${labels}" will remove 1 file of that type from the library. This cannot be undone. Continue?`
@@ -11872,7 +11934,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // For 3MF files, try to get primary thumbnail from database if not found in model.thumbnail
         // Load asynchronously to avoid blocking — never getAllThumbnails for a single display slot
         (async () => {
-          if (!thumbnailSrc && model.filePath && /\.(3mf|lys)$/i.test(model.filePath)) {
+          if (!thumbnailSrc && model.filePath && /\.(3mf|lys|f3d)$/i.test(model.filePath)) {
             try {
               const primary = await fetchPrimaryThumbnailForGrid(model.filePath);
               if (primary) {
@@ -13247,7 +13309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         try {
           // 0. Non-previewable types: use typed placeholder (file type label)
-          if (!isRenderable3dExtension(fileExt) && fileExt !== 'svg' && fileExt !== 'lys') {
+          if (!isRenderable3dExtension(fileExt) && fileExt !== 'svg' && fileExt !== 'lys' && fileExt !== 'f3d') {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             if (!skipHash && (!model.hash || model.hash === '')) {
@@ -13277,7 +13339,35 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
           }
 
-          // 0c. LYS: pull embedded preview.png; otherwise render the mesh
+          // 0c. F3D: pull Fusion embedded Previews/small.png (no mesh)
+          if (fileExt === 'f3d') {
+            try {
+              const embeddedImages = await extractF3DThumbnail(model.filePath);
+              if (embeddedImages && embeddedImages.length > 0) {
+                const validImages = embeddedImages.filter(
+                  (im) => typeof im === 'string' && im.startsWith('data:image')
+                );
+                if (validImages.length > 0) {
+                  thumbnail = validImages[0];
+                  await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  if (!skipHash && (!model.hash || model.hash === '')) {
+                    try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
+                  }
+                  return;
+                }
+              }
+            } catch (embeddedError) {
+              console.error(`Error extracting embedded image from F3D: ${model.filePath}`, embeddedError);
+            }
+            thumbnail = generateTypedPlaceholder('f3d');
+            await window.electron.saveThumbnail(model.filePath, thumbnail);
+            if (!skipHash && (!model.hash || model.hash === '')) {
+              try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
+            }
+            return;
+          }
+
+          // 0d. LYS: pull embedded preview.png; otherwise render the mesh
           if (fileExt === 'lys') {
             try {
               const embeddedImages = await extractLYSThumbnail(model.filePath);
@@ -14415,11 +14505,9 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
               const fileExtension = file.filePath.split('.').pop().toLowerCase();
               let thumbnail = null;
               
-              if (fileExtension === '3mf' || fileExtension === 'lys') {
+              if (fileExtension === '3mf' || fileExtension === 'lys' || fileExtension === 'f3d') {
                 try {
-                  const images = fileExtension === 'lys'
-                    ? await window.electron.getLYSImages(file.filePath)
-                    : await window.electron.get3MFImages(file.filePath);
+                  const images = await extractEmbeddedPreviewImages(file.filePath, fileExtension);
                   if (images && images.length > 0) {
                     console.log(`[DEBUG] Found ${images.length} embedded image(s) in ${fileExtension.toUpperCase()}: ${file.filePath}`);
                     // Add all images to model's thumbnails at once using batch function
@@ -15005,11 +15093,9 @@ async function renderFile(file, container, skipThumbnail = false) {
 
   if (!file.thumbnail &&!skipThumbnail) {
     const fileExtension = file.filePath.split('.').pop().toLowerCase();
-    if (fileExtension === '3mf' || fileExtension === 'lys') {
+    if (fileExtension === '3mf' || fileExtension === 'lys' || fileExtension === 'f3d') {
       try {
-        const images = fileExtension === 'lys'
-          ? await window.electron.getLYSImages(file.filePath)
-          : await window.electron.get3MFImages(file.filePath);
+        const images = await extractEmbeddedPreviewImages(file.filePath, fileExtension);
         if (images && images.length > 0) {
           const firstImage = images[0];
           console.log(`[DEBUG] renderFile: Using ${images.length} embedded image(s) from ${fileExtension.toUpperCase()}: ${file.filePath}`);
@@ -15273,16 +15359,15 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     fileExtension = filePath.split('.').pop().toLowerCase();
   }
   
-  if (fileExtension === '3mf' || fileExtension === 'lys') {
+  if (fileExtension === '3mf' || fileExtension === 'lys' || fileExtension === 'f3d') {
     try {
       // Scroll hydrate only needs a few top-scoring plate/cover images.
       // Fetching every embedded PNG over the WebSocket bridge OOMs Docker on large libraries.
-      const images = fileExtension === 'lys'
-        ? await window.electron.getLYSImages(filePath, { quiet: true })
-        : await window.electron.get3MFImages(filePath, {
-            maxImages: 3,
-            quiet: true
-          });
+      const images = await extractEmbeddedPreviewImages(
+        filePath,
+        fileExtension,
+        fileExtension === '3mf' ? { maxImages: 3, quiet: true } : { quiet: true }
+      );
       // Cell scrolled away while we extracted — abandon (will re-queue if it returns).
       // Scan/batch jobs use a detached dummy container on purpose (retainDetached).
       if (container && !container.isConnected && !retainDetached) {
@@ -18236,9 +18321,32 @@ async function generateThumbnail(file) {
       throw new Error("generateThumbnail: filePath is undefined");
     }
 
-    // 1. Try to get embedded thumbnail for 3MF / LYS
+    // 1. Try to get embedded thumbnail for 3MF / LYS / F3D
     const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
     const thumbExt = pathForExt.split('.').pop().toLowerCase();
+    if (thumbExt === 'f3d') {
+        console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded preview for ${filePath}`);
+        try {
+            const images = await extractF3DThumbnail(filePath);
+            if (images && images.length > 0) {
+                const validImages = images.filter(
+                  (im) => typeof im === 'string' && im.startsWith('data:image')
+                );
+                if (validImages.length > 0) {
+                    await window.electron.addMultipleThumbnails(filePath, validImages);
+                    try {
+                      await window.electron.calculateFileHash(filePath);
+                    } catch (hashError) {
+                      console.error(`Error calculating hash for ${filePath}:`, hashError);
+                    }
+                    return validImages[0];
+                }
+            }
+        } catch (e) {
+            console.error('Error extracting F3D thumbnail:', e);
+        }
+        return generateTypedPlaceholder('f3d');
+    }
     if (thumbExt === 'lys') {
         console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded preview for ${filePath}`);
         try {

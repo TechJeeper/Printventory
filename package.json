@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.8",
+  "version": "2.2.9",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -143,6 +143,7 @@
       "aitagging.js",
       "thumbnail-compress.js",
       "extract-lys-preview.js",
+      "extract-f3d-preview.js",
       "parse-lys-geometry.js",
       "step-assembly.js",
       "slicer.js",

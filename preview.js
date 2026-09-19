@@ -878,7 +878,8 @@ console.log('[Preview] preview.js script loaded');
 
   function isPreviewableExtension(ext) {
     return ext === 'stl' || ext === '3mf' || ext === 'obj' || ext === 'ply'
-      || ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'igs' || ext === 'iges';
+      || ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'igs' || ext === 'iges'
+      || ext === 'f3d';
   }
 
   function isPreviewableModelPath(filePath) {
@@ -913,6 +914,42 @@ console.log('[Preview] preview.js script loaded');
     const ext = getPreviewExtension(filePath);
     if (!isPreviewableExtension(ext)) {
       throw new Error(`Unsupported file type: ${ext}`);
+    }
+
+    if (ext === 'f3d') {
+      if (typeof window.electron?.getF3DImages !== 'function') {
+        throw new Error('F3D preview is not available');
+      }
+      const loading = document.getElementById('preview-loading');
+      if (loading && loading.querySelector('p')) {
+        loading.querySelector('p').textContent = 'Extracting Fusion preview...';
+      }
+      const images = await window.electron.getF3DImages(filePath);
+      if (loadToken !== previewLoadToken) {
+        throw new Error('Preview cancelled');
+      }
+      const dataUrl = Array.isArray(images) ? images.find((im) => typeof im === 'string' && im.startsWith('data:image')) : null;
+      if (!dataUrl) {
+        throw new Error('This F3D file has no embedded preview image');
+      }
+      const texture = await new Promise((resolve, reject) => {
+        const loader = new THREE.TextureLoader();
+        loader.load(dataUrl, resolve, undefined, reject);
+      });
+      if (THREE.sRGBEncoding) texture.encoding = THREE.sRGBEncoding;
+      const img = texture.image;
+      const w = img?.width || 1;
+      const h = img?.height || 1;
+      const maxDim = 80;
+      const aspect = w / h;
+      const width = aspect >= 1 ? maxDim : maxDim * aspect;
+      const height = aspect >= 1 ? maxDim / aspect : maxDim;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(width, height),
+        new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, transparent: true })
+      );
+      previewFrom3mf = false;
+      return mesh;
     }
 
     if (ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'obj' || ext === 'ply' || ext === 'igs' || ext === 'iges') {

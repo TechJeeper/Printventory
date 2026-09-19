@@ -4,6 +4,11 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.9] - 2026-09-19
+
+- F3D thumbnails and 3D preview from Fusion’s embedded `Previews/small.png`
+- File Type settings save no longer fails in Docker/server when unchecking a type (`getAdditionalFileTypesCatalog` missing)
+
 ## [2.2.8] - 2026-09-18
 
 - STEP/STP thumbnails and 3D preview, including assemblies that only reference sibling part files
