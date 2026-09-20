@@ -40,6 +40,8 @@ console.log('[Preview] preview.js script loaded');
   let previewSitOnFaceMode = false;
   let previewFaceHighlight = null;
   let previewRestPose = null;
+  let previewStudioAvailable = true;
+  let previewImageOnlyMode = false;
 
   const STUDIO_STORAGE_KEY = 'printventory.previewStudio.v5';
   const STUDIO_DEFAULTS = {
@@ -416,6 +418,7 @@ console.log('[Preview] preview.js script loaded');
     const studioBtn = document.getElementById('preview-toggle-studio');
     if (studioBtn) {
       studioBtn.addEventListener('click', () => {
+        if (!previewStudioAvailable) return;
         const panel = document.getElementById('preview-studio-panel');
         setStudioPanelOpen(panel?.classList.contains('hidden'));
         persistStudioSettings(readStudioForm());
@@ -529,6 +532,7 @@ console.log('[Preview] preview.js script loaded');
     // Wait a bit for dialog to fully render before initializing Three.js
     await new Promise(resolve => setTimeout(resolve, 100));
 
+    hideImageOnlyPreview();
     // Initialize Three.js scene
     initPreviewScene();
 
@@ -879,7 +883,56 @@ console.log('[Preview] preview.js script loaded');
   function isPreviewableExtension(ext) {
     return ext === 'stl' || ext === '3mf' || ext === 'obj' || ext === 'ply'
       || ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'igs' || ext === 'iges'
-      || ext === 'f3d';
+      || ext === 'f3d' || ext === 'chitubox' || ext === 'voxl';
+  }
+
+  function isImageOnlyPreviewExtension(ext) {
+    return ext === 'f3d' || ext === 'chitubox' || ext === 'voxl';
+  }
+
+  function hideImageOnlyPreview() {
+    const existing = document.getElementById('preview-image-only');
+    if (existing) existing.remove();
+    const container = document.getElementById('preview-canvas-container');
+    if (container) container.classList.remove('image-only-preview');
+    const canvas = document.getElementById('preview-canvas');
+    if (canvas) canvas.style.visibility = '';
+    previewImageOnlyMode = false;
+  }
+
+  function showImageOnlyPreview(dataUrl, label) {
+    hideImageOnlyPreview();
+    previewImageOnlyMode = true;
+    setStudioAvailable(false);
+    const container = document.getElementById('preview-canvas-container');
+    if (!container) return;
+    container.classList.add('image-only-preview');
+    const canvas = document.getElementById('preview-canvas');
+    if (canvas) canvas.style.visibility = 'hidden';
+    const wrap = document.createElement('div');
+    wrap.id = 'preview-image-only';
+    wrap.className = 'preview-image-only';
+    wrap.setAttribute('role', 'img');
+    wrap.setAttribute('aria-label', `${label || 'Embedded'} preview image`);
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = `${label || 'Embedded'} preview`;
+    wrap.appendChild(img);
+    container.appendChild(wrap);
+    updatePreviewControlsHint();
+  }
+
+  async function loadEmbeddedPreviewDataUrl(filePath, ext) {
+    const getter =
+      ext === 'f3d' ? window.electron?.getF3DImages
+        : ext === 'chitubox' ? window.electron?.getChituboxImages
+          : ext === 'voxl' ? window.electron?.getVoxlImages
+            : null;
+    if (typeof getter !== 'function') {
+      throw new Error(`${ext.toUpperCase()} preview is not available`);
+    }
+    const images = await getter(filePath);
+    return Array.isArray(images) ? images.find((im) => typeof im === 'string' && im.startsWith('data:image')) : null;
   }
 
   function isPreviewableModelPath(filePath) {
@@ -916,40 +969,22 @@ console.log('[Preview] preview.js script loaded');
       throw new Error(`Unsupported file type: ${ext}`);
     }
 
-    if (ext === 'f3d') {
-      if (typeof window.electron?.getF3DImages !== 'function') {
-        throw new Error('F3D preview is not available');
-      }
+    if (isImageOnlyPreviewExtension(ext)) {
+      const label = ext === 'f3d' ? 'Fusion' : ext === 'chitubox' ? 'ChiTuBox' : 'VOXL';
       const loading = document.getElementById('preview-loading');
       if (loading && loading.querySelector('p')) {
-        loading.querySelector('p').textContent = 'Extracting Fusion preview...';
+        loading.querySelector('p').textContent = `Extracting ${label} preview...`;
       }
-      const images = await window.electron.getF3DImages(filePath);
+      const dataUrl = await loadEmbeddedPreviewDataUrl(filePath, ext);
       if (loadToken !== previewLoadToken) {
         throw new Error('Preview cancelled');
       }
-      const dataUrl = Array.isArray(images) ? images.find((im) => typeof im === 'string' && im.startsWith('data:image')) : null;
       if (!dataUrl) {
-        throw new Error('This F3D file has no embedded preview image');
+        throw new Error(`This ${ext.toUpperCase()} file has no embedded preview image`);
       }
-      const texture = await new Promise((resolve, reject) => {
-        const loader = new THREE.TextureLoader();
-        loader.load(dataUrl, resolve, undefined, reject);
-      });
-      if (THREE.sRGBEncoding) texture.encoding = THREE.sRGBEncoding;
-      const img = texture.image;
-      const w = img?.width || 1;
-      const h = img?.height || 1;
-      const maxDim = 80;
-      const aspect = w / h;
-      const width = aspect >= 1 ? maxDim : maxDim * aspect;
-      const height = aspect >= 1 ? maxDim / aspect : maxDim;
-      const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(width, height),
-        new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, transparent: true })
-      );
+      // Return a sentinel object; loadPreviewModel shows it as a 2D image (not a 3D plane).
       previewFrom3mf = false;
-      return mesh;
+      return { __imageOnlyPreview: true, dataUrl, label };
     }
 
     if (ext === 'step' || ext === 'stp' || ext === 'lys' || ext === 'obj' || ext === 'ply' || ext === 'igs' || ext === 'iges') {
@@ -1088,8 +1123,11 @@ console.log('[Preview] preview.js script loaded');
 
     fileType.textContent = `Type: ${ext.toUpperCase()}`;
     hidePreviewPartPicker();
+    hideImageOnlyPreview();
     previewRestPose = null;
     setSitOnFaceMode(false);
+    // Image-only formats (f3d, chitubox, voxl) have no mesh — Studio cannot apply.
+    setStudioAvailable(!isImageOnlyPreviewExtension(ext));
     console.log('Loading model type:', ext);
 
     if (!isPreviewableExtension(ext)) {
@@ -1097,6 +1135,14 @@ console.log('[Preview] preview.js script loaded');
     }
 
     const object = await createPreviewObjectFromPath(filePath, loadToken);
+    if (object && object.__imageOnlyPreview) {
+      showImageOnlyPreview(object.dataUrl, object.label);
+      previewModel = null;
+      const dimensions = document.getElementById('preview-dimensions');
+      if (dimensions) dimensions.textContent = `${object.label} embedded preview`;
+      return;
+    }
+    setStudioAvailable(true);
     previewModel = object;
     captureOriginalMaterials(previewModel);
     enableModelShadows(previewModel);
@@ -1134,8 +1180,10 @@ console.log('[Preview] preview.js script loaded');
 
     currentBundleGroupRecord = groupRecord;
     hidePreviewSlicerMenu();
+    hideImageOnlyPreview();
     previewRestPose = null;
     setSitOnFaceMode(false);
+    setStudioAvailable(true);
 
     const modelName = document.getElementById('preview-model-name');
     const loading = document.getElementById('preview-loading');
@@ -1170,6 +1218,11 @@ console.log('[Preview] preview.js script loaded');
 
       try {
         const obj = await createPreviewObjectFromPath(child.filePath, loadToken);
+        if (obj && obj.__imageOnlyPreview) {
+          // Embedded-image formats have no mesh for bundle layout.
+          loadFailures++;
+          continue;
+        }
         applyPartTint(obj, i, toLoad.length);
 
         const box = new THREE.Box3().setFromObject(obj);
@@ -1632,19 +1685,49 @@ console.log('[Preview] preview.js script loaded');
     previewFaceHighlight.visible = true;
   }
 
+  function updatePreviewControlsHint() {
+    const hint = document.querySelector('#preview-dialog .preview-instructions p');
+    if (!hint) return;
+    if (previewImageOnlyMode) {
+      hint.innerHTML =
+        '<strong>Embedded preview:</strong> This file type includes a still image only — orbit, pan, and Studio are not available';
+      return;
+    }
+    if (previewSitOnFaceMode) {
+      hint.innerHTML =
+        '<strong>Sit on face:</strong> Click a surface to set it flat on the floor • Esc or the button again to cancel';
+      return;
+    }
+    hint.innerHTML =
+      '<strong>Controls:</strong> Left click + drag to orbit • Right click + drag to pan • Scroll to zoom • Click a part to focus';
+  }
+
   function setSitOnFaceMode(enabled) {
-    previewSitOnFaceMode = !!enabled;
+    previewSitOnFaceMode = !!enabled && previewStudioAvailable && !previewImageOnlyMode;
     const button = document.getElementById('preview-studio-sit-face');
     const container = document.getElementById('preview-canvas-container');
     if (button) button.classList.toggle('active', previewSitOnFaceMode);
     if (container) container.classList.toggle('is-picking-face', previewSitOnFaceMode);
     if (!previewSitOnFaceMode) clearFaceHighlight();
-    const hint = document.querySelector('#preview-dialog .preview-instructions p');
-    if (hint) {
-      hint.innerHTML = previewSitOnFaceMode
-        ? '<strong>Sit on face:</strong> Click a surface to set it flat on the floor • Esc or the button again to cancel'
-        : '<strong>Controls:</strong> Left click + drag to orbit • Right click + drag to pan • Scroll to zoom • Click a part to focus';
+    updatePreviewControlsHint();
+  }
+
+  function setStudioAvailable(enabled) {
+    previewStudioAvailable = !!enabled;
+    const button = document.getElementById('preview-toggle-studio');
+    if (!previewStudioAvailable) {
+      setSitOnFaceMode(false);
+      setStudioPanelOpen(false);
     }
+    if (button) {
+      button.classList.toggle('hidden', !previewStudioAvailable);
+      button.disabled = !previewStudioAvailable;
+      button.setAttribute('aria-hidden', previewStudioAvailable ? 'false' : 'true');
+      button.title = previewStudioAvailable
+        ? 'Studio lighting and materials'
+        : 'Studio is not available for this file type';
+    }
+    updatePreviewControlsHint();
   }
 
   function captureRestPose(model) {
@@ -1819,6 +1902,7 @@ console.log('[Preview] preview.js script loaded');
   }
 
   function setStudioPanelOpen(open) {
+    if (open && !previewStudioAvailable) open = false;
     const panel = document.getElementById('preview-studio-panel');
     const button = document.getElementById('preview-toggle-studio');
     if (panel) panel.classList.toggle('hidden', !open);
@@ -2653,6 +2737,7 @@ console.log('[Preview] preview.js script loaded');
       window.electron.cancel3MFPreview?.(preview3mfRequestId);
       preview3mfRequestId = null;
     }
+    hideImageOnlyPreview();
     cleanupPreviewScene();
     dialog.close();
     currentFilePath = null;
@@ -2660,6 +2745,7 @@ console.log('[Preview] preview.js script loaded');
     hidePreviewPartPicker();
     hidePreviewSlicerMenu();
     hidePreviewSaveMenu();
+    setStudioAvailable(true);
     updatePreviewSlicerButton();
   }
 

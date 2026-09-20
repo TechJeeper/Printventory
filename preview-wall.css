@@ -149,11 +149,12 @@
   display: block;
 }
 
-/* Menu button: compact corner */
+/* Menu button: top-right under print status — keeps bottom-right free for selection check */
 .preview-tile .thumbnail-menu-button {
   left: auto;
   right: 4px;
-  bottom: 4px;
+  top: 26px;
+  bottom: auto;
   width: 22px;
   min-width: 22px;
   height: 22px;
@@ -282,7 +283,7 @@
   bottom: 28px;
 }
 
-/* Filename caption is always visible; 3D stays on hover */
+/* Filename caption is always visible; Preview stays on hover */
 .preview-tile-overlay {
   position: absolute;
   left: 0;
@@ -308,7 +309,7 @@
 .preview-tile:hover .preview-tile-overlay,
 .preview-tile:focus-within .preview-tile-overlay {
   min-height: 42%;
-  padding: 10px 8px 8px;
+  padding: 10px 28px 8px;
   background: linear-gradient(to top, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.45) 55%, transparent 100%);
 }
 
@@ -339,13 +340,15 @@
 }
 
 .preview-tile-actions {
+  display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  justify-content: center;
 }
 
 .preview-tile-open-btn {
-  align-self: flex-start;
+  align-self: center;
   padding: 4px 10px;
   font-size: 10px;
   font-weight: 600;

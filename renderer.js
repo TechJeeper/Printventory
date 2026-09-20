@@ -319,6 +319,7 @@ const FILE_TYPE_CATALOG_FALLBACK = [
   { id: '3ds', label: '3DS (.3ds)' },
   { id: 'amf', label: 'AMF (.amf)' },
   { id: 'blender', label: 'Blender (.blender)' },
+  { id: 'chitubox', label: 'ChiTuBox (.chitubox)' },
   { id: 'dae', label: 'DAE (.dae)' },
   { id: 'dxf', label: 'DXF (.dxf)' },
   { id: 'dwg', label: 'DWG (.dwg)' },
@@ -332,6 +333,7 @@ const FILE_TYPE_CATALOG_FALLBACK = [
   { id: 'ply', label: 'PLY (.ply)' },
   { id: 'step', label: 'STEP (.step/.stp)' },
   { id: 'svg', label: 'SVG (.svg)' },
+  { id: 'voxl', label: 'VOXL (.voxl)' },
   { id: 'x3d', label: 'X3D (.x3d)' }
 ];
 
@@ -347,9 +349,12 @@ async function getFileTypesCatalogForUi() {
 }
 
 // File Type Settings: expose save early so Save button onclick works in Docker/server (before DOMContentLoaded block runs)
+window._fileTypeSettingsSaving = false;
 window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromDialog() {
   const dialogEl = document.getElementById('file-type-settings-dialog');
   if (!dialogEl || !window.electron?.saveSetting) return;
+  if (window._fileTypeSettingsSaving) return;
+  window._fileTypeSettingsSaving = true;
   try {
     // Get previously saved scan types to detect unchecked (removed) types
     let previousIds = [];
@@ -358,7 +363,7 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
       if (previousRaw) previousIds = JSON.parse(previousRaw);
     } catch (e) { /* ignore */ }
 
-    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'chitubox', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'voxl', 'x3d'];
     const selectedScanTypes = [];
     for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
       const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
@@ -402,6 +407,8 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
   } catch (err) {
     console.error('File type settings save failed:', err);
     if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to save file type settings: ' + (err.message || String(err)));
+  } finally {
+    window._fileTypeSettingsSaving = false;
   }
 };
 
@@ -1252,6 +1259,7 @@ function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
   if (window._serverBulkThumbnailJobActive) return false;
   if (!itemEl || !model || !model.filePath) return false;
   if (model.hasThumbnail) return false;
+  if (hasImageOnlyPreviewMiss(model.filePath)) return false;
 
   const thumbContainer = itemEl.querySelector('.thumbnail-container');
   if (!thumbContainer) return false;
@@ -1282,6 +1290,16 @@ function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
     resolve: async (thumbnail) => {
       pendingThumbnails.delete(model.filePath);
       if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+        // Image-only extract miss: never re-hydrate (cannot mesh-render).
+        if (hasImageOnlyPreviewMiss(model.filePath)) {
+          const liveImg = thumbContainer.querySelector('img');
+          if (liveImg) {
+            liveImg.src = thumbnail && thumbnail !== '3d.png'
+              ? thumbnail
+              : generateTypedPlaceholder(extensionFromModelPath(model.filePath));
+          }
+          return;
+        }
         scheduleVisibleThumbnailHydrate();
         return;
       }
@@ -1484,7 +1502,7 @@ function getModelColor() {
 }
 
 // Extensions that are valid for library (scan/add). Used for isValidFile.
-const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.lys', '.lyt', '.obj', '.ply', '.step', '.stp', '.svg', '.x3d']);
+const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.chitubox', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.lys', '.lyt', '.obj', '.ply', '.step', '.stp', '.svg', '.voxl', '.x3d']);
 
 function isRenderable3dExtension(extension) {
   const ext = (extension || '').toLowerCase().replace(/^\./, '');
@@ -1495,8 +1513,8 @@ function isRenderable3dExtension(extension) {
 // Map file extension (with or without dot) to label for typed placeholder
 const EXTENSION_TO_PLACEHOLDER_LABEL = {
   '3ds': '3DS', 'amf': 'AMF', 'blender': 'Blender', 'dae': 'DAE', 'dxf': 'DXF', 'dwg': 'DWG',
-  'fbx': 'FBX', 'f3d': 'F3D', 'f3z': 'F3Z', 'gcode': 'G-code', 'igs': 'IGES', 'iges': 'IGES',
-  'lys': 'LYS', 'lyt': 'LYT', 'obj': 'OBJ', 'ply': 'PLY', 'step': 'STEP', 'stp': 'STEP', 'svg': 'SVG', 'x3d': 'X3D'
+  'fbx': 'FBX', 'f3d': 'F3D', 'f3z': 'F3Z', 'chitubox': 'ChiTuBox', 'gcode': 'G-code', 'igs': 'IGES', 'iges': 'IGES',
+  'lys': 'LYS', 'lyt': 'LYT', 'obj': 'OBJ', 'ply': 'PLY', 'step': 'STEP', 'stp': 'STEP', 'svg': 'SVG', 'voxl': 'VOXL', 'x3d': 'X3D'
 };
 
 function generateTypedPlaceholder(extension) {
@@ -1558,11 +1576,36 @@ function isFailurePlaceholderThumbnail(thumb) {
   try {
     if (thumb === generateCorruptedPlaceholder()) return true;
     // Bulk-gen used to save typed STL/3MF/OBJ placeholders "to prevent future attempts"
-    for (const ext of ['stl', '3mf', 'obj', 'ply', 'step', 'stp', 'lys', 'lyt', 'igs', 'iges']) {
+    for (const ext of ['stl', '3mf', 'obj', 'ply', 'step', 'stp', 'lys', 'lyt', 'igs', 'iges', 'f3d', 'chitubox', 'voxl', 'svg', 'f3z']) {
       if (thumb === generateTypedPlaceholder(ext)) return true;
     }
   } catch (_) { /* ignore */ }
   return false;
+}
+
+/**
+ * Image-only formats (f3d / chitubox / voxl) that already failed embedded-preview extract.
+ * Mesh render cannot produce a thumb — without this, returning 3d.png + scheduleVisibleThumbnailHydrate
+ * re-queues forever (DevTools shows renderModelToPNG Start ×N).
+ */
+const IMAGE_ONLY_PREVIEW_MISS = new Set();
+
+function markImageOnlyPreviewMiss(filePath) {
+  const key = normalizeThumbCacheKey(filePath);
+  if (key) IMAGE_ONLY_PREVIEW_MISS.add(key);
+}
+
+function hasImageOnlyPreviewMiss(filePath) {
+  const key = normalizeThumbCacheKey(filePath);
+  return !!(key && IMAGE_ONLY_PREVIEW_MISS.has(key));
+}
+
+function extensionFromModelPath(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  const pathPart = filePath.includes('::') ? filePath.split('::')[1] : filePath;
+  const base = pathPart.split(/[/\\]/).pop() || pathPart;
+  const dot = base.lastIndexOf('.');
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : '';
 }
 
 /**
@@ -6109,7 +6152,7 @@ async function loadAndShowFileTypeSettings() {
       checkbox.checked = enableZipArchives === '1';
     }
 
-    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'x3d'];
+    const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'chitubox', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'voxl', 'x3d'];
     try {
       const scanTypesRaw = await window.electron.getSetting('scanAdditionalFileTypes');
       const scanTypes = (scanTypesRaw && typeof scanTypesRaw === 'string') ? JSON.parse(scanTypesRaw) : [];
@@ -6441,10 +6484,26 @@ async function extractEmbeddedPreviewImages(filePath, fileExtension, options) {
   if (ext === 'f3d' && typeof window.electron.getF3DImages === 'function') {
     return window.electron.getF3DImages(filePath, options);
   }
+  if (ext === 'chitubox' && typeof window.electron.getChituboxImages === 'function') {
+    return window.electron.getChituboxImages(filePath, options);
+  }
+  if (ext === 'voxl' && typeof window.electron.getVoxlImages === 'function') {
+    return window.electron.getVoxlImages(filePath, options);
+  }
   if (ext === '3mf' && typeof window.electron.get3MFImages === 'function') {
     return window.electron.get3MFImages(filePath, options);
   }
   return null;
+}
+
+function isEmbeddedImagePreviewExt(extension) {
+  const ext = (extension || '').toLowerCase().replace(/^\./, '');
+  return ext === '3mf' || ext === 'lys' || ext === 'f3d' || ext === 'chitubox' || ext === 'voxl';
+}
+
+function isImageOnlyPreviewExt(extension) {
+  const ext = (extension || '').toLowerCase().replace(/^\./, '');
+  return ext === 'f3d' || ext === 'chitubox' || ext === 'voxl';
 }
 
 async function extractLYSThumbnail(filePath) {
@@ -10952,64 +11011,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // File Type Settings: open-file-type-settings is handled via earlyEventChannels + _electronRealEventHandlers (loadAndShowFileTypeSettings)
 
-  async function saveFileTypeSettingsFromDialog() {
-    const dialogEl = document.getElementById('file-type-settings-dialog');
-    if (!dialogEl) return;
-    try {
-      let previousIds = [];
-      try {
-        const previousRaw = await window.electron.getSetting('scanAdditionalFileTypes');
-        if (previousRaw) previousIds = JSON.parse(previousRaw);
-      } catch (e) { /* ignore */ }
-
-      const ADDITIONAL_SCAN_TYPE_IDS = ['3ds', 'amf', 'blender', 'dae', 'dxf', 'dwg', 'fbx', 'f3d', 'f3z', 'gcode', 'igs', 'lys', 'obj', 'ply', 'step', 'svg', 'x3d'];
-      const selectedScanTypes = [];
-      for (const id of ADDITIONAL_SCAN_TYPE_IDS) {
-        const el = dialogEl.querySelector('#scan-type-' + id) || document.getElementById('scan-type-' + id);
-        if (el && el.checked) selectedScanTypes.push(id);
-      }
-      const uncheckedIds = previousIds.filter(id => !selectedScanTypes.includes(id));
-
-      if (uncheckedIds.length > 0 && window.electron?.getModelCountByFileTypeIds && window.electron?.removeModelsByFileTypeIds) {
-        const count = await window.electron.getModelCountByFileTypeIds(uncheckedIds);
-        if (count > 0) {
-          const catalog = await getFileTypesCatalogForUi();
-          const labels = uncheckedIds.map(id => (catalog.find(e => e.id === id) || {}).label || id).join(', ');
-          const message = count === 1
-            ? `Unchecking "${labels}" will remove 1 file of that type from the library. This cannot be undone. Continue?`
-            : `Unchecking ${labels} will remove ${count} files of those types from the library. This cannot be undone. Continue?`;
-          const confirmResult = await window.electron.showMessage('Remove file type from library?', message, ['Yes', 'No']);
-          if (confirmResult !== 'Yes') return;
-          await window.electron.removeModelsByFileTypeIds(uncheckedIds);
-          if (typeof window.performCombinedSearch === 'function') await window.performCombinedSearch();
-        }
-      }
-
-      const checkbox = dialogEl.querySelector('#enable-zip-archives') || document.getElementById('enable-zip-archives');
-      const enableZipArchives = checkbox?.checked ? '1' : '0';
-      await window.electron.saveSetting('enableZipArchives', enableZipArchives);
-      await window.electron.saveSetting('scanAdditionalFileTypes', JSON.stringify(selectedScanTypes));
-      const designerCheckbox = dialogEl.querySelector('#enable-3mf-designer') || document.getElementById('enable-3mf-designer');
-      const parentModelCheckbox = dialogEl.querySelector('#enable-3mf-parent-model') || document.getElementById('enable-3mf-parent-model');
-      const licenseCheckbox = dialogEl.querySelector('#enable-3mf-license') || document.getElementById('enable-3mf-license');
-      const notesCheckbox = dialogEl.querySelector('#enable-3mf-notes') || document.getElementById('enable-3mf-notes');
-      await window.electron.saveSetting('enable3MFDesigner', designerCheckbox?.checked ? '1' : '0');
-      await window.electron.saveSetting('enable3MFParentModel', parentModelCheckbox?.checked ? '1' : '0');
-      await window.electron.saveSetting('enable3MFLicense', licenseCheckbox?.checked ? '1' : '0');
-      await window.electron.saveSetting('enable3MFNotes', notesCheckbox?.checked ? '1' : '0');
-      if (typeof dialogEl.close === 'function') dialogEl.close();
-      if (typeof populateFileTypeFilter === 'function') await populateFileTypeFilter();
-    } catch (err) {
-      console.error('File type settings save failed:', err);
-      if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to save file type settings: ' + (err.message || String(err)));
-    }
-  }
-  window.saveFileTypeSettingsFromDialog = saveFileTypeSettingsFromDialog;
-
-  document.getElementById('save-file-type-settings')?.addEventListener('click', async (event) => {
-    event.preventDefault();
-    await saveFileTypeSettingsFromDialog();
-  });
+  // File Type Settings: open-file-type-settings is handled via earlyEventChannels + _electronRealEventHandlers (loadAndShowFileTypeSettings)
+  // Save uses window.saveFileTypeSettingsFromDialog (early-bound, reentrancy-guarded) via HTML onclick only.
 
   document.getElementById('cancel-file-type-settings')?.addEventListener('click', () => {
     document.getElementById('file-type-settings-dialog')?.close();
@@ -11934,7 +11937,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // For 3MF files, try to get primary thumbnail from database if not found in model.thumbnail
         // Load asynchronously to avoid blocking — never getAllThumbnails for a single display slot
         (async () => {
-          if (!thumbnailSrc && model.filePath && /\.(3mf|lys|f3d)$/i.test(model.filePath)) {
+          if (!thumbnailSrc && model.filePath && /\.(3mf|lys|f3d|chitubox|voxl)$/i.test(model.filePath)) {
             try {
               const primary = await fetchPrimaryThumbnailForGrid(model.filePath);
               if (primary) {
@@ -13309,7 +13312,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         try {
           // 0. Non-previewable types: use typed placeholder (file type label)
-          if (!isRenderable3dExtension(fileExt) && fileExt !== 'svg' && fileExt !== 'lys' && fileExt !== 'f3d') {
+          if (!isRenderable3dExtension(fileExt) && fileExt !== 'svg' && fileExt !== 'lys' && !isImageOnlyPreviewExt(fileExt)) {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             if (!skipHash && (!model.hash || model.hash === '')) {
@@ -13339,10 +13342,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
           }
 
-          // 0c. F3D: pull Fusion embedded Previews/small.png (no mesh)
-          if (fileExt === 'f3d') {
+          // 0c. Image-only previews: F3D / ChiTuBox / VOXL embedded thumbs (no mesh)
+          if (isImageOnlyPreviewExt(fileExt)) {
             try {
-              const embeddedImages = await extractF3DThumbnail(model.filePath);
+              const embeddedImages = await extractEmbeddedPreviewImages(model.filePath, fileExt);
               if (embeddedImages && embeddedImages.length > 0) {
                 const validImages = embeddedImages.filter(
                   (im) => typeof im === 'string' && im.startsWith('data:image')
@@ -13357,10 +13360,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
               }
             } catch (embeddedError) {
-              console.error(`Error extracting embedded image from F3D: ${model.filePath}`, embeddedError);
+              console.error(`Error extracting embedded image from ${fileExt.toUpperCase()}: ${model.filePath}`, embeddedError);
             }
-            thumbnail = generateTypedPlaceholder('f3d');
-            await window.electron.saveThumbnail(model.filePath, thumbnail);
+            // Leave retryable — typed placeholders used to stick forever on Docker grids.
+            await window.electron.saveThumbnail(model.filePath, '3d.png');
             if (!skipHash && (!model.hash || model.hash === '')) {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
@@ -14505,7 +14508,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
               const fileExtension = file.filePath.split('.').pop().toLowerCase();
               let thumbnail = null;
               
-              if (fileExtension === '3mf' || fileExtension === 'lys' || fileExtension === 'f3d') {
+              if (isEmbeddedImagePreviewExt(fileExtension)) {
                 try {
                   const images = await extractEmbeddedPreviewImages(file.filePath, fileExtension);
                   if (images && images.length > 0) {
@@ -15093,7 +15096,7 @@ async function renderFile(file, container, skipThumbnail = false) {
 
   if (!file.thumbnail &&!skipThumbnail) {
     const fileExtension = file.filePath.split('.').pop().toLowerCase();
-    if (fileExtension === '3mf' || fileExtension === 'lys' || fileExtension === 'f3d') {
+    if (isEmbeddedImagePreviewExt(fileExtension)) {
       try {
         const images = await extractEmbeddedPreviewImages(file.filePath, fileExtension);
         if (images && images.length > 0) {
@@ -15359,7 +15362,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     fileExtension = filePath.split('.').pop().toLowerCase();
   }
   
-  if (fileExtension === '3mf' || fileExtension === 'lys' || fileExtension === 'f3d') {
+  if (isEmbeddedImagePreviewExt(fileExtension)) {
     try {
       // Scroll hydrate only needs a few top-scoring plate/cover images.
       // Fetching every embedded PNG over the WebSocket bridge OOMs Docker on large libraries.
@@ -15467,7 +15470,19 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     }
   }
 
-  // Non-previewable types: show typed placeholder (file type label on image)
+  // Image-only types already tried extract above. No mesh path exists — stop retrying
+  // (returning 3d.png used to scheduleVisibleThumbnailHydrate forever).
+  if (isImageOnlyPreviewExt(fileExtension)) {
+    markImageOnlyPreviewMiss(filePath);
+    const dataUrl = generateTypedPlaceholder(fileExtension);
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.style.width = '250px';
+    img.style.height = '250px';
+    container.innerHTML = '';
+    container.appendChild(img);
+    return dataUrl;
+  }
   if (!isRenderable3dExtension(fileExtension) && fileExtension !== 'svg') {
     const dataUrl = generateTypedPlaceholder(fileExtension);
     const img = document.createElement('img');
@@ -18321,13 +18336,13 @@ async function generateThumbnail(file) {
       throw new Error("generateThumbnail: filePath is undefined");
     }
 
-    // 1. Try to get embedded thumbnail for 3MF / LYS / F3D
+    // 1. Try to get embedded thumbnail for 3MF / LYS / F3D / ChiTuBox / VOXL
     const pathForExt = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
     const thumbExt = pathForExt.split('.').pop().toLowerCase();
-    if (thumbExt === 'f3d') {
+    if (isImageOnlyPreviewExt(thumbExt)) {
         console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded preview for ${filePath}`);
         try {
-            const images = await extractF3DThumbnail(filePath);
+            const images = await extractEmbeddedPreviewImages(filePath, thumbExt);
             if (images && images.length > 0) {
                 const validImages = images.filter(
                   (im) => typeof im === 'string' && im.startsWith('data:image')
@@ -18343,9 +18358,11 @@ async function generateThumbnail(file) {
                 }
             }
         } catch (e) {
-            console.error('Error extracting F3D thumbnail:', e);
+            console.error(`Error extracting ${thumbExt.toUpperCase()} thumbnail:`, e);
         }
-        return generateTypedPlaceholder('f3d');
+        // Retryable sentinel — do not persist typed F3D/ChiTuBox/VOXL art.
+        await window.electron.saveThumbnail(filePath, '3d.png');
+        return '3d.png';
     }
     if (thumbExt === 'lys') {
         console.log(`[DEBUG] generateThumbnail: Attempting to extract embedded preview for ${filePath}`);
@@ -20727,6 +20744,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   // List queries omit the blob but may set hasMultipleThumbnails from SQL.
   const thumbnailString = model.thumbnail;
   let hasThumbnailFlag = !!model.hasThumbnail;
+  const modelExt = extensionFromModelPath(model.filePath);
+  const imageOnlyMiss = hasImageOnlyPreviewMiss(model.filePath);
   
   const allThumbnails = thumbnailString ? parseThumbnails(thumbnailString) : [];
   let hasMultipleThumbnails = allThumbnails.length > 1 || !!model.hasMultipleThumbnails;
@@ -20734,10 +20753,16 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   let currentThumbnail = allThumbnails.length > 0 ? allThumbnails[currentThumbnailIndex] : null;
 
   // Stuck Docker failure art (corrupted / typed STL) must not block regeneration.
-  if (currentThumbnail && isFailurePlaceholderThumbnail(currentThumbnail)) {
+  // Image-only extract misses intentionally show a typed label — do not clear/re-queue those.
+  if (currentThumbnail && isFailurePlaceholderThumbnail(currentThumbnail) && !imageOnlyMiss) {
     currentThumbnail = null;
     hasThumbnailFlag = false;
     hasMultipleThumbnails = false;
+  }
+
+  if (imageOnlyMiss && !currentThumbnail) {
+    currentThumbnail = generateTypedPlaceholder(modelExt);
+    hasThumbnailFlag = true;
   }
   
   // Add image element right away to reserve space
@@ -20780,6 +20805,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
       // Flagged as having a thumb but empty/clipped — queue a re-render (detailed/preview).
       if (view !== 'detailed' && view !== 'preview') return;
+      if (hasImageOnlyPreviewMiss(model.filePath)) return;
       if (pendingThumbnails.has(model.filePath)) return;
       pendingThumbnails.add(model.filePath);
       enqueueRenderTask({
@@ -20788,7 +20814,14 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         thumbPriority,
         resolve: async (thumbnail) => {
           pendingThumbnails.delete(model.filePath);
-          if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) return;
+          if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+            if (hasImageOnlyPreviewMiss(model.filePath) && img.isConnected) {
+              img.src = thumbnail && thumbnail !== '3d.png'
+                ? thumbnail
+                : generateTypedPlaceholder(extensionFromModelPath(model.filePath));
+            }
+            return;
+          }
           if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
           // Late queue finish must not wipe a user-added / multi-image default.
           try {
@@ -21052,6 +21085,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     // scrolling must not compete with the hidden-window job (OOM).
     if (window._serverBulkThumbnailJobActive) {
       // keep placeholder; job will fill thumbs server-side
+    } else if (hasImageOnlyPreviewMiss(model.filePath)) {
+      img.src = generateTypedPlaceholder(extensionFromModelPath(model.filePath));
     } else if (!pendingThumbnails.has(model.filePath)) {
       pendingThumbnails.add(model.filePath);
 
@@ -21064,7 +21099,17 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
           pendingThumbnails.delete(model.filePath);
 
           // Never persist failure placeholders — leave retryable (hasThumbnail=0 via 3d.png).
+          // Image-only extract misses cannot mesh-render — stop the hydrate loop.
           if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+            if (hasImageOnlyPreviewMiss(model.filePath)) {
+              const imgEl = thumbnailContainer.querySelector('img');
+              if (imgEl) {
+                imgEl.src = thumbnail && thumbnail !== '3d.png'
+                  ? thumbnail
+                  : generateTypedPlaceholder(extensionFromModelPath(model.filePath));
+              }
+              return;
+            }
             if (thumbnail && isFailurePlaceholderThumbnail(thumbnail)) {
               // Show failure in this cell only; do not write to DB.
               const imgEl = thumbnailContainer.querySelector('img');
@@ -21705,8 +21750,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     const openBtn = document.createElement('button');
     openBtn.type = 'button';
     openBtn.className = 'preview-tile-open-btn';
-    openBtn.textContent = '3D';
-    openBtn.title = 'Open 3D preview';
+    openBtn.textContent = 'Preview';
+    openBtn.title = 'Open preview';
     openBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -23404,8 +23449,8 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
       const openBtn = document.createElement('button');
       openBtn.type = 'button';
       openBtn.className = 'preview-tile-open-btn';
-      openBtn.textContent = '3D';
-      openBtn.title = 'Open 3D preview';
+      openBtn.textContent = 'Preview';
+      openBtn.title = 'Open preview';
       openBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();

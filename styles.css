@@ -970,10 +970,14 @@ button:disabled {
   flex-shrink: 0;
   cursor: pointer;
   accent-color: var(--primary-accent, #00d4ff);
+  /* Keep input outside the label so one click toggles once (no label re-activation). */
+  pointer-events: auto;
 }
 
-.scan-file-type-option span {
+.scan-file-type-option label {
   flex: 0 1 auto;
+  margin: 0;
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -7828,6 +7832,34 @@ dialog:not([open]) {
   display: block;
 }
 
+.preview-canvas-container.image-only-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0f0f18;
+}
+
+.preview-image-only {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.preview-image-only img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
 .preview-loading {
   position: absolute;
   top: 0;
@@ -7905,6 +7937,11 @@ dialog:not([open]) {
 
 .preview-control-button span {
   font-size: 16px;
+}
+
+/* Global `button { display:flex }` overrides native/class hide — force Studio off for image-only types */
+#preview-toggle-studio.hidden {
+  display: none !important;
 }
 
 .preview-control-button.active {

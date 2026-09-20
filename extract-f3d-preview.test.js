@@ -15,7 +15,20 @@ const OTHER_PNG = Buffer.from(
 );
 
 describe('extract-f3d-preview', () => {
-  test('extracts FusionAssetName[Active]/Previews/small.png', async () => {
+  test('prefers FusionAssetName[Active]/Previews/big.png over small.png', async () => {
+    const zipped = fflate.zipSync({
+      'FusionAssetName[Active]/Previews/small.png': OTHER_PNG,
+      'FusionAssetName[Active]/Previews/big.png': TINY_PNG,
+      'Animation/Previews/small.png': OTHER_PNG
+    });
+    const entry = await extractF3dPreviewEntry(zipped);
+    assert.ok(entry);
+    assert.equal(entry.name, 'FusionAssetName[Active]/Previews/big.png');
+    assert.equal(Buffer.from(entry.bytes).equals(TINY_PNG), true);
+    assert.equal(Buffer.from(await extractF3dPreview(zipped)).equals(TINY_PNG), true);
+  });
+
+  test('falls back to Active small.png when big.png is missing', async () => {
     const zipped = fflate.zipSync({
       'FusionAssetName[Active]/Previews/small.png': TINY_PNG,
       'Animation/Previews/small.png': OTHER_PNG
@@ -24,7 +37,6 @@ describe('extract-f3d-preview', () => {
     assert.ok(entry);
     assert.equal(entry.name, 'FusionAssetName[Active]/Previews/small.png');
     assert.equal(Buffer.from(entry.bytes).equals(TINY_PNG), true);
-    assert.equal(Buffer.from(await extractF3dPreview(zipped)).equals(TINY_PNG), true);
   });
 
   test('falls back to any Previews/small.png', async () => {

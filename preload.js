@@ -188,6 +188,12 @@ contextBridge.exposeInMainWorld('electron', {
   getF3DImages: (filePath, options) => {
     return ipcRenderer.invoke('getF3DImages', filePath, options);
   },
+  getChituboxImages: (filePath, options) => {
+    return ipcRenderer.invoke('getChituboxImages', filePath, options);
+  },
+  getVoxlImages: (filePath, options) => {
+    return ipcRenderer.invoke('getVoxlImages', filePath, options);
+  },
   get3MFSTL: (filePath) => {
     console.log('preload: get3MFSTL called with:', filePath);
     return ipcRenderer.invoke('get3MFSTL', filePath);

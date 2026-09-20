@@ -4,6 +4,13 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.10] - 2026-09-20
+
+- ChiTuBox (`.chitubox`) and VOXL (`.voxl`) thumbnails/previews from embedded images when present
+- Preview wall: open button labeled **Preview** and centered; `...` menu no longer sits under the selection check
+- Studio disabled for image-only formats (F3D, ChiTuBox, VOXL)
+- Stop infinite thumbnail retry hang when image-only files have no embedded preview
+
 ## [2.2.9] - 2026-09-19
 
 - F3D thumbnails and 3D preview from Fusion’s embedded `Previews/small.png`

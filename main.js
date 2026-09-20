@@ -153,12 +153,15 @@ const {
 } = require('./thumbnail-compress');
 const { extractLysPreviewEntry } = require('./extract-lys-preview');
 const { extractF3dPreviewEntry } = require('./extract-f3d-preview');
+const { extractChituboxPreviewEntry } = require('./extract-chitubox-preview');
+const { extractVoxlPreviewEntry } = require('./extract-voxl-preview');
 
 // Additional file types for scan/library (alphabetical by label). id used in settings; extensions for scan/filter.
 const ADDITIONAL_FILE_TYPES_CATALOG = [
   { id: '3ds', label: '3DS (.3ds)', extensions: ['.3ds'] },
   { id: 'amf', label: 'AMF (.amf)', extensions: ['.amf'] },
   { id: 'blender', label: 'Blender (.blender)', extensions: ['.blender'] },
+  { id: 'chitubox', label: 'ChiTuBox (.chitubox)', extensions: ['.chitubox'] },
   { id: 'dae', label: 'DAE (.dae)', extensions: ['.dae'] },
   { id: 'dxf', label: 'DXF (.dxf)', extensions: ['.dxf'] },
   { id: 'dwg', label: 'DWG (.dwg)', extensions: ['.dwg'] },
@@ -172,6 +175,7 @@ const ADDITIONAL_FILE_TYPES_CATALOG = [
   { id: 'ply', label: 'PLY (.ply)', extensions: ['.ply'] },
   { id: 'step', label: 'STEP (.step/.stp)', extensions: ['.step', '.stp'] },
   { id: 'svg', label: 'SVG (.svg)', extensions: ['.svg'] },
+  { id: 'voxl', label: 'VOXL (.voxl)', extensions: ['.voxl'] },
   { id: 'x3d', label: 'X3D (.x3d)', extensions: ['.x3d'] }
 ];
 
@@ -815,6 +819,8 @@ ${bridgeCode}
         '.fbx': 'application/octet-stream',
         '.f3d': 'application/octet-stream',
         '.f3z': 'application/octet-stream',
+        '.chitubox': 'application/octet-stream',
+        '.voxl': 'application/octet-stream',
         '.gcode': 'application/octet-stream',
         '.igs': 'application/octet-stream',
         '.iges': 'application/octet-stream',
@@ -937,6 +943,8 @@ ${bridgeCode}
         '.fbx': 'application/octet-stream',
         '.f3d': 'application/octet-stream',
         '.f3z': 'application/octet-stream',
+        '.chitubox': 'application/octet-stream',
+        '.voxl': 'application/octet-stream',
         '.gcode': 'application/octet-stream',
         '.igs': 'application/octet-stream',
         '.iges': 'application/octet-stream',
@@ -8028,7 +8036,7 @@ function isPreviewableModelFile(filePath) {
   const ext = getPreviewableExtension(filePath);
   return ext === '.stl' || ext === '.3mf' || ext === '.obj' || ext === '.ply'
     || ext === '.step' || ext === '.stp' || ext === '.lys' || ext === '.igs' || ext === '.iges'
-    || ext === '.f3d';
+    || ext === '.f3d' || ext === '.chitubox' || ext === '.voxl';
 }
 
 function sendPreviewBundleEvent(event, payload) {
@@ -10646,6 +10654,124 @@ ipcMain.handle('getF3DImages', async (event, filePath, options = {}) => {
     return [dataUrl];
   } catch (error) {
     console.error('Error reading F3D preview:', error);
+    return [];
+  } finally {
+    await fh?.close();
+  }
+});
+
+ipcMain.handle('getChituboxImages', async (event, filePath, options = {}) => {
+  if (isUrlModel(filePath)) return [];
+  if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
+    return [];
+  }
+
+  const opts = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+  const compress = opts.compress !== false;
+
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+
+  if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+    return [];
+  }
+
+  if (pathInfo.isZipEntry) {
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    } catch (error) {
+      console.error('Error extracting zip entry for ChiTuBox preview:', error);
+      return [];
+    }
+  }
+
+  try {
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return [];
+    }
+
+    const data = await fs.promises.readFile(actualFilePath);
+    const entry = extractChituboxPreviewEntry(new Uint8Array(data));
+    if (!entry || !entry.bytes || !entry.bytes.length) {
+      return [];
+    }
+
+    let dataUrl = `data:image/png;base64,${Buffer.from(entry.bytes).toString('base64')}`;
+    if (compress) {
+      try {
+        dataUrl = compressDataUrl(dataUrl) || dataUrl;
+      } catch (_) { /* keep original */ }
+    }
+    return [dataUrl];
+  } catch (error) {
+    console.error('Error reading ChiTuBox preview:', error);
+    return [];
+  }
+});
+
+ipcMain.handle('getVoxlImages', async (event, filePath, options = {}) => {
+  if (isUrlModel(filePath)) return [];
+  if (/[\\\/]__macosx[\\\/]/i.test(filePath)) {
+    return [];
+  }
+
+  const opts = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+  const compress = opts.compress !== false;
+
+  const pathInfo = parseZipPath(filePath);
+  let actualFilePath = filePath;
+
+  if (pathInfo.isZipEntry && isMacOsResourceForkEntry(pathInfo.entryPath)) {
+    return [];
+  }
+
+  if (pathInfo.isZipEntry) {
+    try {
+      actualFilePath = await extractModelFromZip(pathInfo.zipPath, pathInfo.entryPath);
+    } catch (error) {
+      console.error('Error extracting zip entry for VOXL preview:', error);
+      return [];
+    }
+  }
+
+  let fh;
+  try {
+    if (!fs.existsSync(actualFilePath)) {
+      console.error('File does not exist:', actualFilePath);
+      return [];
+    }
+
+    fh = await fs.promises.open(actualFilePath, 'r');
+    const { size } = await fh.stat();
+    const handle = fh;
+    const entry = await extractVoxlPreviewEntry({
+      size,
+      read: async (offset, length) => {
+        const buf = Buffer.alloc(Math.max(0, Math.min(length, size - offset)));
+        const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+        return new Uint8Array(buf.subarray(0, bytesRead));
+      }
+    });
+    if (!entry || !entry.bytes || !entry.bytes.length) {
+      return [];
+    }
+
+    const mime = (entry.mimeType || 'image/png').toLowerCase();
+    const mimeType = mime.includes('jpeg') || mime.includes('jpg')
+      ? 'jpeg'
+      : mime.includes('webp')
+        ? 'webp'
+        : 'png';
+    let dataUrl = `data:image/${mimeType};base64,${Buffer.from(entry.bytes).toString('base64')}`;
+    if (compress) {
+      try {
+        dataUrl = compressDataUrl(dataUrl) || dataUrl;
+      } catch (_) { /* keep original */ }
+    }
+    return [dataUrl];
+  } catch (error) {
+    console.error('Error reading VOXL preview:', error);
     return [];
   } finally {
     await fh?.close();

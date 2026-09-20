@@ -136,12 +136,16 @@ async function readEntry(src, entry, options) {
 
 function choosePreview(entries) {
   const files = entries.filter((e) => !e.name.endsWith('/'));
+  // Prefer big.png (higher-res Fusion viewport capture) over small.png.
   const rank = (e) => {
     const n = e.name.toLowerCase();
-    if (n === 'fusionassetname[active]/previews/small.png') return 0;
-    if (/\[active\]\/previews\/[^/]+\.png$/.test(n)) return 1;
-    if (/(^|\/)previews\/small\.png$/.test(n)) return 2;
-    if (/(^|\/)previews\/[^/]+\.(png|jpe?g)$/.test(n)) return 3;
+    if (n === 'fusionassetname[active]/previews/big.png') return 0;
+    if (/\[active\]\/previews\/big\.png$/.test(n)) return 1;
+    if (/(^|\/)previews\/big\.png$/.test(n)) return 2;
+    if (n === 'fusionassetname[active]/previews/small.png') return 3;
+    if (/\[active\]\/previews\/[^/]+\.png$/.test(n)) return 4;
+    if (/(^|\/)previews\/small\.png$/.test(n)) return 5;
+    if (/(^|\/)previews\/[^/]+\.(png|jpe?g)$/.test(n)) return 6;
     return 99;
   };
   const best = files.map((e) => [rank(e), e]).filter(([r]) => r < 99).sort((a, b) => a[0] - b[0])[0];
