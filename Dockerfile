@@ -102,7 +102,8 @@ RUN rm -rf node_modules/better-sqlite3/build || true && \
     npx electron-builder install-app-deps
 
 # Copy application files
-COPY main.js bundle-keys.js zip-extract.js preload.js renderer.js index.html styles.css preview-wall.css thumbnail-progress.css thumbnail-progress.js ./
+COPY main.js bundle-keys.js zip-extract.js preload.js renderer.js notes-markdown.js index.html styles.css notes-markdown.css preview-wall.css thumbnail-progress.css thumbnail-progress.js ./
+COPY printer-manager.js slicer-detect.js printer-management.js printer-management.css parts-stock.js parts-stock.css ./
 COPY manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css ./
 COPY server-bridge.js scan-worker.js parse-worker.js ./
 COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
@@ -115,7 +116,7 @@ COPY *.png *.jpg *.bmp ./
 COPY guide/ ./guide/
 
 # Fail the build if required app modules were omitted from COPY above
-RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js server-tls.js extension-inbox.js sidebar-layout.js folder-tree.js extract-lys-preview.js extract-f3d-preview.js extract-chitubox-preview.js extract-voxl-preview.js parse-lys-geometry.js step-assembly.js manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css; do \
+RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js server-tls.js extension-inbox.js sidebar-layout.js folder-tree.js extract-lys-preview.js extract-f3d-preview.js extract-chitubox-preview.js extract-voxl-preview.js parse-lys-geometry.js step-assembly.js manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css notes-markdown.js notes-markdown.css printer-manager.js slicer-detect.js printer-management.js printer-management.css parts-stock.js parts-stock.css; do \
       test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
     done
 

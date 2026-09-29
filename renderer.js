@@ -67,8 +67,8 @@ if (typeof window !== 'undefined') {
 window._electronRealEventHandlers = {};
 window._electronPendingEvents = {};
 const earlyEventChannels = [
-  'open-theme-settings', 'regenerate-thumbnails', 'generate-missing-thumbnails',
-  'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-filament-manager', 'open-stats',
+  'open-theme-settings', 'clear-new-flags', 'regenerate-thumbnails', 'generate-missing-thumbnails',
+  'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-filament-manager', 'open-printer-management', 'open-parts-stock', 'open-stats',
   'open-backup-restore', 'open-ai-config', 'open-file-type-settings', 'open-performance-settings',
   'open-slicer-settings', 'open-browser-extension-settings', 'open-mcp-server-settings', 'open-https-settings', 'open-purge-models',
   'open-metadata-editor', 'open-system-report', 'open-manage-thumbnails',
@@ -412,7 +412,7 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
   }
 };
 
-// Tag Manager & DeDup: fullscreen toggle (expose early so the icon works in Docker/server mode)
+// Modal fullscreen toggles (exposed early so icons work in Docker/server mode)
 window.syncTagManagerFullscreenButton = function syncTagManagerFullscreenButton(isFullscreen) {
   const btn = document.getElementById('tag-manager-fullscreen-toggle');
   if (!btn) return;
@@ -424,10 +424,50 @@ window.syncTagManagerFullscreenButton = function syncTagManagerFullscreenButton(
 window.toggleTagManagerFullscreen = function toggleTagManagerFullscreen() {
   const dialog = document.getElementById('tag-manager-dialog');
   if (!dialog) return;
-  // Single handler: HTML onclick calls this. Do not also bind click in JS or the
-  // class toggles twice (no resize) and textContent wipes the icon SVGs.
   dialog.classList.toggle('modal-fullscreen');
   window.syncTagManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncFilamentManagerFullscreenButton = function syncFilamentManagerFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('filament-manager-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.toggleFilamentManagerFullscreen = function toggleFilamentManagerFullscreen() {
+  const dialog = document.getElementById('filament-manager-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncFilamentManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncPrinterManagementFullscreenButton = function syncPrinterManagementFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('printer-management-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.togglePrinterManagementFullscreen = function togglePrinterManagementFullscreen() {
+  const dialog = document.getElementById('printer-management-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncPrinterManagementFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncPartsStockFullscreenButton = function syncPartsStockFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('parts-stock-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.togglePartsStockFullscreen = function togglePartsStockFullscreen() {
+  const dialog = document.getElementById('parts-stock-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncPartsStockFullscreenButton(dialog.classList.contains('modal-fullscreen'));
 };
 window.toggleDedupFullscreen = function toggleDedupFullscreen() {
   const dialog = document.getElementById('dedup-dialog');
@@ -3688,6 +3728,7 @@ async function showModelDetails(filePath) {
     
     document.getElementById('model-source').value = storedValues['model-source'];
     document.getElementById('model-notes').value = storedValues['model-notes'];
+    window.NotesMarkdown?.sync(document.getElementById('model-notes'));
     if (window.PrintHistory) {
       await window.PrintHistory.populateDetails(model);
     }
@@ -3861,6 +3902,8 @@ let isCheckingForHashes = false;
 let isThumbnailDialogShowing = false;
 // Flag to prevent multiple regenerate thumbnails dialogs from showing
 let isRegeneratingThumbnails = false;
+// Flag to prevent multiple clear-new-flag confirmations from showing
+let isClearingNewFlags = false;
 
 // Active browser-side waiter for a server/Docker bulk thumbnail job
 let activeServerThumbnailJobWaiter = null;
@@ -6246,11 +6289,25 @@ async function createServerMenuBar() {
       ]
     },
     { label: '---', action: null },
-    { label: 'Filament Management', action: () => {
+    { label: 'Filament Manager', action: () => {
       if (typeof window.openFilamentManager === 'function') {
         window.openFilamentManager();
       } else {
         window.electron.send('open-filament-manager');
+      }
+    }},
+    { label: 'Printer Manager', action: () => {
+      if (typeof window.openPrinterManagement === 'function') {
+        window.openPrinterManagement();
+      } else {
+        window.electron.send('open-printer-management');
+      }
+    }},
+    { label: 'Parts Manager', action: () => {
+      if (typeof window.openPartsStock === 'function') {
+        window.openPartsStock();
+      } else {
+        window.electron.send('open-parts-stock');
       }
     }},
     { label: 'Tag Manager', action: () => {
@@ -6263,16 +6320,10 @@ async function createServerMenuBar() {
     { label: 'Metadata Manager', action: () => {
       window.electron.send('open-metadata-editor');
     }},
-    { label: 'Backup/Restore', action: () => {
-      const dialog = document.getElementById('backup-restore-dialog');
-      if (dialog) {
-        dialog.showModal();
-      } else {
-        // Fallback: trigger the event which will open the dialog via the listener
-        window.electron.send('open-backup-restore');
-      }
-    }},
     { label: '---', action: null },
+    { label: 'Clear New Flag', action: () => {
+      window.electron.send('clear-new-flags');
+    }},
     { label: 'Regenerate Thumbnails', action: () => {
       window.electron.send('regenerate-thumbnails');
     }},
@@ -6283,6 +6334,16 @@ async function createServerMenuBar() {
       const dialog = document.getElementById('purge-models-dialog');
       if (dialog) {
         dialog.showModal();
+      }
+    }},
+    { label: '---', action: null },
+    { label: 'Backup/Restore', action: () => {
+      const dialog = document.getElementById('backup-restore-dialog');
+      if (dialog) {
+        dialog.showModal();
+      } else {
+        // Fallback: trigger the event which will open the dialog via the listener
+        window.electron.send('open-backup-restore');
       }
     }},
     { label: '---', action: null },
@@ -7212,10 +7273,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (currentModal && currentModalTextarea && currentNotesTextarea) {
       // Always read the current value from the textarea
       currentModalTextarea.value = currentNotesTextarea.value || '';
+      window.NotesMarkdown?.sync(currentModalTextarea);
       currentModal.showModal();
       // Focus the textarea after a short delay to ensure modal is fully rendered
       setTimeout(() => {
-        currentModalTextarea.focus();
+        document.getElementById('notes-richtext')?.focus();
       }, 100);
     }
   });
@@ -7229,9 +7291,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const currentModal = document.getElementById('notes-modal-dialog');
     
     if (currentModal && currentModalTextarea && currentNotesTextarea) {
+      window.NotesMarkdown?.commit();
       const newValue = currentModalTextarea.value || '';
       // Update the main textarea with the new value
       currentNotesTextarea.value = newValue;
+      window.NotesMarkdown?.sync(currentNotesTextarea);
       
       // Trigger change event to auto-save
       const changeEvent = new Event('change', { bubbles: true });
@@ -7257,8 +7321,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const currentNotesTextarea = document.getElementById('model-notes');
     
     if (currentModalTextarea && currentNotesTextarea) {
+      window.NotesMarkdown?.commit();
       const newValue = currentModalTextarea.value || '';
       currentNotesTextarea.value = newValue;
+      window.NotesMarkdown?.sync(currentNotesTextarea);
       
       // Trigger change event to auto-save
       const changeEvent = new Event('change', { bubbles: true });
@@ -9102,6 +9168,57 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('DOMContentLoaded', () => {
     initializeMetadataSearch();
   });
+
+  window._electronRealEventHandlers['clear-new-flags'] = async function() {
+    if (isClearingNewFlags) return;
+    if (await isServerThumbnailWorkerContext()) return;
+    isClearingNewFlags = true;
+    try {
+      const userChoice = await window.electron.showMessage(
+        'Clear New Flag',
+        'This will clear the New flag from every model in your library. Continue?',
+        ['Yes', 'No']
+      );
+      if (userChoice !== 'Yes') return;
+
+      const result = await window.electron.clearNewFlags();
+      const cleared = result && typeof result.cleared === 'number' ? result.cleared : 0;
+
+      const container = document.querySelector('.file-grid');
+      if (container && Array.isArray(container.currentModels)) {
+        for (const model of container.currentModels) {
+          if (model) model.isNew = 0;
+        }
+      }
+      document.querySelectorAll('.new-status').forEach((el) => el.remove());
+
+      try {
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        }
+      } catch (refreshError) {
+        console.warn('Cleared new flags but failed to refresh the grid:', refreshError);
+      }
+
+      const message = cleared === 0
+        ? 'No models were marked as new.'
+        : `Cleared the New flag from ${cleared} model${cleared === 1 ? '' : 's'}.`;
+      await window.electron.showMessage('Clear New Flag', message);
+    } catch (error) {
+      console.error('Error clearing new flags:', error);
+      if (window.electron?.showMessage) {
+        await window.electron.showMessage('Error', 'Failed to clear New flags: ' + (error.message || error));
+      }
+    } finally {
+      isClearingNewFlags = false;
+    }
+  };
+  if (window._electronPendingEvents['clear-new-flags']) {
+    window._electronPendingEvents['clear-new-flags'].forEach((args) => {
+      window._electronRealEventHandlers['clear-new-flags'].apply(null, args);
+    });
+    delete window._electronPendingEvents['clear-new-flags'];
+  }
 
   window._electronRealEventHandlers['regenerate-thumbnails'] = async function() {
     if (isRegeneratingThumbnails) return;
@@ -13344,6 +13461,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           // 0c. Image-only previews: F3D / ChiTuBox / VOXL embedded thumbs (no mesh)
           if (isImageOnlyPreviewExt(fileExt)) {
+            console.log(
+              `[DEBUG] generateThumbnailsForModels: Attempting to extract embedded thumbnail for ${model.filePath}`
+            );
             try {
               const embeddedImages = await extractEmbeddedPreviewImages(model.filePath, fileExt);
               if (embeddedImages && embeddedImages.length > 0) {
@@ -13353,14 +13473,27 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (validImages.length > 0) {
                   thumbnail = validImages[0];
                   await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  console.log(
+                    `[DEBUG] generateThumbnailsForModels: SUCCESS - Saved ${validImages.length} embedded image(s) for ${model.filePath}`
+                  );
                   if (!skipHash && (!model.hash || model.hash === '')) {
                     try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
                   }
                   return;
                 }
+                console.log(
+                  `[DEBUG] generateThumbnailsForModels: Invalid image format for ${model.filePath}`
+                );
+              } else {
+                console.log(
+                  `[DEBUG] generateThumbnailsForModels: No embedded thumbnail found for ${model.filePath} (${fileExt}). Saving placeholder.`
+                );
               }
             } catch (embeddedError) {
-              console.error(`Error extracting embedded image from ${fileExt.toUpperCase()}: ${model.filePath}`, embeddedError);
+              console.error(
+                `[DEBUG] generateThumbnailsForModels: Error extracting embedded image from ${fileExt.toUpperCase()}: ${model.filePath}`,
+                embeddedError
+              );
             }
             // Leave retryable — typed placeholders used to stick forever on Docker grids.
             await window.electron.saveThumbnail(model.filePath, '3d.png');
@@ -13372,6 +13505,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           // 0d. LYS: pull embedded preview.png; otherwise render the mesh
           if (fileExt === 'lys') {
+            console.log(
+              `[DEBUG] generateThumbnailsForModels: Attempting to extract embedded thumbnail for ${model.filePath}`
+            );
             try {
               const embeddedImages = await extractLYSThumbnail(model.filePath);
               if (embeddedImages && embeddedImages.length > 0) {
@@ -13381,14 +13517,27 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (validImages.length > 0) {
                   thumbnail = validImages[0];
                   await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  console.log(
+                    `[DEBUG] generateThumbnailsForModels: SUCCESS - Saved ${validImages.length} embedded image(s) for ${model.filePath}`
+                  );
                   if (!skipHash && (!model.hash || model.hash === '')) {
                     try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
                   }
                   return;
                 }
+                console.log(
+                  `[DEBUG] generateThumbnailsForModels: Invalid image format for ${model.filePath}`
+                );
+              } else {
+                console.log(
+                  `[DEBUG] generateThumbnailsForModels: No embedded thumbnail found for ${model.filePath}. Falling back to 3D rendering.`
+                );
               }
             } catch (embeddedError) {
-              console.error(`Error extracting embedded image from LYS: ${model.filePath}`, embeddedError);
+              console.error(
+                `[DEBUG] generateThumbnailsForModels: Error extracting embedded image from LYS: ${model.filePath}`,
+                embeddedError
+              );
             }
           }
           
@@ -15779,7 +15928,10 @@ function clearModelDetailsSidebar() {
   const ms = document.getElementById('model-source');
   if (ms) ms.value = '';
   const mnotes = document.getElementById('model-notes');
-  if (mnotes) mnotes.value = '';
+  if (mnotes) {
+    mnotes.value = '';
+    window.NotesMarkdown?.sync(mnotes);
+  }
   const mp = document.getElementById('model-print-status');
   if (mp) mp.value = 'unprinted';
   const hist = document.getElementById('print-history-list');
@@ -19177,6 +19329,7 @@ function exitMultiEditMode() {
   document.getElementById('model-designer').value = '';
   document.getElementById('model-source').value = '';
   document.getElementById('model-notes').value = '';
+  window.NotesMarkdown?.sync(document.getElementById('model-notes'));
   const printStatusSelect = document.getElementById('model-print-status');
   if (printStatusSelect) printStatusSelect.value = 'unprinted';
   document.getElementById('model-parent').value = '';

@@ -1,0 +1,886 @@
+/* Printer Management Dialog Styling
+   Follows the aesthetic of parts-stock.css & filament manager */
+
+#printer-management-dialog {
+  min-width: 620px;
+  max-width: 940px;
+  width: 92%;
+  max-height: 90vh;
+  border-radius: 20px;
+  background: rgba(24, 24, 38, 0.96);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  color: #fff;
+  padding: 24px 28px;
+  border: none;
+  overflow: hidden;
+}
+
+#printer-management-dialog:not([open]) {
+  display: none !important;
+}
+
+#printer-management-dialog[open] {
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+#printer-management-dialog * {
+  box-sizing: border-box;
+}
+
+#printer-management-dialog [hidden] {
+  display: none !important;
+}
+
+#printer-management-dialog button:not(.modal-fullscreen-icon-btn) {
+  width: auto;
+  margin-bottom: 0;
+  box-shadow: none;
+}
+
+#printer-management-dialog .modal-fullscreen-icon-btn {
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  flex-shrink: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
+}
+
+/* Header */
+.printer-management-header {
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.printer-management-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.printer-management-header h3 {
+  margin: 0 0 4px 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.printer-management-header .setting-description {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Top Nav Tabs */
+.printer-management-tabs {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 10px;
+}
+
+.printer-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #94a3b8;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.printer-tab-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.printer-tab-btn.active {
+  background: rgba(0, 212, 255, 0.15);
+  border-color: rgba(0, 212, 255, 0.4);
+  color: #38bdf8;
+}
+
+.printer-tab-badge {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.printer-tab-badge.due {
+  background: #ef4444;
+  color: #fff;
+}
+
+/* Scrollable Form & Content Container */
+.printer-management-scroll-content {
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-right: 4px;
+  margin-bottom: 12px;
+}
+
+.printer-management-scroll-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.printer-management-scroll-content::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 4px;
+}
+
+.printer-management-scroll-content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+.printer-management-scroll-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Form Sections */
+.printer-form-section,
+.printer-maintenance-form-section {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.printer-form-section.collapsed {
+  padding: 10px 18px !important;
+  margin-bottom: 14px !important;
+}
+
+.printer-form-section.collapsed .printer-section-header {
+  margin-bottom: 0 !important;
+}
+
+.printer-toggle-add-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 0 14px !important;
+  border-radius: 8px !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  line-height: 1 !important;
+  border: 1px solid rgba(56, 189, 248, 0.4) !important;
+  background: rgba(56, 189, 248, 0.12) !important;
+  color: #38bdf8 !important;
+  transition: all 0.2s ease !important;
+}
+
+.printer-toggle-add-btn:hover {
+  background: rgba(56, 189, 248, 0.24) !important;
+  color: #fff !important;
+  border-color: rgba(56, 189, 248, 0.6) !important;
+}
+
+.printer-toggle-add-btn.active {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: #cbd5e1 !important;
+}
+
+.printer-toggle-add-btn.active:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+  color: #fff !important;
+}
+
+.printer-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.printer-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.printer-add-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  width: 100%;
+}
+
+.printer-span {
+  grid-column: 1 / -1;
+}
+
+.printer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+}
+
+.printer-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.printer-field-label .required {
+  color: #38bdf8;
+  margin-left: 2px;
+}
+
+/* Inputs & selects inside dialog */
+#printer-management-dialog input[type="text"],
+#printer-management-dialog input[type="datetime-local"],
+#printer-management-dialog select,
+#printer-management-dialog textarea {
+  width: 100% !important;
+  box-sizing: border-box !important;
+  padding: 10px 14px !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: #fff !important;
+  font-size: 13.5px !important;
+  line-height: 1.4 !important;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s !important;
+}
+
+#printer-management-dialog textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
+#printer-management-dialog input:focus,
+#printer-management-dialog select:focus,
+#printer-management-dialog textarea:focus {
+  outline: none !important;
+  border-color: #00d4ff !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.18) !important;
+}
+
+#printer-management-dialog input::placeholder,
+#printer-management-dialog textarea::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 13px;
+}
+
+#printer-management-dialog select option {
+  background-color: #1e1e2e;
+  color: #fff;
+}
+
+/* Web Address input group with Open button */
+.printer-url-group {
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 8px !important;
+  align-items: center !important;
+  width: 100% !important;
+}
+
+#printer-management-dialog .printer-url-group input[type="text"] {
+  flex: 1 1 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+}
+
+.printer-url-open-btn,
+#printer-management-dialog .printer-url-open-btn {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  max-width: fit-content !important;
+  padding: 6px 12px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  height: 36px !important;
+  border-radius: 8px !important;
+  margin: 0 !important;
+  background: rgba(0, 212, 255, 0.12) !important;
+  border: 1px solid rgba(0, 212, 255, 0.3) !important;
+  color: #38bdf8 !important;
+  cursor: pointer;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  white-space: nowrap !important;
+  transition: all 0.15s ease !important;
+}
+
+.printer-url-open-btn:hover,
+#printer-management-dialog .printer-url-open-btn:hover {
+  background: rgba(0, 212, 255, 0.22) !important;
+  border-color: #00d4ff !important;
+  color: #fff !important;
+  transform: translateY(-1px);
+}
+
+/* Klipper toggle pill */
+.printer-klipper-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+.printer-klipper-toggle-row input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  accent-color: #00d4ff;
+  cursor: pointer;
+  margin: 0;
+}
+
+.printer-klipper-toggle-label {
+  font-size: 13px;
+  color: #f1f5f9;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.klipper-tag-badge {
+  background: linear-gradient(135deg, #a855f7, #6366f1);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Form actions */
+.printer-form-actions {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  width: 100%;
+}
+
+.printer-btn-primary,
+#printer-management-dialog .printer-btn-primary {
+  width: auto !important;
+  min-width: 180px;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #00d4ff, #0077ff);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 32px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 4px 14px rgba(0, 119, 255, 0.35);
+}
+
+.printer-btn-primary:hover,
+#printer-management-dialog .printer-btn-primary:hover {
+  background: linear-gradient(135deg, #38bdf8, #0066ee);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0, 119, 255, 0.45);
+}
+
+.printer-btn-cancel,
+#printer-management-dialog .printer-btn-cancel {
+  width: auto !important;
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 10px 20px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.printer-btn-cancel:hover,
+#printer-management-dialog .printer-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.printer-status-msg {
+  margin-top: 10px;
+  font-size: 13px;
+  min-height: 20px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.printer-status-msg.error {
+  color: #f87171;
+}
+
+.printer-status-msg.success {
+  color: #4ade80;
+}
+
+/* Printer List Section */
+.printer-list-section {
+  width: 100%;
+}
+
+.printer-cards-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.printer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 14px 18px;
+  transition: all 0.15s ease;
+}
+
+.printer-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.printer-card-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+}
+
+.printer-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.printer-card-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.printer-card-name {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.printer-card-model {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.printer-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.printer-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.printer-badge.printer-type {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.36);
+  color: #6ee7b7;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+
+.printer-badge.klipper {
+  background: rgba(168, 85, 247, 0.2);
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  color: #d8b4fe;
+}
+
+.printer-badge.prints-count {
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+}
+
+.printer-badge.reminder-due {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  animation: pulse-glow 2s infinite ease-in-out;
+}
+
+.printer-search-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.printer-type-filter-select,
+#printer-management-dialog select.printer-type-filter-select {
+  width: auto !important;
+  min-width: 120px !important;
+  max-width: 160px !important;
+  height: 38px !important;
+  padding: 6px 12px !important;
+  font-size: 13px !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  color: #e2e8f0 !important;
+  cursor: pointer;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.printer-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.printer-action-btn,
+#printer-management-dialog .printer-action-btn {
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 0 12px !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+  white-space: nowrap !important;
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  line-height: 1 !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #cbd5e1 !important;
+  cursor: pointer;
+  flex-shrink: 0 !important;
+  transition: all 0.15s ease !important;
+}
+
+.printer-action-btn:hover,
+#printer-management-dialog .printer-action-btn:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #fff !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+}
+
+.printer-action-btn.web-ui,
+#printer-management-dialog .printer-action-btn.web-ui {
+  background: rgba(0, 212, 255, 0.12) !important;
+  border-color: rgba(0, 212, 255, 0.3) !important;
+  color: #38bdf8 !important;
+}
+
+.printer-action-btn.web-ui:hover,
+#printer-management-dialog .printer-action-btn.web-ui:hover {
+  background: rgba(0, 212, 255, 0.24) !important;
+  color: #fff !important;
+  border-color: #00d4ff !important;
+}
+
+.printer-action-btn.maintenance,
+#printer-management-dialog .printer-action-btn.maintenance {
+  background: rgba(16, 185, 129, 0.12) !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+  color: #34d399 !important;
+}
+
+.printer-action-btn.maintenance:hover,
+#printer-management-dialog .printer-action-btn.maintenance:hover {
+  background: rgba(16, 185, 129, 0.24) !important;
+  color: #fff !important;
+  border-color: #10b981 !important;
+}
+
+.printer-action-btn.danger,
+#printer-management-dialog .printer-action-btn.danger {
+  width: 32px !important;
+  min-width: 32px !important;
+  padding: 0 !important;
+  color: #f87171 !important;
+  font-size: 13px !important;
+}
+
+.printer-action-btn.danger:hover,
+#printer-management-dialog .printer-action-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.18) !important;
+  border-color: #ef4444 !important;
+}
+
+/* Empty state */
+.printer-empty-state {
+  text-align: center;
+  padding: 36px 20px;
+  color: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.printer-empty-icon {
+  font-size: 32px;
+  margin-bottom: 4px;
+}
+
+/* Maintenance View */
+.maintenance-active-printer-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+}
+
+.maintenance-printer-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.maintenance-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .maintenance-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.maintenance-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Reminders & Log items */
+.reminder-item,
+.log-item {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  transition: all 0.15s ease;
+}
+
+.reminder-item.is-overdue {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.reminder-item.is-due-soon {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.reminder-item.is-completed {
+  opacity: 0.6;
+}
+
+.reminder-item-main,
+.log-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.reminder-title,
+.log-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.reminder-meta,
+.log-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #94a3b8;
+  flex-wrap: wrap;
+}
+
+.due-pill {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.due-pill.overdue {
+  background: #ef4444;
+  color: #fff;
+}
+
+.due-pill.due-soon {
+  background: #f59e0b;
+  color: #000;
+}
+
+.due-pill.upcoming {
+  background: rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+}
+
+.due-pill.completed {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+
+.reminder-actions,
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.reminder-done-btn {
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.reminder-done-btn:hover {
+  background: #10b981;
+  color: #fff;
+}
+
+/* Dialog footer buttons */
+.printer-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.printer-btn-close,
+#printer-management-dialog .printer-btn-close {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: auto !important;
+  min-width: 100px;
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #fff !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: 10px !important;
+  padding: 9px 20px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  cursor: pointer;
+  transition: all 0.15s ease !important;
+}
+
+.printer-btn-close:hover,
+#printer-management-dialog .printer-btn-close:hover {
+  background: rgba(255, 255, 255, 0.16) !important;
+}
+
+/* Print History entry with printer badge */
+.print-history-printer {
+  font-size: 12px;
+  color: #38bdf8;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0, 212, 255, 0.1);
+  padding: 2px 8px;
+  border-radius: 6px;
+  margin-top: 4px;
+}
+
+.print-history-printer-model {
+  color: #94a3b8;
+  font-size: 11px;
+}

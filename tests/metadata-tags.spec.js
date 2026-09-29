@@ -6,7 +6,8 @@
  * Note: Close any running Printventory instance first (single-instance lock).
  */
 const { test, expect, _electron: electron } = require('@playwright/test');
-const { getElectronLaunchOptions, cleanTestArtifacts, dismissOnboarding, acceptTerms, runDirectoryScan } = require('./test-utils');
+const { getElectronLaunchOptions, cleanTestArtifacts, dismissOnboarding, acceptTerms, runDirectoryScan, saveCurrentModel } = require('./test-utils');
+
 
 let app;
 let window;
@@ -29,12 +30,17 @@ async function ensureGridLoaded() {
 
 /** Click first model in grid and wait for single-edit details panel. */
 async function openFirstModelDetails() {
-  const firstItem = window.locator('.file-grid .file-item').first();
-  await firstItem.click();
+  const details = window.locator('#model-details');
+  const isHidden = await details.evaluate((el) => el.classList.contains('hidden'));
+  if (isHidden) {
+    const firstItem = window.locator('.file-grid .file-item').first();
+    await firstItem.click();
+  }
   await expect(window.locator('#model-details')).not.toHaveClass(/hidden/);
   await expect(window.locator('#model-name')).toBeVisible({ timeout: 5000 });
   await window.waitForTimeout(300);
 }
+
 
 /** Get file path of the first model in the grid (for IPC verification). */
 async function getFirstModelPath() {
@@ -156,14 +162,46 @@ test.describe('Metadata and tags', () => {
   test('Single-edit: set source and notes and save', async () => {
     await openFirstModelDetails();
     await window.locator('#model-source').fill('https://example.com/model');
-    await window.locator('#model-notes').fill('Test notes here');
-    await window.locator('#save-model-button').click();
+    await window.locator('#open-notes-modal-button').click();
+    await window.locator('#notes-richtext').fill('Test notes here');
+    await window.locator('#save-notes-button').click();
+    await saveCurrentModel(window);
     await window.waitForTimeout(500);
     const filePath = await getFirstModelPath();
     const model = await getModelData(filePath);
     expect(model.source).toBe('https://example.com/model');
     expect(model.notes).toBe('Test notes here');
   });
+
+  test('Single-edit: set formatted notes with bold and italic and save', async () => {
+    await openFirstModelDetails();
+    await window.locator('#open-notes-modal-button').click();
+    const rich = window.locator('#notes-richtext');
+    await rich.evaluate((el) => { el.innerHTML = ''; });
+    await rich.click();
+    await window.keyboard.type('Hello World');
+    for (let i = 0; i < 5; i++) {
+      await window.keyboard.press('Shift+ArrowLeft');
+    }
+    await window.locator('.notes-toolbar [data-md="bold"]').click();
+    await window.waitForTimeout(200);
+    await window.locator('#save-notes-button').click();
+    await window.waitForTimeout(400);
+
+    const sidebarNotes = await window.locator('#model-notes').inputValue();
+    expect(sidebarNotes).toBe('Hello **World**');
+    const sidebarPreview = await window.locator('#model-notes-preview').evaluate((el) => el.innerHTML);
+    expect(sidebarPreview).toContain('<strong>World</strong>');
+
+    await saveCurrentModel(window);
+    await window.waitForTimeout(500);
+
+
+    const filePath = await getFirstModelPath();
+    const model = await getModelData(filePath);
+    expect(model.notes).toBe('Hello **World**');
+  });
+
 
   test('Single-edit: add new tag via dialog and verify', async () => {
     await openFirstModelDetails();

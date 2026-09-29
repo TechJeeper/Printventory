@@ -101,10 +101,16 @@
         const hay = `${formatFilamentLabel(f)} ${f.vendor || ''} ${f.material || ''} ${f.source || ''}`.toLowerCase();
         return hay.includes(q);
       });
+      const countBadge = document.getElementById('filament-count-badge');
+      if (countBadge) {
+        countBadge.textContent = filtered.length ? `${filtered.length} filament${filtered.length === 1 ? '' : 's'}` : '';
+      }
       if (filtered.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'filament-manager-empty';
-        empty.textContent = q ? 'No filaments match that search.' : 'No filaments yet. Add one below or sync from Spoolman.';
+        empty.innerHTML = q
+          ? '<span style="font-size:22px;margin-bottom:4px;">🔍</span><span>No filaments match that search.</span>'
+          : '<span style="font-size:22px;margin-bottom:4px;">🧵</span><span>No filaments yet. Add one above or sync from Spoolman.</span>';
         list.appendChild(empty);
         return;
       }
@@ -116,14 +122,20 @@
         row.dataset.filamentId = String(filament.id);
         const swatch = `<span class="filament-swatch" style="background:${colorCss(filament.color_hex)}" title="${escapeHtml(filament.color_hex || 'No color')}"></span>`;
         const badge = filament.source === 'spoolman' ? '<span class="filament-source-badge">Spoolman</span>' : '<span class="filament-source-badge manual">Manual</span>';
+        const modelCount = Number(filament.model_count) || 0;
+        const countText = modelCount === 1 ? '1 model' : `${modelCount} models`;
         row.innerHTML = `
           ${swatch}
           <div class="filament-manager-item-body">
-            <div class="filament-manager-item-name">${escapeHtml(formatFilamentLabel(filament))}</div>
-            <div class="filament-manager-item-meta">${escapeHtml(filament.diameter ? `${filament.diameter} mm` : '')}</div>
+            <div class="filament-manager-item-name" title="${escapeHtml(formatFilamentLabel(filament))}">${escapeHtml(formatFilamentLabel(filament))}</div>
+            <div class="filament-manager-item-meta">
+              ${filament.diameter ? `<span class="filament-tag">${escapeHtml(filament.diameter)} mm</span>` : ''}
+              ${filament.material ? `<span class="filament-tag material">${escapeHtml(filament.material)}</span>` : ''}
+              ${filament.vendor ? `<span class="filament-tag">${escapeHtml(filament.vendor)}</span>` : ''}
+            </div>
           </div>
           ${badge}
-          <span class="filament-count">${filament.model_count || 0}</span>
+          <span class="filament-count">${countText}</span>
           <button type="button" class="filament-remove" title="Remove from Printventory" aria-label="Delete filament">×</button>
         `;
         row.querySelector('.filament-remove')?.addEventListener('click', async (e) => {
@@ -151,17 +163,52 @@
     }
   }
 
+  function isFilamentAddOpen() {
+    const body = document.getElementById('filament-form-body');
+    return !!(body && !body.hidden);
+  }
+
+  function setFilamentAddOpen(open) {
+    const section = document.getElementById('filament-form-section');
+    const body = document.getElementById('filament-form-body');
+    const btn = document.getElementById('filament-toggle-add-btn');
+    if (body) body.hidden = !open;
+    if (section) section.classList.toggle('collapsed', !open);
+    if (btn) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.textContent = open ? '− Cancel' : '+ Add Filament';
+      btn.classList.toggle('active', open);
+    }
+    if (!open) {
+      const nameInput = document.getElementById('new-filament-name');
+      const vendorInput = document.getElementById('new-filament-vendor');
+      const materialInput = document.getElementById('new-filament-material');
+      const colorText = document.getElementById('new-filament-color');
+      const colorPicker = document.getElementById('new-filament-color-picker');
+      const diameterInput = document.getElementById('new-filament-diameter');
+      if (nameInput) nameInput.value = '';
+      if (vendorInput) vendorInput.value = '';
+      if (materialInput) materialInput.value = '';
+      if (colorText) colorText.value = '';
+      if (colorPicker) colorPicker.value = '#808080';
+      if (diameterInput) diameterInput.value = '1.75';
+      setStatus('');
+    }
+  }
+
   async function openFilamentManager() {
     const dialog = document.getElementById('filament-manager-dialog');
     if (!dialog) return;
     dialog.classList.remove('modal-fullscreen');
-    const fullscreenBtn = document.getElementById('filament-manager-fullscreen-toggle');
-    if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
+    if (typeof window.syncFilamentManagerFullscreenButton === 'function') {
+      window.syncFilamentManagerFullscreenButton(false);
+    }
     await loadSpoolmanSettingsIntoForm();
     const searchEl = document.getElementById('filament-manager-search');
     if (searchEl) searchEl.value = '';
     setStatus('');
     setSpoolmanSetupOpen(false);
+    setFilamentAddOpen(false);
     await refreshFilamentManagerList();
     dialog.showModal();
   }
@@ -197,6 +244,16 @@
       if (n && colorPicker) colorPicker.value = `#${n}`;
     });
 
+    document.getElementById('filament-toggle-add-btn')?.addEventListener('click', () => {
+      const open = !isFilamentAddOpen();
+      setFilamentAddOpen(open);
+      if (open) document.getElementById('new-filament-name')?.focus();
+    });
+
+    document.getElementById('cancel-filament-manager-button')?.addEventListener('click', () => {
+      setFilamentAddOpen(false);
+    });
+
     document.getElementById('add-filament-manager-button')?.addEventListener('click', async () => {
       const name = document.getElementById('new-filament-name')?.value?.trim();
       if (!name) {
@@ -221,6 +278,7 @@
         document.getElementById('new-filament-vendor').value = '';
         document.getElementById('new-filament-material').value = '';
         setStatus(`Added ${name}`, false);
+        setFilamentAddOpen(false);
         await refreshFilamentManagerList(document.getElementById('filament-manager-search')?.value || '');
         await window.populateFilamentSelect?.();
         await window.populateFilamentFilter?.();
@@ -273,6 +331,11 @@
     });
 
     document.getElementById('filament-manager-dialog')?.addEventListener('close', async () => {
+      const dialog = document.getElementById('filament-manager-dialog');
+      if (dialog) dialog.classList.remove('modal-fullscreen');
+      if (typeof window.syncFilamentManagerFullscreenButton === 'function') {
+        window.syncFilamentManagerFullscreenButton(false);
+      }
       try {
         await saveSpoolmanSettingsFromForm();
         await window.populateFilamentSelect?.();
@@ -517,6 +580,7 @@
 
   window.formatFilamentLabel = formatFilamentLabel;
   window.openFilamentManager = openFilamentManager;
+  window.setFilamentAddOpen = setFilamentAddOpen;
   window.refreshFilamentManagerList = refreshFilamentManagerList;
   window.loadModelFilaments = loadModelFilaments;
   window.populateFilamentSelect = populateFilamentSelect;
@@ -525,12 +589,19 @@
   window.addFilamentToModel = addFilamentToModel;
   window.updateModelFilamentDisplay = updateModelFilamentDisplay;
   window.initializeFilaments = initializeFilaments;
-  window.toggleFilamentManagerFullscreen = function () {
-    const dialog = document.getElementById('filament-manager-dialog');
+  window.syncFilamentManagerFullscreenButton = function syncFilamentManagerFullscreenButton(isFullscreen) {
     const btn = document.getElementById('filament-manager-fullscreen-toggle');
-    if (!dialog || !btn) return;
+    if (!btn) return;
+    const full = !!isFullscreen;
+    btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+  };
+  window.toggleFilamentManagerFullscreen = function toggleFilamentManagerFullscreen() {
+    const dialog = document.getElementById('filament-manager-dialog');
+    if (!dialog) return;
     dialog.classList.toggle('modal-fullscreen');
-    btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
+    window.syncFilamentManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
   };
 
   function boot() {

@@ -245,6 +245,83 @@ function ensurePrintLifecycleSchema(db) {
   db.prepare('CREATE INDEX IF NOT EXISTS idx_print_events_model_id ON print_events(model_id)').run();
   db.prepare('CREATE INDEX IF NOT EXISTS idx_print_events_printed_at ON print_events(printed_at)').run();
   db.prepare('CREATE INDEX IF NOT EXISTS idx_print_event_filaments_filament_id ON print_event_filaments(filament_id)').run();
+  try {
+    const tableInfo = db.prepare('PRAGMA table_info(print_events)').all();
+    if (!tableInfo.some((col) => col.name === 'printer_id')) {
+      db.prepare('ALTER TABLE print_events ADD COLUMN printer_id INTEGER').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_print_events_printer_id ON print_events(printer_id)').run();
+    }
+  } catch (_) {}
+  ensurePartsSchema(db);
+}
+
+function ensurePartsSchema(db) {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS parts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      category TEXT,
+      quantity INTEGER NOT NULL DEFAULT 0,
+      unit TEXT,
+      notes TEXT,
+      low_stock INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS print_event_parts (
+      event_id INTEGER NOT NULL,
+      part_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      name TEXT,
+      PRIMARY KEY (event_id, part_id)
+    )
+  `).run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_parts_name ON parts(name)').run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_print_event_parts_part_id ON print_event_parts(part_id)').run();
+}
+
+function normalizePartsUsage(raw) {
+  if (raw == null) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  const usages = [];
+  const seen = new Set();
+  for (const item of list) {
+    if (item == null || item === '') continue;
+    const id = item && typeof item === 'object' ? Number(item.id ?? item.partId) : Number(item);
+    const qtyRaw = item && typeof item === 'object' ? Number(item.quantity ?? item.qty ?? 1) : 1;
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    if (!Number.isFinite(qtyRaw) || qtyRaw < 1) continue;
+    seen.add(id);
+    usages.push({ id, quantity: Math.min(Math.floor(qtyRaw), 9999) });
+  }
+  return usages;
+}
+
+function applyPartUsage(db, eventId, usages, copies) {
+  if (!usages.length) return;
+  const selectPart = db.prepare('SELECT id, name, quantity FROM parts WHERE id = ?');
+  const deduct = db.prepare('UPDATE parts SET quantity = quantity - ? WHERE id = ?');
+  const link = db.prepare('INSERT INTO print_event_parts (event_id, part_id, quantity, name) VALUES (?, ?, ?, ?)');
+  for (const usage of usages) {
+    const part = selectPart.get(usage.id);
+    if (!part) throw new Error('Part not found');
+    const needed = usage.quantity * copies;
+    const available = Number(part.quantity) || 0;
+    if (available < needed) {
+      throw new Error(`Not enough "${part.name}" in stock (${available} available, ${needed} needed).`);
+    }
+    deduct.run(needed, part.id);
+    link.run(eventId, part.id, needed, part.name);
+  }
+}
+
+function restorePartUsage(db, eventId) {
+  const rows = db.prepare('SELECT part_id, quantity FROM print_event_parts WHERE event_id = ?').all(eventId);
+  const restore = db.prepare('UPDATE parts SET quantity = quantity + ? WHERE id = ?');
+  for (const row of rows) {
+    restore.run(Number(row.quantity) || 0, row.part_id);
+  }
+  db.prepare('DELETE FROM print_event_parts WHERE event_id = ?').run(eventId);
 }
 
 function migratePrintLifecycle(db) {
@@ -319,19 +396,23 @@ function logPrintEvent(db, payload) {
   const printedAt = toIsoDate(payload.printedAt);
   const notes = payload.notes != null ? String(payload.notes) : '';
   const filamentIds = normalizeFilamentIds(payload.filamentIds);
+  const partsUsage = normalizePartsUsage(payload.parts);
+  const printerIdRaw = payload?.printerId ?? payload?.printer_id;
+  const printerId = printerIdRaw != null && Number(printerIdRaw) > 0 ? Number(printerIdRaw) : null;
   const createdAt = new Date().toISOString();
 
   const result = db.transaction(() => {
     const insert = db.prepare(`
-      INSERT INTO print_events (model_id, printed_at, outcome, quantity, notes, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(modelId, printedAt, outcome, quantity, notes || null, createdAt);
+      INSERT INTO print_events (model_id, printed_at, outcome, quantity, notes, created_at, printer_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(modelId, printedAt, outcome, quantity, notes || null, createdAt, printerId);
     const eventId = insert.lastInsertRowid;
     const link = db.prepare('INSERT OR IGNORE INTO print_event_filaments (event_id, filament_id) VALUES (?, ?)');
     for (const filamentId of filamentIds) {
       const exists = db.prepare('SELECT id FROM filaments WHERE id = ?').get(filamentId);
       if (exists) link.run(eventId, filamentId);
     }
+    applyPartUsage(db, eventId, partsUsage, quantity);
     const current = db.prepare('SELECT print_status FROM models WHERE id = ?').get(modelId);
     const nextStatus = statusAfterOutcome(current?.print_status, outcome);
     db.prepare('UPDATE models SET print_status = ? WHERE id = ?').run(nextStatus, modelId);
@@ -363,6 +444,7 @@ function deletePrintEvent(db, eventId) {
     const row = db.prepare('SELECT id, model_id, outcome FROM print_events WHERE id = ?').get(id);
     if (!row) throw new Error('Print event not found');
     db.prepare('DELETE FROM print_event_filaments WHERE event_id = ?').run(id);
+    restorePartUsage(db, id);
     db.prepare('DELETE FROM print_events WHERE id = ?').run(id);
     let model = refreshPrintDerivedFields(db, row.model_id);
     if (row.outcome === 'printed' && model && Number(model.print_count) === 0 && model.print_status === 'printed') {
@@ -398,11 +480,35 @@ function setPrintStatusBatch(db, payload) {
 function getPrintEvents(db, modelId) {
   const id = Number(modelId);
   if (!Number.isInteger(id) || id <= 0) return [];
+  const hasPrintersTable = (function() {
+    try {
+      return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='printers'").get());
+    } catch (_) { return false; }
+  })();
+
+  const hasPrinterTypeCol = hasPrintersTable && (function() {
+    try {
+      const cols = db.prepare("PRAGMA table_info(printers)").all();
+      return cols.some(c => c.name === 'printer_type');
+    } catch (_) { return false; }
+  })();
+
+  const selectFields = hasPrintersTable
+    ? `pe.id, pe.model_id, pe.printed_at, pe.outcome, pe.quantity, pe.notes, pe.created_at, pe.printer_id,
+       pr.nickname AS printer_nickname, pr.manufacturer AS printer_manufacturer, pr.model AS printer_model,
+       ${hasPrinterTypeCol ? 'pr.printer_type' : 'NULL'} AS printer_type`
+    : `pe.id, pe.model_id, pe.printed_at, pe.outcome, pe.quantity, pe.notes, pe.created_at, pe.printer_id,
+       NULL AS printer_nickname, NULL AS printer_manufacturer, NULL AS printer_model, NULL AS printer_type`;
+
+  const fromClause = hasPrintersTable
+    ? `FROM print_events pe LEFT JOIN printers pr ON pr.id = pe.printer_id`
+    : `FROM print_events pe`;
+
   const events = db.prepare(`
-    SELECT id, model_id, printed_at, outcome, quantity, notes, created_at
-    FROM print_events
-    WHERE model_id = ?
-    ORDER BY printed_at DESC, id DESC
+    SELECT ${selectFields}
+    ${fromClause}
+    WHERE pe.model_id = ?
+    ORDER BY pe.printed_at DESC, pe.id DESC
   `).all(id);
   const filamentStmt = db.prepare(`
     SELECT f.id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source
@@ -411,16 +517,32 @@ function getPrintEvents(db, modelId) {
     WHERE pef.event_id = ?
     ORDER BY f.vendor COLLATE NOCASE, f.name COLLATE NOCASE
   `);
+  const partStmt = db.prepare(`
+    SELECT pep.part_id AS id,
+           COALESCE(p.name, pep.name) AS name,
+           p.category AS category,
+           p.unit AS unit,
+           pep.quantity AS quantity
+    FROM print_event_parts pep
+    LEFT JOIN parts p ON p.id = pep.part_id
+    WHERE pep.event_id = ?
+    ORDER BY name COLLATE NOCASE
+  `);
   return events.map((event) => ({
     ...event,
-    filaments: filamentStmt.all(event.id)
+    filaments: filamentStmt.all(event.id),
+    parts: partStmt.all(event.id)
   }));
 }
 
 function deletePrintRowsForModel(db, modelId) {
   const events = db.prepare('SELECT id FROM print_events WHERE model_id = ?').all(modelId);
   const delFil = db.prepare('DELETE FROM print_event_filaments WHERE event_id = ?');
-  for (const event of events) delFil.run(event.id);
+  const delParts = db.prepare('DELETE FROM print_event_parts WHERE event_id = ?');
+  for (const event of events) {
+    delFil.run(event.id);
+    delParts.run(event.id);
+  }
   db.prepare('DELETE FROM print_events WHERE model_id = ?').run(modelId);
 }
 
@@ -494,6 +616,8 @@ module.exports = {
   printSortOrderClause,
   normalizeQuantity,
   normalizeFilamentIds,
+  normalizePartsUsage,
+  ensurePartsSchema,
   resolvePrintFieldsOnSave,
   migratePrintLifecycle,
   ensurePrintLifecycleSchema,

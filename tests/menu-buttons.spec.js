@@ -108,6 +108,7 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#save-slicer-settings')).toBeVisible();
     await expect(window.locator('#cancel-slicer-settings')).toBeVisible();
     await expect(window.locator('#add-slicer-button')).toBeVisible();
+    await expect(window.locator('#detect-slicers-button')).toBeVisible();
     await closeDialog('slicer-dialog', 'button#cancel-slicer-settings');
   });
 
@@ -165,9 +166,13 @@ test.describe('Scan then menu and button checks', () => {
     await closeDialog('dedup-dialog', 'button#close-dedup');
   });
 
-  test('Tools > Filament Management: dialog and buttons', async () => {
+  test('Tools > Filament Manager: dialog and buttons', async () => {
     await openDialog('filament-manager-dialog');
     await expect(window.locator('#filament-manager-dialog')).toBeVisible();
+    await expect(window.locator('#filament-toggle-add-btn')).toBeVisible();
+    await expect(window.locator('#filament-form-body')).toBeHidden();
+    await window.locator('#filament-toggle-add-btn').click();
+    await expect(window.locator('#filament-form-body')).toBeVisible();
     await expect(window.locator('#add-filament-manager-button')).toBeVisible();
     await expect(window.locator('#filament-manager-search')).toBeVisible();
     await expect(window.locator('#clear-filament-search')).toBeVisible();
@@ -180,7 +185,99 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#spoolman-test-button')).toBeVisible();
     await expect(window.locator('#spoolman-sync-button')).toBeVisible();
     await expect(window.locator('#filament-manager-fullscreen-toggle')).toBeVisible();
+    await expect(window.locator('#filament-manager-fullscreen-toggle .fullscreen-icon-expand')).toBeVisible();
+    const filamentToggleBox = await window.locator('#filament-manager-fullscreen-toggle').boundingBox();
+    expect(filamentToggleBox.width).toBeCloseTo(28, 0);
+    expect(filamentToggleBox.height).toBeCloseTo(28, 0);
+    await window.locator('#filament-manager-fullscreen-toggle').click();
+    await expect(window.locator('#filament-manager-dialog')).toHaveClass(/modal-fullscreen/);
+    await expect(window.locator('#filament-manager-fullscreen-toggle .fullscreen-icon-shrink')).toBeVisible();
+    await window.locator('#filament-manager-fullscreen-toggle').click();
+    await expect(window.locator('#filament-manager-dialog')).not.toHaveClass(/modal-fullscreen/);
     await closeDialog('filament-manager-dialog', 'button:has-text("Close")');
+  });
+
+  test('Tools > Parts Manager: dialog and buttons', async () => {
+    await window.evaluate(() => window.openPartsStock());
+    await expect(window.locator('#parts-stock-dialog')).toBeVisible();
+    await expect(window.locator('#parts-stock-toggle-add-btn')).toBeVisible();
+    await expect(window.locator('#parts-stock-form-body')).toBeHidden();
+    await window.locator('#parts-stock-toggle-add-btn').click();
+    await expect(window.locator('#parts-stock-form-body')).toBeVisible();
+    await expect(window.locator('#parts-stock-name')).toBeVisible();
+    await expect(window.locator('#parts-stock-category')).toBeVisible();
+    await expect(window.locator('#parts-stock-quantity')).toBeVisible();
+    await expect(window.locator('#parts-stock-add')).toBeVisible();
+    await expect(window.locator('#parts-stock-search')).toBeVisible();
+    await expect(window.locator('#parts-stock-clear-search')).toBeVisible();
+    await expect(window.locator('#parts-stock-close')).toBeVisible();
+    await expect(window.locator('#parts-stock-fullscreen-toggle')).toBeVisible();
+    await expect(window.locator('#parts-stock-fullscreen-toggle .fullscreen-icon-expand')).toBeVisible();
+    const partsToggleBox = await window.locator('#parts-stock-fullscreen-toggle').boundingBox();
+    expect(partsToggleBox.width).toBeCloseTo(28, 0);
+    expect(partsToggleBox.height).toBeCloseTo(28, 0);
+    await window.locator('#parts-stock-fullscreen-toggle').click();
+    await expect(window.locator('#parts-stock-dialog')).toHaveClass(/modal-fullscreen/);
+    await expect(window.locator('#parts-stock-fullscreen-toggle .fullscreen-icon-shrink')).toBeVisible();
+    await window.locator('#parts-stock-fullscreen-toggle').click();
+    await expect(window.locator('#parts-stock-dialog')).not.toHaveClass(/modal-fullscreen/);
+
+    const name = `menu-m3-${Date.now()}`;
+    await window.locator('#parts-stock-name').fill(name);
+    await window.locator('#parts-stock-category').fill('Screws');
+    await window.locator('#parts-stock-quantity').fill('12');
+    await window.locator('#parts-stock-add').click();
+    await expect(window.locator('#parts-stock-status')).toHaveText('Part saved.');
+    await window.locator('#parts-stock-search').fill(name);
+    const row = window.locator('.parts-stock-item', { hasText: name });
+    await expect(row).toBeVisible();
+    await expect(row.locator('.parts-stock-qty-input')).toHaveValue('12');
+    await row.locator('.parts-stock-step[data-delta="-1"]').click();
+    await expect(row.locator('.parts-stock-qty-input')).toHaveValue('11');
+    const partId = await row.getAttribute('data-part-id');
+    await closeDialog('parts-stock-dialog', 'button#parts-stock-close');
+
+    const model = window.locator('.file-item[data-filepath]').first();
+    await expect(model).toBeVisible();
+    await model.click();
+    await window.locator('#log-print-button').click();
+    await expect(window.locator('#log-print-dialog')).toBeVisible();
+    await window.locator('#log-print-part-select').selectOption(partId);
+    await window.locator('#log-print-part-qty').fill('2');
+    await window.locator('#log-print-part-add').click();
+    await expect(window.locator('#log-print-parts-summary')).toContainText(`${name} ×2`);
+    await window.locator('#log-print-save').click();
+    await expect(window.locator('#log-print-dialog')).toBeHidden({ timeout: 10000 });
+
+    await window.evaluate(() => window.openPartsStock());
+    await window.locator('#parts-stock-search').fill(name);
+    await expect(window.locator('.parts-stock-item', { hasText: name }).locator('.parts-stock-qty-input')).toHaveValue('9');
+    await closeDialog('parts-stock-dialog', 'button#parts-stock-close');
+  });
+
+  test('Tools > Printer Manager: dialog and buttons', async () => {
+    await window.evaluate(() => window.openPrinterManagement());
+    await expect(window.locator('#printer-management-dialog')).toBeVisible();
+    await expect(window.locator('#printer-toggle-add-btn')).toBeVisible();
+    await expect(window.locator('#printer-form-body')).toBeHidden();
+    await window.locator('#printer-toggle-add-btn').click();
+    await expect(window.locator('#printer-form-body')).toBeVisible();
+    await expect(window.locator('#printer-form-nickname')).toBeVisible();
+    await window.locator('#printer-toggle-add-btn').click();
+    await expect(window.locator('#printer-form-body')).toBeHidden();
+
+    await expect(window.locator('#printer-management-fullscreen-toggle')).toBeVisible();
+    await expect(window.locator('#printer-management-fullscreen-toggle .fullscreen-icon-expand')).toBeVisible();
+    const printerToggleBox = await window.locator('#printer-management-fullscreen-toggle').boundingBox();
+    expect(printerToggleBox.width).toBeCloseTo(28, 0);
+    expect(printerToggleBox.height).toBeCloseTo(28, 0);
+    await window.locator('#printer-management-fullscreen-toggle').click();
+    await expect(window.locator('#printer-management-dialog')).toHaveClass(/modal-fullscreen/);
+    await expect(window.locator('#printer-management-fullscreen-toggle .fullscreen-icon-shrink')).toBeVisible();
+    await window.locator('#printer-management-fullscreen-toggle').click();
+    await expect(window.locator('#printer-management-dialog')).not.toHaveClass(/modal-fullscreen/);
+
+    await closeDialog('printer-management-dialog', '#printer-management-close');
   });
 
   test('Tools > Tag Manager: dialog and buttons', async () => {

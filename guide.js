@@ -66,7 +66,9 @@ const guidePages = [
     title: "Advanced Tools",
     content: `🌟 Explore powerful features under the <strong>Tools</strong> menu!<br>
     <ul>
-      <li><strong>Filament Management</strong> – Track which filament a model uses. Add filaments yourself, or open <strong>Spoolman Setup</strong> in that same window to sync your catalog! 🧵</li>
+      <li><strong>Filament Manager</strong> – Track which filament a model uses. Add filaments yourself, or open <strong>Spoolman Setup</strong> in that same window to sync your catalog! 🧵</li>
+      <li><strong>Printer Manager</strong> – Onboard your 3D printers, launch Klipper/OctoPrint web interfaces, track maintenance logs, and schedule reminders. 🖨️</li>
+      <li><strong>Parts Manager</strong> – Keep a count of screws, bearings, inserts, and other hardware. When you log a print, pick the parts it used and they come out of stock. 🔩</li>
       <li><strong>Tag Manager</strong> – Organize your models with tags for easy access! Click a tag to rename it across the library, or clear the name to delete it. 🏷️</li>
       <li><strong>Print Roulette</strong> – Feeling indecisive? Let Printventory randomly select your next model to print! 🎲</li>
       <li><strong>Backup/Restore</strong> – Safeguard your data with easy backup and restore options! 💾</li>

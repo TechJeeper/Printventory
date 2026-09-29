@@ -519,6 +519,19 @@
     'saveFilament': 'save-filament',
     'deleteFilament': 'delete-filament',
     'getModelFilaments': 'get-model-filaments',
+    'getAllParts': 'get-all-parts',
+    'savePart': 'save-part',
+    'deletePart': 'delete-part',
+    'getAllPrinters': 'get-all-printers',
+    'savePrinter': 'save-printer',
+    'deletePrinter': 'delete-printer',
+    'getPrinterMaintenanceLogs': 'get-printer-maintenance-logs',
+    'savePrinterMaintenanceLog': 'save-printer-maintenance-log',
+    'deletePrinterMaintenanceLog': 'delete-printer-maintenance-log',
+    'getPrinterReminders': 'get-printer-reminders',
+    'savePrinterReminder': 'save-printer-reminder',
+    'deletePrinterReminder': 'delete-printer-reminder',
+    'completePrinterReminder': 'complete-printer-reminder',
     'getPrintEvents': 'get-print-events',
     'logPrintEvent': 'log-print-event',
     'logPrintEventsBatch': 'log-print-events-batch',
@@ -558,6 +571,7 @@
     'deleteFile': 'delete-file',
     'fetchThangsPage': 'fetch-thangs-page',
     'purgeModels': 'purge-models',
+    'clearNewFlags': 'clear-new-model-flags',
     'getAdditionalFileTypesCatalog': 'get-additional-file-types-catalog',
     'getModelCountByFileTypeIds': 'get-model-count-by-file-type-ids',
     'removeModelsByFileTypeIds': 'remove-models-by-file-type-ids',
@@ -591,6 +605,7 @@
     'getModelsWithDefaultThumbnails': 'get-models-with-default-thumbnails',
     'fetchMakerWorldPage': 'fetch-makerworld-page',
     'getSlicers': 'get-slicers',
+    'detectSlicers': 'detect-slicers',
     'openFileInSlicer': 'open-file-in-slicer',
     'saveSlicer': 'save-slicer',
     'deleteSlicer': 'delete-slicer',
@@ -640,6 +655,14 @@
 
   window.electron.onOpenFilamentManager = function(callback) {
     window.electron.on('open-filament-manager', callback);
+  };
+
+  window.electron.onOpenPrinterManagement = function(callback) {
+    window.electron.on('open-printer-management', callback);
+  };
+
+  window.electron.onOpenPartsStock = function(callback) {
+    window.electron.on('open-parts-stock', callback);
   };
   
   window.electron.onOpenMetadataEditor = function(callback) {

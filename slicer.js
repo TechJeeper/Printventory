@@ -3,6 +3,22 @@
 
 let slicerEntries = [];
 
+function normalizeSlicerPathKey(slicerPath) {
+  return String(slicerPath || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function setSlicerDetectStatus(message) {
+  const status = document.getElementById('slicer-detect-status');
+  if (!status) return;
+  if (!message) {
+    status.textContent = '';
+    status.hidden = true;
+    return;
+  }
+  status.textContent = message;
+  status.hidden = false;
+}
+
 function suggestSlicerNameFromPath(slicerPath) {
   const base = String(slicerPath || '').split(/[/\\]/).pop() || '';
   const withoutExt = base.replace(/\.(exe|app|appimage|dmg)$/i, '');
@@ -253,6 +269,7 @@ async function openSlicerSettings() {
   });
   
   slicerList.innerHTML = '';
+  setSlicerDetectStatus('');
   
   // Load existing slicers
   window.electron.getSlicers()
@@ -271,6 +288,69 @@ async function openSlicerSettings() {
     });
   
   dialog.showModal();
+}
+
+async function autoDetectSlicers() {
+  const button = document.getElementById('detect-slicers-button');
+  if (!window.electron || typeof window.electron.detectSlicers !== 'function') {
+    setSlicerDetectStatus('Auto Detect is not available in this session.');
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Detecting…';
+  }
+  setSlicerDetectStatus('Looking for installed slicers…');
+
+  try {
+    const detected = await window.electron.detectSlicers();
+    const list = Array.isArray(detected) ? detected : [];
+    const existingPaths = new Set(
+      Array.from(document.querySelectorAll('.slicer-entry .slicer-path'))
+        .map((input) => normalizeSlicerPathKey(input.value))
+        .filter(Boolean)
+    );
+    const fresh = list.filter((slicer) => slicer && slicer.name && slicer.path && !existingPaths.has(normalizeSlicerPathKey(slicer.path)));
+
+    if (!fresh.length) {
+      setSlicerDetectStatus(list.length
+        ? 'Installed slicers are already in the list.'
+        : 'No slicers were found in the usual install locations. Use Add New Slicer to browse for one.');
+      return;
+    }
+
+    const slicerList = document.getElementById('slicer-list');
+    let blankEntry = Array.from(document.querySelectorAll('.slicer-entry')).find((entry) => {
+      const name = entry.querySelector('.slicer-name')?.value.trim();
+      const slicerPath = entry.querySelector('.slicer-path')?.value.trim();
+      return !name && !slicerPath;
+    });
+
+    for (const slicer of fresh) {
+      if (blankEntry) {
+        const nameInput = blankEntry.querySelector('.slicer-name');
+        const pathInput = blankEntry.querySelector('.slicer-path');
+        if (nameInput) nameInput.value = slicer.name;
+        if (pathInput) pathInput.value = slicer.path;
+        blankEntry = null;
+        continue;
+      }
+      const entry = await createSlicerEntry(slicer);
+      if (entry && slicerList) slicerList.appendChild(entry);
+    }
+
+    const noun = fresh.length === 1 ? 'slicer' : 'slicers';
+    setSlicerDetectStatus(`Found ${fresh.length} ${noun}. Review the list, then Save.`);
+  } catch (err) {
+    console.error('Error detecting slicers:', err);
+    setSlicerDetectStatus(`Could not detect slicers: ${err.message || err}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Auto Detect';
+    }
+  }
 }
 
 function saveSlicerSettings() {
@@ -325,6 +405,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   
+  document.getElementById('detect-slicers-button')?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await autoDetectSlicers();
+  });
+
   // Add save button handler
   document.getElementById('save-slicer-settings')?.addEventListener('click', (e) => {
     e.preventDefault();

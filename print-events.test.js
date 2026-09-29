@@ -174,6 +174,88 @@ test('event filaments attach without changing model assignments', () => {
   db.close();
 });
 
+test('logging a print removes selected parts from stock, scaled by copy count', () => {
+  const db = createDb();
+  const id = insertModel(db, { filePath: 'parts.stl', printed: 0, print_status: 'unprinted', print_count: 0 });
+  const partId = db.prepare(
+    "INSERT INTO parts (name, category, quantity, unit, low_stock) VALUES ('M3x8', 'Screws', 20, 'pcs', 4)"
+  ).run().lastInsertRowid;
+  printEvents.logPrintEvent(db, {
+    modelId: id,
+    outcome: 'printed',
+    quantity: 2,
+    parts: [{ id: partId, quantity: 4 }]
+  });
+  assert.strictEqual(db.prepare('SELECT quantity FROM parts WHERE id = ?').get(partId).quantity, 12);
+  const events = printEvents.getPrintEvents(db, id);
+  assert.strictEqual(events[0].parts.length, 1);
+  assert.strictEqual(events[0].parts[0].name, 'M3x8');
+  assert.strictEqual(events[0].parts[0].quantity, 8);
+  db.close();
+});
+
+test('a short parts stock rolls the print log back', () => {
+  const db = createDb();
+  const id = insertModel(db, { filePath: 'short.stl', printed: 0, print_status: 'unprinted', print_count: 0 });
+  const partId = db.prepare(
+    "INSERT INTO parts (name, quantity, unit, low_stock) VALUES ('608 bearing', 3, 'pcs', 0)"
+  ).run().lastInsertRowid;
+  assert.throws(
+    () => printEvents.logPrintEvent(db, { modelId: id, outcome: 'printed', quantity: 2, parts: [{ id: partId, quantity: 2 }] }),
+    /Not enough "608 bearing"/
+  );
+  assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM print_events').get().n, 0);
+  assert.strictEqual(db.prepare('SELECT quantity FROM parts WHERE id = ?').get(partId).quantity, 3);
+  assert.strictEqual(db.prepare('SELECT print_status FROM models WHERE id = ?').get(id).print_status, 'unprinted');
+  db.close();
+});
+
+test('deleting a print log puts the parts back in stock', () => {
+  const db = createDb();
+  const id = insertModel(db, { filePath: 'restore.stl', printed: 0, print_status: 'unprinted', print_count: 0 });
+  const partId = db.prepare(
+    "INSERT INTO parts (name, quantity, unit, low_stock) VALUES ('Heat set insert', 10, 'pcs', 0)"
+  ).run().lastInsertRowid;
+  const logged = printEvents.logPrintEvent(db, {
+    modelId: id,
+    outcome: 'failed',
+    quantity: 1,
+    parts: [{ id: partId, quantity: 3 }]
+  });
+  assert.strictEqual(db.prepare('SELECT quantity FROM parts WHERE id = ?').get(partId).quantity, 7);
+  printEvents.deletePrintEvent(db, logged.eventId);
+  assert.strictEqual(db.prepare('SELECT quantity FROM parts WHERE id = ?').get(partId).quantity, 10);
+  db.close();
+});
+
+test('a batch log removes parts once per model and rolls back when stock runs out', () => {
+  const db = createDb();
+  const a = insertModel(db, { filePath: 'batch-a.stl', printed: 0, print_status: 'unprinted', print_count: 0 });
+  const b = insertModel(db, { filePath: 'batch-b.stl', printed: 0, print_status: 'unprinted', print_count: 0 });
+  const partId = db.prepare(
+    "INSERT INTO parts (name, quantity, unit, low_stock) VALUES ('M3 nut', 5, 'pcs', 0)"
+  ).run().lastInsertRowid;
+  printEvents.logPrintEventsBatch(db, {
+    modelIds: [a, b],
+    outcome: 'printed',
+    quantity: 1,
+    parts: [{ id: partId, quantity: 2 }]
+  });
+  assert.strictEqual(db.prepare('SELECT quantity FROM parts WHERE id = ?').get(partId).quantity, 1);
+
+  assert.throws(
+    () => printEvents.logPrintEventsBatch(db, {
+      modelIds: [a, b],
+      outcome: 'printed',
+      parts: [{ id: partId, quantity: 1 }]
+    }),
+    /Not enough "M3 nut"/
+  );
+  assert.strictEqual(db.prepare('SELECT quantity FROM parts WHERE id = ?').get(partId).quantity, 1);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM print_events').get().n, 2);
+  db.close();
+});
+
 test('filters distinguish status, ever-printed, and legacy not-printed', () => {
   const printedNoLog = { printed: 1, print_status: 'printed', print_count: 0 };
   const want = { printed: 0, print_status: 'want', print_count: 0 };

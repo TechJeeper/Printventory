@@ -4079,7 +4079,26 @@ dialog:not([open]) {
   min-height: 0;
   max-height: none;
 }
-#filament-manager-dialog.modal-fullscreen form .form-group:last-of-type {
+#filament-manager-dialog.modal-fullscreen {
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  inset: 0 !important;
+  border-radius: 0 !important;
+  padding: 24px !important;
+  box-sizing: border-box !important;
+  overflow: hidden;
+}
+#filament-manager-dialog.modal-fullscreen form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+#filament-manager-dialog.modal-fullscreen form .filament-list-section {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -4087,6 +4106,53 @@ dialog:not([open]) {
 }
 #filament-manager-dialog.modal-fullscreen #filament-manager-list {
   flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+#parts-stock-dialog.modal-fullscreen {
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  inset: 0 !important;
+  border-radius: 0 !important;
+  padding: 24px !important;
+  box-sizing: border-box !important;
+  overflow: hidden;
+}
+#parts-stock-dialog.modal-fullscreen form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+#parts-stock-dialog.modal-fullscreen .parts-stock-list-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#parts-stock-dialog.modal-fullscreen #parts-stock-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+#printer-management-dialog.modal-fullscreen {
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  inset: 0 !important;
+  border-radius: 0 !important;
+  padding: 24px !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+}
+#printer-management-dialog.modal-fullscreen .printer-management-scroll-content {
+  flex: 1 1 auto;
   min-height: 0;
   max-height: none;
 }
@@ -4270,8 +4336,20 @@ dialog:not([open]) {
   min-width: 0;
 }
 
-#tag-manager-dialog .modal-fullscreen-icon-btn {
-  margin: 0;
+.modal-fullscreen-icon-btn {
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  flex-shrink: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
 }
 
 #tag-manager-dialog .dialog-buttons {
@@ -4457,129 +4535,685 @@ dialog:not([open]) {
 }
 
 /* Filament Management */
+/* Filament Management Dialog — styled to match Parts Stock */
 #filament-manager-dialog {
-  min-width: 480px;
-  max-width: 720px;
-}
-#filament-manager-dialog input[type="text"],
-#filament-manager-dialog input[type="password"],
-#filament-manager-dialog input[type="number"] {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
+  min-width: 580px;
+  max-width: 860px;
+  width: 92%;
+  border-radius: 20px;
+  background: rgba(24, 24, 38, 0.96);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.1);
   color: #fff;
+  padding: 24px 28px;
 }
+
+#filament-manager-dialog * {
+  box-sizing: border-box;
+}
+
+#filament-manager-dialog [hidden] {
+  display: none !important;
+}
+
+/* Header */
+.filament-manager-header {
+  margin-bottom: 18px;
+}
+
+.filament-manager-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.filament-manager-header-row h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filament-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filament-header-btn {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 8px !important;
+  padding: 6px 12px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  cursor: pointer;
+  height: 30px !important;
+  width: auto !important;
+  margin: 0 !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease !important;
+}
+
+.filament-header-btn:hover {
+  background: rgba(255, 255, 255, 0.15) !important;
+  border-color: rgba(255, 255, 255, 0.28) !important;
+  color: #fff !important;
+}
+
+.filament-manager-header .setting-description {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Spoolman Setup Card */
 .spoolman-setup-panel {
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03);
+  width: 100%;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  border-radius: 14px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
 }
+
 .spoolman-setup-panel[hidden] {
   display: none !important;
 }
+
+.spoolman-section-header {
+  margin-bottom: 12px;
+}
+
+.spoolman-section-header label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #38bdf8;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.spoolman-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  width: 100%;
+}
+
 .filament-spoolman-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 10px;
+  margin-top: 14px;
+  width: 100%;
 }
-.filament-manager-status {
-  margin-top: 8px;
-  font-size: 13px;
-  color: #9ad;
-  min-height: 1.2em;
+
+.spoolman-btn {
+  flex: 1;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 16px !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 10px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  cursor: pointer;
+  height: 36px;
+  width: auto !important;
+  margin: 0 !important;
+  transition: all 0.2s ease !important;
 }
-.filament-manager-status.error {
-  color: #f88;
+
+.spoolman-btn:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+  color: #fff !important;
 }
+
+.spoolman-btn-primary {
+  background: linear-gradient(135deg, #0284c7 0%, #00d4ff 100%) !important;
+  color: #fff !important;
+  border: none !important;
+  font-weight: 600 !important;
+  box-shadow: 0 3px 12px rgba(0, 212, 255, 0.25) !important;
+}
+
+.spoolman-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 16px rgba(0, 212, 255, 0.4) !important;
+}
+
+/* Filament Form Section */
+.filament-form-section {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+  box-sizing: border-box;
+}
+
+.filament-form-section.collapsed {
+  padding: 10px 18px !important;
+  margin-bottom: 14px !important;
+}
+
+.filament-form-section.collapsed .filament-section-header {
+  margin-bottom: 0 !important;
+}
+
+.filament-toggle-add-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 0 14px !important;
+  border-radius: 8px !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  line-height: 1 !important;
+  border: 1px solid rgba(56, 189, 248, 0.4) !important;
+  background: rgba(56, 189, 248, 0.12) !important;
+  color: #38bdf8 !important;
+  transition: all 0.2s ease !important;
+}
+
+.filament-toggle-add-btn:hover {
+  background: rgba(56, 189, 248, 0.24) !important;
+  color: #fff !important;
+  border-color: rgba(56, 189, 248, 0.6) !important;
+}
+
+.filament-toggle-add-btn.active {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: #cbd5e1 !important;
+}
+
+.filament-toggle-add-btn.active:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+  color: #fff !important;
+}
+
+.filament-btn-cancel {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 18px !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #cbd5e1 !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 10px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  cursor: pointer;
+  height: 38px;
+  line-height: 1;
+  transition: all 0.2s ease !important;
+}
+
+.filament-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+  color: #fff !important;
+}
+
+.filament-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+#filament-form-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
 .filament-add-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  align-items: center;
+  gap: 10px 14px;
+  width: 100%;
 }
+
+.filament-span {
+  grid-column: 1 / -1;
+}
+
+.filament-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+}
+
+.filament-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.filament-field-label .required {
+  color: #38bdf8;
+  margin-left: 2px;
+}
+
+/* Strip select arrows, paddings, and styles inherited from styles.css */
+#filament-manager-dialog .form-group input,
+#filament-manager-dialog input[type="text"],
+#filament-manager-dialog input[type="password"],
+#filament-manager-dialog input[type="number"] {
+  background-image: none !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  padding: 10px 14px !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: #fff !important;
+  font-size: 13.5px !important;
+  line-height: 1.4 !important;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s !important;
+}
+
+#filament-manager-dialog .form-group input:focus,
+#filament-manager-dialog input[type="text"]:focus,
+#filament-manager-dialog input[type="password"]:focus,
+#filament-manager-dialog input[type="number"]:focus {
+  outline: none !important;
+  border-color: #00d4ff !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.18) !important;
+}
+
+#filament-manager-dialog input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 13px;
+}
+
+#filament-manager-dialog input[type="number"]::-webkit-inner-spin-button,
+#filament-manager-dialog input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+#filament-manager-dialog input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Color Row */
 .filament-color-row {
   display: flex;
   gap: 8px;
   align-items: center;
+  width: 100%;
 }
+
 .filament-color-row input[type="color"] {
-  width: 40px;
-  height: 36px;
-  padding: 0;
-  border: none;
-  background: transparent;
+  width: 44px !important;
+  height: 40px !important;
+  min-width: 44px !important;
+  padding: 2px !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.05) !important;
   cursor: pointer;
+  flex-shrink: 0;
 }
+
+.filament-color-row input[type="text"] {
+  flex: 1;
+}
+
+/* Filament Form Actions - Full Width */
+#filament-manager-dialog button:not(.modal-fullscreen-icon-btn) {
+  margin-bottom: 0;
+  box-shadow: none;
+}
+
+#filament-manager-dialog .modal-fullscreen-icon-btn {
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  flex-shrink: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
+}
+
+.filament-form-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  align-items: center;
+  width: 100%;
+}
+
+.filament-btn-primary {
+  width: 100% !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 22px !important;
+  background: linear-gradient(135deg, #0284c7 0%, #00d4ff 100%) !important;
+  color: #fff !important;
+  border: none !important;
+  border-radius: 10px !important;
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  height: 38px;
+  line-height: 1;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  box-shadow: 0 3px 12px rgba(0, 212, 255, 0.25) !important;
+}
+
+.filament-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 16px rgba(0, 212, 255, 0.4) !important;
+}
+
+.filament-btn-primary:active {
+  transform: translateY(0);
+}
+
+.filament-manager-status {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #38bdf8;
+  min-height: 1.2em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filament-manager-status:empty {
+  margin-top: 0;
+  min-height: 0;
+}
+
+.filament-manager-status.error {
+  color: #f87171;
+}
+
+/* Filament List Section */
+.filament-list-section {
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.filament-list-section .filament-section-header {
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.filament-list-section label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.filament-count-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: rgba(0, 212, 255, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+.filament-count-badge:empty {
+  display: none;
+}
+
+#filament-manager-dialog .input-with-icon {
+  width: 100% !important;
+  position: relative;
+  margin-bottom: 10px;
+}
+
+#filament-manager-dialog .input-with-icon input#filament-manager-search {
+  width: 100% !important;
+  padding-right: 40px !important;
+}
+
+#filament-manager-dialog .input-with-icon #clear-filament-search {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px !important;
+  height: 26px !important;
+  min-width: 26px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 6px !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: none !important;
+  color: #94a3b8 !important;
+  font-size: 15px !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease !important;
+}
+
+#filament-manager-dialog .input-with-icon #clear-filament-search:hover {
+  background: rgba(255, 255, 255, 0.16) !important;
+  color: #fff !important;
+}
+
 #filament-manager-list,
 .filament-manager-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-height: 80px;
+  gap: 8px;
+  min-height: 100px;
   max-height: 280px;
   overflow-y: auto;
-  margin-top: 8px;
   padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(14, 14, 24, 0.5);
+  width: 100%;
 }
+
 .filament-manager-empty {
-  color: #999;
-  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #64748b;
+  padding: 26px 16px;
   text-align: center;
+  font-size: 13px;
+  line-height: 1.5;
 }
+
+/* Filament List Row Item */
 .filament-manager-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 12px;
+  padding: 10px 14px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: all 0.2s ease;
+  width: 100%;
 }
+
+.filament-manager-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.filament-manager-item .filament-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+  display: inline-block;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
 .filament-manager-item-body {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
+
 .filament-manager-item-name {
-  color: #fff;
-  font-size: 13px;
+  color: #f8fafc;
+  font-size: 13.5px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .filament-manager-item-meta {
-  color: #999;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #94a3b8;
   font-size: 11px;
 }
+
+.filament-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.07);
+  color: #cbd5e1;
+}
+
+.filament-tag.material {
+  background: rgba(0, 212, 255, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
 .filament-source-badge {
   font-size: 11px;
+  font-weight: 600;
   padding: 2px 8px;
-  border-radius: 10px;
-  background: rgba(0, 212, 255, 0.2);
-  color: #9eefff;
+  border-radius: 6px;
+  background: rgba(0, 212, 255, 0.15);
+  color: #7dd3fc;
+  border: 1px solid rgba(0, 212, 255, 0.25);
   white-space: nowrap;
 }
+
 .filament-source-badge.manual {
-  background: rgba(255, 255, 255, 0.12);
-  color: #ddd;
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
+
 .filament-count {
-  font-size: 12px;
-  color: #aaa;
+  font-size: 11px;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
 }
+
 .filament-remove {
-  border: none;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  border-radius: 50%;
-  width: 24px;
-  height: 24px;
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  color: #94a3b8 !important;
+  border-radius: 8px !important;
+  font-size: 18px !important;
   cursor: pointer;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0 !important;
+  transition: all 0.15s ease !important;
+}
+
+.filament-remove:hover {
+  background: rgba(239, 68, 68, 0.18) !important;
+  color: #ef4444 !important;
+}
+
+/* Full-width Close button spanning entire dialog at bottom */
+#filament-manager-dialog .dialog-buttons {
+  margin-top: 18px;
+  width: 100%;
+  display: flex;
+}
+
+#filament-manager-close {
+  width: 100% !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  color: #f1f5f9 !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: 12px !important;
+  padding: 10px 24px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  height: 40px !important;
+  cursor: pointer;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease !important;
+}
+
+#filament-manager-close:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+  border-color: rgba(255, 255, 255, 0.28) !important;
+  color: #fff !important;
 }
 .filament-swatch {
   width: 16px;
@@ -6054,6 +6688,7 @@ dialog:not([open]) {
 }
 .print-history-item-main,
 .print-history-filaments,
+.print-history-parts,
 .print-history-notes {
   grid-column: 1;
   min-width: 0;
@@ -6071,6 +6706,7 @@ dialog:not([open]) {
 }
 .print-history-when,
 .print-history-filaments,
+.print-history-parts,
 .print-history-notes {
   font-size: 12px;
   color: #bbb;
@@ -7155,9 +7791,26 @@ dialog:not([open]) {
   color: white;
 }
 
-#add-slicer-button {
+#slicer-dialog .slicer-list-actions {
+  display: flex;
+  gap: 8px;
   margin: 1rem 0;
-  width: 100%;
+}
+
+#slicer-dialog .slicer-list-actions .full-width-button {
+  flex: 1;
+  width: auto;
+  max-width: none;
+  margin: 0;
+}
+
+#slicer-detect-status {
+  margin: 0 0 0.75rem;
+}
+
+#detect-slicers-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 #slicer-list {

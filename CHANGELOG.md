@@ -4,6 +4,14 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.11] - 2026-09-29
+
+- Printer Management: save printers, maintenance logs, and scheduled reminders
+- Parts Stock inventory, deducted when a print is logged
+- Markdown model notes
+- Detect installed slicers from Settings
+- Filament manager shows how many models use each spool, with a collapsible add form
+
 ## [2.2.10] - 2026-09-20
 
 - ChiTuBox (`.chitubox`) and VOXL (`.voxl`) thumbnails/previews from embedded images when present

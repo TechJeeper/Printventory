@@ -226,7 +226,19 @@ const TOOL_DEFINITIONS = [
         quantity: { type: 'integer', description: 'Number of copies (default 1)' },
         printedAt: { type: 'string', description: 'ISO datetime; defaults to now' },
         notes: { type: 'string' },
-        filamentIds: { type: 'array', items: { type: 'integer' } }
+        filamentIds: { type: 'array', items: { type: 'integer' } },
+        parts: {
+          type: 'array',
+          description: 'Parts removed from stock. Each item is { id, quantity } where quantity is per copy.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'integer' },
+              quantity: { type: 'integer' }
+            },
+            required: ['id']
+          }
+        }
       },
       required: ['outcome']
     }
@@ -498,7 +510,19 @@ const TOOL_DEFINITIONS = [
         quantity: { type: 'integer' },
         printedAt: { type: 'string' },
         notes: { type: 'string' },
-        filamentIds: { type: 'array', items: { type: 'integer' } }
+        filamentIds: { type: 'array', items: { type: 'integer' } },
+        parts: {
+          type: 'array',
+          description: 'Parts removed from stock. Each item is { id, quantity } where quantity is per copy.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'integer' },
+              quantity: { type: 'integer' }
+            },
+            required: ['id']
+          }
+        }
       },
       required: ['outcome']
     }

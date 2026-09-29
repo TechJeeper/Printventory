@@ -310,7 +310,9 @@ test.describe('Printventory full application E2E', () => {
     await window.waitForTimeout(300);
 
     await window.locator('#model-source').fill('https://example.com/e2e-model');
-    await window.locator('#model-notes').fill('E2E notes for automated test');
+    await window.locator('#open-notes-modal-button').click();
+    await window.locator('#notes-richtext').fill('E2E notes for automated test');
+    await window.locator('#save-notes-button').click();
     await window.locator('#model-print-status').selectOption('printed');
 
     await window.locator('#add-tag-button').click();
@@ -335,7 +337,7 @@ test.describe('Printventory full application E2E', () => {
     await openModelDetails(window, 0);
     await window.locator('#open-notes-modal-button').click();
     await expect(window.locator('#notes-modal-dialog')).toBeVisible();
-    await window.locator('#notes-modal-textarea').fill('Updated via notes modal');
+    await window.locator('#notes-richtext').fill('Updated via notes modal');
     await window.locator('#save-notes-button').click();
     await window.waitForTimeout(400);
     await expect(window.locator('#model-notes')).toHaveValue('Updated via notes modal');
@@ -591,9 +593,10 @@ test.describe('Printventory full application E2E', () => {
 
   // ─── Tools & sidebar dialogs ────────────────────────────────────────────────
 
-  test('Tools: Filament Management create and search', async () => {
+  test('Tools: Filament Manager create and search', async () => {
     await openDialog(window, 'filament-manager-dialog');
     await expect(window.locator('#filament-manager-dialog')).toBeVisible();
+    await window.locator('#filament-toggle-add-btn').click();
     await window.locator('#new-filament-name').fill('manager-e2e-filament');
     await window.locator('#new-filament-vendor').fill('E2E Vendor');
     await window.locator('#new-filament-material').fill('PLA');
@@ -603,6 +606,24 @@ test.describe('Printventory full application E2E', () => {
     await window.waitForTimeout(300);
     await expect(window.locator('#filament-manager-dialog')).toContainText('manager-e2e-filament');
     await closeDialog(window, 'filament-manager-dialog', 'button:has-text("Close")');
+  });
+
+  test('Tools: Parts Manager create, search, and adjust quantity', async () => {
+    await window.evaluate(() => window.openPartsStock());
+    await expect(window.locator('#parts-stock-dialog')).toBeVisible();
+    await window.locator('#parts-stock-toggle-add-btn').click();
+    await window.locator('#parts-stock-name').fill('e2e-m3-screw');
+    await window.locator('#parts-stock-category').fill('Screws');
+    await window.locator('#parts-stock-quantity').fill('25');
+    await window.locator('#parts-stock-add').click();
+    await expect(window.locator('#parts-stock-dialog')).toContainText('Part saved.');
+    await window.locator('#parts-stock-search').fill('e2e-m3');
+    const row = window.locator('.parts-stock-item', { hasText: 'e2e-m3-screw' });
+    await expect(row).toBeVisible();
+    await expect(row.locator('.parts-stock-qty-input')).toHaveValue('25');
+    await row.locator('.parts-stock-step[data-delta="-1"]').click();
+    await expect(row.locator('.parts-stock-qty-input')).toHaveValue('24');
+    await closeDialog(window, 'parts-stock-dialog', '#parts-stock-close');
   });
 
   test('Tools: Tag Manager create and search', async () => {

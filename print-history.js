@@ -29,6 +29,7 @@
   };
 
   let logDialogFilePaths = [];
+  let logDialogParts = [];
   let statusMenuEl = null;
 
   function escapeHtml(text) {
@@ -221,6 +222,105 @@
     }
   }
 
+  function friendlyIpcError(error) {
+    const message = String(error?.message || error || 'Failed to log print');
+    return message.replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '');
+  }
+
+  function selectedParts() {
+    const chips = document.getElementById('log-print-parts');
+    if (!chips) return [];
+    return Array.from(chips.querySelectorAll('.part-chip')).map((el) => ({
+      id: Number(el.dataset.partId),
+      quantity: Math.max(1, Math.min(9999, Math.floor(Number(el.querySelector('.part-chip-qty')?.value) || 1))),
+      name: el.dataset.partName || 'Part',
+      stock: Number(el.dataset.stock)
+    })).filter((part) => part.id > 0);
+  }
+
+  function updateLogPartsSummary() {
+    const el = document.getElementById('log-print-parts-summary');
+    if (!el) return;
+    const parts = selectedParts();
+    if (!parts.length) {
+      el.textContent = '';
+      return;
+    }
+    const copies = Math.max(1, Number(document.getElementById('log-print-quantity')?.value) || 1);
+    const models = Math.max(1, logDialogFilePaths.length);
+    const bits = parts.map((part) => `${part.name} ×${part.quantity * copies * models}`);
+    el.textContent = `Removes ${bits.join(', ')} from Parts Stock.`;
+  }
+
+  function renderLogPartChip(part, quantity) {
+    const chip = document.createElement('span');
+    chip.className = 'filament-chip part-chip';
+    chip.dataset.partId = String(part.id);
+    chip.dataset.partName = part.name || 'Part';
+    chip.dataset.stock = String(Number(part.quantity) || 0);
+    const unit = part.unit ? ` ${part.unit}` : '';
+    chip.innerHTML = `${escapeHtml(part.name)} × <input type="number" class="part-chip-qty" min="1" max="9999" value="${quantity}" aria-label="Quantity per copy"><span class="part-chip-stock">${Number(part.quantity) || 0}${escapeHtml(unit)} in stock</span><span class="filament-chip-remove" title="Remove">×</span>`;
+    chip.querySelector('.part-chip-qty')?.addEventListener('input', updateLogPartsSummary);
+    chip.querySelector('.filament-chip-remove')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      chip.remove();
+      updateLogPartsSummary();
+    });
+    return chip;
+  }
+
+  function addLogPart(part, quantity) {
+    const container = document.getElementById('log-print-parts');
+    if (!container || !part) return;
+    const qty = Math.max(1, Math.min(9999, Math.floor(Number(quantity) || 1)));
+    const existing = container.querySelector(`[data-part-id="${part.id}"]`);
+    if (existing) {
+      const input = existing.querySelector('.part-chip-qty');
+      if (input) input.value = String(Math.min(9999, (Number(input.value) || 0) + qty));
+    } else {
+      container.appendChild(renderLogPartChip(part, qty));
+    }
+    updateLogPartsSummary();
+  }
+
+  async function fillLogPartSelect() {
+    const select = document.getElementById('log-print-part-select');
+    const container = document.getElementById('log-print-parts');
+    const qtyInput = document.getElementById('log-print-part-qty');
+    if (!select || !container) return;
+    select.innerHTML = '<option value="">Add part…</option>';
+    container.innerHTML = '';
+    if (qtyInput) qtyInput.value = '1';
+    logDialogParts = [];
+    try {
+      logDialogParts = await window.electron.getAllParts() || [];
+    } catch (_) {
+      logDialogParts = [];
+    }
+    logDialogParts.forEach((part) => {
+      const option = document.createElement('option');
+      option.value = String(part.id);
+      const category = part.category ? ` (${part.category})` : '';
+      const unit = part.unit ? ` ${part.unit}` : '';
+      option.textContent = `${part.name}${category} — ${Number(part.quantity) || 0}${unit}`;
+      select.appendChild(option);
+    });
+    updateLogPartsSummary();
+  }
+
+  function addSelectedLogPart() {
+    const select = document.getElementById('log-print-part-select');
+    const qtyInput = document.getElementById('log-print-part-qty');
+    const id = Number(select?.value);
+    if (!id) return;
+    const part = logDialogParts.find((item) => item.id === id);
+    if (!part) return;
+    addLogPart(part, qtyInput?.value || 1);
+    if (select) select.value = '';
+    if (qtyInput) qtyInput.value = '1';
+  }
+
   function selectedFilamentIds() {
     const chips = document.getElementById('log-print-filaments');
     if (!chips) return [];
@@ -276,6 +376,31 @@
     };
   }
 
+  async function fillLogPrinterSelect(preselectedId = null) {
+    const select = document.getElementById('log-print-printer-select');
+    if (!select) return;
+    select.innerHTML = '<option value="">Select printer (optional)…</option>';
+    let printers = [];
+    try {
+      if (window.electron?.getAllPrinters) {
+        printers = await window.electron.getAllPrinters() || [];
+      }
+    } catch (_) {
+      printers = [];
+    }
+    printers.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = String(p.id);
+      const mfg = [p.manufacturer, p.model].filter(Boolean).join(' ');
+      const typeTag = p.printer_type ? `[${p.printer_type}] ` : '';
+      opt.textContent = `${typeTag}${p.nickname}${mfg ? ` (${mfg})` : ''}`;
+      if (preselectedId && Number(preselectedId) === p.id) {
+        opt.selected = true;
+      }
+      select.appendChild(opt);
+    });
+  }
+
   async function openLogDialog({ filePaths } = {}) {
     const dialog = document.getElementById('log-print-dialog');
     if (!dialog) return;
@@ -305,6 +430,10 @@
       } catch (_) { /* ignore */ }
     }
     await fillLogFilamentSelect(prefill);
+    await fillLogPartSelect();
+    await fillLogPrinterSelect();
+    const status = document.getElementById('log-print-status');
+    if (status) status.textContent = '';
     if (typeof dialog.showModal === 'function') dialog.showModal();
   }
 
@@ -315,12 +444,16 @@
     const outcomeSelect = document.getElementById('log-print-outcome');
     const qtyInput = document.getElementById('log-print-quantity');
     const notesInput = document.getElementById('log-print-notes');
+    const printerSelect = document.getElementById('log-print-printer-select');
+    const printerId = printerSelect?.value ? Number(printerSelect.value) : null;
     const payload = {
       printedAt: whenInput?.value ? new Date(whenInput.value).toISOString() : new Date().toISOString(),
       outcome: outcomeSelect?.value || 'printed',
       quantity: Number(qtyInput?.value) || 1,
       notes: notesInput?.value || '',
-      filamentIds: selectedFilamentIds()
+      printerId: printerId && printerId > 0 ? printerId : null,
+      filamentIds: selectedFilamentIds(),
+      parts: selectedParts().map((part) => ({ id: part.id, quantity: part.quantity }))
     };
     try {
       if (logDialogFilePaths.length === 1) {
@@ -329,11 +462,12 @@
         await window.electron.logPrintEventsBatch({ ...payload, filePaths: logDialogFilePaths });
       }
       dialog?.close();
+      document.dispatchEvent(new CustomEvent('parts-stock-changed'));
       await refreshAfterChange(logDialogFilePaths);
     } catch (error) {
       console.error('Error logging print:', error);
       const status = document.getElementById('log-print-status');
-      if (status) status.textContent = error.message || 'Failed to log print';
+      if (status) status.textContent = friendlyIpcError(error);
     }
   }
 
@@ -382,13 +516,22 @@
       const li = document.createElement('li');
       li.className = `print-history-item outcome-${event.outcome}`;
       const filaments = (event.filaments || []).map((f) => formatFilamentLabel(f)).join(', ');
+      const parts = (event.parts || []).map((part) => `${part.name || 'Part'} ×${Number(part.quantity) || 0}`).join(', ');
       const qty = Number(event.quantity) > 1 ? ` ×${event.quantity}` : '';
+      const printerName = event.printer_nickname || event.printer_name;
+      const printerModel = event.printer_model ? ` <span class="print-history-printer-model">(${escapeHtml(event.printer_model)})</span>` : '';
+      const printerType = event.printer_type ? `<span class="print-history-printer-type" style="font-size:11px;font-weight:700;color:#6ee7b7;background:rgba(16,185,129,0.18);padding:1px 6px;border-radius:4px;margin-right:4px;">${escapeHtml(event.printer_type)}</span>` : '';
+      const printerBadge = printerName
+        ? `<div class="print-history-printer">🖨️ ${printerType}${escapeHtml(printerName)}${printerModel}</div>`
+        : '';
       li.innerHTML = `
         <div class="print-history-item-main">
           <span class="print-history-outcome">${escapeHtml(OUTCOME_LABELS[event.outcome] || event.outcome)}${qty}</span>
           <span class="print-history-when">${escapeHtml(formatPrintDate(event.printed_at))}</span>
         </div>
+        ${printerBadge}
         ${filaments ? `<div class="print-history-filaments">${escapeHtml(filaments)}</div>` : ''}
+        ${parts ? `<div class="print-history-parts">${escapeHtml(parts)}</div>` : ''}
         ${event.notes ? `<div class="print-history-notes">${escapeHtml(event.notes)}</div>` : ''}
         <button type="button" class="print-history-delete icon-button" title="Delete this log entry" aria-label="Delete print log">×</button>
       `;
@@ -399,6 +542,7 @@
         if (!ok) return;
         try {
           await window.electron.deletePrintEvent(event.id);
+          document.dispatchEvent(new CustomEvent('parts-stock-changed'));
           await refreshAfterChange(model.filePath);
         } catch (err) {
           console.error('Error deleting print event:', err);
@@ -456,6 +600,20 @@
 
   function wireUi() {
     document.getElementById('log-print-form')?.addEventListener('submit', submitLogDialog);
+    document.getElementById('log-print-part-add')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      addSelectedLogPart();
+    });
+    document.getElementById('log-print-part-qty')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addSelectedLogPart();
+      }
+    });
+    document.getElementById('log-print-parts')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') e.preventDefault();
+    });
+    document.getElementById('log-print-quantity')?.addEventListener('input', updateLogPartsSummary);
     document.addEventListener('click', async (e) => {
       const cancel = e.target.closest('#log-print-cancel');
       if (cancel) {
@@ -485,6 +643,10 @@
         await setStatusForPaths(paths, e.target.value);
         e.target.value = '';
       }
+    });
+    document.addEventListener('printers-changed', () => {
+      const dialog = document.getElementById('log-print-dialog');
+      if (dialog?.open) fillLogPrinterSelect();
     });
   }
 

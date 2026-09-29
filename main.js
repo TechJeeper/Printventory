@@ -8,6 +8,7 @@ const { Worker } = require('worker_threads');
 const { deriveBundleFromFilePath } = require('./bundle-keys');
 const spoolman = require('./spoolman');
 const printEvents = require('./print-events');
+const printerManager = require('./printer-manager');
 const { buildFolderForest } = require('./folder-tree-lib');
 const {
   registerMcpRoutes,
@@ -17,6 +18,7 @@ const {
 } = require('./mcp-server');
 const serverTls = require('./server-tls');
 const extensionInbox = require('./extension-inbox');
+const { detectInstalledSlicers } = require('./slicer-detect');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -2137,7 +2139,8 @@ function getMcpToolContext() {
         quantity: args.quantity,
         printedAt: args.printedAt,
         notes: args.notes,
-        filamentIds: args.filamentIds
+        filamentIds: args.filamentIds,
+        parts: args.parts
       });
     },
     deletePrintEvent: async (eventId) => printEvents.deletePrintEvent(db, eventId),
@@ -2381,7 +2384,8 @@ function getMcpToolContext() {
         quantity: args.quantity,
         printedAt: args.printedAt,
         notes: args.notes,
-        filamentIds: args.filamentIds
+        filamentIds: args.filamentIds,
+        parts: args.parts
       });
     },
     getModelsByDirectory: async (args) => {
@@ -3398,6 +3402,7 @@ function initializeDatabase() {
     // Check and create slicers table if it doesn't exist
     ensureSlicersTableExists();
     ensureFilamentsTablesExist();
+    ensurePartsTablesExist();
     
     // Initialize default settings
     initializeDefaultSettings();
@@ -3496,6 +3501,7 @@ function migrateRatingFavoriteColumns() {
 function migratePrintLifecycleColumns() {
   try {
     printEvents.migratePrintLifecycle(db);
+    printerManager.ensurePrinterSchema(db);
     return true;
   } catch (error) {
     console.error('Error migrating print lifecycle columns:', error);
@@ -3930,8 +3936,16 @@ async function createWindow() {
         },
         { type: 'separator' },
         {
-          label: 'Filament Management',
+          label: 'Filament Manager',
           click: () => mainWindow.webContents.send('open-filament-manager')
+        },
+        {
+          label: 'Printer Manager',
+          click: () => mainWindow.webContents.send('open-printer-management')
+        },
+        {
+          label: 'Parts Manager',
+          click: () => mainWindow.webContents.send('open-parts-stock')
         },
         {
           label: 'Tag Manager',
@@ -3941,11 +3955,17 @@ async function createWindow() {
           label: 'Metadata Manager',
           click: () => mainWindow.webContents.send('open-metadata-editor')
         },
-        {
-          label: 'Backup/Restore',
-          click: () => mainWindow.webContents.send('open-backup-restore')
-        },
         { type: 'separator' },
+        {
+          label: 'Clear New Flag',
+          click: () => {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('clear-new-flags');
+            } else {
+              mainWindow.webContents.send('clear-new-flags');
+            }
+          }
+        },
         {
           label: 'Regenerate Thumbnails',
           click: () => {
@@ -3969,6 +3989,11 @@ async function createWindow() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
+        },
+        { type: 'separator' },
+        {
+          label: 'Backup/Restore',
+          click: () => mainWindow.webContents.send('open-backup-restore')
         }
       ]
     },
@@ -4219,8 +4244,16 @@ function createApplicationMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Filament Management',
+          label: 'Filament Manager',
           click: () => mainWindow.webContents.send('open-filament-manager')
+        },
+        {
+          label: 'Printer Manager',
+          click: () => mainWindow.webContents.send('open-printer-management')
+        },
+        {
+          label: 'Parts Manager',
+          click: () => mainWindow.webContents.send('open-parts-stock')
         },
         {
           label: 'Tag Manager',
@@ -4230,11 +4263,17 @@ function createApplicationMenu() {
           label: 'Metadata Manager',
           click: () => mainWindow.webContents.send('open-metadata-editor')
         },
-        {
-          label: 'Backup/Restore',
-          click: () => mainWindow.webContents.send('open-backup-restore')
-        },
         { type: 'separator' },
+        {
+          label: 'Clear New Flag',
+          click: () => {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('clear-new-flags');
+            } else {
+              mainWindow.webContents.send('clear-new-flags');
+            }
+          }
+        },
         {
           label: 'Regenerate Thumbnails',
           click: () => {
@@ -4258,6 +4297,11 @@ function createApplicationMenu() {
         {
           label: 'Purge Models',
           click: () => mainWindow.webContents.send('open-purge-models')
+        },
+        { type: 'separator' },
+        {
+          label: 'Backup/Restore',
+          click: () => mainWindow.webContents.send('open-backup-restore')
         }
       ]
     },
@@ -6200,6 +6244,77 @@ async function getModelFilamentsHandler(event, modelId) {
 }
 ipcMain.handle('get-model-filaments', getModelFilamentsHandler);
 
+function normalizePartStockQuantity(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(Math.floor(n), 1000000);
+}
+
+async function getAllPartsHandler() {
+  try {
+    printEvents.ensurePartsSchema(db);
+    return db.prepare(`
+      SELECT id, name, category, quantity, unit, notes, low_stock
+      FROM parts
+      ORDER BY name COLLATE NOCASE, id ASC
+    `).all();
+  } catch (error) {
+    console.error('Error getting parts:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-all-parts', getAllPartsHandler);
+
+async function savePartHandler(event, part) {
+  try {
+    printEvents.ensurePartsSchema(db);
+    const name = String(part?.name || '').trim();
+    if (!name) throw new Error('Part name is required');
+    const category = String(part?.category || '').trim() || null;
+    const unit = String(part?.unit || '').trim() || 'pcs';
+    const notes = String(part?.notes || '').trim() || null;
+    const quantity = normalizePartStockQuantity(part?.quantity);
+    const lowStock = normalizePartStockQuantity(part?.lowStock ?? part?.low_stock ?? 0);
+    const id = part?.id != null && part.id !== '' ? Number(part.id) : null;
+    if (id) {
+      if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid part');
+      const existing = db.prepare('SELECT id FROM parts WHERE id = ?').get(id);
+      if (!existing) throw new Error('Part not found');
+      db.prepare(`
+        UPDATE parts
+        SET name = ?, category = ?, quantity = ?, unit = ?, notes = ?, low_stock = ?
+        WHERE id = ?
+      `).run(name, category, quantity, unit, notes, lowStock, id);
+      return db.prepare('SELECT * FROM parts WHERE id = ?').get(id);
+    }
+    const result = db.prepare(`
+      INSERT INTO parts (name, category, quantity, unit, notes, low_stock)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(name, category, quantity, unit, notes, lowStock);
+    return db.prepare('SELECT * FROM parts WHERE id = ?').get(result.lastInsertRowid);
+  } catch (error) {
+    console.error('Error saving part:', error);
+    throw error;
+  }
+}
+ipcMain.handle('save-part', savePartHandler);
+
+async function deletePartHandler(event, partId) {
+  try {
+    printEvents.ensurePartsSchema(db);
+    const id = Number(partId);
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid part');
+    return db.transaction(() => {
+      const result = db.prepare('DELETE FROM parts WHERE id = ?').run(id);
+      return result.changes > 0;
+    })();
+  } catch (error) {
+    console.error('Error deleting part:', error);
+    throw error;
+  }
+}
+ipcMain.handle('delete-part', deletePartHandler);
+
 async function getPrintEventsHandler(event, modelId) {
   try {
     return printEvents.getPrintEvents(db, modelId);
@@ -6259,6 +6374,108 @@ async function setPrintStatusBatchHandler(event, payload) {
   }
 }
 ipcMain.handle('set-print-status-batch', setPrintStatusBatchHandler);
+
+async function getAllPrintersHandler() {
+  try {
+    return printerManager.getAllPrinters(db);
+  } catch (error) {
+    console.error('Error getting printers:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-all-printers', getAllPrintersHandler);
+
+async function savePrinterHandler(event, printer) {
+  try {
+    return printerManager.savePrinter(db, printer);
+  } catch (error) {
+    console.error('Error saving printer:', error);
+    throw error;
+  }
+}
+ipcMain.handle('save-printer', savePrinterHandler);
+
+async function deletePrinterHandler(event, printerId) {
+  try {
+    return printerManager.deletePrinter(db, printerId);
+  } catch (error) {
+    console.error('Error deleting printer:', error);
+    throw error;
+  }
+}
+ipcMain.handle('delete-printer', deletePrinterHandler);
+
+async function getPrinterMaintenanceLogsHandler(event, printerId) {
+  try {
+    return printerManager.getPrinterMaintenanceLogs(db, printerId);
+  } catch (error) {
+    console.error('Error getting printer maintenance logs:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-printer-maintenance-logs', getPrinterMaintenanceLogsHandler);
+
+async function savePrinterMaintenanceLogHandler(event, logEntry) {
+  try {
+    return printerManager.savePrinterMaintenanceLog(db, logEntry);
+  } catch (error) {
+    console.error('Error saving printer maintenance log:', error);
+    throw error;
+  }
+}
+ipcMain.handle('save-printer-maintenance-log', savePrinterMaintenanceLogHandler);
+
+async function deletePrinterMaintenanceLogHandler(event, logId) {
+  try {
+    return printerManager.deletePrinterMaintenanceLog(db, logId);
+  } catch (error) {
+    console.error('Error deleting printer maintenance log:', error);
+    throw error;
+  }
+}
+ipcMain.handle('delete-printer-maintenance-log', deletePrinterMaintenanceLogHandler);
+
+async function getPrinterRemindersHandler(event, printerId) {
+  try {
+    return printerManager.getPrinterReminders(db, printerId);
+  } catch (error) {
+    console.error('Error getting printer reminders:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-printer-reminders', getPrinterRemindersHandler);
+
+async function savePrinterReminderHandler(event, reminder) {
+  try {
+    return printerManager.savePrinterReminder(db, reminder);
+  } catch (error) {
+    console.error('Error saving printer reminder:', error);
+    throw error;
+  }
+}
+ipcMain.handle('save-printer-reminder', savePrinterReminderHandler);
+
+async function deletePrinterReminderHandler(event, reminderId) {
+  try {
+    return printerManager.deletePrinterReminder(db, reminderId);
+  } catch (error) {
+    console.error('Error deleting printer reminder:', error);
+    throw error;
+  }
+}
+ipcMain.handle('delete-printer-reminder', deletePrinterReminderHandler);
+
+async function completePrinterReminderHandler(event, payload) {
+  try {
+    const reminderId = typeof payload === 'object' ? payload?.id : payload;
+    const notes = typeof payload === 'object' ? payload?.notes : null;
+    return printerManager.completePrinterReminder(db, reminderId, notes);
+  } catch (error) {
+    console.error('Error completing printer reminder:', error);
+    throw error;
+  }
+}
+ipcMain.handle('complete-printer-reminder', completePrinterReminderHandler);
 
 function readSpoolmanSettings(urlOverride, tokenOverride) {
   const urlRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('spoolmanUrl');
@@ -8025,6 +8242,23 @@ const purgeModelsHandler = async (event, options = {}) => {
 };
 ipcMain.handle('purge-models', purgeModelsHandler);
 ipcHandlerRegistry.set('purge-models', purgeModelsHandler);
+
+const clearNewFlagsHandler = async () => {
+  try {
+    if (!db || !db.open) {
+      const dbPath = getDatabasePath();
+      db = new Database(dbPath, {
+        verbose: DEBUG ? console.log : null
+      });
+    }
+    const result = db.prepare('UPDATE models SET isNew = 0 WHERE isNew = 1').run();
+    return { success: true, cleared: result.changes || 0 };
+  } catch (error) {
+    console.error('Error clearing new flags:', error);
+    throw error;
+  }
+};
+ipcMain.handle('clear-new-model-flags', clearNewFlagsHandler);
 
 function getPreviewableExtension(filePath) {
   if (!filePath || typeof filePath !== 'string') return '';
@@ -11963,6 +12197,14 @@ ipcMain.on('open-filament-manager', (event) => {
   mainWindow.webContents.send('open-filament-manager');
 });
 
+ipcMain.on('open-printer-management', (event) => {
+  mainWindow.webContents.send('open-printer-management');
+});
+
+ipcMain.on('open-parts-stock', (event) => {
+  mainWindow.webContents.send('open-parts-stock');
+});
+
 ipcMain.on('open-metadata-editor', (event) => {
   mainWindow.webContents.send('open-metadata-editor');
 });
@@ -12431,6 +12673,15 @@ let fetch;
 })();
 
 // Add these new IPC handlers
+ipcMain.handle('detect-slicers', async () => {
+  try {
+    return detectInstalledSlicers();
+  } catch (error) {
+    console.error('Error detecting slicers:', error);
+    throw error;
+  }
+});
+
 ipcMain.handle('get-slicers', () => {
   try {
     // Ensure the slicers table exists before querying it
@@ -13545,6 +13796,16 @@ function ensureSlicersTableExists() {
     return true;
   } catch (error) {
     console.error('Error ensuring slicers table exists:', error);
+    return false;
+  }
+}
+
+function ensurePartsTablesExist() {
+  try {
+    printEvents.ensurePartsSchema(db);
+    return true;
+  } catch (error) {
+    console.error('Error ensuring parts tables exist:', error);
     return false;
   }
 }

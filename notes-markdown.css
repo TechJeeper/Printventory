@@ -1,0 +1,240 @@
+.notes-editor {
+  width: 100%;
+  min-width: 0;
+}
+
+.notes-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.notes-toolbar button {
+  width: auto;
+  min-width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1;
+  box-shadow: none;
+  transform: none;
+  overflow: visible;
+}
+
+.notes-toolbar button::before {
+  display: none;
+}
+
+.notes-toolbar button:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: none;
+}
+
+.notes-source {
+  display: none !important;
+}
+
+.notes-sidebar-preview {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  max-width: none;
+  min-height: 80px;
+  max-height: 150px;
+  cursor: pointer;
+}
+
+.notes-richtext {
+  min-height: 360px;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: left;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.notes-richtext:focus {
+  border-color: var(--primary-accent, #00d4ff);
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
+}
+
+.notes-richtext :is(p, ul, ol, pre, blockquote) {
+  margin: 0 0 0.6em;
+}
+
+.notes-richtext :is(h1, h2, h3) {
+  margin: 0.15em 0 0.4em;
+  line-height: 1.25;
+}
+
+.notes-richtext a {
+  color: var(--primary-accent, #00d4ff);
+}
+
+.notes-richtext code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.notes-preview {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 80px;
+  max-height: 150px;
+  overflow: auto;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: left;
+  box-sizing: border-box;
+  word-wrap: break-word;
+}
+
+.notes-preview > *:first-child {
+  margin-top: 0;
+}
+
+.notes-preview p,
+.notes-preview ul,
+.notes-preview ol,
+.notes-preview pre,
+.notes-preview blockquote {
+  margin: 0 0 0.6em;
+}
+
+.notes-preview > *:last-child {
+  margin-bottom: 0;
+}
+
+.notes-preview h1,
+.notes-preview h2,
+.notes-preview h3,
+.notes-preview h4,
+.notes-preview h5,
+.notes-preview h6 {
+  margin: 0.15em 0 0.4em;
+  line-height: 1.25;
+  font-weight: 650;
+}
+
+.notes-preview h1 { font-size: 1.25em; }
+.notes-preview h2 { font-size: 1.12em; }
+.notes-preview h3 { font-size: 1.02em; }
+
+.notes-preview a {
+  color: var(--primary-accent, #00d4ff);
+}
+
+.notes-preview code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.notes-preview pre {
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 8px;
+  overflow: auto;
+}
+
+.notes-preview pre code {
+  padding: 0;
+  background: none;
+}
+
+.notes-preview ul,
+.notes-preview ol {
+  padding-left: 1.3em;
+}
+
+.notes-preview blockquote {
+  padding-left: 0.8em;
+  border-left: 3px solid var(--primary-accent, #00d4ff);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.notes-preview hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  margin: 0.6em 0;
+}
+
+.notes-preview-empty {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.45);
+  font-style: italic;
+}
+
+.notes-modal {
+  width: min(980px, 94vw);
+  max-width: 980px;
+}
+
+.notes-modal .form-group {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+}
+
+.notes-markdown-hint {
+  margin: -8px 0 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.notes-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.notes-split textarea,
+.notes-modal .notes-preview {
+  width: 100%;
+  min-height: 360px;
+  max-height: 60vh;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+.notes-modal .notes-preview {
+  display: block;
+}
+
+@media (max-width: 720px) {
+  .notes-split {
+    grid-template-columns: 1fr;
+  }
+
+  .notes-split textarea,
+  .notes-modal .notes-preview,
+  .notes-richtext {
+    min-height: 180px;
+  }
+}

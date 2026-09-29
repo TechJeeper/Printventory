@@ -13,6 +13,9 @@
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="parts-stock.css">
+  <link rel="stylesheet" href="printer-management.css">
+  <link rel="stylesheet" href="notes-markdown.css">
   <link rel="stylesheet" href="preview-wall.css">
   <link rel="stylesheet" href="thumbnail-progress.css">
   <link rel="stylesheet" href="mobile-ui.css">
@@ -66,8 +69,8 @@
       <button id="tag-button" class="icon-button" title="Tag - Tag Manager">
         <img src="tag.png" alt="Tag Manager">
       </button>
-      <button id="filament-button" class="icon-button" title="Filament - Filament Management">
-        <img src="filament.png" alt="Filament Management">
+      <button id="filament-button" class="icon-button" title="Filament - Filament Manager">
+        <img src="filament.png" alt="Filament Manager">
       </button>
       <button id="roulette-button" class="icon-button" title="Roulette - Print Roulette">
         <img src="roulette.png" alt="Print Roulette">
@@ -404,7 +407,7 @@
               <option value="">Select a filament...</option>
             </select>
             <button type="button" class="list-button icon-button" data-field="filament" data-target="filament-select" data-mode="edit" data-container="model-filaments" title="Search existing filaments">☰</button>
-            <button type="button" id="add-filament-button" class="icon-button" title="Filament Management">+</button>
+            <button type="button" id="add-filament-button" class="icon-button" title="Filament Manager">+</button>
           </div>
           <div id="model-filaments" class="tags-list"></div>
         </div>
@@ -412,8 +415,9 @@
       <div class="form-group">
         <label for="model-notes">Notes:</label>
         <div class="notes-input-container">
-          <textarea id="model-notes"></textarea>
-          <button type="button" id="open-notes-modal-button" class="icon-button" title="Open in larger editor">✏️</button>
+          <textarea id="model-notes" class="notes-source" aria-hidden="true" tabindex="-1"></textarea>
+          <div id="model-notes-preview" class="notes-preview notes-sidebar-preview" aria-label="Notes"></div>
+          <button type="button" id="open-notes-modal-button" class="icon-button" title="Edit notes">✏️</button>
         </div>
       </div>
       <div class="form-group print-history-group">
@@ -480,11 +484,30 @@
           <input type="number" id="log-print-quantity" min="1" max="9999" value="1">
         </div>
         <div class="form-group">
+          <label for="log-print-printer-select">Printer used</label>
+          <select id="log-print-printer-select">
+            <option value="">Select printer (optional)…</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label for="log-print-filament-select">Filament used</label>
           <select id="log-print-filament-select">
             <option value="">Add filament…</option>
           </select>
           <div id="log-print-filaments" class="tags-list"></div>
+        </div>
+        <div class="form-group">
+          <label for="log-print-part-select">Parts used</label>
+          <div class="log-print-parts-add">
+            <select id="log-print-part-select">
+              <option value="">Add part…</option>
+            </select>
+            <input type="number" id="log-print-part-qty" min="1" max="9999" value="1" title="Quantity of this part per copy" aria-label="Quantity per copy">
+            <button type="button" id="log-print-part-add">Add</button>
+          </div>
+          <p class="setting-description">Quantity is per copy. Saving removes that many from Parts Stock for every copy and every model in this log.</p>
+          <div id="log-print-parts" class="tags-list"></div>
+          <p id="log-print-parts-summary" class="setting-description"></p>
         </div>
         <div class="form-group">
           <label for="log-print-notes">Notes</label>
@@ -688,7 +711,7 @@
               <option value="">Select a filament...</option>
             </select>
             <button type="button" class="list-button icon-button" data-field="filament" data-target="multi-filament-select" data-mode="multi" data-container="multi-filaments" title="Search existing filaments">☰</button>
-            <button type="button" class="icon-button add-filament-button" title="Filament Management">+</button>
+            <button type="button" class="icon-button add-filament-button" title="Filament Manager">+</button>
           </div>
           <div id="multi-filaments" class="tags-list"></div>
           <div style="margin-top: 8px;">
@@ -717,11 +740,23 @@
         </div>
       </form>
     </dialog>
-    <dialog id="notes-modal-dialog" class="modal">
+    <dialog id="notes-modal-dialog" class="modal notes-modal">
       <form method="dialog">
         <h3>Edit Notes</h3>
         <div class="form-group">
-          <textarea id="notes-modal-textarea" style="width: 100%; min-height: 400px; padding: 12px 16px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); color: #fff; font-size: 14px; font-family: inherit; resize: vertical;"></textarea>
+          <div class="notes-editor" data-notes-editor="modal">
+            <div class="notes-toolbar" role="toolbar" aria-label="Notes formatting">
+              <button type="button" data-md="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+              <button type="button" data-md="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+              <button type="button" data-md="strike" title="Strikethrough"><s>S</s></button>
+              <button type="button" data-md="h2" title="Heading">H</button>
+              <button type="button" data-md="list" title="Bullet list">•</button>
+              <button type="button" data-md="link" title="Link">Link</button>
+              <button type="button" data-md="code" title="Code">&lt;/&gt;</button>
+            </div>
+            <div id="notes-richtext" class="notes-richtext" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Notes"></div>
+            <textarea id="notes-modal-textarea" class="notes-source" aria-hidden="true" tabindex="-1"></textarea>
+          </div>
         </div>
         <div class="dialog-buttons">
           <button type="submit" id="save-notes-button">Save</button>
@@ -908,7 +943,11 @@
         <div id="slicer-list">
           <!-- Slicer entries will be added here dynamically -->
         </div>
-        <button type="button" id="add-slicer-button" class="full-width-button">Add New Slicer</button>
+        <div class="slicer-list-actions">
+          <button type="button" id="add-slicer-button" class="full-width-button">Add New Slicer</button>
+          <button type="button" id="detect-slicers-button" class="full-width-button">Auto Detect</button>
+        </div>
+        <p id="slicer-detect-status" class="setting-description" hidden></p>
         <div class="dialog-buttons">
           <button type="button" id="save-slicer-settings">Save</button>
           <button type="button" id="cancel-slicer-settings" onclick="document.getElementById('slicer-dialog')?.close()">Cancel</button>
@@ -1747,6 +1786,8 @@
             <div class="shortcut-row"><span class="shortcut-action">Next model (detail view)</span><kbd>↓</kbd> or <kbd>J</kbd></div>
             <div class="shortcut-row"><span class="shortcut-action">Previous model (detail view)</span><kbd>↑</kbd> or <kbd>K</kbd></div>
             <div class="shortcut-row"><span class="shortcut-action">Exit Multi-Edit mode</span><kbd>Escape</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Bold in notes</span><kbd>Ctrl</kbd>+<kbd>B</kbd></div>
+            <div class="shortcut-row"><span class="shortcut-action">Italic in notes</span><kbd>Ctrl</kbd>+<kbd>I</kbd></div>
             <div class="shortcut-row"><span class="shortcut-action">Show this shortcuts dialog</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>?</kbd></div>
           </div>
           <button type="button" onclick="document.getElementById('keyboard-shortcuts-dialog')?.close()">Close</button>
@@ -1956,45 +1997,456 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       </dialog>
 
       <dialog id="filament-manager-dialog" class="modal">
-        <form method="dialog">
-          <h3>Filament Management</h3>
+        <form method="dialog" id="filament-manager-form">
+          <div class="filament-manager-header">
+            <div class="filament-manager-header-row">
+              <h3>🧵 Filament Manager</h3>
+              <div class="filament-header-actions">
+                <button type="button" id="spoolman-setup-toggle" class="filament-header-btn" aria-expanded="false" aria-controls="spoolman-setup-panel">Spoolman Setup</button>
+                <button type="button" id="filament-manager-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleFilamentManagerFullscreen==='function')window.toggleFilamentManagerFullscreen()">
+                  <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+                  </svg>
+                  <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <p class="setting-description">Manage your 3D printing filament library, assign spools to models, or sync with Spoolman.</p>
+          </div>
+
           <div id="spoolman-setup-panel" class="form-group spoolman-setup-panel" hidden>
-            <label>Spoolman Setup</label>
-            <input type="text" id="spoolman-url" placeholder="http://localhost:7912" autocomplete="off" spellcheck="false">
-            <input type="password" id="spoolman-api-token" placeholder="API token (optional)" autocomplete="off" style="margin-top: 8px;">
+            <div class="spoolman-section-header">
+              <label>Spoolman Integration</label>
+            </div>
+            <div class="spoolman-grid">
+              <div class="filament-field">
+                <label class="filament-field-label" for="spoolman-url">Instance URL</label>
+                <input type="text" id="spoolman-url" placeholder="http://localhost:7912" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="filament-field">
+                <label class="filament-field-label" for="spoolman-api-token">API Token (Optional)</label>
+                <input type="password" id="spoolman-api-token" placeholder="Optional token" autocomplete="off">
+              </div>
+            </div>
             <div class="filament-spoolman-actions">
-              <button type="button" id="spoolman-test-button">Test Connection</button>
-              <button type="button" id="spoolman-sync-button">Sync Now</button>
+              <button type="button" id="spoolman-test-button" class="spoolman-btn">Test Connection</button>
+              <button type="button" id="spoolman-sync-button" class="spoolman-btn spoolman-btn-primary">Sync Now</button>
             </div>
             <div id="spoolman-setup-status" class="filament-manager-status"></div>
           </div>
-          <div class="form-group">
-            <label>Add Filament</label>
-            <div class="filament-add-grid">
-              <input type="text" id="new-filament-name" placeholder="Name (required)" autocomplete="off">
-              <input type="text" id="new-filament-vendor" placeholder="Vendor" autocomplete="off">
-              <input type="text" id="new-filament-material" placeholder="Material (PLA, PETG…)" autocomplete="off">
-              <div class="filament-color-row">
-                <input type="color" id="new-filament-color-picker" value="#808080" title="Color">
-                <input type="text" id="new-filament-color" placeholder="Hex color" autocomplete="off">
-              </div>
-              <input type="number" id="new-filament-diameter" placeholder="Diameter" value="1.75" step="0.05" min="0">
-              <button type="button" id="add-filament-manager-button" class="icon-button">+</button>
+
+          <div class="form-group filament-form-section collapsed" id="filament-form-section">
+            <div class="filament-section-header">
+              <label id="filament-form-label" for="new-filament-name">Add a filament</label>
+              <button type="button" id="filament-toggle-add-btn" class="filament-toggle-add-btn" aria-expanded="false">+ Add Filament</button>
             </div>
-            <div id="filament-manager-status" class="filament-manager-status"></div>
+            <div id="filament-form-body" hidden>
+              <div class="filament-add-grid">
+                <div class="filament-field filament-span">
+                  <label class="filament-field-label" for="new-filament-name">Filament Name <span class="required">*</span></label>
+                  <input type="text" id="new-filament-name" placeholder="Name (e.g. PolyLite PLA Black, Prusament Galaxy Silver…)" autocomplete="off">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-vendor">Vendor / Brand</label>
+                  <input type="text" id="new-filament-vendor" placeholder="e.g. Polymaker, Bambu Lab, eSUN" autocomplete="off">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-material">Material</label>
+                  <input type="text" id="new-filament-material" placeholder="e.g. PLA, PETG, ABS, TPU" autocomplete="off">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-color">Color</label>
+                  <div class="filament-color-row">
+                    <input type="color" id="new-filament-color-picker" value="#808080" title="Click to pick color">
+                    <input type="text" id="new-filament-color" placeholder="Hex (e.g. 808080)" autocomplete="off">
+                  </div>
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-diameter">Diameter (mm)</label>
+                  <input type="number" id="new-filament-diameter" placeholder="1.75" value="1.75" step="0.05" min="0">
+                </div>
+              </div>
+              <div class="filament-form-actions">
+                <button type="button" id="add-filament-manager-button" class="filament-btn-primary">Add Filament</button>
+                <button type="button" id="cancel-filament-manager-button" class="filament-btn-cancel">Cancel</button>
+              </div>
+              <div id="filament-manager-status" class="filament-manager-status"></div>
+            </div>
           </div>
-          <div class="form-group">
-            <label>Filaments</label>
+
+          <div class="form-group filament-list-section">
+            <div class="filament-section-header">
+              <label for="filament-manager-search">Filaments Inventory</label>
+              <span id="filament-count-badge" class="filament-count-badge"></span>
+            </div>
             <div class="input-with-icon">
-              <input type="text" id="filament-manager-search" placeholder="Search filaments...">
+              <input type="text" id="filament-manager-search" placeholder="Search filaments by name, vendor, material...">
               <button type="button" id="clear-filament-search" class="icon-button" title="Clear search">×</button>
             </div>
             <div id="filament-manager-list" class="filament-manager-list"></div>
           </div>
+
           <div class="dialog-buttons">
-            <button type="button" id="spoolman-setup-toggle" aria-expanded="false" aria-controls="spoolman-setup-panel">Spoolman Setup</button>
-            <button type="button" id="filament-manager-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleFilamentManagerFullscreen==='function')window.toggleFilamentManagerFullscreen()">Full Screen</button>
-            <button type="button" onclick="document.getElementById('filament-manager-dialog')?.close()">Close</button>
+            <button type="button" id="filament-manager-close" class="filament-btn-close" onclick="document.getElementById('filament-manager-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="printer-management-dialog" class="modal">
+        <div class="printer-management-header">
+          <div class="printer-management-header-row">
+            <h3>🖨️ Printer Manager</h3>
+            <button type="button" id="printer-management-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.togglePrinterManagementFullscreen==='function')window.togglePrinterManagementFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
+          <p class="setting-description">Onboard your 3D printers, launch Klipper/OctoPrint web interfaces, track maintenance logs, and schedule reminders.</p>
+          <div class="printer-management-tabs">
+            <button type="button" id="printer-tab-printers" class="printer-tab-btn active">
+              <span>🖨️ My Printers</span>
+              <span id="printer-tab-printers-count" class="printer-tab-badge">0</span>
+            </button>
+            <button type="button" id="printer-tab-maintenance" class="printer-tab-btn">
+              <span>📋 Maintenance &amp; Reminders</span>
+              <span id="printer-tab-due-badge" class="printer-tab-badge due" hidden></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="printer-management-scroll-content">
+          <!-- View 1: Printers Onboarding & List -->
+          <div id="printer-view-printers">
+            <div class="form-group printer-form-section collapsed" id="printer-form-section">
+              <div class="printer-section-header">
+                <label id="printer-form-title" class="printer-section-title">Onboard a Printer</label>
+                <button type="button" id="printer-toggle-add-btn" class="printer-toggle-add-btn" aria-expanded="false">+ Add Printer</button>
+              </div>
+              <div id="printer-form-body" hidden>
+                <form id="printer-form">
+                  <div class="printer-add-grid">
+                    <div class="printer-field printer-span">
+                      <label class="printer-field-label" for="printer-form-nickname">Nickname <span class="required">*</span></label>
+                      <input type="text" id="printer-form-nickname" placeholder="e.g. Voron 2.4, Bambu X1C, Living Room Ender" autocomplete="off" required>
+                    </div>
+                    <div class="printer-field">
+                      <label class="printer-field-label" for="printer-form-manufacturer">Manufacturer</label>
+                      <input type="text" id="printer-form-manufacturer" list="printer-manufacturers-list" placeholder="e.g. Bambu Lab, Prusa, Creality, Voron" autocomplete="off">
+                    </div>
+                    <div class="printer-field">
+                      <label class="printer-field-label" for="printer-form-model">Model</label>
+                      <input type="text" id="printer-form-model" placeholder="e.g. X1-Carbon, MK4, Ender 3 V2, 2.4r2" autocomplete="off">
+                    </div>
+                    <div class="printer-field">
+                      <label class="printer-field-label" for="printer-form-type">Printer Type</label>
+                      <select id="printer-form-type">
+                        <option value="FDM">FDM</option>
+                        <option value="SLA">SLA</option>
+                        <option value="SLS">SLS</option>
+                        <option value="DLP">DLP</option>
+                        <option value="LCD">LCD</option>
+                        <option value="MJF">MJF</option>
+                        <option value="DMLS">DMLS</option>
+                        <option value="SLM">SLM</option>
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+                    <div class="printer-field">
+                      <label class="printer-field-label" for="printer-form-firmware">Firmware Type</label>
+                      <select id="printer-form-firmware">
+                        <option value="Klipper">Klipper</option>
+                        <option value="Marlin">Marlin</option>
+                        <option value="Bambu OS">Bambu OS</option>
+                        <option value="Prusa Buddy">Prusa Buddy</option>
+                        <option value="RepRap">RepRap</option>
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+                    <div class="printer-field printer-span">
+                      <label class="printer-klipper-toggle-row">
+                        <input type="checkbox" id="printer-form-klipper" checked>
+                        <span class="printer-klipper-toggle-label">
+                          <span>Running Klipper</span>
+                          <span class="klipper-tag-badge">Klipper</span>
+                          <span style="font-size:12px;color:#94a3b8;margin-left:4px;">(Enables Moonraker / Mainsail / Fluidd web interface integration)</span>
+                        </span>
+                      </label>
+                    </div>
+                    <div class="printer-field printer-span">
+                      <label class="printer-field-label" for="printer-form-web-url">Web Interface Address (Mainsail, Fluidd, OctoPrint, etc.)</label>
+                      <div class="printer-url-group">
+                        <input type="text" id="printer-form-web-url" placeholder="http://mainsail.local or http://192.168.1.100" autocomplete="off" spellcheck="false">
+                        <button type="button" id="printer-form-test-url" class="printer-url-open-btn" title="Open URL in browser">🌐 Open ↗</button>
+                      </div>
+                    </div>
+                    <div class="printer-field printer-span">
+                      <label class="printer-field-label" for="printer-form-notes">Notes / Location (Optional)</label>
+                      <input type="text" id="printer-form-notes" placeholder="e.g. Workshop rack, 0.4mm hardened nozzle installed" autocomplete="off">
+                    </div>
+                  </div>
+                  <div class="printer-form-actions">
+                    <button type="submit" id="printer-form-submit" class="printer-btn-primary">Add Printer</button>
+                    <button type="button" id="printer-form-cancel" class="printer-btn-cancel">Cancel</button>
+                  </div>
+                  <div id="printer-form-status" class="printer-status-msg"></div>
+                </form>
+              </div>
+            </div>
+
+            <div class="form-group printer-list-section">
+              <div class="printer-section-header">
+                <label class="printer-section-title">Onboarded Printers</label>
+                <span id="printer-count-badge" class="printer-tab-badge"></span>
+              </div>
+              <div class="printer-search-filter-row">
+                <div class="input-with-icon" style="flex: 1;">
+                  <input type="text" id="printer-search-input" placeholder="Search printers by nickname, type, model...">
+                  <button type="button" id="printer-clear-search" class="icon-button" title="Clear search">×</button>
+                </div>
+                <select id="printer-type-filter" class="printer-type-filter-select" title="Filter by printer type">
+                  <option value="">All Types</option>
+                  <option value="FDM">FDM</option>
+                  <option value="SLA">SLA</option>
+                  <option value="SLS">SLS</option>
+                  <option value="DLP">DLP</option>
+                  <option value="LCD">LCD</option>
+                  <option value="MJF">MJF</option>
+                  <option value="DMLS">DMLS</option>
+                  <option value="SLM">SLM</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div id="printer-cards-list" class="printer-cards-grid"></div>
+            </div>
+          </div>
+
+          <!-- View 2: Maintenance Hub & Reminders -->
+          <div id="printer-view-maintenance" hidden>
+            <div class="maintenance-active-printer-row">
+              <div class="maintenance-printer-selector">
+                <span style="font-weight:600;font-size:13px;color:#cbd5e1;">Active Printer:</span>
+                <select id="maintenance-printer-select"></select>
+              </div>
+              <div style="font-size:12px;color:#94a3b8;">Manage preventative maintenance and upcoming service alerts</div>
+            </div>
+
+            <div class="maintenance-split">
+              <!-- Left Column: Scheduled Reminders -->
+              <div class="maintenance-column">
+                <div class="form-group printer-maintenance-form-section">
+                  <div class="printer-section-header">
+                    <label class="printer-section-title">⏰ Scheduled Reminders</label>
+                  </div>
+                  <div id="maintenance-reminders-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;"></div>
+
+                  <form id="reminder-form">
+                    <div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:8px;text-transform:uppercase;">Schedule New Reminder</div>
+                    <div style="display:flex;flex-direction:column;gap:10px;">
+                      <div class="printer-field">
+                        <label class="printer-field-label" for="reminder-form-title">Task Title <span class="required">*</span></label>
+                        <input type="text" id="reminder-form-title" list="reminder-presets-list" placeholder="e.g. Lubricate linear rails" required autocomplete="off">
+                      </div>
+                      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                        <div class="printer-field">
+                          <label class="printer-field-label" for="reminder-form-due-date">Due Date</label>
+                          <input type="date" id="reminder-form-due-date" required>
+                        </div>
+                        <div class="printer-field">
+                          <label class="printer-field-label" for="reminder-form-interval">Recurrence</label>
+                          <select id="reminder-form-interval">
+                            <option value="0">One-time</option>
+                            <option value="14">Every 2 weeks (14 days)</option>
+                            <option value="30">Every month (30 days)</option>
+                            <option value="60">Every 2 months (60 days)</option>
+                            <option value="90">Every 3 months (90 days)</option>
+                            <option value="180">Every 6 months (180 days)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="printer-field">
+                        <label class="printer-field-label" for="reminder-form-notes">Notes (Optional)</label>
+                        <input type="text" id="reminder-form-notes" placeholder="e.g. Use Mobilux EP2 grease" autocomplete="off">
+                      </div>
+                      <div>
+                        <button type="submit" class="printer-btn-primary" style="padding:7px 16px;font-size:12.5px;">Schedule Reminder</button>
+                      </div>
+                      <div id="reminder-form-status" class="printer-status-msg"></div>
+                    </div>
+                  </form>
+                </div>
+              </div>
+
+              <!-- Right Column: Maintenance History Log -->
+              <div class="maintenance-column">
+                <div class="form-group printer-maintenance-form-section">
+                  <div class="printer-section-header">
+                    <label class="printer-section-title">📝 Maintenance History Log</label>
+                  </div>
+                  <div id="maintenance-logs-list" style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto;margin-bottom:14px;"></div>
+
+                  <form id="log-maintenance-form">
+                    <div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:8px;text-transform:uppercase;">Record Maintenance Performed</div>
+                    <div style="display:flex;flex-direction:column;gap:10px;">
+                      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                        <div class="printer-field">
+                          <label class="printer-field-label" for="log-form-type">Type</label>
+                          <select id="log-form-type">
+                            <option value="Lubrication">Lubrication</option>
+                            <option value="Cleaning">Cleaning</option>
+                            <option value="Belt Tensioning">Belt Tensioning</option>
+                            <option value="Nozzle Replacement">Nozzle Replacement</option>
+                            <option value="Bed Tramming / Leveling">Bed Tramming</option>
+                            <option value="Extruder Service">Extruder Service</option>
+                            <option value="PTFE Tube">PTFE Tube</option>
+                            <option value="Firmware Update">Firmware Update</option>
+                            <option value="General Service">General Service</option>
+                          </select>
+                        </div>
+                        <div class="printer-field">
+                          <label class="printer-field-label" for="log-form-performed-at">Date</label>
+                          <input type="date" id="log-form-performed-at" required>
+                        </div>
+                      </div>
+                      <div class="printer-field">
+                        <label class="printer-field-label" for="log-form-title">Summary / Action</label>
+                        <input type="text" id="log-form-title" placeholder="e.g. Swapped to 0.6mm CHT nozzle" autocomplete="off">
+                      </div>
+                      <div class="printer-field">
+                        <label class="printer-field-label" for="log-form-description">Details / Notes</label>
+                        <textarea id="log-form-description" placeholder="Notes, observations, torque specs, brand of replacement parts..." rows="2"></textarea>
+                      </div>
+                      <div>
+                        <button type="submit" class="printer-btn-primary" style="padding:7px 16px;font-size:12.5px;">Log Maintenance</button>
+                      </div>
+                      <div id="log-form-status" class="printer-status-msg"></div>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <datalist id="printer-manufacturers-list">
+          <option value="Bambu Lab"></option>
+          <option value="Prusa Research"></option>
+          <option value="Voron Design"></option>
+          <option value="Creality"></option>
+          <option value="Elegoo"></option>
+          <option value="Anycubic"></option>
+          <option value="RatRig"></option>
+          <option value="Qidi Tech"></option>
+          <option value="Flashforge"></option>
+          <option value="Sovol"></option>
+          <option value="Snapmaker"></option>
+          <option value="Kingroon"></option>
+          <option value="Artillery"></option>
+          <option value="UltiMaker"></option>
+        </datalist>
+
+        <datalist id="reminder-presets-list">
+          <option value="Clean and grease Z-axis lead screws"></option>
+          <option value="Lubricate X/Y linear rails and rods"></option>
+          <option value="Check and tension belts"></option>
+          <option value="Wash PEI print surface with warm soapy water"></option>
+          <option value="Inspect and clean extruder drive gears"></option>
+          <option value="Check PTFE reverse Bowden tube for wear"></option>
+          <option value="Check hotend screws and nozzle tightness"></option>
+          <option value="Bed tramming and auto-level mesh calibration"></option>
+          <option value="Replace activated carbon / HEPA filter"></option>
+        </datalist>
+
+        <div class="printer-dialog-footer">
+          <button type="button" id="printer-management-close" class="printer-btn-close">Close</button>
+        </div>
+      </dialog>
+
+      <dialog id="parts-stock-dialog" class="modal">
+        <form id="parts-stock-form">
+          <div class="parts-stock-header">
+            <div class="parts-stock-header-row">
+              <h3>🔩 Parts Manager</h3>
+              <button type="button" id="parts-stock-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.togglePartsStockFullscreen==='function')window.togglePartsStockFullscreen()">
+                <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+                </svg>
+                <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+                </svg>
+              </button>
+            </div>
+            <p class="setting-description">Track screws, bearings, inserts, and other hardware. When you log a print, choose the parts it used and they are removed from stock.</p>
+          </div>
+          <div class="form-group parts-stock-form-section collapsed" id="parts-stock-form-section">
+            <div class="parts-stock-section-header">
+              <label id="parts-stock-form-label" for="parts-stock-name">Add a part</label>
+              <button type="button" id="parts-stock-toggle-add-btn" class="parts-stock-toggle-add-btn" aria-expanded="false">+ Add Part</button>
+            </div>
+            <div id="parts-stock-form-body" hidden>
+              <div class="parts-stock-add-grid">
+                <div class="parts-stock-field parts-stock-span">
+                  <label class="parts-stock-field-label" for="parts-stock-name">Part Name <span class="required">*</span></label>
+                  <input type="text" id="parts-stock-name" placeholder="Name (e.g. M3×8 screw, 608 bearing…)" autocomplete="off">
+                </div>
+                <div class="parts-stock-field">
+                  <label class="parts-stock-field-label" for="parts-stock-category">Category</label>
+                  <input type="text" id="parts-stock-category" list="parts-stock-categories" placeholder="Category (e.g. Screws)" autocomplete="off">
+                </div>
+                <div class="parts-stock-field">
+                  <label class="parts-stock-field-label" for="parts-stock-unit">Unit</label>
+                  <input type="text" id="parts-stock-unit" placeholder="Unit (pcs)" autocomplete="off" value="pcs" aria-label="Unit">
+                </div>
+                <div class="parts-stock-field">
+                  <label class="parts-stock-field-label" for="parts-stock-quantity">Quantity on hand</label>
+                  <input type="number" id="parts-stock-quantity" min="0" max="1000000" step="1" value="0" title="Quantity on hand" aria-label="Quantity on hand">
+                </div>
+                <div class="parts-stock-field">
+                  <label class="parts-stock-field-label" for="parts-stock-low">Low stock alert threshold</label>
+                  <input type="number" id="parts-stock-low" min="0" max="1000000" step="1" value="0" title="Warn when quantity is at or below this number" aria-label="Low stock warning">
+                </div>
+                <div class="parts-stock-field parts-stock-span">
+                  <label class="parts-stock-field-label" for="parts-stock-notes">Notes (optional)</label>
+                  <input type="text" id="parts-stock-notes" placeholder="Notes (optional, e.g. bin number or size specs)" autocomplete="off">
+                </div>
+              </div>
+              <datalist id="parts-stock-categories">
+                <option value="Screws"></option>
+                <option value="Nuts"></option>
+                <option value="Washers"></option>
+                <option value="Bearings"></option>
+                <option value="Inserts"></option>
+                <option value="Magnets"></option>
+                <option value="Springs"></option>
+                <option value="Electronics"></option>
+                <option value="Fasteners"></option>
+                <option value="Hardware"></option>
+              </datalist>
+              <div class="parts-stock-form-actions">
+                <button type="submit" id="parts-stock-add" class="parts-stock-btn-primary">Add</button>
+                <button type="button" id="parts-stock-cancel-edit" class="parts-stock-btn-cancel">Cancel</button>
+              </div>
+              <div id="parts-stock-status" class="parts-stock-status"></div>
+            </div>
+          </div>
+          <div class="form-group parts-stock-list-section">
+            <div class="parts-stock-section-header">
+              <label for="parts-stock-search">Parts Inventory</label>
+              <span id="parts-stock-count-badge" class="parts-stock-count-badge"></span>
+            </div>
+            <div class="input-with-icon">
+              <input type="text" id="parts-stock-search" placeholder="Search parts...">
+              <button type="button" id="parts-stock-clear-search" class="icon-button" title="Clear search">×</button>
+            </div>
+            <div id="parts-stock-list" class="parts-stock-list"></div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="button" id="parts-stock-close">Close</button>
           </div>
         </form>
       </dialog>
@@ -2208,8 +2660,11 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="sidebar-layout.js"></script>
   <script src="folder-tree.js"></script>
   <script src="step-assembly.js"></script>
+  <script src="notes-markdown.js"></script>
   <script src="renderer.js"></script>
   <script src="filament.js"></script>
+  <script src="printer-management.js"></script>
+  <script src="parts-stock.js"></script>
   <script src="print-history.js"></script>
   <script type="module" src="slicer.js"></script>
   <script src="guide.js"></script>
