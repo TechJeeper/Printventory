@@ -4,6 +4,12 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.13] - 2026-10-01
+
+- STL Home accepts a list of directories, using the same add and remove controls as excluded directories
+- Startup scans every STL Home directory, on the desktop and in Docker
+- STL_HOME accepts one path or several, separated the same way as STL_HOME_EXCLUDE
+
 ## [2.2.12] - 2026-10-01
 
 - Library scans skip folders that start with a dot, extra folder names you list, and directories excluded from STL Home

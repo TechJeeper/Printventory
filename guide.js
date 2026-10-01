@@ -57,7 +57,7 @@ const guidePages = [
     <ul>
       <li>Change the <strong>Theme</strong> to match your style! 🎨</li>
       <li>Adjust <strong>Performance</strong> settings to optimize your workflow! 🚀</li>
-      <li>Set your <strong>STL Home</strong> directory for automatic scans on startup! 🏠</li>
+      <li>Set your <strong>STL Home</strong> directories for automatic scans on startup! 🏠</li>
       <li>Specify the <strong>Slicer Path</strong> to open models directly in your favorite slicer! 🖨️</li>
     </ul>`,
     image: ""

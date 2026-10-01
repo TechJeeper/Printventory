@@ -135,24 +135,25 @@ Printventory can also be deployed as a Docker container for Linux server mode de
 
 ### STL Home Setting
 
-The STL Home setting allows automatic scanning of a directory on startup and, in server mode, periodic scanning for new files. This is particularly useful for keeping your library up-to-date automatically.
+The STL Home setting allows automatic scanning of one or more directories on startup and, in server mode, periodic scanning for new files. This is particularly useful for keeping your library up-to-date automatically.
 
 #### Setting STL Home in Server Mode
 
 1. Access the Printventory web interface at `http://<your-ip>:5000`
 2. Navigate to **Settings → STL Home**
-3. Enter the directory path:
+3. Add each directory:
    - **Windows Server Mode**: Use UNC path format (e.g., `\\server\share\models`)
    - The path must be accessible from the server machine
+   - Add another row for each extra library
 4. Configure the **Update Frequency** (default: 60 minutes):
-   - This determines how often the STL Home directory is automatically scanned for new files
+   - This determines how often the STL Home directories are automatically scanned for new files
    - Range: 1-1440 minutes (1 minute to 24 hours)
 5. Click **Save**
 
 #### How It Works
 
-- **On Startup**: When Printventory starts in server mode, it automatically scans the STL Home directory if one is configured
-- **Periodic Scanning**: In server mode, Printventory will automatically scan the STL Home directory at the configured interval
+- **On Startup**: When Printventory starts in server mode, it automatically scans every configured STL Home directory
+- **Periodic Scanning**: In server mode, Printventory scans each STL Home directory at the configured interval
 - **Path Requirements**: STL Home paths follow the same format rules as regular scanning:
   - **Windows Server Mode**: Must use UNC paths (`\\server\share\path`)
   - Paths are validated when saved
@@ -160,7 +161,7 @@ The STL Home setting allows automatic scanning of a directory on startup and, in
 
 #### Clearing STL Home
 
-To disable automatic scanning, clear the STL Home directory field and save. This will stop both startup and periodic scanning.
+To disable automatic scanning, remove every directory from the list and save. This stops both startup and periodic scanning.
 
 ### Getting Help
 
@@ -442,8 +443,11 @@ services:
       - GIO_USE_VOLUME_MONITOR=unix
       - DBUS_FATAL_WARNINGS=0
 
-      # Auto-configure STL Home (must match a mounted volume)
-      # - STL_HOME=/mnt/models
+      # Auto-configure STL Home (must match a mounted volume).
+      # Several directories: comma, semicolon, or newline separated, or a JSON array.
+      # - STL_HOME=/mnt/models,/mnt/archive
+      # Directories to skip under STL Home (comma-separated container paths)
+      # - STL_HOME_EXCLUDE=/mnt/models/cache,/mnt/models/derivatives
 
       # Preview / memory tuning (optional)
       # - PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB=512
@@ -493,7 +497,8 @@ docker compose up -d
 
 | Variable | Purpose |
 |----------|---------|
-| `STL_HOME` | Sets the STL Home scan directory on start (Linux path inside the container). |
+| `STL_HOME` | STL Home scan directories on start (Linux paths inside the container). One path, or several separated by commas, semicolons, or newlines, or a JSON array. |
+| `STL_HOME_EXCLUDE` | Directories STL Home scans skip. Comma, semicolon, or newline separated container paths, or a JSON array. Same empty-vs-override rules as `STL_HOME`. |
 | `PRINTVENTORY_ENV_OVERRIDES_SETTINGS` | Set to `1` to re-apply env settings on every start (legacy). By default, env fills unset DB settings only. |
 | `PRINTVENTORY_GPU` | Server thumbnail WebGL backend: `auto` (default), `nvidia`, or `swiftshader` (CPU). |
 | `PRINTVENTORY_PREVIEW_3MF_WORKER_MEMORY_MB` | Memory budget for 3MF preview workers (keep below container RAM). |
@@ -667,7 +672,7 @@ http://localhost:5000
 
 ### STL Home Setting
 
-The STL Home setting allows automatic scanning of a directory on startup and periodic scanning for new files in Docker mode. This is ideal for keeping your library synchronized with a network share or mounted directory.
+The STL Home setting allows automatic scanning of one or more directories on startup and periodic scanning for new files in Docker mode. This is ideal for keeping your library synchronized with a network share or mounted directory.
 
 #### Setting STL Home in Docker Mode
 
@@ -675,36 +680,42 @@ There are two ways to configure STL Home in Docker:
 
 **Option 1: Using Environment Variable (Recommended for Docker)**
 
-You can set the STL Home directory directly in your `docker-compose.yml` using the `STL_HOME` environment variable:
+You can set STL Home directories directly in your `docker-compose.yml` using the `STL_HOME` environment variable:
 
 ```yaml
 environment:
-  - STL_HOME=/mnt/network-share/models
+  - STL_HOME=/mnt/network-share/models,/mnt/network-share/archive
+  - STL_HOME_EXCLUDE=/mnt/network-share/models/cache,/mnt/network-share/models/derivatives
 ```
 
-This will automatically configure the STL Home setting when the container starts. The setting will be visible in the Printventory web interface under **Settings → STL Home**.
+A single path still works (`STL_HOME=/mnt/network-share/models`). For several directories, separate paths with commas, semicolons, or newlines, or pass a JSON array. This configures STL Home when the container starts. The list is visible under **Settings → STL Home**.
+
+`STL_HOME` is saved when the directory list is still empty. After you change it in the web UI, that saved list is kept on restart unless `PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1`.
+
+`STL_HOME_EXCLUDE` is the same excluded-directories list as in that dialog. Separate paths the same way, or pass a JSON array. A path can be absolute inside the container or relative to the STL Home directory being scanned. The list is saved when it is still empty (`[]`). After you change it in the web UI, that saved list is kept on restart unless `PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1`.
 
 **Option 2: Using the Web Interface**
 
 1. **Ensure your files are mounted** into the container (see [Path Mapping Guide](#path-mapping-guide) above)
 2. **Access the Printventory web interface** at `http://<your-server-ip>:5000` or `http://localhost:5000`
 3. **Navigate to Settings → STL Home**
-4. **Enter the directory path using the container path format:**
+4. **Add each directory using the container path format:**
    - Use Linux-style absolute paths (e.g., `/mnt/network-share/models`)
-   - The path must match a mounted volume in your Docker configuration
+   - Each path must match a mounted volume in your Docker configuration
    - Example: If you mounted `Z:/:/mnt/network-share:ro`, use `/mnt/network-share/path/to/models`
+   - Add another row for each extra library
 5. **Configure the Update Frequency** (default: 60 minutes):
-   - This determines how often the STL Home directory is automatically scanned for new files
+   - This determines how often the STL Home directories are automatically scanned for new files
    - Range: 1-1440 minutes (1 minute to 24 hours)
    - Recommended: 60-120 minutes for most use cases
 6. **Click Save**
 
-**Note**: If you set `STL_HOME` via environment variable, you can still adjust the Update Frequency through the web interface. The environment variable takes precedence for the directory path.
+**Note**: If you set `STL_HOME` via environment variable, you can still adjust the Update Frequency through the web interface. The environment variable fills the directory list when it is still empty.
 
 #### How It Works in Docker
 
-- **On Container Startup**: When the Printventory container starts, it automatically scans the STL Home directory if one is configured
-- **Periodic Scanning**: The container will automatically scan the STL Home directory at the configured interval
+- **On Container Startup**: When the Printventory container starts, it automatically scans every STL Home directory that is configured
+- **Periodic Scanning**: The container scans each STL Home directory at the configured interval
 - **Path Requirements**: 
   - Must use Linux-style absolute paths starting with `/`
   - Path must correspond to a mounted volume in your Docker configuration
@@ -728,19 +739,20 @@ services:
       - ./data:/root/.config/printventory
       - Z:/:/mnt/network-share:ro  # Windows mapped drive
     environment:
-      - STL_HOME=/mnt/network-share/models
+      - STL_HOME=/mnt/network-share/models,/mnt/network-share/archive
+      - STL_HOME_EXCLUDE=/mnt/network-share/models/cache,/mnt/network-share/models/derivatives
     restart: unless-stopped
 ```
 
 **Result:**
-- STL Home path is automatically set to `/mnt/network-share/models` on container startup
+- STL Home is automatically set to `/mnt/network-share/models` and `/mnt/network-share/archive` on container startup
 - The setting will be visible in **Settings → STL Home** in the web interface
 - Update Frequency can be configured via the web interface (default: 60 minutes)
-- This will automatically scan `Z:\models` on the Windows host (mapped to `/mnt/network-share/models` in the container) every 60 minutes (or your configured interval)
+- This scans `Z:\models` and `Z:\archive` on the Windows host every 60 minutes (or your configured interval)
 
 #### Clearing STL Home
 
-To disable automatic scanning, clear the STL Home directory field and save. This will stop both startup and periodic scanning.
+To disable automatic scanning, remove every directory from the list and save. This stops both startup and periodic scanning.
 
 ### Managing the Container
 

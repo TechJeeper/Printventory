@@ -61,10 +61,15 @@ services:
       # V8 heap MB (optional). Default auto-scales from the container memory limit
       # (or 8192 when unlimited). Raise if logs show "OOM error in V8: Zone Allocation".
       # - PRINTVENTORY_MAX_OLD_SPACE_MB=8192
-      # Optional: Set STL Home directory via environment variable (applied when unset in DB, or set
-      # PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 to always apply env on every start — legacy behavior).
-      # Use Linux-style absolute paths (e.g., /mnt/network-share/models)
+      # Optional: STL Home directories (applied when the list is unset in the DB, or always when
+      # PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1). One path, or several separated by commas,
+      # semicolons, or newlines, or a JSON array. Use Linux paths inside the container.
+      # - STL_HOME=/mnt/models,/mnt/archive
       - STL_HOME=/mnt/test_files
+      # Optional: directories STL Home scans skip. Comma, semicolon, or newline separated
+      # container paths (or a JSON array). Relative paths are resolved against STL Home.
+      # Applied when the exclude list is empty, or always when PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1.
+      # - STL_HOME_EXCLUDE=/mnt/test_files/cache,/mnt/test_files/derivatives
       # Listen port inside the container (Settings → HTTPS / SSL). Default 5000. Map the same
       # port in `ports:` above. PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 makes this win every start.
       # - PRINTVENTORY_PORT=5001

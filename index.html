@@ -885,22 +885,27 @@
         <p class="warning-text">
           Warning: Scanning large directories may impact performance.
         </p>
-        <p class="setting-description">Setting an STL Home will cause the app to scan the selected directory on startup.</p>
-        <div class="form-group stl-home-dir-row">
-          <input type="text" id="stl-home-directory" placeholder="No directory selected" readonly>
-          <div class="stl-home-dir-buttons">
-            <button type="button" id="choose-stl-home-button" class="primary-button">Choose Directory</button>
-            <button type="button" id="clear-stl-home-button" class="secondary-button">Clear Directory</button>
+        <p class="setting-description">Directories in this list are scanned when the app starts.</p>
+        <div class="form-group" id="stl-home-directories-group">
+          <label for="stl-home-directories-input">Directories</label>
+          <p class="setting-description">The app scans every directory here on startup. Add more than one to cover separate libraries.</p>
+          <ul id="stl-home-directories-list" class="stl-home-exclude-list">
+            <li class="stl-home-exclude-empty">No directories selected.</li>
+          </ul>
+          <div class="stl-home-exclude-add-row">
+            <input type="text" id="stl-home-directories-input" placeholder="Paste a path or use Add Directory" autocomplete="off">
+            <button type="button" id="stl-home-directories-browse" class="primary-button">Add Directory</button>
+            <button type="button" id="stl-home-directories-add" class="secondary-button">Add</button>
           </div>
         </div>
         <div class="form-group" id="stl-home-update-frequency-group" style="display: none;">
           <label for="stl-home-update-frequency">Update Frequency (minutes):</label>
           <input type="number" id="stl-home-update-frequency" min="1" max="1440" value="60">
-          <p class="setting-description">How frequently the STL Home directory will be scanned for new files.</p>
+          <p class="setting-description">How frequently the STL Home directories will be scanned for new files.</p>
         </div>
         <div class="form-group" id="stl-home-exclude-group">
           <label for="stl-home-exclude-input">Excluded directories</label>
-          <p class="setting-description">STL Home scans skip these directories and everything inside them. Use a full path, or a path relative to STL Home. Folders starting with a dot, such as .manyfold and .git, are always skipped. Models already in the library stay until you remove them, except files found in those hidden folders, which the next scan can drop from the library.</p>
+          <p class="setting-description">STL Home scans skip these directories and everything inside them. Use a full path, or a path relative to the STL Home directory being scanned. Folders starting with a dot, such as .manyfold and .git, are always skipped. Models already in the library stay until you remove them, except files found in those hidden folders, which the next scan can drop from the library.</p>
           <ul id="stl-home-exclude-list" class="stl-home-exclude-list">
             <li class="stl-home-exclude-empty">No directories excluded.</li>
           </ul>
@@ -925,7 +930,7 @@
           </div>
           <p class="setting-description" style="margin-top: 0.25rem; margin-bottom: 0.5rem;">When you run “Scan STL Home”, folder names are used to set Designer and Parent model. Values are only applied when the field is empty.</p>
           <p class="setting-description stl-home-path-direction-desc" id="stl-home-path-desc-from-model" style="margin-bottom: 0.25rem; font-size: 0.9em;">From Model: level 0 = parent of file, 1 = grandparent, 2 = great-grandparent, etc.</p>
-          <p class="setting-description stl-home-path-direction-desc" id="stl-home-path-desc-from-root" style="margin-bottom: 0.25rem; font-size: 0.9em; display: none;">From Root: level 0 = STL Home, 1 = first folder under STL Home, 2 = second, etc.</p>
+          <p class="setting-description stl-home-path-direction-desc" id="stl-home-path-desc-from-root" style="margin-bottom: 0.25rem; font-size: 0.9em; display: none;">From Root: level 0 = the STL Home directory that contains the file, 1 = first folder under it, 2 = second, etc.</p>
           <p class="setting-description" style="margin-bottom: 0.5rem; font-size: 0.85em;"><span class="path-example">Example: D:\MODELS\DESIGNER\PARENT\MODEL.3MF</span> — From Model: level 0 = PARENT, level 1 = DESIGNER. From Root: level 0 = MODELS (STL Home), level 1 = DESIGNER, level 2 = PARENT.</p>
           <div class="path-metadata-indices">
             <div class="form-group path-metadata-col">

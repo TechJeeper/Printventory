@@ -724,7 +724,7 @@ test.describe('Printventory full application E2E', () => {
     const dialogs = [
       { id: 'settings-dialog', cancel: '#cancel-settings', extra: '#ui-theme' },
       { id: 'performance-settings-dialog', cancel: '#cancel-performance-settings', extra: '#max-file-size' },
-      { id: 'stl-home-dialog', cancel: '#cancel-stl-home-button', extra: '#choose-stl-home-button' },
+      { id: 'stl-home-dialog', cancel: '#cancel-stl-home-button', extra: '#stl-home-directories-list' },
       { id: 'slicer-dialog', cancel: '#cancel-slicer-settings', extra: '#add-slicer-button' },
       { id: 'browser-extension-settings-dialog', cancel: '#cancel-browser-extension-settings', extra: '#extension-inbox-directory' },
       { id: 'mcp-server-settings-dialog', cancel: '#cancel-mcp-server-settings', extra: '#mcp-server-url' },

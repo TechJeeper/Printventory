@@ -2423,7 +2423,7 @@ function getMcpToolContext() {
       let directory = String(args.directory || '').trim();
       if (!directory) {
         directory = db.prepare('SELECT value FROM settings WHERE key = ?').get('directoryPath')?.value
-          || db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value
+          || readStlHomeDirectories()[0]
           || '';
       }
       if (!directory) throw new Error('directory is required (no last-scanned folder is saved)');
@@ -3126,7 +3126,8 @@ if (!gotTheLock) {
       // STL_HOME / EXTENSION_UPLOAD_DIR: seed from env when the setting is empty, or always when
       // PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1 (legacy Docker behavior). Otherwise UI changes persist
       // across container restarts instead of being overwritten every startup.
-      applyDockerEnvSettingIfNeeded('stlHome', process.env.STL_HOME);
+      applyStlHomeEnvIfNeeded(process.env.STL_HOME);
+      applyStlHomeExcludeEnvIfNeeded(process.env.STL_HOME_EXCLUDE);
       applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
       applyDockerEnvSettingIfNeeded('serverHttpPort', process.env.PRINTVENTORY_PORT);
 
@@ -3793,6 +3794,7 @@ function initializeDefaultSettings() {
       { key: 'enableZipArchives', value: '0' }, // ZIP archive support disabled by default
       { key: 'scanAdditionalFileTypes', value: '[]' }, // JSON array of catalog ids for additional scan types (e.g. ["obj","step"])
       { key: 'scanExcludeFolders', value: '' }, // Extra folder names to skip while scanning, one per line
+      { key: 'stlHomeDirectories', value: '[]' }, // JSON array of directories scanned as STL Home
       { key: 'stlHomeExcludeDirectories', value: '[]' }, // JSON array of directories skipped by STL Home scans
       { key: 'aiTagFolderLevels', value: '2' }, // Parent folders sent to AI tagging and used by Tag from Folder
       { key: 'aiTagMaxTags', value: '10' }, // Maximum number of AI-generated tags
@@ -4824,10 +4826,9 @@ function readStlHomeExcludeDirectories() {
 
 function scanPathIsUnderStlHome(directoryPath) {
   try {
-    const stlHome = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value || '';
-    const home = String(stlHome).trim();
-    if (!home) return false;
-    return isExcludedPath(directoryPath, compileExcludeDirs([home]));
+    const homes = readStlHomeDirectories();
+    if (!homes.length) return false;
+    return isExcludedPath(directoryPath, compileExcludeDirs(homes));
   } catch (_) {
     return false;
   }
@@ -10033,6 +10034,133 @@ function applyDockerEnvSettingIfNeeded(key, envValue) {
   }
 }
 
+function dedupePathList(paths) {
+  const seen = new Set();
+  const out = [];
+  for (const item of paths || []) {
+    const p = String(item || '').trim();
+    if (!p) continue;
+    const key = p.replace(/[\\/]+$/, '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
+/** STL_HOME and STL_HOME_EXCLUDE: comma, semicolon, or newline separated paths, or a JSON array. */
+function parseExcludePathList(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return parsed.map((entry) => String(entry || '').trim()).filter(Boolean);
+      }
+    } catch (_) { /* treat as a delimited list */ }
+  }
+  return text.split(/[\r\n,;]+/).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function excludeDirectoriesSettingIsEmpty(value) {
+  const current = value == null ? '' : String(value).trim();
+  if (!current || current === '[]') return true;
+  try {
+    const parsed = JSON.parse(current);
+    if (!Array.isArray(parsed)) return false;
+    return parsed.every((entry) => !String(entry || '').trim());
+  } catch (_) {
+    return false;
+  }
+}
+
+function readLegacyStlHomePaths(value) {
+  const text = String(value || '').trim();
+  if (!text) return [];
+  if (text.startsWith('[') || /[\r\n,;]/.test(text)) return dedupePathList(parseExcludePathList(text));
+  return [text];
+}
+
+/** Directories scanned as STL Home. Prefers the JSON list, then a legacy single stlHome path. */
+function readStlHomeDirectories() {
+  try {
+    if (!db) return [];
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHomeDirectories');
+    const fromList = dedupePathList(parseExcludePathList(row?.value));
+    if (fromList.length) return fromList;
+    const legacy = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value;
+    return readLegacyStlHomePaths(legacy);
+  } catch (error) {
+    console.error('Invalid STL Home directories setting:', error);
+    return [];
+  }
+}
+
+function stlHomeDirectoriesAreUnset() {
+  const listRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHomeDirectories');
+  if (!excludeDirectoriesSettingIsEmpty(listRow?.value)) return false;
+  const legacy = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value;
+  return !String(legacy || '').trim();
+}
+
+/**
+ * Seed STL Home directories from STL_HOME.
+ * One path or several (comma, semicolon, newline, or a JSON array). The stored
+ * list default is "[]", which is unset. A saved list — or a legacy stlHome path —
+ * is left alone unless PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1.
+ */
+function applyStlHomeEnvIfNeeded(envValue) {
+  if (!db || !envValue || !String(envValue).trim()) return;
+  const paths = dedupePathList(parseExcludePathList(envValue));
+  if (!paths.length) return;
+  const force = process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === '1' ||
+    process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === 'true';
+  try {
+    if (!force && !stlHomeDirectoriesAreUnset()) return;
+    const json = JSON.stringify(paths);
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('stlHomeDirectories', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(json);
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('stlHome', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(paths[0]);
+    console.log('Startup env applied setting stlHomeDirectories:', json, force ? '(PRINTVENTORY_ENV_OVERRIDES_SETTINGS)' : '');
+  } catch (e) {
+    console.error('Error applying STL_HOME:', e);
+  }
+}
+
+/**
+ * Seed STL Home excluded directories from STL_HOME_EXCLUDE.
+ * The stored default is "[]", which is unset. A saved list is left alone unless
+ * PRINTVENTORY_ENV_OVERRIDES_SETTINGS=1.
+ */
+function applyStlHomeExcludeEnvIfNeeded(envValue) {
+  if (!db || !envValue || !String(envValue).trim()) return;
+  const paths = parseExcludePathList(envValue);
+  if (!paths.length) return;
+  const force = process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === '1' ||
+    process.env.PRINTVENTORY_ENV_OVERRIDES_SETTINGS === 'true';
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHomeExcludeDirectories');
+    if (!force && !excludeDirectoriesSettingIsEmpty(row?.value)) return;
+    const json = JSON.stringify(paths);
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('stlHomeExcludeDirectories', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(json);
+    console.log('Startup env applied setting stlHomeExcludeDirectories:', json, force ? '(PRINTVENTORY_ENV_OVERRIDES_SETTINGS)' : '');
+  } catch (e) {
+    console.error('Error applying STL_HOME_EXCLUDE:', e);
+  }
+}
+
 // Update the database path handling
 function getDatabasePath() {
   try {
@@ -10092,10 +10220,10 @@ function getLibraryRootPaths() {
       if (trimmed && !roots.includes(trimmed)) roots.push(trimmed);
     }
   };
-  add(process.env.STL_HOME);
+  for (const home of parseExcludePathList(process.env.STL_HOME)) add(home);
   try {
     if (db) {
-      add(db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value);
+      for (const home of readStlHomeDirectories()) add(home);
       add(db.prepare('SELECT value FROM settings WHERE key = ?').get('directoryPath')?.value);
     }
   } catch (_) { /* db not ready */ }
@@ -10199,10 +10327,9 @@ function getExtractTempDir() {
   // Guard: if TEMP is mounted inside the library (common Docker misconfig), use userData instead
   try {
     if (typeof app !== 'undefined' && app && typeof app.isReady === 'function' && app.isReady() && db) {
-      const stlRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome');
-      const stlHome = stlRow && stlRow.value ? path.resolve(String(stlRow.value)) : '';
-      if (stlHome) {
-        const resolvedDir = path.resolve(osDir);
+      const resolvedDir = path.resolve(osDir);
+      for (const home of readStlHomeDirectories()) {
+        const stlHome = path.resolve(String(home));
         if (resolvedDir === stlHome || resolvedDir.startsWith(stlHome + path.sep)) {
           return path.join(app.getPath('userData'), EXTRACT_TEMP_DIR_NAME);
         }
@@ -12761,12 +12888,13 @@ ipcMain.handle('get-folder-tree', async () => {
   try {
     const rows = db.prepare('SELECT filePath FROM models').all();
     const filePaths = rows.map((r) => r.filePath).filter(Boolean);
-    const stlHome = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value || '';
+    const homes = readStlHomeDirectories();
+    const envHomes = parseExcludePathList(process.env.STL_HOME);
     const lastScan = db.prepare('SELECT value FROM settings WHERE key = ?').get('directoryPath')?.value || '';
-    const envHome = process.env.STL_HOME || '';
+    const primary = homes[0] || envHomes[0] || '';
     return buildFolderForest(filePaths, {
-      stlHome: stlHome || envHome,
-      roots: [stlHome, envHome, lastScan].filter(Boolean)
+      stlHome: primary,
+      roots: [...homes, ...envHomes, lastScan].filter(Boolean)
     });
   } catch (error) {
     console.error('Error building folder tree:', error);

@@ -857,34 +857,30 @@ button:disabled {
   pointer-events: auto;
 }
 
-/* STL Home: directory row – input + smaller Choose/Clear buttons side by side */
-.stl-home-dir-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  flex-wrap: wrap;
+#stl-home-dialog form {
+  max-width: 100%;
+  box-sizing: border-box;
 }
-.stl-home-dir-row #stl-home-directory {
-  flex: 1;
+#stl-home-dialog .form-group {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+#stl-home-dialog .form-group input:not([type="checkbox"]):not([type="radio"]),
+#stl-home-dialog .form-group select,
+#stl-home-dialog .form-group textarea {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+#stl-home-dialog .stl-home-exclude-add-row {
+  max-width: 100%;
   min-width: 0;
 }
-.stl-home-dir-buttons {
-  display: flex;
-  gap: 0.5rem;
-  flex-shrink: 0;
-}
-.stl-home-dir-buttons .primary-button,
-.stl-home-dir-buttons .secondary-button {
-  padding: 6px 14px;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
 #stl-home-dialog .stl-home-exclude-list {
   list-style: none;
   margin: 0.5rem 0;
   padding: 0;
-  max-height: 160px;
+  max-height: min(320px, 40vh);
   overflow-y: auto;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
@@ -933,6 +929,12 @@ button:disabled {
   font-size: 13px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+/* Phone Docker layout forces 44px on every dialog button, which made each
+   exclude row tall enough that a short list showed only two folders. */
+body.mobile-ui #stl-home-dialog .stl-home-exclude-remove,
+body.mobile-ui #stl-home-dialog .stl-home-exclude-add-row button {
+  min-height: 36px;
 }
 
 /* STL Home: Designer and Parent model in columns side by side */

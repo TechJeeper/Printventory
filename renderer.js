@@ -762,11 +762,15 @@ window.savePerformanceSettingsFromDialog = async function savePerformanceSetting
   }
 };
 
-// STL Home Clear Directory (early for Docker/server)
+// STL Home: clear every directory (early for Docker/server)
 window.clearSTLHomeDirectory = async function clearSTLHomeDirectory() {
-  const input = document.getElementById('stl-home-directory');
-  if (input) input.value = '';
-  if (window.electron?.saveSetting) await window.electron.saveSetting('stlHome', '');
+  window._stlHomeDirs = [];
+  window._stlHomeDirsLoaded = true;
+  if (typeof renderStlHomeDirectoryList === 'function') renderStlHomeDirectoryList([]);
+  if (window.electron?.saveSetting) {
+    await window.electron.saveSetting('stlHomeDirectories', '[]');
+    await window.electron.saveSetting('stlHome', '');
+  }
   if (typeof window.updateScanStlHomeButtonVisibility === 'function') window.updateScanStlHomeButtonVisibility();
   if (typeof window.stopPeriodicSTLHomeScan === 'function') window.stopPeriodicSTLHomeScan();
   const dialog = document.getElementById('stl-home-dialog');
@@ -1160,16 +1164,16 @@ function runScanSTLHomeImpl() {
     return;
   }
   (async () => {
-    const stlHome = await window.electron.getSetting('stlHome');
-    if (!stlHome || stlHome.trim() === '') {
+    const stlHomes = await getStlHomeDirectories();
+    if (!stlHomes.length) {
       console.log('[Scan STL Home] no path set');
       if (window.electron && typeof window.electron.showMessage === 'function') {
-        await window.electron.showMessage('STL Home', 'Set STL Home path in Settings first (Settings → STL Home).');
+        await window.electron.showMessage('STL Home', 'Set STL Home directories in Settings first (Settings → STL Home).');
       }
       return;
     }
-    console.log('[Scan STL Home] starting scan:', stlHome);
-    await window.electron.saveDirectory(stlHome.trim());
+    console.log('[Scan STL Home] starting scan:', stlHomes.join(', '));
+    await window.electron.saveDirectory(stlHomes[0]);
     const clearFilterButton = document.querySelector('.clear-filter-button');
     if (clearFilterButton) {
       clearFilterButton.click();
@@ -1200,7 +1204,9 @@ function runScanSTLHomeImpl() {
       if (renderProgressText) renderProgressText.textContent = progress.processed + ' / ' + (progress.total || 0);
     });
     try {
-      await scanAndRenderDirectory(stlHome.trim(), false, true);
+      for (const stlHomeDir of stlHomes) {
+        await scanAndRenderDirectory(stlHomeDir, false, true);
+      }
       await populateDesignerDropdown();
       await populateParentModelFilter();
       await populateTagFilter();
@@ -5537,7 +5543,19 @@ function addStlHomeExcludeDir(dir) {
   current.push(p);
   window._stlHomeExcludeDirs = current;
   renderStlHomeExcludeList(current);
+  revealStlHomeExcludeAddRow();
   return true;
+}
+
+function revealStlHomeExcludeAddRow() {
+  const list = document.getElementById('stl-home-exclude-list');
+  if (list && list.scrollHeight > list.clientHeight) {
+    list.scrollTop = list.scrollHeight;
+  }
+  const row = document.querySelector('#stl-home-dialog .stl-home-exclude-add-row');
+  if (row && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 async function saveStlHomeExcludeDirectoriesSetting() {
@@ -5597,6 +5615,138 @@ function bindStlHomeExcludeControls() {
 }
 window.bindStlHomeExcludeControls = bindStlHomeExcludeControls;
 
+function parseLegacyStlHomeSetting(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  if (text.startsWith('[')) return parseStlHomeExcludeSetting(text);
+  if (/[\r\n,;]/.test(text)) {
+    return parseStlHomeExcludeSetting(JSON.stringify(
+      text.split(/[\r\n,;]+/).map((entry) => entry.trim()).filter(Boolean)
+    ));
+  }
+  return [text];
+}
+
+async function getStlHomeDirectories() {
+  const raw = await window.electron.getSetting('stlHomeDirectories');
+  const fromList = parseStlHomeExcludeSetting(raw);
+  if (fromList.length) return fromList;
+  const legacy = await window.electron.getSetting('stlHome');
+  return parseLegacyStlHomeSetting(legacy);
+}
+window.getStlHomeDirectories = getStlHomeDirectories;
+
+function renderStlHomeDirectoryList(dirs) {
+  const list = document.getElementById('stl-home-directories-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!dirs.length) {
+    const empty = document.createElement('li');
+    empty.className = 'stl-home-exclude-empty';
+    empty.textContent = 'No directories selected.';
+    list.appendChild(empty);
+    return;
+  }
+  dirs.forEach((dir, index) => {
+    const li = document.createElement('li');
+    li.className = 'stl-home-exclude-item';
+    const span = document.createElement('span');
+    span.className = 'stl-home-exclude-path';
+    span.textContent = dir;
+    span.title = dir;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secondary-button stl-home-exclude-remove';
+    btn.textContent = 'Remove';
+    btn.dataset.index = String(index);
+    li.appendChild(span);
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+}
+
+function addStlHomeDirectory(dir) {
+  const p = String(dir || '').trim();
+  if (!p) return false;
+  const current = Array.isArray(window._stlHomeDirs) ? window._stlHomeDirs.slice() : [];
+  const key = p.replace(/[\\/]+$/, '').toLowerCase();
+  if (current.some((d) => d.replace(/[\\/]+$/, '').toLowerCase() === key)) return false;
+  current.push(p);
+  window._stlHomeDirs = current;
+  renderStlHomeDirectoryList(current);
+  revealStlHomeDirectoryAddRow();
+  return true;
+}
+
+function revealStlHomeDirectoryAddRow() {
+  const list = document.getElementById('stl-home-directories-list');
+  if (list && list.scrollHeight > list.clientHeight) {
+    list.scrollTop = list.scrollHeight;
+  }
+  const row = document.querySelector('#stl-home-directories-group .stl-home-exclude-add-row');
+  if (row && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+async function saveStlHomeDirectoriesSetting() {
+  if (!window._stlHomeDirsLoaded) return;
+  const dirs = Array.isArray(window._stlHomeDirs) ? window._stlHomeDirs : [];
+  await window.electron.saveSetting('stlHomeDirectories', JSON.stringify(dirs));
+  await window.electron.saveSetting('stlHome', dirs[0] || '');
+}
+window.saveStlHomeDirectoriesSetting = saveStlHomeDirectoriesSetting;
+
+function bindStlHomeDirectoryControls() {
+  const list = document.getElementById('stl-home-directories-list');
+  const browseBtn = document.getElementById('stl-home-directories-browse');
+  const addBtn = document.getElementById('stl-home-directories-add');
+  const input = document.getElementById('stl-home-directories-input');
+  if (list && !list.dataset.bound) {
+    list.dataset.bound = '1';
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('.stl-home-exclude-remove');
+      if (!btn || !list.contains(btn)) return;
+      const index = Number(btn.dataset.index);
+      if (!Number.isInteger(index)) return;
+      const next = (window._stlHomeDirs || []).slice();
+      if (index < 0 || index >= next.length) return;
+      next.splice(index, 1);
+      window._stlHomeDirs = next;
+      renderStlHomeDirectoryList(next);
+    });
+  }
+  const addFromInput = () => {
+    if (!input) return;
+    if (addStlHomeDirectory(input.value)) input.value = '';
+  };
+  if (addBtn && !addBtn.dataset.bound) {
+    addBtn.dataset.bound = '1';
+    addBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      addFromInput();
+    });
+  }
+  if (input && !input.dataset.bound) {
+    input.dataset.bound = '1';
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      e.stopPropagation();
+      addFromInput();
+    });
+  }
+  if (browseBtn && !browseBtn.dataset.bound) {
+    browseBtn.dataset.bound = '1';
+    browseBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const directory = await window.electron.openFileDialog();
+      if (directory && directory[0]) addStlHomeDirectory(directory[0]);
+    });
+  }
+}
+window.bindStlHomeDirectoryControls = bindStlHomeDirectoryControls;
+
 // Shared function to initialize and open STL Home dialog
 window.openSTLHomeDialog = async function() {
   const stlHomeDialog = document.getElementById('stl-home-dialog');
@@ -5605,18 +5755,19 @@ window.openSTLHomeDialog = async function() {
   // Check if we're in server mode
   const serverMode = await window.electron.isServerMode().catch(() => false);
   
-  // Load the current STL Home setting (if any)
-  const dir = await window.electron.getSetting('stlHome');
-  const directoryInput = document.getElementById('stl-home-directory');
-  if (directoryInput) {
-    directoryInput.value = dir || "";
-  }
+  window._stlHomeDirs = await getStlHomeDirectories();
+  window._stlHomeDirsLoaded = true;
+  renderStlHomeDirectoryList(window._stlHomeDirs);
+  bindStlHomeDirectoryControls();
+  requestAnimationFrame(() => revealStlHomeDirectoryAddRow());
+  const directoryInput = document.getElementById('stl-home-directories-input');
+  if (directoryInput) directoryInput.value = '';
   
   // Load the update frequency setting (default to 60 minutes)
   const updateFrequency = await window.electron.getSetting('stlHomeUpdateFrequency');
   const updateFrequencyInput = document.getElementById('stl-home-update-frequency');
   const updateFrequencyGroup = document.getElementById('stl-home-update-frequency-group');
-  const chooseButton = document.getElementById('choose-stl-home-button');
+  const directoryBrowse = document.getElementById('stl-home-directories-browse');
 
   // Load path metadata from folder (STL Home only): enabled + direction + use Designer/Parent checkboxes + segment indices
   const pathMetaEnabled = await window.electron.getSetting('pathMetadataStlHomeEnabled');
@@ -5647,35 +5798,27 @@ window.openSTLHomeDialog = async function() {
   window._stlHomeExcludeDirsLoaded = true;
   renderStlHomeExcludeList(window._stlHomeExcludeDirs);
   bindStlHomeExcludeControls();
+  requestAnimationFrame(() => revealStlHomeExcludeAddRow());
   const excludeBrowse = document.getElementById('stl-home-exclude-browse');
   const excludeInput = document.getElementById('stl-home-exclude-input');
   if (excludeInput) excludeInput.value = '';
   
   if (serverMode) {
-    // In server mode: hide Choose Directory button, show Update Frequency, make input editable
-    if (chooseButton) chooseButton.style.display = 'none';
+    // In server mode: hide folder pickers, show Update Frequency, type paths instead
+    if (directoryBrowse) directoryBrowse.style.display = 'none';
+    if (directoryInput) directoryInput.placeholder = 'Enter a directory path';
     if (excludeBrowse) excludeBrowse.style.display = 'none';
     if (excludeInput) excludeInput.placeholder = 'Enter a path to exclude';
     if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'block';
     if (updateFrequencyInput) {
       updateFrequencyInput.value = updateFrequency || '60';
     }
-    // Make the input field editable in server mode so users can type paths
-    if (directoryInput) {
-      directoryInput.removeAttribute('readonly');
-      directoryInput.placeholder = 'Enter UNC path (e.g., \\\\server\\share\\path)';
-    }
   } else {
-    // In normal mode: show Choose Directory button, hide Update Frequency, keep input readonly
-    if (chooseButton) chooseButton.style.display = 'block';
+    if (directoryBrowse) directoryBrowse.style.display = '';
+    if (directoryInput) directoryInput.placeholder = 'Paste a path or use Add Directory';
     if (excludeBrowse) excludeBrowse.style.display = '';
     if (excludeInput) excludeInput.placeholder = 'Paste a path or use Add Directory';
     if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'none';
-    // Keep input readonly in normal mode (browse button is used)
-    if (directoryInput) {
-      directoryInput.setAttribute('readonly', 'readonly');
-      directoryInput.placeholder = 'No directory selected';
-    }
   }
 
   // Bind Save button when dialog opens - run save logic directly so it always works (Docker/server load order)
@@ -5685,8 +5828,7 @@ window.openSTLHomeDialog = async function() {
       e.preventDefault();
       e.stopPropagation();
       console.log('[STL Home] Save button clicked');
-      const stlDirEl = document.getElementById('stl-home-directory');
-      const stlDir = stlDirEl ? stlDirEl.value.trim() : '';
+      const stlDirs = Array.isArray(window._stlHomeDirs) ? window._stlHomeDirs.slice() : [];
       const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
       const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
       const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
@@ -5694,8 +5836,8 @@ window.openSTLHomeDialog = async function() {
       const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
       const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
       try {
-        console.log('[STL Home] Saving stlHome:', stlDir);
-        await window.electron.saveSetting('stlHome', stlDir);
+        console.log('[STL Home] Saving directories:', stlDirs);
+        await saveStlHomeDirectoriesSetting();
         await window.electron.saveSetting('pathMetadataStlHomeEnabled', pathMetaEnabledEl?.checked ? '1' : '0');
         await window.electron.saveSetting('pathMetadataStlHomeDirection', (pathMetaDirectionEl?.value === 'fromRoot' || pathMetaDirectionEl?.value === 'fromModel') ? pathMetaDirectionEl.value : 'fromModel');
         await window.electron.saveSetting('pathMetadataUseDesigner', pathMetaUseDesignerEl?.checked ? '1' : '0');
@@ -5705,15 +5847,15 @@ window.openSTLHomeDialog = async function() {
         await saveStlHomeExcludeDirectoriesSetting();
         // Show "Scan STL Home" in sidebar from value we just saved (Docker/server: getSetting can lag)
         const scanStlHomeBtn = document.getElementById('scan-stl-home-button');
-        if (scanStlHomeBtn) scanStlHomeBtn.style.display = (stlDir && stlDir.trim() !== '') ? '' : 'none';
+        if (scanStlHomeBtn) scanStlHomeBtn.style.display = stlDirs.length ? '' : 'none';
         if (typeof window.updateScanStlHomeButtonVisibility === 'function') await window.updateScanStlHomeButtonVisibility();
         const serverMode = await window.electron.isServerMode().catch(() => false);
         if (serverMode) {
           const updateFrequencyEl = document.getElementById('stl-home-update-frequency');
           const updateFrequency = updateFrequencyEl ? updateFrequencyEl.value : '60';
           await window.electron.saveSetting('stlHomeUpdateFrequency', updateFrequency);
-          if (stlDir && stlDir.trim() !== '') {
-            if (typeof window.performSTLHomeScan === 'function') window.performSTLHomeScan(stlDir).catch(err => console.error('STL Home scan on save:', err));
+          if (stlDirs.length) {
+            if (typeof window.performSTLHomeScan === 'function') window.performSTLHomeScan(stlDirs).catch(err => console.error('STL Home scan on save:', err));
             if (typeof window.startPeriodicSTLHomeScan === 'function') window.startPeriodicSTLHomeScan();
           } else {
             if (typeof window.stopPeriodicSTLHomeScan === 'function') window.stopPeriodicSTLHomeScan();
@@ -7926,8 +8068,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (serverMode) {
       // In server mode, prompt for UNC path via text input
       // Pre-fill with STL Home if it's set
-      const stlHome = await window.electron.getSetting('stlHome');
-      const defaultPath = stlHome && stlHome.trim() !== '' ? stlHome.trim() : '';
+      const stlHomes = await getStlHomeDirectories();
+      const defaultPath = stlHomes[0] || '';
       const promptMessage = defaultPath 
         ? `Enter UNC path to scan (e.g., \\\\server\\share\\path):\n\nCurrent STL Home: ${defaultPath}`
         : 'Enter UNC path to scan (e.g., \\\\server\\share\\path):';
@@ -10765,14 +10907,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     await window.openSTLHomeDialog();
   });
 
-  // Handler for "Choose Directory" button in the STL Home dialog
-  document.getElementById('choose-stl-home-button')?.addEventListener('click', async () => {
-    const directory = await window.electron.openFileDialog();
-    if (directory && directory[0]) {
-      document.getElementById('stl-home-directory').value = directory[0];
-    }
-  });
-
+  if (typeof bindStlHomeDirectoryControls === 'function') bindStlHomeDirectoryControls();
+  if (!window._stlHomeDirsLoaded && typeof renderStlHomeDirectoryList === 'function') {
+    renderStlHomeDirectoryList([]);
+  }
   if (typeof bindStlHomeExcludeControls === 'function') bindStlHomeExcludeControls();
   if (!window._stlHomeExcludeDirsLoaded && typeof renderStlHomeExcludeList === 'function') {
     renderStlHomeExcludeList([]);
@@ -10792,13 +10930,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Show or hide "Scan STL Home" sidebar button based on whether STL Home path is set
   async function updateScanStlHomeButtonVisibility() {
-    const stlHome = await window.electron.getSetting('stlHome');
+    const stlHomes = await getStlHomeDirectories();
     const btn = document.getElementById('scan-stl-home-button');
-    if (btn) btn.style.display = (stlHome && stlHome.trim() !== '') ? '' : 'none';
+    if (btn) btn.style.display = stlHomes.length ? '' : 'none';
   }
   window.updateScanStlHomeButtonVisibility = updateScanStlHomeButtonVisibility;
 
-  document.getElementById('clear-stl-home-button')?.addEventListener('click', () => window.clearSTLHomeDirectory());
   document.getElementById('stl-home-path-direction')?.addEventListener('change', () => { if (window.updateStlHomePathDirectionDesc) window.updateStlHomePathDirectionDesc(); });
 
   // Periodic STL Home scanning for server mode
@@ -10811,8 +10948,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const serverMode = await window.electron.isServerMode().catch(() => false);
     if (!serverMode) return;
     
-    const stlHome = await window.electron.getSetting('stlHome');
-    if (!stlHome || stlHome.trim() === "") return;
+    const stlHomes = await getStlHomeDirectories();
+    if (!stlHomes.length) return;
     
     const updateFrequency = await window.electron.getSetting('stlHomeUpdateFrequency');
     const frequencyMinutes = parseInt(updateFrequency) || 60;
@@ -10822,9 +10959,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // In server mode: no scan on page load; first check after interval, then on interval
     const runScan = async () => {
-      const currentStlHome = await window.electron.getSetting('stlHome');
-      if (currentStlHome && currentStlHome.trim() !== "") {
-        await performSTLHomeScan(currentStlHome);
+      const currentStlHomes = await getStlHomeDirectories();
+      if (currentStlHomes.length) {
+        await performSTLHomeScan(currentStlHomes);
       } else {
         stopPeriodicSTLHomeScan();
       }
@@ -10841,18 +10978,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function performSTLHomeScan(stlHomeDir) {
+    const explicit = Array.isArray(stlHomeDir)
+      ? stlHomeDir.map((dir) => String(dir || '').trim()).filter(Boolean)
+      : parseLegacyStlHomeSetting(stlHomeDir);
+    const dirs = explicit.length ? explicit : await getStlHomeDirectories();
+    if (!dirs.length) return;
+    let newFilesCount = 0;
+    // Index every directory before thumbnail rendering. scanAndRenderDirectory waits on
+    // thumbnails, and in the server window that wait never finishes, so later homes
+    // were never scanned.
+    for (const dir of dirs) {
+      try {
+        console.log(`Performing STL Home scan: ${dir}`);
+        const result = await window.electron.scanDirectory(dir, { isStlHomeScan: true });
+        newFilesCount += Number(result && result.newFilesCount) || 0;
+      } catch (error) {
+        console.error('Error during STL Home scan:', dir, error);
+      }
+    }
     try {
-      console.log(`Performing periodic STL Home scan: ${stlHomeDir}`);
-      // Use background scan to avoid disrupting the UI
-      await scanAndRenderDirectory(stlHomeDir, true);
-      
-      // Refresh filters after scanning
       await populateDesignerDropdown();
       await populateParentModelFilter();
       await populateTagFilter();
       await populateLicenseFilter();
     } catch (error) {
-      console.error('Error during periodic STL Home scan:', error);
+      console.error('STL Home scan filter refresh failed:', error);
+    }
+    if (newFilesCount > 0 && window.electron && typeof window.electron.showMessageBox === 'function') {
+      window.electron.showMessageBox({
+        type: 'question',
+        buttons: ['Yes', 'No'],
+        defaultId: 0,
+        title: 'New Models Found',
+        message: `${newFilesCount} new model(s) found, would you like to see them?`
+      }).catch((error) => console.error('STL Home new-models prompt failed:', error));
     }
   }
   window.performSTLHomeScan = performSTLHomeScan;
@@ -10862,17 +11021,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Shared save logic for STL Home (used by Save click, form submit, and inline onclick for Docker/server/Electron)
   async function saveSTLHomeFromDialog() {
     console.log('[STL Home] saveSTLHomeFromDialog started');
-    const stlDirEl = document.getElementById('stl-home-directory');
     const pathMetaEnabledEl = document.getElementById('stl-home-path-metadata-enabled');
     const pathMetaUseDesignerEl = document.getElementById('stl-home-use-designer');
     const pathMetaUseParentModelEl = document.getElementById('stl-home-use-parent-model');
     const pathMetaDirectionEl = document.getElementById('stl-home-path-direction');
     const pathMetaDesignerIndexEl = document.getElementById('stl-home-designer-index');
     const pathMetaParentModelIndexEl = document.getElementById('stl-home-parent-model-index');
-    const stlDir = stlDirEl ? stlDirEl.value.trim() : '';
+    const stlDirs = Array.isArray(window._stlHomeDirs) ? window._stlHomeDirs.slice() : [];
     try {
-      console.log('[STL Home] Saving stlHome:', stlDir);
-      await window.electron.saveSetting('stlHome', stlDir);
+      console.log('[STL Home] Saving directories:', stlDirs);
+      if (typeof saveStlHomeDirectoriesSetting === 'function') await saveStlHomeDirectoriesSetting();
       await window.electron.saveSetting('pathMetadataStlHomeEnabled', pathMetaEnabledEl?.checked ? '1' : '0');
       await window.electron.saveSetting('pathMetadataStlHomeDirection', (pathMetaDirectionEl?.value === 'fromRoot' || pathMetaDirectionEl?.value === 'fromModel') ? pathMetaDirectionEl.value : 'fromModel');
       await window.electron.saveSetting('pathMetadataUseDesigner', pathMetaUseDesignerEl?.checked ? '1' : '0');
@@ -10886,8 +11044,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const updateFrequencyEl = document.getElementById('stl-home-update-frequency');
         const updateFrequency = updateFrequencyEl ? updateFrequencyEl.value : '60';
         await window.electron.saveSetting('stlHomeUpdateFrequency', updateFrequency);
-        if (stlDir && stlDir.trim() !== "") {
-          if (typeof performSTLHomeScan === 'function') performSTLHomeScan(stlDir).catch(err => console.error('STL Home scan on save:', err));
+        if (stlDirs.length) {
+          if (typeof performSTLHomeScan === 'function') performSTLHomeScan(stlDirs).catch(err => console.error('STL Home scan on save:', err));
           if (typeof startPeriodicSTLHomeScan === 'function') startPeriodicSTLHomeScan();
         } else {
           if (typeof stopPeriodicSTLHomeScan === 'function') stopPeriodicSTLHomeScan();
@@ -10943,21 +11101,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (document.body) attachScanStlHomeHandler();
   else document.addEventListener('DOMContentLoaded', attachScanStlHomeHandler);
 
-  // On startup, if an STL Home directory is specified:
-  // - In docker/server mode (stl_home set via startup/env): run one background check when the server loads, then on the interval.
+  // On startup, if STL Home directories are specified:
+  // - In docker/server mode (STL_HOME set via startup/env): run one background check when the server loads, then on the interval.
   // - When user saves STL Home via the UI in server mode: scan runs in the dialog submit handler when saved.
   // - In normal mode: scan once on load and refresh filters.
-  const stlHome = await window.electron.getSetting('stlHome');
+  const stlHomes = await getStlHomeDirectories();
   
-  if (stlHome && stlHome.trim() !== "") {
+  if (stlHomes.length) {
     const serverModeStlHome = await window.electron.isServerMode().catch(() => false);
     if (serverModeStlHome) {
       // Browser tabs share the Docker API. A scan on every page load freezes the tab
       // (getAllModels + render). The Electron server window owns background scans.
       const isElectronShell = /Electron/i.test(navigator.userAgent);
       if (isElectronShell) {
-        console.log("STL Home is set (server window). Running initial background check, then on the configured interval.");
-        performSTLHomeScan(stlHome).catch(err => console.error('Background STL Home scan on server load:', err));
+        console.log("STL Home is set (server window). Running initial background check, then on the configured interval.", stlHomes.join(', '));
+        performSTLHomeScan(stlHomes).catch(err => console.error('Background STL Home scan on server load:', err));
         startPeriodicSTLHomeScan();
       } else {
         console.log("STL Home is set (browser client). Loading library from the database; scan stays on the server window.");
@@ -10966,7 +11124,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
     } else {
-      console.log("STL Home is set. Showing library from database; STL Home scan in background:", stlHome);
+      console.log("STL Home is set. Showing library from database; STL Home scan in background:", stlHomes.join(', '));
       if (typeof window.performCombinedSearch === 'function') {
         await window.performCombinedSearch();
       }
@@ -10974,18 +11132,23 @@ document.addEventListener('DOMContentLoaded', async () => {
       await populateParentModelFilter();
       await populateTagFilter();
       await populateLicenseFilter();
-      scanAndRenderDirectory(stlHome, true, true)
-        .then(async () => {
+      (async () => {
+        for (const stlHomeDir of stlHomes) {
           try {
-            await populateDesignerDropdown();
-            await populateParentModelFilter();
-            await populateTagFilter();
-            await populateLicenseFilter();
-          } catch (e) {
-            console.error('Startup STL Home scan: filter refresh failed:', e);
+            await scanAndRenderDirectory(stlHomeDir, true, true);
+          } catch (err) {
+            console.error('Background STL Home scan on startup:', stlHomeDir, err);
           }
-        })
-        .catch((err) => console.error('Background STL Home scan on startup:', err));
+        }
+        try {
+          await populateDesignerDropdown();
+          await populateParentModelFilter();
+          await populateTagFilter();
+          await populateLicenseFilter();
+        } catch (e) {
+          console.error('Startup STL Home scan: filter refresh failed:', e);
+        }
+      })();
     }
   } else if (typeof window.performCombinedSearch === 'function') {
     await window.performCombinedSearch();

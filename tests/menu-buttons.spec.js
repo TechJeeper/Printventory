@@ -117,8 +117,15 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#stl-home-dialog')).toBeVisible();
     await expect(window.locator('#save-stl-home-button')).toBeVisible();
     await expect(window.locator('#cancel-stl-home-button')).toBeVisible();
-    await expect(window.locator('#choose-stl-home-button')).toBeVisible();
-    await expect(window.locator('#clear-stl-home-button')).toBeVisible();
+    await expect(window.locator('#stl-home-directories-list')).toBeVisible();
+    await expect(window.locator('#stl-home-directories-input')).toBeVisible();
+    await expect(window.locator('#stl-home-directories-add')).toBeVisible();
+    const homePath = 'C:\\models\\library';
+    await window.locator('#stl-home-directories-input').fill(homePath);
+    await window.locator('#stl-home-directories-add').click();
+    await expect(window.locator('#stl-home-directories-list')).toContainText(homePath);
+    await window.locator('#stl-home-directories-list .stl-home-exclude-item', { hasText: homePath }).locator('button').click();
+    await expect(window.locator('#stl-home-directories-list')).not.toContainText(homePath);
     await expect(window.locator('#stl-home-exclude-list')).toBeVisible();
     await expect(window.locator('#stl-home-exclude-input')).toBeVisible();
     await expect(window.locator('#stl-home-exclude-add')).toBeVisible();
