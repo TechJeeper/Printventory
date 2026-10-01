@@ -61,6 +61,7 @@ const filesToCopy = [
   'preview-3mf-worker-node.js',
   'threemf-loader-simple.js',
   'threemf-mesh-extract.js',
+  'geometry-normals.js',
   'preview.js',
   'query-builder.js',
   'aitagging.js',

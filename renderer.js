@@ -2098,7 +2098,13 @@ async function loadModel(filePath, options = {}) {
               if (!geoData.position || geoData.position.length < 9) return;
               const geometry = new THREE.BufferGeometry();
               geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
-              if (geoData.normal && geoData.normal.length >= geoData.position.length) {
+              // Trust file/worker normals only when usable. Zeroed STL facet normals
+              // otherwise shade to a flat silhouette under MeshStandardMaterial.
+              const hasNormalData = geoData.normal && geoData.normal.length >= geoData.position.length;
+              const normalsUsable = hasNormalData && (
+                !window.GeometryNormals || window.GeometryNormals.normalsAreUsable(geoData.normal)
+              );
+              if (normalsUsable) {
                 geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
               } else {
                 geometry.computeVertexNormals();

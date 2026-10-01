@@ -59,6 +59,7 @@ $rootFiles = @(
     "preview-3mf-worker-node.js",
     "threemf-loader-simple.js",
     "threemf-mesh-extract.js",
+    "geometry-normals.js",
     "search.js",
     "installer.nsh",
     "logo.png",

@@ -14,6 +14,7 @@ importScripts('vendor/OBJLoader.js');
 importScripts('vendor/PLYLoader.js');
 importScripts('threemf-mesh-extract.js');
 importScripts('parse-lys-geometry.js');
+importScripts('geometry-normals.js');
 
 function workerErrorMessage(error) {
   if (!error) return 'Unknown worker parse error';
@@ -338,7 +339,10 @@ function processObject(object, id) {
   if (object.isBufferGeometry) {
     object.computeBoundingBox();
     object.center();
-    if (!object.attributes.normal) {
+    // Recompute when missing OR all-zero (common bad STL exports)
+    if (self.GeometryNormals) {
+      self.GeometryNormals.ensureUsableVertexNormals(object);
+    } else if (!object.attributes.normal) {
       object.computeVertexNormals();
     }
     const geo = extractGeometry(object, null, transferables, object.userData && object.userData.color);
@@ -347,7 +351,9 @@ function processObject(object, id) {
     object.updateMatrixWorld(true);
     object.traverse((child) => {
       if (child.isMesh && child.geometry) {
-        if (!child.geometry.attributes.normal) {
+        if (self.GeometryNormals) {
+          self.GeometryNormals.ensureUsableVertexNormals(child.geometry);
+        } else if (!child.geometry.attributes.normal) {
           child.geometry.computeVertexNormals();
         }
         const meshColor = (child.geometry.userData && child.geometry.userData.color)

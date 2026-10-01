@@ -166,6 +166,7 @@
       "preview-3mf-worker-node.js",
       "threemf-loader-simple.js",
       "threemf-mesh-extract.js",
+      "geometry-normals.js",
       "3d.png",
       "file-icon.png",
       "sidebar-bg.jpg",
