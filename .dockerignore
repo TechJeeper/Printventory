@@ -41,6 +41,12 @@ verify.spec.js
 
 # Development files
 .cursor/
+.deploySteps
+.scp
+.macssh
+.env
+scripts/.discord
+scripts/publish-beta-release.local.json
 
 # Database files (will be created in container)
 printventory.db
