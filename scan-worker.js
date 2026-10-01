@@ -3,6 +3,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Module = require('module');
+const {
+  normalizeExcludeNames,
+  shouldSkipDirectoryName,
+  shouldSkipFileName,
+  shouldSkipEntryPath,
+  compileExcludeDirs,
+  isExcludedDir
+} = require('./scan-skip');
 
 // We'll load StreamZip after receiving the node_modules path from the main process
 let StreamZip = null;
@@ -168,14 +176,7 @@ const BASE_SCAN_EXTENSIONS = ['.stl', '.3mf'];
  * Normalize extension list from main (includes ADDITIONAL_FILE_TYPES_CATALOG selections: .obj, .step, .stp, …).
  * Used for both directory-queue filtering and processFile / ZIP entry matching so behavior stays consistent.
  */
-/** macOS ZIP junk: __MACOSX folder entries and AppleDouble (._*) resource forks */
-function isMacOsJunkZipEntry(entryPath) {
-  if (!entryPath) return false;
-  const normalized = entryPath.replace(/\\/g, '/');
-  if (normalized.split('/').some((seg) => seg.toLowerCase() === '__macosx')) return true;
-  const base = path.basename(entryPath);
-  return base.startsWith('._');
-}
+let scanExcludeNames = new Set();
 
 function buildScanExtensionSet(scanExtensions) {
   const set = new Set();
@@ -223,7 +224,7 @@ async function calculateFileHash(filePath) {
   });
 }
 
-async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = null) {
+async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = null, excludeDirectories = null) {
   const files = [];
   /** Every file-type dirent seen while walking the tree (matches legacy totalFiles meaning). */
   let traversedFileEntries = 0;
@@ -238,8 +239,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   };
 
   const shouldQueueFile = (fileName) => {
-    // Skip Printventory zip-extract temps if they somehow land under a scanned tree
-    if (typeof fileName === 'string' && fileName.startsWith('printventory_')) return false;
+    if (shouldSkipFileName(fileName)) return false;
     const ext = path.extname(fileName).toLowerCase();
     if (extSet.has(ext)) return true;
     if (enableZipArchives && ext === '.zip') return true;
@@ -260,6 +260,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   };
 
   // Use a simple queue system
+  const excludedDirs = compileExcludeDirs(excludeDirectories, directoryPath);
   const queue = [{ type: 'dir', path: directoryPath }];
   const seenDirs = new Set();
   let activeOps = 0;
@@ -302,6 +303,10 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   };
 
   const processDirectory = async (dirPath) => {
+    if (isExcludedDir(dirPath, excludedDirs)) {
+      console.log(`Skipping excluded directory ${dirPath}`);
+      return;
+    }
     if (seenDirs.has(dirPath)) return;
     seenDirs.add(dirPath);
 
@@ -311,10 +316,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
         const fullPath = path.join(dirPath, entry.name);
 
         if (entry.isDirectory()) {
-          // Skip system directories, __MACOSX, and Printventory extract temp folders
-          if (entry.name.toLowerCase() === '__macosx' ||
-              entry.name === 'printventory-extracts' ||
-              /^(System Volume Information|\$Recycle\.Bin|Windows|Recovery|Boot|EFI)$/i.test(entry.name)) {
+          if (shouldSkipDirectoryName(entry.name, scanExcludeNames)) {
             continue;
           }
           // Prioritize files over directories to keep memory usage lower?
@@ -387,7 +389,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
     
     for (const entry of Object.values(entries)) {
       if (!entry.isDirectory) {
-        if (isMacOsJunkZipEntry(entry.name)) continue;
+        if (shouldSkipEntryPath(entry.name, scanExcludeNames)) continue;
         const ext = path.extname(entry.name).toLowerCase();
         if (extSet.has(ext)) {
           if (entry.size <= maxFileSize) {
@@ -429,7 +431,8 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
   return files;
 }
 
-parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives, scanExtensions, nodeModulesPath: passedNodeModulesPath }) => {
+parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives, scanExtensions, excludeFolderNames, excludeDirectories, nodeModulesPath: passedNodeModulesPath }) => {
+  scanExcludeNames = normalizeExcludeNames(excludeFolderNames);
   // Set the node_modules path if provided
   if (passedNodeModulesPath) {
     nodeModulesPath = passedNodeModulesPath;
@@ -453,7 +456,7 @@ parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives,
     }
   }
   try {
-    const result = await scanDirectory(directoryPath, maxFileSize, enableZipArchives, extList);
+    const result = await scanDirectory(directoryPath, maxFileSize, enableZipArchives, extList, excludeDirectories);
     parentPort.postMessage({ type: 'done', result });
   } catch (error) {
     parentPort.postMessage({ type: 'error', error: error.message });

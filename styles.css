@@ -177,6 +177,11 @@ body.server-mode .sidebar {
   transform: none !important;
   margin-left: 0 !important;
 }
+/* A browser session cannot launch a local slicer, so hide that control. */
+body.server-mode #preview-send-to-slicer,
+body.server-mode #preview-slicer-menu {
+  display: none !important;
+}
 
 #logo {
   width: 65%;
@@ -199,6 +204,33 @@ body.server-mode .sidebar {
   font-size: 13px;
   color: rgba(255, 255, 255, 0.9);
   letter-spacing: 0.02em;
+}
+
+.filter-section .search-models-field .input-with-icon {
+  width: 100%;
+}
+
+.filter-section .search-notes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  margin-top: 8px;
+  margin-bottom: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  user-select: none;
+}
+
+.form-group .search-notes-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  margin: 0;
+  cursor: pointer;
 }
 
 .form-group input[type="checkbox"],
@@ -840,6 +872,61 @@ button:disabled {
   padding: 6px 14px;
   font-size: 13px;
   white-space: nowrap;
+}
+
+#stl-home-dialog .stl-home-exclude-list {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+#stl-home-dialog .stl-home-exclude-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+#stl-home-dialog .stl-home-exclude-item:last-child {
+  border-bottom: none;
+}
+#stl-home-dialog .stl-home-exclude-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.9em;
+}
+#stl-home-dialog .stl-home-exclude-empty {
+  padding: 8px 10px;
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+#stl-home-dialog .stl-home-exclude-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+#stl-home-dialog .stl-home-exclude-add-row input {
+  flex: 1;
+  min-width: 12rem;
+  width: auto;
+}
+#stl-home-dialog .stl-home-exclude-add-row button,
+#stl-home-dialog .stl-home-exclude-remove {
+  width: auto;
+  margin-bottom: 0;
+  padding: 6px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* STL Home: Designer and Parent model in columns side by side */
@@ -8150,6 +8237,19 @@ dialog:not([open]) {
   background: rgba(239, 68, 68, 0.20);
   border-color: rgba(239, 68, 68, 0.6);
   box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
+}
+
+.pill-notes-off {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .pill-invert {

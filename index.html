@@ -110,13 +110,17 @@
     </div>
     <div class="filter-section">
       <div class="filter-pinned">
-      <div class="form-group">
+      <div class="form-group search-models-field">
         <label for="search-filter-input">Search Models:</label>
         <div class="input-with-icon">
           <input type="text" id="search-filter-input" placeholder="Enter search term...">
           <button id="filter-search-button" class="icon-button" title="Add this text to the active query (all fields)">🔍</button>
           <button id="clear-filter-search-button" class="icon-button" title="Clear search">×</button>
         </div>
+        <label class="search-notes-toggle" title="Include notes in all-fields search. Turn off to skip long imported descriptions. A search limited to the Notes field still matches notes.">
+          <input type="checkbox" id="search-include-notes" checked>
+          <span>Include Notes</span>
+        </label>
       </div>
       <div class="form-group">
         <label for="sort-select">Sort By:</label>
@@ -894,6 +898,18 @@
           <input type="number" id="stl-home-update-frequency" min="1" max="1440" value="60">
           <p class="setting-description">How frequently the STL Home directory will be scanned for new files.</p>
         </div>
+        <div class="form-group" id="stl-home-exclude-group">
+          <label for="stl-home-exclude-input">Excluded directories</label>
+          <p class="setting-description">STL Home scans skip these directories and everything inside them. Use a full path, or a path relative to STL Home. Folders starting with a dot, such as .manyfold and .git, are always skipped. Models already in the library stay until you remove them, except files found in those hidden folders, which the next scan can drop from the library.</p>
+          <ul id="stl-home-exclude-list" class="stl-home-exclude-list">
+            <li class="stl-home-exclude-empty">No directories excluded.</li>
+          </ul>
+          <div class="stl-home-exclude-add-row">
+            <input type="text" id="stl-home-exclude-input" placeholder="Paste a path or use Add Directory" autocomplete="off">
+            <button type="button" id="stl-home-exclude-browse" class="primary-button">Add Directory</button>
+            <button type="button" id="stl-home-exclude-add" class="secondary-button">Add</button>
+          </div>
+        </div>
         <div class="form-group" id="stl-home-path-metadata-group">
           <div class="form-group checkbox-container stl-home-path-metadata-checkbox-row">
             <input type="checkbox" id="stl-home-path-metadata-enabled" value="1" onclick="setTimeout(function(){ if(window.updateStlHomePathMetadataGrayed) window.updateStlHomePathMetadataGrayed(); }, 0)">
@@ -989,6 +1005,14 @@
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-svg"><label for="scan-type-svg">SVG (.svg)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-voxl"><label for="scan-type-voxl">VOXL (.voxl)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-x3d"><label for="scan-type-x3d">X3D (.x3d)</label></div>
+          </div>
+        </div>
+        <div class="settings-group">
+          <h4>Skip folders</h4>
+          <p class="setting-description">Folders whose names start with a dot are always skipped, including <code>.manyfold</code>, <code>.git</code>, and AppleDouble <code>._</code> files. Add more folder names to skip, one per line.</p>
+          <div class="form-group">
+            <label for="scan-exclude-folders">Extra folder names:</label>
+            <textarea id="scan-exclude-folders" rows="4" placeholder="cache&#10;derivatives"></textarea>
           </div>
         </div>
         <div class="settings-group">
@@ -1233,6 +1257,11 @@
           <small>Detail level for tag generation (Low: "Toy", Medium: "Dragon", High: "Articulated Dragon")</small>
         </div>
         <div class="form-group">
+          <label for="ai-tag-folder-levels">Folder levels:</label>
+          <input type="number" id="ai-tag-folder-levels" min="0" max="6" value="2">
+          <small>How many parent folders to send with the thumbnail, and to use for Tag from Folder. 0 omits folders from the AI prompt. For Kitchen/Bagel Slicer/model.3mf, 2 levels include Kitchen and Bagel Slicer.</small>
+        </div>
+        <div class="form-group">
           <label for="ai-tag-merge-strategy">Tag Merge Strategy:</label>
           <select id="ai-tag-merge-strategy">
             <option value="merge">Merge (add to existing tags)</option>
@@ -1281,7 +1310,7 @@
       <form method="dialog">
         <h3>Edit AI Prompt</h3>
         <p class="setting-description">
-          This prompt is sent to the AI when generating tags. Leave empty to use the built-in default. Filename context is appended automatically when available.
+          This prompt is sent to the AI when generating tags. Leave empty to use the built-in default. Filename, folder, and description context is appended automatically when available.
         </p>
         <div class="form-group">
           <label for="ai-prompt-textarea">Prompt:</label>
@@ -1306,6 +1335,7 @@
         <p class="setting-description">
           Review and select which tags to apply to this model. Uncheck any tags you don't want to include.
         </p>
+        <p id="tag-preview-status" class="setting-description" hidden></p>
         <div id="tag-preview-container" style="max-height: 400px; overflow-y: auto; margin: 15px 0; padding: 10px; background: #1e1e1e; border-radius: 6px; border: 1px solid #333;">
           <!-- Tags will be dynamically added here -->
         </div>
@@ -2661,6 +2691,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="folder-tree.js"></script>
   <script src="step-assembly.js"></script>
   <script src="notes-markdown.js"></script>
+  <script src="stl-sanity.js"></script>
   <script src="renderer.js"></script>
   <script src="filament.js"></script>
   <script src="printer-management.js"></script>

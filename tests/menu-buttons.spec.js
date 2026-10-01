@@ -119,6 +119,15 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#cancel-stl-home-button')).toBeVisible();
     await expect(window.locator('#choose-stl-home-button')).toBeVisible();
     await expect(window.locator('#clear-stl-home-button')).toBeVisible();
+    await expect(window.locator('#stl-home-exclude-list')).toBeVisible();
+    await expect(window.locator('#stl-home-exclude-input')).toBeVisible();
+    await expect(window.locator('#stl-home-exclude-add')).toBeVisible();
+    const excludePath = 'C:\\models\\skip-me';
+    await window.locator('#stl-home-exclude-input').fill(excludePath);
+    await window.locator('#stl-home-exclude-add').click();
+    await expect(window.locator('#stl-home-exclude-list')).toContainText(excludePath);
+    await window.locator('#stl-home-exclude-list .stl-home-exclude-remove').click();
+    await expect(window.locator('#stl-home-exclude-list')).toContainText('No directories excluded.');
     await closeDialog('stl-home-dialog', 'button#cancel-stl-home-button');
   });
 

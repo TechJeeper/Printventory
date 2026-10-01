@@ -402,6 +402,9 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
     await window.electron.saveSetting('enable3MFLicense', licenseCheckbox?.checked ? '1' : '0');
     await window.electron.saveSetting('enable3MFNotes', notesCheckbox?.checked ? '1' : '0');
 
+    const excludeFoldersEl = dialogEl.querySelector('#scan-exclude-folders') || document.getElementById('scan-exclude-folders');
+    await window.electron.saveSetting('scanExcludeFolders', excludeFoldersEl ? excludeFoldersEl.value : '');
+
     if (typeof dialogEl.close === 'function') dialogEl.close();
     if (typeof window.populateFileTypeFilter === 'function') await window.populateFileTypeFilter();
   } catch (err) {
@@ -714,6 +717,7 @@ window.saveAIConfigFromDialog = async function saveAIConfigFromDialog() {
   const allowRetagging = document.getElementById('ai-tag-allow-retagging') && document.getElementById('ai-tag-allow-retagging').checked ? '1' : '0';
   const concurrency = (document.getElementById('ai-tag-concurrency') && document.getElementById('ai-tag-concurrency').value) || '3';
   const detailLevel = (document.getElementById('ai-tag-detail-level') && document.getElementById('ai-tag-detail-level').value) || 'medium';
+  const folderLevels = (document.getElementById('ai-tag-folder-levels') && document.getElementById('ai-tag-folder-levels').value) || '2';
   try {
     await window.electron.saveSetting('apiKey', apiKey);
     await window.electron.saveSetting('apiEndpoint', endpoint);
@@ -725,6 +729,7 @@ window.saveAIConfigFromDialog = async function saveAIConfigFromDialog() {
     await window.electron.saveSetting('aiTagAllowRetagging', allowRetagging);
     await window.electron.saveSetting('aiTagConcurrency', concurrency);
     await window.electron.saveSetting('aiTagDetailLevel', detailLevel);
+    await window.electron.saveSetting('aiTagFolderLevels', folderLevels);
     const dialog = document.getElementById('ai-config-dialog');
     if (dialog && typeof dialog.close === 'function') dialog.close();
   } catch (err) {
@@ -2098,7 +2103,13 @@ async function loadModel(filePath, options = {}) {
               if (!geoData.position || geoData.position.length < 9) return;
               const geometry = new THREE.BufferGeometry();
               geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
-              if (geoData.normal && geoData.normal.length >= geoData.position.length) {
+              if (!geometry.index && geoData.normal && typeof repairZeroFaceNormals === 'function') {
+                repairZeroFaceNormals(geoData.position, geoData.normal);
+              }
+              const normalsMissing = !geoData.normal
+                || geoData.normal.length < geoData.position.length
+                || (typeof normalsAreMissing === 'function' && normalsAreMissing(geoData.normal));
+              if (!normalsMissing) {
                 geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
               } else {
                 geometry.computeVertexNormals();
@@ -2509,6 +2520,12 @@ function insertDetailedMetadataRowBefore(metadataContainer, el, selectorList) {
   }
 }
 
+function librarySearchIncludesNotes() {
+  if (typeof window.searchIncludeNotesChecked === 'function') return window.searchIncludeNotesChecked();
+  const el = document.getElementById('search-include-notes');
+  return !el || el.checked;
+}
+
 async function updateModelElement(filePath) {
   try {
     const model = await window.electron.getModel(filePath);
@@ -2603,7 +2620,7 @@ async function updateModelElement(filePath) {
       }
     }
     
-    // Check search term filter (name, directory, metadata, tags, notes)
+    // Check search term filter (name, directory, metadata, tags, and notes unless the Notes checkbox is off)
     if (shouldBeVisible && searchTerm) {
       const searchLower = searchTerm.toLowerCase();
       const fileName = (model.fileName || '').toLowerCase();
@@ -2612,7 +2629,7 @@ async function updateModelElement(filePath) {
       const modelSource = (model.source || '').toLowerCase();
       const modelLicense = (model.license || '').toLowerCase();
       const modelParent = (model.parentModel || '').toLowerCase();
-      const modelNotes = (model.notes || '').toLowerCase();
+      const modelNotes = librarySearchIncludesNotes() ? (model.notes || '').toLowerCase() : '';
       const tagNames = Array.isArray(model.tags) ? model.tags.map(t => (t && t.name) ? t.name.toLowerCase() : '').filter(Boolean) : [];
       const tagsMatch = tagNames.some(name => name.includes(searchLower));
       
@@ -5460,6 +5477,126 @@ function createMenuDropdown(label, items) {
 }
 window.updateStlHomePathMetadataGrayed = updateStlHomePathMetadataGrayed;
 
+function parseStlHomeExcludeSetting(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of parsed) {
+      const p = String(item || '').trim();
+      if (!p) continue;
+      const key = p.replace(/[\\/]+$/, '').toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+    }
+    return out;
+  } catch (err) {
+    console.error('[STL Home] Invalid exclude list:', err);
+    return [];
+  }
+}
+
+function renderStlHomeExcludeList(dirs) {
+  const list = document.getElementById('stl-home-exclude-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!dirs.length) {
+    const empty = document.createElement('li');
+    empty.className = 'stl-home-exclude-empty';
+    empty.textContent = 'No directories excluded.';
+    list.appendChild(empty);
+    return;
+  }
+  dirs.forEach((dir, index) => {
+    const li = document.createElement('li');
+    li.className = 'stl-home-exclude-item';
+    const span = document.createElement('span');
+    span.className = 'stl-home-exclude-path';
+    span.textContent = dir;
+    span.title = dir;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secondary-button stl-home-exclude-remove';
+    btn.textContent = 'Remove';
+    btn.dataset.index = String(index);
+    li.appendChild(span);
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+}
+
+function addStlHomeExcludeDir(dir) {
+  const p = String(dir || '').trim();
+  if (!p) return false;
+  const current = Array.isArray(window._stlHomeExcludeDirs) ? window._stlHomeExcludeDirs.slice() : [];
+  const key = p.replace(/[\\/]+$/, '').toLowerCase();
+  if (current.some(d => d.replace(/[\\/]+$/, '').toLowerCase() === key)) return false;
+  current.push(p);
+  window._stlHomeExcludeDirs = current;
+  renderStlHomeExcludeList(current);
+  return true;
+}
+
+async function saveStlHomeExcludeDirectoriesSetting() {
+  if (!window._stlHomeExcludeDirsLoaded) return;
+  const dirs = Array.isArray(window._stlHomeExcludeDirs) ? window._stlHomeExcludeDirs : [];
+  await window.electron.saveSetting('stlHomeExcludeDirectories', JSON.stringify(dirs));
+}
+window.saveStlHomeExcludeDirectoriesSetting = saveStlHomeExcludeDirectoriesSetting;
+
+function bindStlHomeExcludeControls() {
+  const list = document.getElementById('stl-home-exclude-list');
+  const browseBtn = document.getElementById('stl-home-exclude-browse');
+  const addBtn = document.getElementById('stl-home-exclude-add');
+  const input = document.getElementById('stl-home-exclude-input');
+  if (list && !list.dataset.bound) {
+    list.dataset.bound = '1';
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('.stl-home-exclude-remove');
+      if (!btn || !list.contains(btn)) return;
+      const index = Number(btn.dataset.index);
+      if (!Number.isInteger(index)) return;
+      const next = (window._stlHomeExcludeDirs || []).slice();
+      if (index < 0 || index >= next.length) return;
+      next.splice(index, 1);
+      window._stlHomeExcludeDirs = next;
+      renderStlHomeExcludeList(next);
+    });
+  }
+  const addFromInput = () => {
+    if (!input) return;
+    if (addStlHomeExcludeDir(input.value)) input.value = '';
+  };
+  if (addBtn && !addBtn.dataset.bound) {
+    addBtn.dataset.bound = '1';
+    addBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      addFromInput();
+    });
+  }
+  if (input && !input.dataset.bound) {
+    input.dataset.bound = '1';
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      e.stopPropagation();
+      addFromInput();
+    });
+  }
+  if (browseBtn && !browseBtn.dataset.bound) {
+    browseBtn.dataset.bound = '1';
+    browseBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const directory = await window.electron.openFileDialog();
+      if (directory && directory[0]) addStlHomeExcludeDir(directory[0]);
+    });
+  }
+}
+window.bindStlHomeExcludeControls = bindStlHomeExcludeControls;
+
 // Shared function to initialize and open STL Home dialog
 window.openSTLHomeDialog = async function() {
   const stlHomeDialog = document.getElementById('stl-home-dialog');
@@ -5504,10 +5641,21 @@ window.openSTLHomeDialog = async function() {
   updateStlHomePathMetadataGrayed();
   // Re-apply grayed state after paint (fixes Docker/server mode where checkbox state wasn't reflected)
   requestAnimationFrame(() => updateStlHomePathMetadataGrayed());
+
+  const excludeRaw = await window.electron.getSetting('stlHomeExcludeDirectories');
+  window._stlHomeExcludeDirs = parseStlHomeExcludeSetting(excludeRaw);
+  window._stlHomeExcludeDirsLoaded = true;
+  renderStlHomeExcludeList(window._stlHomeExcludeDirs);
+  bindStlHomeExcludeControls();
+  const excludeBrowse = document.getElementById('stl-home-exclude-browse');
+  const excludeInput = document.getElementById('stl-home-exclude-input');
+  if (excludeInput) excludeInput.value = '';
   
   if (serverMode) {
     // In server mode: hide Choose Directory button, show Update Frequency, make input editable
     if (chooseButton) chooseButton.style.display = 'none';
+    if (excludeBrowse) excludeBrowse.style.display = 'none';
+    if (excludeInput) excludeInput.placeholder = 'Enter a path to exclude';
     if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'block';
     if (updateFrequencyInput) {
       updateFrequencyInput.value = updateFrequency || '60';
@@ -5520,6 +5668,8 @@ window.openSTLHomeDialog = async function() {
   } else {
     // In normal mode: show Choose Directory button, hide Update Frequency, keep input readonly
     if (chooseButton) chooseButton.style.display = 'block';
+    if (excludeBrowse) excludeBrowse.style.display = '';
+    if (excludeInput) excludeInput.placeholder = 'Paste a path or use Add Directory';
     if (updateFrequencyGroup) updateFrequencyGroup.style.display = 'none';
     // Keep input readonly in normal mode (browse button is used)
     if (directoryInput) {
@@ -5552,6 +5702,7 @@ window.openSTLHomeDialog = async function() {
         await window.electron.saveSetting('pathMetadataUseParentModel', pathMetaUseParentModelEl?.checked ? '1' : '0');
         await window.electron.saveSetting('pathMetadataDesignerIndex', pathMetaDesignerIndexEl?.value ?? '1');
         await window.electron.saveSetting('pathMetadataParentModelIndex', pathMetaParentModelIndexEl?.value ?? '0');
+        await saveStlHomeExcludeDirectoriesSetting();
         // Show "Scan STL Home" in sidebar from value we just saved (Docker/server: getSetting can lag)
         const scanStlHomeBtn = document.getElementById('scan-stl-home-button');
         if (scanStlHomeBtn) scanStlHomeBtn.style.display = (stlDir && stlDir.trim() !== '') ? '' : 'none';
@@ -6101,6 +6252,7 @@ async function loadAndShowAIConfig() {
   const allowRetaggingValue = await window.electron.getSetting('aiTagAllowRetagging').catch(() => null);
   const concurrencyValue = await window.electron.getSetting('aiTagConcurrency').catch(() => null);
   const detailLevelValue = await window.electron.getSetting('aiTagDetailLevel').catch(() => null);
+  const folderLevelsValue = await window.electron.getSetting('aiTagFolderLevels').catch(() => null);
   
   const maxTagsEl = document.getElementById('ai-tag-max-tags');
   if (maxTagsEl) {
@@ -6130,6 +6282,11 @@ async function loadAndShowAIConfig() {
   const detailLevelEl = document.getElementById('ai-tag-detail-level');
   if (detailLevelEl) {
     detailLevelEl.value = detailLevelValue || 'medium';
+  }
+
+  const folderLevelsEl = document.getElementById('ai-tag-folder-levels');
+  if (folderLevelsEl) {
+    folderLevelsEl.value = folderLevelsValue != null && folderLevelsValue !== '' ? folderLevelsValue : '2';
   }
   
   // Double-check Puter.com defaults are set (in case elements weren't ready earlier)
@@ -6227,6 +6384,12 @@ async function loadAndShowFileTypeSettings() {
     }
     if (notesCheckbox) {
       notesCheckbox.checked = enable3MFNotes === '1' || enable3MFNotes === null;
+    }
+
+    const excludeFolders = await window.electron.getSetting('scanExcludeFolders');
+    const excludeFoldersEl = document.getElementById('scan-exclude-folders');
+    if (excludeFoldersEl) {
+      excludeFoldersEl.value = excludeFolders || '';
     }
   } catch (err) {
     console.error('Error loading file type settings:', err);
@@ -10610,6 +10773,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  if (typeof bindStlHomeExcludeControls === 'function') bindStlHomeExcludeControls();
+  if (!window._stlHomeExcludeDirsLoaded && typeof renderStlHomeExcludeList === 'function') {
+    renderStlHomeExcludeList([]);
+  }
+
   // Handler for Cancel button in the STL Home dialog (inline onclick also set in HTML for Docker/server mode)
   document.getElementById('cancel-stl-home-button')?.addEventListener('click', () => {
     document.getElementById('stl-home-dialog').close();
@@ -10711,6 +10879,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await window.electron.saveSetting('pathMetadataUseParentModel', pathMetaUseParentModelEl?.checked ? '1' : '0');
       await window.electron.saveSetting('pathMetadataDesignerIndex', pathMetaDesignerIndexEl?.value ?? '1');
       await window.electron.saveSetting('pathMetadataParentModelIndex', pathMetaParentModelIndexEl?.value ?? '0');
+      if (typeof saveStlHomeExcludeDirectoriesSetting === 'function') await saveStlHomeExcludeDirectoriesSetting();
       if (typeof updateScanStlHomeButtonVisibility === 'function') updateScanStlHomeButtonVisibility();
       const serverMode = await window.electron.isServerMode().catch(() => false);
       if (serverMode) {
@@ -11023,6 +11192,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const allowRetagging = document.getElementById('ai-tag-allow-retagging')?.checked ? '1' : '0';
     const concurrency = document.getElementById('ai-tag-concurrency')?.value || '3';
     const detailLevel = document.getElementById('ai-tag-detail-level')?.value || 'medium';
+    const folderLevels = document.getElementById('ai-tag-folder-levels')?.value || '2';
     
     await window.electron.saveSetting('apiKey', apiKey);
     await window.electron.saveSetting('apiEndpoint', endpoint);
@@ -11034,6 +11204,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await window.electron.saveSetting('aiTagAllowRetagging', allowRetagging);
     await window.electron.saveSetting('aiTagConcurrency', concurrency);
     await window.electron.saveSetting('aiTagDetailLevel', detailLevel);
+    await window.electron.saveSetting('aiTagFolderLevels', folderLevels);
     
     document.getElementById('ai-config-dialog').close();
   });
@@ -11572,26 +11743,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     showTagPreviewDialog(pendingTagData);
   }
 
+  async function showRateLimitNotice(errorMessage) {
+    const detailedMessage = errorMessage && errorMessage.includes('Rate limit exceeded: ')
+      ? errorMessage.split('Rate limit exceeded: ')[1]
+      : 'API rate limit has been exceeded. Tags already generated can still be applied.';
+    if (rateLimitDialogShown) return;
+    rateLimitDialogShown = true;
+    try {
+      await window.electron.showMessage('Rate Limit Exceeded', detailedMessage);
+    } catch (error) {
+      console.error('Error showing rate limit message:', error);
+    }
+  }
+
   window._electronRealEventHandlers['tags-generated'] = async function(filePath, tags, errorMessage) {
     try {
-      // Check if there's a rate limit error
-      if (errorMessage && errorMessage.includes('Rate limit')) {
-        // Extract the detailed message if available (after "Rate limit exceeded: ")
-        const detailedMessage = errorMessage.includes('Rate limit exceeded: ') 
-          ? errorMessage.split('Rate limit exceeded: ')[1]
-          : 'API rate limit has been exceeded. Please try again later.';
-        
-        // Only show dialog once per batch operation to prevent flooding
-        const isBatchOperation = batchTagGenerationInProgress;
-        if (!isBatchOperation || !rateLimitDialogShown) {
-          await window.electron.showMessage('Rate Limit Exceeded', detailedMessage);
-          if (isBatchOperation) {
-            rateLimitDialogShown = true; // Mark as shown for this batch
-          }
-        }
-        return;
-      }
-      
+      const isRateLimit = !!(errorMessage && errorMessage.includes('Rate limit'));
+
       // Fetch the current model data for the given filePath
       const model = await window.electron.getModel(filePath);
       if (!model) {
@@ -11643,6 +11811,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!tags || tags.length === 0) {
           console.log(`No tags generated for ${filePath}`);
         }
+      }
+
+      if (isRateLimit) {
+        await showRateLimitNotice(errorMessage);
       }
     } catch (error) {
       console.error(`Error updating tags for model ${filePath}:`, error);
@@ -11799,7 +11971,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   window._electronRealEventHandlers['batch-tag-generation-complete'] = async function() {
     batchTagGenerationInProgress = false;
-    rateLimitDialogShown = false; // Reset rate limit dialog flag when batch completes
+    pendingTagData = pendingTagData.map((entry) => {
+      if (!entry || entry.generatedTags !== undefined) return entry;
+      return {
+        ...entry,
+        generatedTags: [],
+        errorMessage: entry.errorMessage || 'Tag generation stopped before this model finished. Tags already generated can still be applied.'
+      };
+    });
     
     // Wait a tiny bit to ensure all pending tag updates have completed
     // This prevents race conditions where the last tag update hasn't finished
@@ -12290,20 +12469,33 @@ document.addEventListener('DOMContentLoaded', async () => {
         `<div style="color: #bbb; line-height: 1.5;">${getMergeStrategyDescription(mergeStrategy)}</div>`;
       container.appendChild(strategyInfo);
 
-      // Enable/disable Apply button based on whether tags are generated
+      const statusEl = document.getElementById('tag-preview-status');
+      if (statusEl) {
+        const rateLimited = uniqueModelsData.find((modelData) => modelData.errorMessage && modelData.errorMessage.includes('Rate limit'));
+        if (rateLimited) {
+          const detail = rateLimited.errorMessage.includes('Rate limit exceeded: ')
+            ? rateLimited.errorMessage.split('Rate limit exceeded: ')[1]
+            : rateLimited.errorMessage;
+          statusEl.hidden = false;
+          statusEl.textContent = detail;
+        } else {
+          statusEl.hidden = true;
+          statusEl.textContent = '';
+        }
+      }
+
+      // Apply stays disabled only while this run is still waiting on models.
+      // A stopped run (rate limit, error, or completion) can apply tags that already came back.
       const applyButton = document.getElementById('tag-preview-apply');
       if (applyButton) {
-        // Check if any models are still generating tags (generatedTags === undefined)
-        const stillGenerating = uniqueModelsData.some(modelData => modelData.generatedTags === undefined);
+        const stillGenerating = batchTagGenerationInProgress && uniqueModelsData.some(modelData => modelData.generatedTags === undefined);
         
         if (stillGenerating) {
-          // Disable button if tags are still being generated
           applyButton.disabled = true;
           applyButton.style.opacity = '0.5';
           applyButton.style.cursor = 'not-allowed';
           applyButton.title = 'Please wait for tags to finish generating';
         } else {
-          // Enable button if all tags are generated (even if empty arrays)
           applyButton.disabled = false;
           applyButton.style.opacity = '1';
           applyButton.style.cursor = 'pointer';
@@ -13038,13 +13230,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
               const command = buildSlicerLaunchCommand(slicerPath, modelPaths);
               
-              exec(command, (error, stdout, stderr) => {
-                if (error) {
+              exec(command, (error) => {
+                const failedToStart = error && (
+                  error.code === 'ENOENT' ||
+                  error.code === 'ENOTDIR' ||
+                  /ENOENT|not recognized|No such file or directory/i.test(String(error.message || ''))
+                );
+                if (failedToStart) {
                   console.error('Error executing slicer on client:', error);
                   alert(`Error opening file in ${slicerName}:\n${error.message}\n\n` +
                     `File(s): ${modelPaths.join(', ')}\n` +
                     `Slicer: ${slicerPath}\n\n` +
                     `Please try opening the file manually.`);
+                } else if (error) {
+                  // Already-running slicers often exit non-zero after handing the file to the open window.
+                  console.warn('Slicer process exited after launch:', error.message);
                 } else {
                   console.log('Successfully executed slicer command on client');
                 }
@@ -13082,8 +13282,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // PrusaSlicer / SuperSlicer / Slic3r accept --single-instance; Bambu / Orca / Snapmaker Orca reject it.
   function slicerSupportsSingleInstanceFlag(slicerPath) {
-    const base = String(slicerPath).split(/[/\\]/).pop().toLowerCase();
-    return /prusa|superslicer|slic3r/.test(base) && !/bambu|orca/.test(base);
+    const raw = String(slicerPath || '').toLowerCase();
+    if (/bambu|orca/.test(raw)) return false;
+    return /prusa|superslicer|slic3r/.test(raw);
   }
 
   function buildSlicerLaunchCommand(slicerPath, modelPaths) {
@@ -13093,8 +13294,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (appBundle) {
       return `open -n -a ${escapeSlicerShellArg(appBundle)} --args ${escapedPaths}`;
     }
-    let command = escapeSlicerShellArg(slicerPath);
-    if (slicerSupportsSingleInstanceFlag(slicerPath)) {
+    const raw = String(slicerPath || '').trim();
+    const flatpak = raw.match(/^flatpak\s+run\s+(\S+)([\s\S]*)$/i);
+    const snap = raw.match(/^snap\s+run\s+(\S+)([\s\S]*)$/i);
+    let command;
+    if (flatpak) {
+      command = `flatpak run ${flatpak[1]}${flatpak[2] || ''}`;
+    } else if (snap) {
+      command = `snap run ${snap[1]}${snap[2] || ''}`;
+    } else {
+      command = escapeSlicerShellArg(raw);
+    }
+    if (slicerSupportsSingleInstanceFlag(raw)) {
       command += ' --single-instance=0';
     }
     return `${command} ${escapedPaths}`;
@@ -13214,7 +13425,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  window._electronRealEventHandlers['open-slicer-settings'] = function() {
+  window._electronRealEventHandlers['open-slicer-settings'] = async function() {
+    const serverMode = await window.electron?.isServerMode?.().catch(() => false);
+    if (serverMode) return;
     if (typeof window.openSlicerSettings === 'function') {
       window.openSlicerSettings();
       return;
@@ -13954,10 +14167,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!modelTags || !modelTags.some(tag => tag.name === tagFilter)) return false;
     }
 
-    // Handle search term (name, directory, metadata, tags, notes)
+    // Handle search term (name, directory, metadata, tags, and notes unless the Notes checkbox is off)
     if (searchTerm) {
       const searchLower = searchTerm.toLowerCase();
-      const searchFields = [model.fileName, model.designer, model.parentModel, model.notes, model.filePath, model.source, model.license]
+      const searchFields = [model.fileName, model.designer, model.parentModel, librarySearchIncludesNotes() ? model.notes : '', model.filePath, model.source, model.license]
         .filter(Boolean)
         .map(field => String(field).toLowerCase());
       if (searchFields.some(field => field.includes(searchLower))) return true;
@@ -24446,5 +24659,8 @@ document.getElementById('multi-source')?.addEventListener('input', debounce(asyn
 window.renderFiles = renderFiles;
 window.displayModels = displayModels;
 window.syncSelectionWithFilteredModels = syncSelectionWithFilteredModels;
+window.resetFilterSelectionAndDetails = resetFilterSelectionAndDetails;
+window.clearModelDetailsSidebar = clearModelDetailsSidebar;
+ithFilteredModels = syncSelectionWithFilteredModels;
 window.resetFilterSelectionAndDetails = resetFilterSelectionAndDetails;
 window.clearModelDetailsSidebar = clearModelDetailsSidebar;

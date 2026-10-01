@@ -256,6 +256,9 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
 }
 
 async function openSlicerSettings() {
+  const serverMode = await window.electron?.isServerMode?.().catch(() => false);
+  if (serverMode) return;
+
   const dialog = document.getElementById('slicer-dialog');
   if (!dialog) return;
   

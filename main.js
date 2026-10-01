@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, screen, dialog, Menu, shell, contextBridge } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const supportLogs = require('./support-logs').createCapture();
+supportLogs.beginCapture();
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
@@ -19,12 +21,29 @@ const {
 const serverTls = require('./server-tls');
 const extensionInbox = require('./extension-inbox');
 const { detectInstalledSlicers } = require('./slicer-detect');
+const { buildSlicerSpawnSpec } = require('./slicer-launch');
+const {
+  normalizeExcludeNames,
+  shouldSkipDirectoryName,
+  shouldSkipFileName,
+  shouldSkipEntryPath,
+  compileExcludeDirs,
+  isExcludedPath
+} = require('./scan-skip');
+const { clampFolderLevels, folderTagsFromPath } = require('./library-context');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
 if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('ignore-gpu-blocklist');
   app.commandLine.appendSwitch('enable-webgl');
+}
+
+// AppImage FUSE mounts cannot give chrome-sandbox the setuid bit Chromium requires.
+// Opt out before the zygote starts when this process was launched from an AppImage.
+if (process.platform === 'linux' && (process.env.APPIMAGE || process.env.APPDIR)) {
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-setuid-sandbox');
 }
 
 // 3MF preview worker/caching
@@ -3077,6 +3096,11 @@ if (!gotTheLock) {
   // Create the main window and initialize the app
   app.whenReady().then(async () => {
     try {
+      supportLogs.openLogDirectory(app.getPath('logs'));
+      app.on('web-contents-created', (_event, contents) => {
+        supportLogs.attachWebContents(contents);
+      });
+
       // Initialize database first
       if (!initializeDatabase()) {
         if (isServerMode) {
@@ -3768,6 +3792,9 @@ function initializeDefaultSettings() {
       { key: 'versionCheckPerformedOnStartup', value: 'false' }, // New setting for version check tracking
       { key: 'enableZipArchives', value: '0' }, // ZIP archive support disabled by default
       { key: 'scanAdditionalFileTypes', value: '[]' }, // JSON array of catalog ids for additional scan types (e.g. ["obj","step"])
+      { key: 'scanExcludeFolders', value: '' }, // Extra folder names to skip while scanning, one per line
+      { key: 'stlHomeExcludeDirectories', value: '[]' }, // JSON array of directories skipped by STL Home scans
+      { key: 'aiTagFolderLevels', value: '2' }, // Parent folders sent to AI tagging and used by Tag from Folder
       { key: 'aiTagMaxTags', value: '10' }, // Maximum number of AI-generated tags
       { key: 'aiTagUseCategories', value: '0' }, // Use category-based tagging
       { key: 'aiTagMergeStrategy', value: 'merge' }, // How to merge AI tags: 'replace', 'merge', 'append'
@@ -3804,6 +3831,15 @@ function initializeDefaultSettings() {
     console.error('Error initializing default settings:', error);
     return false;
   }
+}
+
+function sendSupportLogsFromMenu() {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  return supportLogs.confirmAndSend({
+    dialog,
+    parentWindow: parent,
+    version
+  });
 }
 
 async function createWindow() {
@@ -4070,6 +4106,12 @@ async function createWindow() {
           label: 'Server Mode Info',
           click: async () => {
             await shell.openExternal('https://github.com/TechJeeper/Printventory?tab=readme-ov-file#server-mode');
+          }
+        },
+        {
+          label: 'Send Logs',
+          click: () => {
+            sendSupportLogsFromMenu();
           }
         },
         {
@@ -4381,6 +4423,12 @@ function createApplicationMenu() {
           }
         },
         {
+          label: 'Send Logs',
+          click: () => {
+            sendSupportLogsFromMenu();
+          }
+        },
+        {
           label: 'Debug Console',
           click: () => mainWindow.webContents.openDevTools()
         }
@@ -4580,8 +4628,9 @@ async function checkZipEntryExists(zipPath, entryPath) {
 }
 
 // Update the removeNonExistentFiles function
-async function removeNonExistentFiles(scanDirectoryPath, window = null) {
+async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeDirectories = null) {
   try {
+    const excluded = compileExcludeDirs(excludeDirectories, scanDirectoryPath);
     // OPTIMIZATION: Only query models in the scanned directory using SQL instead of loading all models
     // This dramatically reduces memory usage and improves performance, especially for large databases
     const prefixParam = directoryScanPrefixSqlParam(scanDirectoryPath);
@@ -4597,6 +4646,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
     }
     
     const filesToDelete = [];
+    const scanExcludeNames = getScanExcludeNames();
     
     // OPTIMIZATION: Batch file existence checks with concurrency limit
     // This prevents overwhelming the file system, especially in Docker/network share scenarios
@@ -4607,6 +4657,15 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
     for (let i = 0; i < modelsInDirectory.length; i += MAX_CONCURRENT_CHECKS) {
       const batch = modelsInDirectory.slice(i, i + MAX_CONCURRENT_CHECKS);
       const batchPromises = batch.map(async (model) => {
+        if (isExcludedPath(model.filePath, excluded)) return;
+        if (isSkippedLibraryPath(model.filePath, scanExcludeNames)) {
+          filesToDelete.push({
+            filePath: model.filePath,
+            id: model.id,
+            reason: 'skipped'
+          });
+          return;
+        }
         const pathInfo = parseZipPath(model.filePath);
         let fileExists = false;
         
@@ -4649,7 +4708,8 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
           debugLog(`File marked as non-existent: ${model.filePath}`);
           filesToDelete.push({
             filePath: model.filePath,
-            id: model.id
+            id: model.id,
+            reason: 'missing'
           });
         }
       });
@@ -4690,17 +4750,25 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
             db.prepare('DELETE FROM models WHERE id = ?').run(file.id);
           }
         })();
-        console.log(`Server mode: Removed ${filesToDelete.length} non-existent files from library`);
+        console.log(`Server mode: Removed ${filesToDelete.length} missing or skipped files from library`);
         return filesToDelete.length; // Return early in server mode to avoid duplicate deletion
       } else if (process.env.PRINTVENTORY_TEST_SCAN_PATH) {
         // Test mode: skip dialog and skip removal so tests don't hang
         console.log(`Test mode: skipping removal of ${filesToDelete.length} non-existent files from directory ${scanDirectoryPath}`);
         return 0;
       } else {
+        const skippedCount = filesToDelete.filter((f) => f.reason === 'skipped').length;
+        const missingCount = filesToDelete.length - skippedCount;
+        let removalMessage = `The scan found ${filesToDelete.length} file${filesToDelete.length === 1 ? '' : 's'} in the library that no longer exist on disk.`;
+        if (skippedCount && !missingCount) {
+          removalMessage = `The scan skipped ${skippedCount} file${skippedCount === 1 ? '' : 's'} in hidden or excluded folders.`;
+        } else if (skippedCount && missingCount) {
+          removalMessage = `The scan found ${missingCount} missing file${missingCount === 1 ? '' : 's'} and ${skippedCount} file${skippedCount === 1 ? '' : 's'} in hidden or excluded folders.`;
+        }
         const result = await dialog.showMessageBox(dialogWindow || undefined, {
           type: 'warning',
           title: 'Confirm File Removal',
-          message: `The scan found ${filesToDelete.length} file${filesToDelete.length === 1 ? '' : 's'} in the library that no longer exist on disk.`,
+          message: removalMessage,
           detail: `These files will be removed from the library (files are not deleted from disk):\n\n${fileList}${moreFiles}\n\nDo you want to proceed?`,
           buttons: ['Remove from Library', 'Skip'],
           defaultId: 0,
@@ -4740,6 +4808,39 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null) {
   }
 }
 
+function readStlHomeExcludeDirectories() {
+  try {
+    if (!db) return [];
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHomeExcludeDirectories');
+    if (!row || !row.value) return [];
+    const parsed = JSON.parse(row.value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((entry) => String(entry).trim()).filter(Boolean);
+  } catch (error) {
+    console.error('Invalid stlHomeExcludeDirectories setting:', error);
+    return [];
+  }
+}
+
+function scanPathIsUnderStlHome(directoryPath) {
+  try {
+    const stlHome = db.prepare('SELECT value FROM settings WHERE key = ?').get('stlHome')?.value || '';
+    const home = String(stlHome).trim();
+    if (!home) return false;
+    return isExcludedPath(directoryPath, compileExcludeDirs([home]));
+  } catch (_) {
+    return false;
+  }
+}
+
+function stlHomeExcludeDirectoriesForScan(directoryPath, options) {
+  const excludes = readStlHomeExcludeDirectories();
+  if (!excludes.length) return [];
+  if (options && options.isStlHomeScan) return excludes;
+  if (scanPathIsUnderStlHome(directoryPath)) return excludes;
+  return [];
+}
+
 // Update the scan-directory handler to use a more efficient scanning process
 async function scanDirectoryHandler(event, directoryPath, options = {}) {
   try {
@@ -4752,6 +4853,7 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
     
     debugLog('Starting directory scan:', directoryPath);
     const maxFileSize = await getMaxFileSize();
+    const excludeDirectories = stlHomeExcludeDirectoriesForScan(directoryPath, options);
     
     // Read enableZipArchives and scanAdditionalFileTypes from database
     const zipSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('enableZipArchives');
@@ -4768,7 +4870,7 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
     // First, remove any non-existent files from the scanned directory
     // Pass the window so we can show a confirmation dialog if needed (null in server mode)
     const window = isServerMode ? null : BrowserWindow.fromWebContents(event.sender);
-    const removedCount = await removeNonExistentFiles(directoryPath, window);
+    const removedCount = await removeNonExistentFiles(directoryPath, window, excludeDirectories);
     if (removedCount > 0) {
       event.sender.send('db-cleanup', {
         message: `Removed ${removedCount} non-existent files from directory ${directoryPath}`
@@ -5066,6 +5168,8 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
         maxFileSize, 
         enableZipArchives,
         scanExtensions,
+        excludeFolderNames: Array.from(getScanExcludeNames()),
+        excludeDirectories,
         nodeModulesPath: nodeModulesPath
       });
     });
@@ -5273,8 +5377,41 @@ function normalizeTagNameList(filters) {
   return [];
 }
 
-/** One positive LIKE/EXISTS fragment for a search clause */
-function pushSearchClauseFragment(field, rawValue, params) {
+/** One positive LIKE/EXISTS fragment for a search clause.
+ *  filters.searchIncludeNotes false omits notes from field "all" only. Explicit field "notes" always searches notes.
+ *  When the flag is absent, the saved searchIncludeNotes setting is used (default on).
+ */
+function searchIncludeNotesEnabled(filters) {
+  if (filters && filters.searchIncludeNotes !== undefined && filters.searchIncludeNotes !== null && filters.searchIncludeNotes !== '') {
+    const v = filters.searchIncludeNotes;
+    if (v === false || v === 0 || v === '0' || v === 'false') return false;
+    return true;
+  }
+  return getSettingValueOr('searchIncludeNotes', '1') !== '0';
+}
+
+function appendAllFieldsSearchSql(params, term, includeNotes) {
+  const notesClause = includeNotes ? "LOWER(COALESCE(notes, '')) LIKE ? OR\n          " : '';
+  if (includeNotes) {
+    params.push(term, term, term, term, term, term, term, term, term, term, term);
+  } else {
+    params.push(term, term, term, term, term, term, term, term, term, term);
+  }
+  return `(
+          LOWER(COALESCE(fileName, '')) LIKE ? OR 
+          LOWER(COALESCE(designer, '')) LIKE ? OR 
+          LOWER(COALESCE(parentModel, '')) LIKE ? OR 
+          ${notesClause}LOWER(COALESCE(filePath, '')) LIKE ? OR
+          LOWER(COALESCE(source, '')) LIKE ? OR
+          LOWER(COALESCE(license, '')) LIKE ? OR
+          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) OR
+          EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
+            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
+          ))
+        )`;
+}
+
+function pushSearchClauseFragment(field, rawValue, params, filters) {
   const term = `%${String(rawValue).toLowerCase()}%`;
   switch (field) {
     case 'fileName':
@@ -5307,20 +5444,7 @@ function pushSearchClauseFragment(field, rawValue, params) {
         LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
       ))`;
     default:
-      params.push(term, term, term, term, term, term, term, term, term, term, term);
-      return `(
-          LOWER(COALESCE(fileName, \'\')) LIKE ? OR 
-          LOWER(COALESCE(designer, \'\')) LIKE ? OR 
-          LOWER(COALESCE(parentModel, \'\')) LIKE ? OR 
-          LOWER(COALESCE(notes, \'\')) LIKE ? OR
-          LOWER(COALESCE(filePath, \'\')) LIKE ? OR
-          LOWER(COALESCE(source, \'\')) LIKE ? OR
-          LOWER(COALESCE(license, \'\')) LIKE ? OR
-          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) OR
-          EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
-            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
-          ))
-        )`;
+      return appendAllFieldsSearchSql(params, term, searchIncludeNotesEnabled(filters));
   }
 }
 
@@ -5511,7 +5635,7 @@ function parseSearchPrimary(tokens, i, params, filters) {
   }
   const tok = tokens[i];
   if (tok.t === 'clause') {
-    const frag = pushSearchClauseFragment(tok.field || 'all', tok.value, params);
+    const frag = pushSearchClauseFragment(tok.field || 'all', tok.value, params, filters);
     return [`(${frag})`, i + 1];
   }
   if (tok.t === 'filter' || tok.t === 'filterMulti') {
@@ -5862,7 +5986,7 @@ function buildModelFilterConditions(filters) {
       for (const c of filters.searchClauses) {
         const val = c && String(c.value || '').trim();
         if (!val) continue;
-        const frag = pushSearchClauseFragment(c.field || 'all', val, params);
+        const frag = pushSearchClauseFragment(c.field || 'all', val, params, filters);
         parts.push(`(${frag})`);
       }
       if (parts.length) {
@@ -5874,37 +5998,12 @@ function buildModelFilterConditions(filters) {
         }
       }
     } else if (filters.search) {
-      const searchTerm = `%${filters.search.toLowerCase()}%`;
+      const frag = pushSearchClauseFragment('all', filters.search, params, filters);
       if (filters.searchInverted) {
-        conditions.push(`(
-          LOWER(COALESCE(fileName, '')) NOT LIKE ? AND 
-          LOWER(COALESCE(designer, '')) NOT LIKE ? AND 
-          LOWER(COALESCE(parentModel, '')) NOT LIKE ? AND 
-          LOWER(COALESCE(notes, '')) NOT LIKE ? AND
-          LOWER(COALESCE(filePath, '')) NOT LIKE ? AND
-          LOWER(COALESCE(source, '')) NOT LIKE ? AND
-          LOWER(COALESCE(license, '')) NOT LIKE ? AND
-          NOT EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) AND
-          NOT EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
-            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
-          ))
-        )`);
+        conditions.push(`NOT (${frag})`);
       } else {
-        conditions.push(`(
-          LOWER(COALESCE(fileName, '')) LIKE ? OR 
-          LOWER(COALESCE(designer, '')) LIKE ? OR 
-          LOWER(COALESCE(parentModel, '')) LIKE ? OR 
-          LOWER(COALESCE(notes, '')) LIKE ? OR
-          LOWER(COALESCE(filePath, '')) LIKE ? OR
-          LOWER(COALESCE(source, '')) LIKE ? OR
-          LOWER(COALESCE(license, '')) LIKE ? OR
-          EXISTS (SELECT 1 FROM model_tags mt INNER JOIN tags t ON t.id = mt.tag_id WHERE mt.model_id = models.id AND LOWER(t.name) LIKE ?) OR
-          EXISTS (SELECT 1 FROM model_filaments mf INNER JOIN filaments f ON f.id = mf.filament_id WHERE mf.model_id = models.id AND (
-            LOWER(COALESCE(f.name, '')) LIKE ? OR LOWER(COALESCE(f.vendor, '')) LIKE ? OR LOWER(COALESCE(f.material, '')) LIKE ?
-          ))
-        )`);
+        conditions.push(frag);
       }
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     pushTagListSQL(conditions, params, filters);
@@ -6776,33 +6875,27 @@ ipcMain.handle('get-server-thumbnail-job-status', async () => {
 });
 
 // Update the shouldSkipDirectory function
+function getScanExcludeNames() {
+  try {
+    if (!db) return new Set();
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('scanExcludeFolders');
+    return normalizeExcludeNames(row && row.value);
+  } catch (_) {
+    return new Set();
+  }
+}
+
 function shouldSkipDirectory(dirName) {
-  // Skip directories named __MACOSX (case-insensitive)
-  if (dirName.toLowerCase() === '__macosx') {
-    debugLog(`Skipping __MACOSX directory: ${dirName}`);
-    return true;
-  }
+  return shouldSkipDirectoryName(dirName, getScanExcludeNames());
+}
 
-  // Skip any directory whose name starts with "Windows Defender" (case-insensitive)
-  if (/^windows defender/i.test(dirName)) {
-    debugLog(`Skipping system directory: ${dirName}`);
-    return true;
-  }
-
-  const systemDirs = [
-    'System Volume Information',
-    '$Recycle.Bin',
-    'Windows',
-    '$WINDOWS.~BT',
-    '$Windows.~WS',
-    'Config.Msi',
-    'ProgramData',
-    'Recovery',
-    'Boot',
-    'EFI'
-  ];
-
-  return systemDirs.some(dir => dirName.toLowerCase() === dir.toLowerCase());
+function isSkippedLibraryPath(filePath, extraLower) {
+  if (!filePath) return false;
+  const pathInfo = parseZipPath(filePath);
+  const diskPath = pathInfo.isZipEntry ? pathInfo.zipPath : filePath;
+  if (shouldSkipEntryPath(diskPath, extraLower)) return true;
+  if (pathInfo.isZipEntry && shouldSkipEntryPath(pathInfo.entryPath, extraLower)) return true;
+  return false;
 }
 
 // Update the scanDirectory function
@@ -6834,6 +6927,9 @@ async function scanDirectory(directoryPath, isValidFile) {
           return await scanRecursive(fullPath);
         } else {
           totalFiles++;
+          if (shouldSkipFileName(entry.name)) {
+            return { files: [], count: 0 };
+          }
           
           try {
             const stats = await fs.promises.stat(fullPath);
@@ -7015,7 +7111,23 @@ ipcMain.handle('open-path', async (event, path) => {
 });
 
 ipcMain.handle('show-message', async (event, title, message, buttons = ['OK']) => {
-  const result = await dialog.showMessageBox({
+  let parent = null;
+  try {
+    parent = event && event.sender ? BrowserWindow.fromWebContents(event.sender) : null;
+  } catch (_) {
+    parent = null;
+  }
+  if (!parent || parent.isDestroyed()) {
+    parent = BrowserWindow.getFocusedWindow()
+      || BrowserWindow.getAllWindows().find((win) => win && !win.isDestroyed())
+      || null;
+  }
+  if (parent && !parent.isDestroyed()) {
+    if (parent.isMinimized()) parent.restore();
+    parent.show();
+    parent.focus();
+  }
+  const result = await dialog.showMessageBox(parent || undefined, {
     type: 'info',
     title: title,
     message: message,
@@ -8667,6 +8779,57 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     menuItems.push(slicerSubmenu);
   }
 
+  menuItems.push({
+    label: 'Tag from Folder',
+    click: async () => {
+      const win = getWindowFromEvent(event);
+      const configuredLevels = clampFolderLevels(getSettings().aiTagFolderLevels);
+      const levels = configuredLevels > 0 ? configuredLevels : 1;
+      if (win && !win.isDestroyed() && !isServerMode) {
+        const confirm = await dialog.showMessageBox(win, {
+          type: 'question',
+          title: 'Tag from Folder',
+          message: `Add folder names as tags for ${filePaths.length} model${filePaths.length === 1 ? '' : 's'}?`,
+          detail: `Uses the closest ${levels} folder name${levels === 1 ? '' : 's'} above each file. Change how many in Settings > AI Configuration.`,
+          buttons: ['Tag', 'Cancel'],
+          defaultId: 0,
+          cancelId: 1
+        });
+        if (confirm.response !== 0) return;
+      }
+      try {
+        const result = applyFolderTagsToModels(filePaths, levels);
+        if (isServerMode && global.broadcastEvent) {
+          global.broadcastEvent('refresh-grid');
+        } else if (event.sender && event.sender.send) {
+          event.sender.send('refresh-grid');
+        }
+        const summary = result.tagsAdded > 0
+          ? `Added ${result.tagsAdded} tag${result.tagsAdded === 1 ? '' : 's'} on ${result.updated} model${result.updated === 1 ? '' : 's'}.`
+          : 'No new folder tags were added. Those tags may already be on the models, or the files have no usable parent folder.';
+        if (win && !win.isDestroyed() && !isServerMode) {
+          await dialog.showMessageBox(win, {
+            type: 'info',
+            title: 'Tag from Folder',
+            message: summary
+          });
+        } else {
+          console.log('[Tag from Folder]', summary);
+        }
+      } catch (error) {
+        console.error('Error tagging from folder:', error);
+        if (win && !win.isDestroyed() && !isServerMode) {
+          await dialog.showMessageBox(win, {
+            type: 'error',
+            title: 'Tag from Folder',
+            message: 'Could not add folder tags',
+            detail: error.message
+          });
+        }
+      }
+    }
+  });
+
   // Check if API key exists in settings
   const apiKeyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('apiKey');
   const apiKey = apiKeyRow ? apiKeyRow.value : null;
@@ -8817,11 +8980,22 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           let completed = 0;
           let successCount = 0;
           let failureCount = 0;
+          let rateLimitStopped = false;
           const totalFiles = filesToProcess.length;
+          const rateLimitSkipMessage = 'Rate limit exceeded: Tag generation stopped because the API rate limit did not clear. Tags already generated can still be applied.';
           
           // Helper function to process a single file
           // Use eventSender (captured from event or clickEvent) for sending events
           const processFile = async (filePath, index) => {
+            if (rateLimitStopped) {
+              completed++;
+              if (isServerMode && global.broadcastEvent) {
+                global.broadcastEvent('tags-generated', filePath, [], rateLimitSkipMessage);
+              } else if (eventSender && eventSender.send) {
+                eventSender.send('tags-generated', filePath, [], rateLimitSkipMessage);
+              }
+              return;
+            }
             try {
               // Get the model from the database to access its thumbnail
               const model = getModelByFilePath(filePath, { includeThumbnail: true });
@@ -8868,6 +9042,8 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                 useCategories: settings.aiTagUseCategories,
                 useJsonResponse: settings.aiTagUseJsonResponse,
                 detailLevel: settings.aiTagDetailLevel,
+                folderLevels: settings.aiTagFolderLevels,
+                notes: model.notes || '',
                 customPrompt: (aiTagPromptValue != null && String(aiTagPromptValue).trim() !== '') ? String(aiTagPromptValue).trim() : null
               };
               
@@ -8887,6 +9063,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                   failureCount++;
                   // Check if it's a rate limit error
                   if (error.message && error.message.includes('Rate limit')) {
+                    rateLimitStopped = true;
                     // Send error info with empty tags
                     if (isServerMode && global.broadcastEvent) {
                       global.broadcastEvent('tags-generated', filePath, [], error.message);
@@ -8921,6 +9098,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
                     failureCount++;
                     // Check if it's a rate limit error
                     if (error.message && error.message.includes('Rate limit')) {
+                      rateLimitStopped = true;
                       // Send error info with empty tags
                       if (isServerMode && global.broadcastEvent) {
                         global.broadcastEvent('tags-generated', filePath, [], error.message);
@@ -8949,6 +9127,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
               completed++;
               // Check if it's a rate limit error
               if (error.message && error.message.includes('Rate limit')) {
+                rateLimitStopped = true;
                 // Send error info with empty tags
                 if (isServerMode && global.broadcastEvent) {
                   global.broadcastEvent('tags-generated', filePath, [], error.message);
@@ -8984,6 +9163,14 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           }
         } catch (error) {
           console.error('Error generating tags:', error);
+
+          if (filePaths.length > 1) {
+            if (isServerMode && global.broadcastEvent) {
+              global.broadcastEvent('batch-tag-generation-complete');
+            } else if (eventSender && eventSender.send) {
+              eventSender.send('batch-tag-generation-complete');
+            }
+          }
           
           // Close progress dialog if open
           if (filePaths.length > 1 && eventSender && eventSender.send) {
@@ -9012,7 +9199,13 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             errorDetail = error.message;
           }
           
-          dialog.showMessageBox({
+          const win = getWindowFromEvent(event);
+          if (win && !win.isDestroyed()) {
+            if (win.isMinimized()) win.restore();
+            win.show();
+            win.focus();
+          }
+          dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
             type: 'error',
             title: errorMessage,
             message: errorDetail,
@@ -9976,11 +10169,7 @@ function parseZipPath(filePath) {
 
 // Skip macOS resource-fork / AppleDouble entries (._*) and __MACOSX metadata — not valid models
 function isMacOsResourceForkEntry(entryPath) {
-  if (!entryPath) return false;
-  const normalized = entryPath.replace(/\\/g, '/');
-  if (normalized.split('/').some((seg) => seg.toLowerCase() === '__macosx')) return true;
-  const base = path.basename(entryPath);
-  return base.startsWith('._');
+  return shouldSkipEntryPath(entryPath, getScanExcludeNames());
 }
 
 // Minimum ZIP is 22 bytes (end-of-central-directory). 3MF is ZIP-based (starts with PK).
@@ -10184,44 +10373,6 @@ function getSlicerBySelection(slicers, { slicerId, slicerName } = {}) {
   return slicers[0];
 }
 
-function escapeShellArg(filePath) {
-  return `"${String(filePath).replace(/"/g, '\\"')}"`;
-}
-
-function getDarwinAppBundlePath(slicerPath) {
-  if (!slicerPath || process.platform !== 'darwin') return null;
-  const normalized = String(slicerPath).replace(/\\/g, '/');
-  if (/\.app$/i.test(normalized)) return normalized;
-  const match = normalized.match(/^(.*?\.app)\//i);
-  return match ? match[1] : null;
-}
-
-// PrusaSlicer / SuperSlicer / Slic3r accept --single-instance; Bambu / Orca / Snapmaker Orca reject it.
-function slicerSupportsSingleInstanceFlag(slicerPath) {
-  const base = path.basename(String(slicerPath)).toLowerCase();
-  return /prusa|superslicer|slic3r/.test(base) && !/bambu|orca/.test(base);
-}
-
-function buildSlicerLaunchCommand(slicerPath, modelPaths) {
-  const paths = (Array.isArray(modelPaths) ? modelPaths : [modelPaths]).filter(Boolean);
-  if (!paths.length) {
-    throw new Error('No model files to open in slicer');
-  }
-
-  const escapedPaths = paths.map(escapeShellArg).join(' ');
-  const appBundle = getDarwinAppBundlePath(slicerPath);
-  if (appBundle) {
-    // -n opens a new instance even when the slicer is already running (macOS).
-    return `open -n -a ${escapeShellArg(appBundle)} --args ${escapedPaths}`;
-  }
-
-  let command = escapeShellArg(slicerPath);
-  if (slicerSupportsSingleInstanceFlag(slicerPath)) {
-    command += ' --single-instance=0';
-  }
-  return `${command} ${escapedPaths}`;
-}
-
 function runSlicerWithModelPaths(slicer, modelPaths) {
   if (!modelPaths.length) {
     return Promise.reject(new Error('No model files to open in slicer'));
@@ -10235,15 +10386,31 @@ function runSlicerWithModelPaths(slicer, modelPaths) {
     ));
   }
 
-  const { exec } = require('child_process');
-  const command = buildSlicerLaunchCommand(slicer.path, modelPaths);
+  const { spawn } = require('child_process');
+  const spec = buildSlicerSpawnSpec(slicer.path, modelPaths);
+  console.log('[Slicer] Launching', spec.command, spec.args.join(' '));
 
   return new Promise((resolve, reject) => {
-    exec(command, (error) => {
-      // Temp extracts for zip entries: give the slicer time to load, then remove
+    let settled = false;
+    const child = spawn(spec.command, spec.args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false
+    });
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      scheduleExtractTempCleanupMany(modelPaths, 0);
+      reject(error);
+    });
+    // Resolve when the process starts. Slicers that are already open often hand the
+    // file to the existing window and exit non-zero; that is still a successful launch.
+    child.once('spawn', () => {
+      if (settled) return;
+      settled = true;
+      child.unref();
       scheduleExtractTempCleanupMany(modelPaths);
-      if (error) reject(error);
-      else resolve({ success: true, count: modelPaths.length });
+      resolve({ success: true, count: modelPaths.length });
     });
   });
 }
@@ -12442,6 +12609,8 @@ async function generateTagsHandler(event, filePath) {
       useCategories: settings.aiTagUseCategories,
       useJsonResponse: settings.aiTagUseJsonResponse,
       detailLevel: settings.aiTagDetailLevel,
+      folderLevels: settings.aiTagFolderLevels,
+      notes: model.notes || '',
       customPrompt: (aiTagPromptValue != null && String(aiTagPromptValue).trim() !== '') ? String(aiTagPromptValue).trim() : null
     };
 
@@ -12499,6 +12668,39 @@ ipcMain.handle('generate-tags', generateTagsHandler);
 ipcHandlerRegistry.set('generate-tags', generateTagsHandler);
 
 // Add this helper function (if it doesn't already exist) near the top of main.js
+function applyFolderTagsToModels(filePaths, levels) {
+  const namesForPath = folderTagsFromPath;
+  let updated = 0;
+  let tagsAdded = 0;
+  const findTag = db.prepare('SELECT id FROM tags WHERE name = ? COLLATE NOCASE');
+  const insertTag = db.prepare('INSERT INTO tags (name) VALUES (?)');
+  const linkTag = db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)');
+  const findModel = db.prepare('SELECT id FROM models WHERE filePath = ?');
+
+  db.transaction(() => {
+    for (const filePath of filePaths) {
+      const model = findModel.get(filePath);
+      if (!model) continue;
+      let addedForModel = 0;
+      for (const name of namesForPath(filePath, levels)) {
+        let tag = findTag.get(name);
+        if (!tag) {
+          const info = insertTag.run(name);
+          tag = { id: info.lastInsertRowid };
+        }
+        const rel = linkTag.run(model.id, tag.id);
+        if (rel.changes) addedForModel += 1;
+      }
+      if (addedForModel) {
+        updated += 1;
+        tagsAdded += addedForModel;
+      }
+    }
+  })();
+
+  return { updated, tagsAdded };
+}
+
 function getSettings() {
   const apiKeyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('apiKey');
   const apiEndpointRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('apiEndpoint');
@@ -12510,6 +12712,7 @@ function getSettings() {
   const aiTagAllowRetaggingRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagAllowRetagging');
   const aiTagConcurrencyRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagConcurrency');
   const aiTagDetailLevelRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagDetailLevel');
+  const aiTagFolderLevelsRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagFolderLevels');
   const aiTagPromptRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagPrompt');
   
   return {
@@ -12524,6 +12727,7 @@ function getSettings() {
     aiTagAllowRetagging: aiTagAllowRetaggingRow ? aiTagAllowRetaggingRow.value === '1' : false,
     aiTagConcurrency: aiTagConcurrencyRow ? parseInt(aiTagConcurrencyRow.value) || 3 : 3,
     aiTagDetailLevel: aiTagDetailLevelRow ? aiTagDetailLevelRow.value : 'medium',
+    aiTagFolderLevels: clampFolderLevels(aiTagFolderLevelsRow ? aiTagFolderLevelsRow.value : 2),
     aiTagPrompt: aiTagPromptRow ? aiTagPromptRow.value : null
   };
 }

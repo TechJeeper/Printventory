@@ -4,6 +4,16 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.12] - 2026-10-01
+
+- Library scans skip folders that start with a dot, extra folder names you list, and directories excluded from STL Home
+- Search can leave notes out of all-fields search
+- AI tagging sends parent folder names and the model description, waits out rate limits, and Tag from Folder applies those folder names without calling the AI
+- Open in Slicer starts another instance when that slicer is already running
+- STL preview rejects files that are not a real STL
+- Help menu can send a redacted support log
+- Linux AppImage starts without the setuid sandbox helper
+
 ## [2.2.11] - 2026-09-29
 
 - Printer Management: save printers, maintenance logs, and scheduled reminders

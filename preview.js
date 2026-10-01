@@ -1419,6 +1419,8 @@ console.log('[Preview] preview.js script loaded');
     const slicers = await loadConfiguredSlicers();
 
     if (!slicers.length) {
+      const serverMode = await window.electron?.isServerMode?.().catch(() => false);
+      if (serverMode) return;
       const configure = confirm('No slicer configured. Open Slicer Settings now?');
       if (configure && typeof window.openSlicerSettings === 'function') {
         await window.openSlicerSettings();

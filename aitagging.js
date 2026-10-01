@@ -3,6 +3,8 @@
 
 const OpenAI = require("openai");
 const { app } = require('electron'); // Import app from Electron
+const { libraryContextSnippet } = require('./library-context');
+const { isRateLimitError, rateLimitWaitMs, rateLimitUserMessage } = require('./ai-rate-limit');
 
 let openaiClient = null;
 let currentService = 'openai';
@@ -315,6 +317,10 @@ function getFilenameContext(filename) {
   return ctx;
 }
 
+function getModelContext(filePath, options = {}) {
+  return getFilenameContext(filePath) + libraryContextSnippet(filePath, options);
+}
+
 // Build prompt based on options
 function buildPrompt(options = {}, filename = null) {
   const maxTags = options.maxTags || DEFAULT_OPTIONS.maxTags;
@@ -324,7 +330,7 @@ function buildPrompt(options = {}, filename = null) {
   
   let prompt = `You are helping organize 3D models in a library. Analyze this image of a 3D model thumbnail and generate ${maxTags} useful category tags that will help users find and organize this model. `;
   
-  prompt += getFilenameContext(filename);
+  prompt += getModelContext(filename, options);
   
   prompt += `Focus ONLY on the 3D model itself - completely ignore any background, text, or UI elements. `;
   prompt += `Do NOT use generic terms like "3D Model", "model", "object", "item", "tag", "tags", "thing", "stuff", or "piece". `;
@@ -383,7 +389,7 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
   // Use custom prompt from settings if set; otherwise build from options. Always append JSON response instructions.
   let basePrompt;
   if (mergedOptions.customPrompt && String(mergedOptions.customPrompt).trim() !== '') {
-    basePrompt = String(mergedOptions.customPrompt).trim() + (filename ? getFilenameContext(filename) : '');
+    basePrompt = String(mergedOptions.customPrompt).trim() + getModelContext(filename, mergedOptions);
   } else {
     basePrompt = buildPrompt(mergedOptions, filename);
   }
@@ -454,11 +460,12 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
   }
 
   let attempt = 0;
+  let pacedDelayMs = delayMs;
 
   while (attempt < maxRetries) {
     try {
-      // Introduce a delay before making the API call
-      await delay(delayMs);
+      if (pacedDelayMs > 0) await delay(pacedDelayMs);
+      pacedDelayMs = delayMs;
 
       console.log(`Attempting to generate tags with model: ${model || defaultModelForService(currentService)} (attempt ${attempt + 1}/${maxRetries})`);
 
@@ -514,21 +521,17 @@ async function generateTagsForImage(base64Image, model, options = {}, delayMs = 
       console.log(`Successfully generated ${limitedTags.length} tags (from ${tags.length} parsed)`);
       return limitedTags;
     } catch (error) {
-      // Check for 429 rate limit errors - check response.status, error.status, and error message
-      const isRateLimit = (error.response && error.response.status === 429) || 
-                         (error.status === 429) ||
-                         (error.message && error.message.includes('429'));
-      
-      if (isRateLimit) {
-        // Don't retry on rate limit - inform user immediately
-        const retryAfter = error.response?.headers?.['retry-after'] || error.response?.headers?.['Retry-After'];
-        let errorMessage = 'API rate limit has been exceeded. Please try again later.';
-        if (retryAfter) {
-          const waitMinutes = Math.ceil(parseInt(retryAfter) / 60);
-          errorMessage = `API rate limit has been exceeded. Please try again in ${waitMinutes} minute${waitMinutes !== 1 ? 's' : ''}.`;
+      if (isRateLimitError(error)) {
+        attempt++;
+        const waitMs = rateLimitWaitMs(error, attempt);
+        if (attempt >= maxRetries) {
+          const errorMessage = rateLimitUserMessage(error);
+          console.warn(`Rate limit exceeded (429) after ${attempt} attempt(s): ${errorMessage}`);
+          throw new Error(`Rate limit exceeded: ${errorMessage}`);
         }
-        console.warn(`Rate limit exceeded (429): ${errorMessage}`);
-        throw new Error(`Rate limit exceeded: ${errorMessage}`);
+        console.warn(`Rate limit (429). Waiting ${Math.ceil(waitMs / 1000)}s before retry ${attempt + 1}/${maxRetries}`);
+        pacedDelayMs = waitMs;
+        continue;
       } 
       // Handle bad request (invalid image format, etc.)
       else if (error.response && error.response.status === 400) {

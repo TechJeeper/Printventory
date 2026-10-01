@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.11",
+  "version": "2.2.12",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -35,7 +35,13 @@
     "test:extractors": "node chrome-extension/extractors.test.js",
     "test:mcp": "node mcp-server.test.js",
     "test:slicer-detect": "node slicer-detect.test.js",
+    "test:slicer-launch": "node slicer-launch.test.js",
+    "test:scan-skip": "node scan-skip.test.js",
+    "test:library-context": "node library-context.test.js",
+    "test:stl-sanity": "node stl-sanity.test.js",
+    "test:ai-rate-limit": "node ai-rate-limit.test.js",
     "test:notes": "node notes-markdown.test.js",
+    "test:support-logs": "node support-logs.test.js",
     "test:full": "playwright test full-app-e2e.spec.js",
     "test:dedup-stress": "node tests/dedup-stress-test.js"
   },
@@ -44,6 +50,7 @@
   "build": {
     "nativeRebuilder": "legacy",
     "appId": "com.printventory.app",
+    "afterPack": "scripts/after-pack-linux-sandbox.js",
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "logo.icns",
@@ -63,7 +70,8 @@
       "asarUnpack": [
         "**/*.node",
         "**/node_modules/node-stream-zip/**/*",
-        "scan-worker.js"
+        "scan-worker.js",
+        "scan-skip.js"
       ]
     },
     "win": {
@@ -73,7 +81,8 @@
       "asarUnpack": [
         "**/*.node",
         "**/node_modules/node-stream-zip/**/*",
-        "scan-worker.js"
+        "scan-worker.js",
+        "scan-skip.js"
       ]
     },
     "linux": {
@@ -87,11 +96,15 @@
       ],
       "icon": "logo.png",
       "category": "Utility",
+      "executableArgs": [
+        "--no-sandbox"
+      ],
       "asar": true,
       "asarUnpack": [
         "**/*.node",
         "**/node_modules/node-stream-zip/**/*",
-        "scan-worker.js"
+        "scan-worker.js",
+        "scan-skip.js"
       ]
     },
     "nsis": {
@@ -176,6 +189,12 @@
       "folder-tree.js",
       "folder-tree-lib.js",
       "scan-worker.js",
+      "scan-skip.js",
+      "slicer-launch.js",
+      "library-context.js",
+      "stl-sanity.js",
+      "ai-rate-limit.js",
+      "support-logs.js",
       "parse-worker.js",
       "vendor/**",
       "vendor/**/*",

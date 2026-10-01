@@ -25,7 +25,7 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        search: { type: 'string', description: 'Free-text search across name, designer, notes, tags, path, source, and license' },
+        search: { type: 'string', description: 'Free-text search across name, designer, tags, path, source, and license. Notes are included unless the app setting searchIncludeNotes is off.' },
         designer: { type: 'string', description: 'Filter by designer name' },
         tags: {
           type: 'array',

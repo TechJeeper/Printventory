@@ -12,6 +12,13 @@ let isFilteringInProgress = false;
 // Generation counter so a filter change during progressive load wins over stale "rest" response
 let searchGeneration = 0;
 
+/** All-fields search includes notes unless the sidebar checkbox is off. Missing control means include. */
+function searchIncludeNotesChecked() {
+  const el = document.getElementById("search-include-notes");
+  if (!el) return true;
+  return !!el.checked;
+}
+
 function filterValueList(primaryArr, legacyStr) {
   const out = [];
   if (Array.isArray(primaryArr)) {
@@ -67,6 +74,7 @@ function getCurrentLibraryFilters() {
     if (filamentFilter) filters.filament = filamentFilter;
     filters.search = resolvedSearchTerm;
   }
+  filters.searchIncludeNotes = searchIncludeNotesChecked();
   return filters;
 }
 
@@ -125,10 +133,23 @@ function describeLibraryFilters(filters) {
     parts.push(`Folder: ${bits[bits.length - 1] || f.directory}`);
   }
   if (f.dateAdded) parts.push("Date added");
-  if (Array.isArray(f.searchTokens) && f.searchTokens.length) parts.push("Query");
-  else if (Array.isArray(f.searchClauses) && f.searchClauses.length) parts.push("Search");
-  else if (f.search && String(f.search).trim()) parts.push(`Search: ${String(f.search).trim()}`);
+  const notesOffLabel = searchSummaryOmitsNotes(f) ? " · notes off" : "";
+  if (Array.isArray(f.searchTokens) && f.searchTokens.length) parts.push(`Query${notesOffLabel}`);
+  else if (Array.isArray(f.searchClauses) && f.searchClauses.length) parts.push(`Search${notesOffLabel}`);
+  else if (f.search && String(f.search).trim()) parts.push(`Search: ${String(f.search).trim()}${notesOffLabel}`);
   return parts.join(" · ");
+}
+
+/** True when an all-fields search is active and the notes checkbox is off. */
+function searchSummaryOmitsNotes(filters) {
+  if (searchIncludeNotesChecked()) return false;
+  const f = filters || {};
+  const tokens = Array.isArray(f.searchTokens) ? f.searchTokens : [];
+  if (tokens.some((t) => t && t.t === "clause" && (!t.field || t.field === "all"))) return true;
+  const clauses = Array.isArray(f.searchClauses) ? f.searchClauses : [];
+  if (clauses.some((c) => c && (!c.field || c.field === "all"))) return true;
+  if (!tokens.length && !clauses.length && f.search && String(f.search).trim()) return true;
+  return false;
 }
 
 // Optional overrides: { limit, offset } for progressive load when clearing filters (Server/Docker)
@@ -451,8 +472,11 @@ function updateFilterIndicator(count) {
               typeof window.queryBuilderSearchFieldLabel === "function"
                 ? window.queryBuilderSearchFieldLabel(tok.field)
                 : tok.field;
+            const notesOff = isAll && !searchIncludeNotesChecked()
+              ? ' <span class="pill-notes-off">notes off</span>'
+              : "";
             const searchLine = isAll
-              ? `Search: &quot;${esc(tok.value)}&quot; ${invertLabel}`
+              ? `Search: &quot;${esc(tok.value)}&quot;${notesOff} ${invertLabel}`
               : `Search (${esc(flab)}): &quot;${esc(tok.value)}&quot; ${invertLabel}`;
             message += `<div class="filter-pill filter-pill-search-clause ${inverted.search ? "inverted" : ""}" data-filter-type="searchToken" data-token-index="${i}">
               ${searchLine}
@@ -832,6 +856,24 @@ async function initializeCombinedSearch() {
     });
   }
 
+  const notesToggle = document.getElementById("search-include-notes");
+  if (notesToggle) {
+    try {
+      const savedNotes = await window.electron.getSetting("searchIncludeNotes");
+      if (savedNotes === "0") notesToggle.checked = false;
+    } catch (error) {
+      console.error("Error loading searchIncludeNotes:", error);
+    }
+    notesToggle.addEventListener("change", async () => {
+      try {
+        await window.electron.saveSetting("searchIncludeNotes", notesToggle.checked ? "1" : "0");
+      } catch (error) {
+        console.error("Error saving searchIncludeNotes:", error);
+      }
+      await performCombinedSearch();
+    });
+  }
+
   // Add new event listeners for other filters
   filterElements.forEach(elementId => {
     const element = document.getElementById(elementId);
@@ -1031,6 +1073,7 @@ async function initializeCombinedSearch() {
 window.getCurrentLibraryFilters = getCurrentLibraryFilters;
 window.libraryFiltersAreActive = libraryFiltersAreActive;
 window.describeLibraryFilters = describeLibraryFilters;
+window.searchIncludeNotesChecked = searchIncludeNotesChecked;
 window.getCombinedFilteredModels = getCombinedFilteredModels;
 window.resetCurrentFilterPanelShell = resetCurrentFilterPanelShell;
 window.clearAllLibraryFilters = clearAllLibraryFilters;
@@ -1072,6 +1115,7 @@ function toggleFilterControls(enabled) {
     'folder-select',
     'sort-select',
     'search-filter-input',
+    'search-include-notes',
     'filter-search-button',
     'clear-filter-search-button',
     'folder-tree-button',

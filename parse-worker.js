@@ -14,6 +14,7 @@ importScripts('vendor/OBJLoader.js');
 importScripts('vendor/PLYLoader.js');
 importScripts('threemf-mesh-extract.js');
 importScripts('parse-lys-geometry.js');
+importScripts('stl-sanity.js');
 
 function workerErrorMessage(error) {
   if (!error) return 'Unknown worker parse error';
@@ -68,23 +69,16 @@ async function handleParseMessage(e) {
   try {
     if (fileExtension === 'stl') {
       const loader = new THREE.STLLoader();
-      const MAX_STL_TRIANGLES = 10000000;
 
       const buffer = tightArrayBuffer(modelBuffer) || await fetchArrayBuffer(url);
-
-      if (buffer.byteLength < 15) {
-        throw new Error('STL file too small to be valid');
-      }
-      if (buffer.byteLength >= 84) {
+      const kind = classifyStlBuffer(buffer);
+      if (kind === 'binary') {
         const triangleCount = new DataView(buffer).getUint32(80, true);
         const expectedBinarySize = 84 + triangleCount * 50;
-        const leftover = buffer.byteLength - expectedBinarySize;
-        if (triangleCount > 0 && triangleCount <= MAX_STL_TRIANGLES && leftover >= 0 && leftover <= 4096) {
-          const exact = leftover === 0 ? buffer : buffer.slice(0, expectedBinarySize);
-          const object = loader.parse(exact);
-          processObject(object, id);
-          return;
-        }
+        const exact = buffer.byteLength === expectedBinarySize ? buffer : buffer.slice(0, expectedBinarySize);
+        const object = loader.parse(exact);
+        processObject(object, id);
+        return;
       }
 
       const object = loader.parse(buffer);
@@ -331,6 +325,18 @@ function parseLysDocument(buffer) {
   return group;
 }
 
+function ensureRenderableNormals(geometry) {
+  const position = geometry.attributes && geometry.attributes.position;
+  if (!position || !position.array || position.array.length < 9) return;
+  const normalAttr = geometry.attributes.normal;
+  if (!geometry.index && normalAttr && normalAttr.array && typeof repairZeroFaceNormals === 'function') {
+    repairZeroFaceNormals(position.array, normalAttr.array);
+  }
+  if (!normalAttr || !normalAttr.array || normalsAreMissing(normalAttr.array)) {
+    geometry.computeVertexNormals();
+  }
+}
+
 function processObject(object, id) {
   const geometries = [];
   const transferables = [];
@@ -338,18 +344,14 @@ function processObject(object, id) {
   if (object.isBufferGeometry) {
     object.computeBoundingBox();
     object.center();
-    if (!object.attributes.normal) {
-      object.computeVertexNormals();
-    }
+    ensureRenderableNormals(object);
     const geo = extractGeometry(object, null, transferables, object.userData && object.userData.color);
     if (geo) geometries.push(geo);
   } else if (object.isObject3D) {
     object.updateMatrixWorld(true);
     object.traverse((child) => {
       if (child.isMesh && child.geometry) {
-        if (!child.geometry.attributes.normal) {
-          child.geometry.computeVertexNormals();
-        }
+        ensureRenderableNormals(child.geometry);
         const meshColor = (child.geometry.userData && child.geometry.userData.color)
           || (child.userData && child.userData.color);
         const geo = extractGeometry(child.geometry, child.matrixWorld.elements, transferables, meshColor);
