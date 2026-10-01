@@ -343,6 +343,12 @@ body.server-mode #preview-slicer-menu {
   position: relative;
 }
 
+/* Text fields with icon buttons are not selects. The form-group chevron
+   otherwise paints over the clear button at the right edge. */
+.form-group .input-with-icon input:not([type="checkbox"]):not([type="radio"]) {
+  background-image: none;
+}
+
 .input-with-icon:has(.icon-button:nth-of-type(2):not(.hidden)) input {
   padding-right: 90px;
 }
