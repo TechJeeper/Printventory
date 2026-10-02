@@ -9,7 +9,8 @@ const {
   createCapture,
   redactLogText,
   readLogTail,
-  buildDiscordMultipart
+  buildDiscordMultipart,
+  resolveDiscordWebhookUrl
 } = require('./support-logs');
 
 function test(name, fn) {
@@ -83,6 +84,16 @@ async function main() {
     assert.ok(text.includes('Printventory support logs'));
     assert.ok(text.includes('name="files[0]"; filename="printventory-logs.zip"'));
     assert.ok(body.includes(fileBuffer));
+  });
+
+  await test('requires a valid configured Discord webhook', () => {
+    assert.throws(() => resolveDiscordWebhookUrl(''), /not configured/);
+    assert.throws(() => resolveDiscordWebhookUrl('http://discord.com/api/webhooks/123/token'), /invalid/);
+    assert.throws(() => resolveDiscordWebhookUrl('https://example.com/api/webhooks/123/token'), /invalid/);
+    assert.strictEqual(
+      resolveDiscordWebhookUrl('https://discord.com/api/webhooks/123/token_value'),
+      'https://discord.com/api/webhooks/123/token_value'
+    );
   });
 
   await test('cancel does not upload', async () => {
