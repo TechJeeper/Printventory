@@ -45,13 +45,14 @@ async function main() {
   console.log('Launching:', exePath);
   console.log('User data:', userDataDir);
 
+  const launchEnv = { ...process.env };
+  delete launchEnv.ELECTRON_RUN_AS_NODE;
+
   const t0 = Date.now();
   const app = await electron.launch({
     executablePath: exePath,
     args: [`--user-data-dir=${userDataDir}`],
-    env: {
-      ...process.env,
-    },
+    env: launchEnv,
     timeout: 60000,
   });
 

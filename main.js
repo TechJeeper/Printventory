@@ -13101,6 +13101,24 @@ const clearAndSaveSlicersHandler = async (event, slicers) => {
     if (!tableExists) {
       ensureSlicersTableExists();
     }
+
+    const seenNames = new Set();
+    const seenPaths = new Set();
+    for (const slicer of slicersArray) {
+      if (!slicer || typeof slicer !== 'object' || !slicer.name || !slicer.path) continue;
+      const name = String(slicer.name).trim();
+      const slicerPath = String(slicer.path).trim();
+      const nameKey = name.toLowerCase();
+      if (seenNames.has(nameKey)) {
+        throw new Error(`"${name}" is already used. Each slicer needs its own name.`);
+      }
+      seenNames.add(nameKey);
+      const pathKey = slicerPath.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+      if (seenPaths.has(pathKey)) {
+        throw new Error(`"${slicerPath}" is already used. Each slicer needs its own path.`);
+      }
+      seenPaths.add(pathKey);
+    }
     
     // Use a transaction to ensure atomicity
     db.transaction(() => {
@@ -13123,6 +13141,13 @@ const clearAndSaveSlicersHandler = async (event, slicers) => {
   } catch (error) {
     console.error('Error clearing and saving slicers:', error);
     console.error('slicers parameter type:', typeof slicers, 'isArray:', Array.isArray(slicers), 'value:', slicers);
+    const message = String(error && error.message ? error.message : error);
+    if (/slicers\.name/i.test(message)) {
+      throw new Error('That slicer name is already used. Each slicer needs its own name.');
+    }
+    if (/slicers\.path/i.test(message)) {
+      throw new Error('That slicer path is already used. Each slicer needs its own path.');
+    }
     throw error;
   }
 };

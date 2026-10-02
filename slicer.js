@@ -383,6 +383,37 @@ async function autoDetectSlicers() {
   }
 }
 
+function duplicateSlicerMessage(slicers) {
+  const names = new Set();
+  const paths = new Set();
+  for (const slicer of slicers) {
+    const nameKey = slicer.name.toLowerCase();
+    if (names.has(nameKey)) {
+      return `"${slicer.name}" is already used. Each slicer needs its own name.`;
+    }
+    names.add(nameKey);
+    const pathKey = normalizeSlicerPathKey(slicer.path);
+    if (paths.has(pathKey)) {
+      return `"${slicer.path}" is already used. Each slicer needs its own path.`;
+    }
+    paths.add(pathKey);
+  }
+  return '';
+}
+
+function friendlySlicerSaveError(err) {
+  const message = String(err && err.message ? err.message : err);
+  const named = message.match(/"[^"]+" is already used\. Each slicer needs its own (?:name|path)\./);
+  if (named) return named[0];
+  if (/slicers\.name/i.test(message)) {
+    return 'That slicer name is already used. Each slicer needs its own name.';
+  }
+  if (/slicers\.path/i.test(message)) {
+    return 'That slicer path is already used. Each slicer needs its own path.';
+  }
+  return 'Error saving slicer settings: ' + message;
+}
+
 function saveSlicerSettings() {
   const entries = document.querySelectorAll('.slicer-entry');
   const slicers = Array.from(entries).map(entry => ({
@@ -396,6 +427,12 @@ function saveSlicerSettings() {
     alert('Please fill in both name and path for all slicers.');
     return;
   }
+
+  const duplicateMessage = duplicateSlicerMessage(slicers);
+  if (duplicateMessage) {
+    alert(duplicateMessage);
+    return;
+  }
   
   // Save all slicers - drop and recreate
   window.electron.clearAndSaveSlicers(slicers)
@@ -404,7 +441,7 @@ function saveSlicerSettings() {
       document.getElementById('slicer-dialog').close();
     })
     .catch(err => {
-      alert('Error saving slicer settings: ' + err.message);
+      alert(friendlySlicerSaveError(err));
       console.error('Error saving slicer settings:', err);
     });
 }
