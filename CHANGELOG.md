@@ -13,6 +13,7 @@ All notable changes contributed via pull request are documented in this file.
 - The path tree shows distinct folder, file, and zip icons
 - Server mode scan and database progress events reach the page
 - Stopping the Docker container exits cleanly
+- Switching between detailed and preview keeps the selected model selected and in view
 
 ## [2.2.13] - 2026-10-01
 

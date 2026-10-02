@@ -24235,6 +24235,18 @@ function renderVirtualGrid(models) {
   const previousVirtualView = container._virtualGridView;
   const gridViewForThisRender = currentGridView;
   const viewStructureChanged = !!(previousVirtualView && previousVirtualView !== gridViewForThisRender);
+  if (
+    window.gridRefresh &&
+    window.gridRefresh.shouldFocusSelectionOnViewSwitch(
+      previousVirtualView,
+      gridViewForThisRender,
+      selectedModels.size > 0
+    )
+  ) {
+    container._focusSelectedOnPaint = true;
+  } else if (viewStructureChanged) {
+    container._focusSelectedOnPaint = false;
+  }
 
   models = dedupeModelsForVirtualGrid(models || []);
   const expandSizeBefore = parentModelExpandedGroups.size + zipArchiveExpandedGroups.size + bundleExpandedGroups.size;
@@ -24554,7 +24566,7 @@ function renderVirtualGrid(models) {
       isRendering = true;
       
       try {
-        const scrollTop = container.scrollTop;
+        let scrollTop = container.scrollTop;
         const containerHeight = container.clientHeight;
 
         // Recalculate columns in case of resize
@@ -24633,6 +24645,19 @@ function renderVirtualGrid(models) {
         }
         container.currentDisplayRecords = currentDisplayRecords;
         spacer.style.height = layout.totalHeight + 'px';
+
+        if (container._focusSelectedOnPaint && window.gridRefresh?.scrollTopForSelectedLayout) {
+          container._focusSelectedOnPaint = false;
+          const target = window.gridRefresh.scrollTopForSelectedLayout(
+            layout,
+            containerHeight,
+            (filePath) => isInSelectedModels(filePath)
+          );
+          if (target != null) {
+            scrollTop = target;
+            if (container.scrollTop !== target) container.scrollTop = target;
+          }
+        }
 
         const groupH =
           currentGridView === 'preview' ? effectivePreviewTilePx : getParentModelGroupHeight(currentGridView);
