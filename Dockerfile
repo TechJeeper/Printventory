@@ -102,11 +102,11 @@ RUN rm -rf node_modules/better-sqlite3/build || true && \
     npx electron-builder install-app-deps
 
 # Copy application files
-COPY main.js bundle-keys.js zip-extract.js preload.js renderer.js notes-markdown.js index.html styles.css notes-markdown.css preview-wall.css thumbnail-progress.css thumbnail-progress.js ./
+COPY main.js db-repair.js bundle-keys.js zip-extract.js preload.js input-dialog-preload.js input-dialog.html renderer.js notes-markdown.js index.html styles.css notes-markdown.css preview-wall.css thumbnail-progress.css thumbnail-progress.js ./
 COPY printer-manager.js slicer-detect.js printer-management.js printer-management.css parts-stock.js parts-stock.css ./
 COPY manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css ./
 COPY server-bridge.js scan-worker.js scan-skip.js parse-worker.js ./
-COPY slicer-launch.js slicer-protocol.js library-context.js folder-tags.js stl-sanity.js ai-rate-limit.js support-logs.js ./
+COPY slicer-launch.js slicer-protocol.js library-context.js folder-tags.js stl-sanity.js ai-rate-limit.js support-logs.js support-webhook.json ./
 COPY helper/ ./helper/
 COPY preview-3mf-worker-node.js threemf-loader-simple.js threemf-mesh-extract.js ./
 COPY preview.js query-builder.js aitagging.js slicer.js guide.js search.js grid-refresh.js thumbnail-compress.js filament.js print-events.js print-history.js spoolman.js ./
@@ -118,7 +118,7 @@ COPY *.png *.jpg *.bmp ./
 COPY guide/ ./guide/
 
 # Fail the build if required app modules were omitted from COPY above
-RUN for f in bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js server-tls.js extension-inbox.js sidebar-layout.js folder-tree.js extract-lys-preview.js extract-f3d-preview.js extract-chitubox-preview.js extract-voxl-preview.js parse-lys-geometry.js step-assembly.js manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css notes-markdown.js notes-markdown.css printer-manager.js slicer-detect.js printer-management.js printer-management.css parts-stock.js parts-stock.css scan-skip.js slicer-launch.js slicer-protocol.js helper/printventory-helper.js helper/install-bundle.js library-context.js folder-tags.js grid-refresh.js stl-sanity.js ai-rate-limit.js support-logs.js; do \
+RUN for f in db-repair.js bundle-keys.js zip-extract.js thumbnail-compress.js threemf-mesh-extract.js print-events.js folder-tree-lib.js mcp-server.js server-tls.js extension-inbox.js sidebar-layout.js folder-tree.js extract-lys-preview.js extract-f3d-preview.js extract-chitubox-preview.js extract-voxl-preview.js parse-lys-geometry.js step-assembly.js manifest.webmanifest sw.js pwa.js mobile-ui.js mobile-ui.css notes-markdown.js notes-markdown.css printer-manager.js slicer-detect.js printer-management.js printer-management.css parts-stock.js parts-stock.css scan-skip.js slicer-launch.js slicer-protocol.js helper/printventory-helper.js helper/install-bundle.js library-context.js folder-tags.js grid-refresh.js stl-sanity.js ai-rate-limit.js support-logs.js support-webhook.json input-dialog-preload.js input-dialog.html; do \
       test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
     done
 

@@ -510,40 +510,92 @@ function getPrintEvents(db, modelId) {
     WHERE pe.model_id = ?
     ORDER BY pe.printed_at DESC, pe.id DESC
   `).all(id);
-  const filamentStmt = db.prepare(`
-    SELECT f.id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source
+  if (!events.length) return [];
+
+  const filamentsByEventId = new Map();
+  for (const row of db.prepare(`
+    SELECT pef.event_id, f.id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source
     FROM filaments f
     JOIN print_event_filaments pef ON pef.filament_id = f.id
-    WHERE pef.event_id = ?
+    JOIN print_events pe ON pe.id = pef.event_id
+    WHERE pe.model_id = ?
     ORDER BY f.vendor COLLATE NOCASE, f.name COLLATE NOCASE
-  `);
-  const partStmt = db.prepare(`
-    SELECT pep.part_id AS id,
+  `).all(id)) {
+    const filament = {
+      id: row.id,
+      name: row.name,
+      vendor: row.vendor,
+      material: row.material,
+      color_hex: row.color_hex,
+      diameter: row.diameter,
+      spoolman_id: row.spoolman_id,
+      source: row.source
+    };
+    const list = filamentsByEventId.get(row.event_id);
+    if (list) list.push(filament);
+    else filamentsByEventId.set(row.event_id, [filament]);
+  }
+
+  const partsByEventId = new Map();
+  for (const row of db.prepare(`
+    SELECT pep.event_id,
+           pep.part_id AS id,
            COALESCE(p.name, pep.name) AS name,
            p.category AS category,
            p.unit AS unit,
            pep.quantity AS quantity
     FROM print_event_parts pep
     LEFT JOIN parts p ON p.id = pep.part_id
-    WHERE pep.event_id = ?
+    JOIN print_events pe ON pe.id = pep.event_id
+    WHERE pe.model_id = ?
     ORDER BY name COLLATE NOCASE
-  `);
+  `).all(id)) {
+    const part = {
+      id: row.id,
+      name: row.name,
+      category: row.category,
+      unit: row.unit,
+      quantity: row.quantity
+    };
+    const list = partsByEventId.get(row.event_id);
+    if (list) list.push(part);
+    else partsByEventId.set(row.event_id, [part]);
+  }
+
   return events.map((event) => ({
     ...event,
-    filaments: filamentStmt.all(event.id),
-    parts: partStmt.all(event.id)
+    filaments: filamentsByEventId.get(event.id) || [],
+    parts: partsByEventId.get(event.id) || []
   }));
 }
 
-function deletePrintRowsForModel(db, modelId) {
-  const events = db.prepare('SELECT id FROM print_events WHERE model_id = ?').all(modelId);
-  const delFil = db.prepare('DELETE FROM print_event_filaments WHERE event_id = ?');
-  const delParts = db.prepare('DELETE FROM print_event_parts WHERE event_id = ?');
-  for (const event of events) {
-    delFil.run(event.id);
-    delParts.run(event.id);
+function deletePrintRowsForModels(db, modelIds) {
+  const ids = [];
+  const seen = new Set();
+  for (const raw of modelIds || []) {
+    const id = Number(raw);
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
   }
-  db.prepare('DELETE FROM print_events WHERE model_id = ?').run(modelId);
+  if (!ids.length) return;
+  const batchSize = 500;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    const placeholders = batch.map(() => '?').join(',');
+    const events = db.prepare(`SELECT id FROM print_events WHERE model_id IN (${placeholders})`).all(...batch);
+    for (let j = 0; j < events.length; j += batchSize) {
+      const eventBatch = events.slice(j, j + batchSize).map((event) => event.id);
+      const eventPlaceholders = eventBatch.map(() => '?').join(',');
+      db.prepare(`DELETE FROM print_event_filaments WHERE event_id IN (${eventPlaceholders})`).run(...eventBatch);
+      db.prepare(`DELETE FROM print_event_parts WHERE event_id IN (${eventPlaceholders})`).run(...eventBatch);
+    }
+    db.prepare(`DELETE FROM print_events WHERE model_id IN (${placeholders})`).run(...batch);
+  }
+}
+
+function deletePrintRowsForModel(db, modelId) {
+  deletePrintRowsForModels(db, [modelId]);
 }
 
 function deletePrintEventFilamentsForFilament(db, filamentId) {
@@ -629,6 +681,7 @@ module.exports = {
   setPrintStatusBatch,
   getPrintEvents,
   deletePrintRowsForModel,
+  deletePrintRowsForModels,
   deletePrintEventFilamentsForFilament,
   bundlePrintSummary
 };

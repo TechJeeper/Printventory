@@ -78,10 +78,36 @@ function buildDiscordMultipart({ payload, filename, fileBuffer, boundary }) {
   return Buffer.concat(chunks);
 }
 
-function resolveDiscordWebhookUrl(webhookUrl = process.env.DISCORD_WEBHOOK_URL) {
-  if (!webhookUrl) {
+function readBundledWebhookUrl() {
+  const candidates = [path.join(__dirname, 'support-webhook.json')];
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, 'support-webhook.json'));
+  }
+  for (const filePath of candidates) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const raw = fs.readFileSync(filePath, 'utf8').trim();
+      if (!raw) continue;
+      if (raw.startsWith('{')) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.url) return String(parsed.url).trim();
+      }
+      return raw;
+    } catch (_) {
+      /* try the next location */
+    }
+  }
+  return '';
+}
+
+function resolveDiscordWebhookUrl(webhookUrl) {
+  const configured = webhookUrl === undefined
+    ? (process.env.DISCORD_WEBHOOK_URL || readBundledWebhookUrl())
+    : webhookUrl;
+  if (!configured) {
     throw new Error('Discord support webhook is not configured.');
   }
+  webhookUrl = configured;
   let url;
   try {
     url = new URL(webhookUrl);

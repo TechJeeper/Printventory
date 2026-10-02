@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background-color: #2d2d2d;
+      color: #fff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+    .message {
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
+    input {
+      width: 100%;
+      padding: 8px;
+      background-color: #444;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 14px;
+      box-sizing: border-box;
+      margin-bottom: 15px;
+    }
+    input:focus {
+      outline: none;
+      border-color: #007bff;
+    }
+    input::placeholder {
+      color: #999;
+    }
+    .buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .cancel {
+      background-color: #555;
+      color: #fff;
+    }
+    .cancel:hover {
+      background-color: #666;
+    }
+    .ok {
+      background-color: #007bff;
+      color: #fff;
+    }
+    .ok:hover {
+      background-color: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <div class="message" id="message"></div>
+  <input type="text" id="input-field" autofocus>
+  <div class="buttons">
+    <button class="cancel" id="cancel-btn" type="button">Cancel</button>
+    <button class="ok" id="ok-btn" type="button">OK</button>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const input = document.getElementById('input-field');
+    document.getElementById('message').textContent = params.get('message') || 'Enter value:';
+    input.placeholder = params.get('placeholder') || '';
+    input.value = params.get('defaultValue') || '';
+
+    function submit(value) {
+      if (window.inputDialog && typeof window.inputDialog.submit === 'function') {
+        window.inputDialog.submit(value);
+      }
+    }
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        submit(input.value);
+      } else if (e.key === 'Escape') {
+        submit(null);
+      }
+    });
+
+    document.getElementById('ok-btn').addEventListener('click', () => submit(input.value));
+    document.getElementById('cancel-btn').addEventListener('click', () => submit(null));
+
+    input.focus();
+    input.select();
+  </script>
+</body>
+</html>

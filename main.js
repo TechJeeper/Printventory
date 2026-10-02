@@ -33,6 +33,7 @@ const {
 } = require('./scan-skip');
 const { clampFolderLevels } = require('./library-context');
 const { applyFolderTagsToModels: applyFolderTagsInDb, shouldAutoTagNewScanFiles } = require('./folder-tags');
+const { repairModelTags } = require('./db-repair');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -2002,20 +2003,7 @@ function pathExistsOnDisk(filePath) {
 }
 
 function removeModelsFromLibraryByPaths(filePaths) {
-  const removed = [];
-  const missing = [];
-  db.transaction(() => {
-    for (const filePath of filePaths) {
-      const model = db.prepare('SELECT id, filePath, fileName FROM models WHERE filePath = ?').get(filePath);
-      if (!model) {
-        missing.push(filePath);
-        continue;
-      }
-      deleteModelJunctionRows(model.id);
-      db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
-      removed.push({ id: model.id, filePath: model.filePath, fileName: model.fileName });
-    }
-  })();
+  const { removed, missing } = deleteModelsByFilePaths(filePaths);
   if (removed.length) {
     if (isServerMode && global.broadcastEvent) global.broadcastEvent('refresh-grid');
     else if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('refresh-grid');
@@ -2500,31 +2488,7 @@ function getMcpToolContext() {
       return { success: true, moved };
     },
     exportLibrary: async (args) => {
-      const models = db.prepare(`
-        SELECT id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, license, rating, favorite
-        FROM models
-      `).all();
-      const exportData = {
-        version: '1.0',
-        exportDate: new Date().toISOString(),
-        models: models.map((model) => ({
-          filePath: model.filePath,
-          fileName: model.fileName,
-          designer: model.designer,
-          source: model.source,
-          notes: model.notes,
-          printed: model.printed,
-          print_status: model.print_status || (model.printed ? 'printed' : 'unprinted'),
-          print_count: model.print_count || 0,
-          last_printed_at: model.last_printed_at || null,
-          parentModel: model.parentModel,
-          license: model.license,
-          rating: model.rating || 0,
-          favorite: model.favorite ? 1 : 0,
-          tags: getModelTagNamesForMcp(model.id),
-          filaments: getFilamentsForModel(model.id)
-        }))
-      };
+      const exportData = buildLibraryExportData();
       const destPath = String(args.destPath || '').trim() || path.join(
         path.dirname(getDatabasePath()),
         `printventory-library-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
@@ -3727,44 +3691,9 @@ function cleanupModelsOldReferences() {
   }
 }
 
-// Add this function to the initializeDatabase function
 function repairModelTagsTable() {
   try {
-    console.log('Checking and repairing model_tags table...');
-    
-    // Enable foreign keys
-    db.pragma('foreign_keys = ON');
-    
-    // Check for orphaned records in model_tags
-    const orphanedModelTags = db.prepare(`
-      SELECT mt.model_id, mt.tag_id 
-      FROM model_tags mt
-      LEFT JOIN models m ON mt.model_id = m.id
-      LEFT JOIN tags t ON mt.tag_id = t.id
-      WHERE m.id IS NULL OR t.id IS NULL
-    `).all();
-    
-    if (orphanedModelTags.length > 0) {
-      console.log(`Found ${orphanedModelTags.length} orphaned model_tags records. Cleaning up...`);
-      
-      // Delete orphaned records
-      db.prepare(`
-        DELETE FROM model_tags 
-        WHERE (model_id, tag_id) IN (
-          SELECT mt.model_id, mt.tag_id
-          FROM model_tags mt
-          LEFT JOIN models m ON mt.model_id = m.id
-          LEFT JOIN tags t ON mt.tag_id = t.id
-          WHERE m.id IS NULL OR t.id IS NULL
-        )
-      `).run();
-      
-      console.log('Orphaned records cleaned up');
-    } else {
-      console.log('No orphaned model_tags records found');
-    }
-    
-    return true;
+    return repairModelTags(db).ok;
   } catch (error) {
     console.error('Error repairing model_tags table:', error);
     return false;
@@ -4750,12 +4679,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeD
       if (isServerMode) {
         // Auto-remove in server mode - use transaction for better performance
         db.transaction(() => {
-          for (const file of filesToDelete) {
-            // First delete from model_tags (child table)
-            deleteModelJunctionRows(file.id);
-            // Then delete from models (parent table)
-            db.prepare('DELETE FROM models WHERE id = ?').run(file.id);
-          }
+          deleteModelsByIds(filesToDelete.map((file) => file.id));
         })();
         console.log(`Server mode: Removed ${filesToDelete.length} missing or skipped files from library`);
         return filesToDelete.length; // Return early in server mode to avoid duplicate deletion
@@ -4791,17 +4715,9 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeD
     }
 
     // Proceed with deletion if user confirmed or if there were no files to delete
-    let removedCount = 0;
-    db.transaction(() => {
-      for (const fileInfo of filesToDelete) {
-        // First delete from model_tags (child table)
-        deleteModelJunctionRows(fileInfo.id);
-        
-        // Then delete from models (parent table)
-        db.prepare('DELETE FROM models WHERE id = ?').run(fileInfo.id);
-        
-        removedCount++;
-      }
+    const removedCount = db.transaction(() => {
+      deleteModelsByIds(filesToDelete.map((fileInfo) => fileInfo.id));
+      return filesToDelete.length;
     })();
 
     if (removedCount > 0) {
@@ -6226,6 +6142,52 @@ function deleteModelJunctionRows(modelId) {
   printEvents.deletePrintRowsForModel(db, modelId);
 }
 
+function deleteModelsByIds(modelIds) {
+  const ids = [];
+  const seen = new Set();
+  for (const raw of modelIds || []) {
+    const id = Number(raw);
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  if (!ids.length) return;
+  const batchSize = 500;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    const placeholders = batch.map(() => '?').join(',');
+    printEvents.deletePrintRowsForModels(db, batch);
+    db.prepare(`DELETE FROM model_tags WHERE model_id IN (${placeholders})`).run(...batch);
+    db.prepare(`DELETE FROM model_filaments WHERE model_id IN (${placeholders})`).run(...batch);
+    db.prepare(`DELETE FROM models WHERE id IN (${placeholders})`).run(...batch);
+  }
+}
+
+function deleteModelsByFilePaths(filePaths) {
+  const paths = Array.isArray(filePaths) ? filePaths.filter((p) => typeof p === 'string' && p) : [];
+  const removed = [];
+  const found = new Set();
+  if (!paths.length) return { removed, missing: [] };
+  db.transaction(() => {
+    const batchSize = 500;
+    const ids = [];
+    for (let i = 0; i < paths.length; i += batchSize) {
+      const batch = paths.slice(i, i + batchSize);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = db.prepare(
+        `SELECT id, filePath, fileName FROM models WHERE filePath IN (${placeholders})`
+      ).all(...batch);
+      for (const row of rows) {
+        found.add(row.filePath);
+        ids.push(row.id);
+        removed.push({ id: row.id, filePath: row.filePath, fileName: row.fileName });
+      }
+    }
+    deleteModelsByIds(ids);
+  })();
+  return { removed, missing: paths.filter((filePath) => !found.has(filePath)) };
+}
+
 function upsertImportedFilament(filament) {
   if (!filament || typeof filament !== 'object') return null;
   const name = String(filament.name || '').trim();
@@ -6670,11 +6632,7 @@ ipcMain.handle('remove-models-by-file-type-ids', async (event, catalogIds) => {
     const ids = modelRows.map(r => r.id);
     if (ids.length === 0) return { deleted: 0 };
     const deleted = db.transaction(() => {
-      for (const id of ids) {
-        db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(id);
-        db.prepare('DELETE FROM model_filaments WHERE model_id = ?').run(id);
-        db.prepare('DELETE FROM models WHERE id = ?').run(id);
-      }
+      deleteModelsByIds(ids);
       return ids.length;
     })();
     return { deleted };
@@ -7146,154 +7104,50 @@ ipcMain.handle('show-input-dialog', async (event, options) => {
     modal: true,
     parent: senderWindow,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'input-dialog-preload.js'),
+      webSecurity: true
     },
     title: title || 'Input',
     show: false,
     backgroundColor: '#2d2d2d'
   });
 
-  // Escape HTML to prevent XSS
-  const escapeHtml = (text) => {
-    return String(text || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  };
-
-  // Create HTML for the input dialog
-  const safeMessage = escapeHtml(message || 'Enter value:');
-  const safePlaceholder = escapeHtml(placeholder || '');
-  const safeDefaultValue = escapeHtml(defaultValue || '');
-  
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-          background-color: #2d2d2d;
-          color: #fff;
-          margin: 0;
-          padding: 20px;
-          display: flex;
-          flex-direction: column;
-          height: 100vh;
-          box-sizing: border-box;
-        }
-        .message {
-          margin-bottom: 15px;
-          font-size: 14px;
-        }
-        input {
-          width: 100%;
-          padding: 8px;
-          background-color: #444;
-          border: 1px solid #555;
-          border-radius: 4px;
-          color: #fff;
-          font-size: 14px;
-          box-sizing: border-box;
-          margin-bottom: 15px;
-        }
-        input:focus {
-          outline: none;
-          border-color: #007bff;
-        }
-        input::placeholder {
-          color: #999;
-        }
-        .buttons {
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-        }
-        button {
-          padding: 8px 16px;
-          border: none;
-          border-radius: 4px;
-          cursor: pointer;
-          font-size: 14px;
-          font-weight: 500;
-        }
-        .cancel {
-          background-color: #555;
-          color: #fff;
-        }
-        .cancel:hover {
-          background-color: #666;
-        }
-        .ok {
-          background-color: #007bff;
-          color: #fff;
-        }
-        .ok:hover {
-          background-color: #0056b3;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="message">${safeMessage}</div>
-      <input type="text" id="input-field" placeholder="${safePlaceholder}" value="${safeDefaultValue}" autofocus>
-      <div class="buttons">
-        <button class="cancel" id="cancel-btn">Cancel</button>
-        <button class="ok" id="ok-btn">OK</button>
-      </div>
-      <script>
-        const { ipcRenderer } = require('electron');
-        const input = document.getElementById('input-field');
-        const okBtn = document.getElementById('ok-btn');
-        const cancelBtn = document.getElementById('cancel-btn');
-        
-        input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') {
-            okBtn.click();
-          } else if (e.key === 'Escape') {
-            cancelBtn.click();
-          }
-        });
-        
-        okBtn.addEventListener('click', () => {
-          ipcRenderer.send('input-dialog-response', input.value);
-        });
-        
-        cancelBtn.addEventListener('click', () => {
-          ipcRenderer.send('input-dialog-response', null);
-        });
-        
-        input.focus();
-        input.select();
-      </script>
-    </body>
-    </html>
-  `;
-
-  inputWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-  inputWindow.show();
+  await inputWindow.loadFile(path.join(__dirname, 'input-dialog.html'), {
+    query: {
+      message: message || 'Enter value:',
+      placeholder: placeholder || '',
+      defaultValue: defaultValue || ''
+    }
+  });
+  if (!inputWindow.isDestroyed()) {
+    inputWindow.show();
+  }
 
   return new Promise((resolve) => {
-    // Handle response from the input dialog
-    const responseHandler = (event, value) => {
-      if (event.sender === inputWindow.webContents) {
-        ipcMain.removeListener('input-dialog-response', responseHandler);
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.removeListener('input-dialog-response', responseHandler);
+      resolve(value || null);
+      if (!inputWindow.isDestroyed()) {
         inputWindow.close();
-        resolve(value || null);
       }
     };
-    
-    ipcMain.on('input-dialog-response', responseHandler);
-    
-    // Handle window close (user clicked X)
-    inputWindow.on('closed', () => {
-      ipcMain.removeListener('input-dialog-response', responseHandler);
-      if (!inputWindow.isDestroyed()) {
-        resolve(null);
+
+    const responseHandler = (responseEvent, value) => {
+      if (responseEvent.sender === inputWindow.webContents) {
+        finish(value);
       }
+    };
+
+    ipcMain.on('input-dialog-response', responseHandler);
+
+    inputWindow.on('closed', () => {
+      finish(null);
     });
   });
 });
@@ -7456,58 +7310,245 @@ ipcMain.handle('restore-database', async (event, payload = null) => {
 });
 
 // Export library handler
-ipcMain.handle('export-library', async () => {
-  const buildExportData = () => {
-    const models = db.prepare(`
-      SELECT id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
-      FROM models
-    `).all();
-    const modelsWithTags = models.map(model => {
-      const tags = db.prepare(`
-        SELECT t.name 
-        FROM tags t 
-        JOIN model_tags mt ON mt.tag_id = t.id 
-        WHERE mt.model_id = ?
-      `).all(model.id).map(t => t.name);
-      const filaments = getFilamentsForModel(model.id).map((f) => ({
-        name: f.name,
-        vendor: f.vendor,
-        material: f.material,
-        color_hex: f.color_hex,
-        diameter: f.diameter,
-        spoolman_id: f.spoolman_id,
-        source: f.source
-      }));
-      
-      return {
-        filePath: model.filePath,
-        fileName: model.fileName,
-        designer: model.designer,
-        source: model.source,
-        notes: model.notes,
-        printed: model.printed,
-        print_status: model.print_status || (model.printed ? 'printed' : 'unprinted'),
-        print_count: model.print_count || 0,
-        last_printed_at: model.last_printed_at || null,
-        parentModel: model.parentModel,
-        license: model.license,
-        rating: model.rating || 0,
-        favorite: model.favorite ? 1 : 0,
-        tags: tags || [],
-        filaments: filaments || []
-      };
-    });
+function libraryTableExists(name) {
+  try {
+    return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name));
+  } catch (_) {
+    return false;
+  }
+}
 
-    return {
-      version: '1.0',
-      exportDate: new Date().toISOString(),
-      models: modelsWithTags
-    };
+function libraryColumnExists(table, column) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((col) => col.name === column);
+  } catch (_) {
+    return false;
+  }
+}
+
+function pushGrouped(map, key, value) {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
+function buildLibraryExportData() {
+  const models = db.prepare(`
+    SELECT id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite
+    FROM models
+  `).all();
+
+  const tagsByModelId = new Map();
+  if (libraryTableExists('tags') && libraryTableExists('model_tags')) {
+    for (const row of db.prepare(`
+      SELECT mt.model_id, t.name
+      FROM tags t
+      JOIN model_tags mt ON mt.tag_id = t.id
+    `).all()) {
+      pushGrouped(tagsByModelId, row.model_id, row.name);
+    }
+  }
+
+  const filamentsByModelId = new Map();
+  if (libraryTableExists('filaments') && libraryTableExists('model_filaments')) {
+    for (const row of db.prepare(`
+      SELECT mf.model_id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source
+      FROM filaments f
+      JOIN model_filaments mf ON mf.filament_id = f.id
+      ORDER BY f.vendor COLLATE NOCASE, f.name COLLATE NOCASE
+    `).all()) {
+      pushGrouped(filamentsByModelId, row.model_id, {
+        name: row.name,
+        vendor: row.vendor,
+        material: row.material,
+        color_hex: row.color_hex,
+        diameter: row.diameter,
+        spoolman_id: row.spoolman_id,
+        source: row.source
+      });
+    }
+  }
+
+  const filamentsByEventId = new Map();
+  if (libraryTableExists('print_events') && libraryTableExists('print_event_filaments') && libraryTableExists('filaments')) {
+    for (const row of db.prepare(`
+      SELECT pef.event_id, f.name, f.vendor, f.material, f.color_hex, f.diameter, f.spoolman_id, f.source
+      FROM filaments f
+      JOIN print_event_filaments pef ON pef.filament_id = f.id
+      ORDER BY f.vendor COLLATE NOCASE, f.name COLLATE NOCASE
+    `).all()) {
+      pushGrouped(filamentsByEventId, row.event_id, {
+        name: row.name,
+        vendor: row.vendor,
+        material: row.material,
+        color_hex: row.color_hex,
+        diameter: row.diameter,
+        spoolman_id: row.spoolman_id,
+        source: row.source
+      });
+    }
+  }
+
+  const partsByEventId = new Map();
+  if (libraryTableExists('print_events') && libraryTableExists('print_event_parts')) {
+    const hasPartsCatalog = libraryTableExists('parts');
+    for (const row of db.prepare(`
+      SELECT pep.event_id,
+             ${hasPartsCatalog ? 'COALESCE(p.name, pep.name)' : 'pep.name'} AS name,
+             ${hasPartsCatalog ? 'p.category' : 'NULL'} AS category,
+             ${hasPartsCatalog ? 'p.unit' : 'NULL'} AS unit,
+             pep.quantity AS quantity
+      FROM print_event_parts pep
+      ${hasPartsCatalog ? 'LEFT JOIN parts p ON p.id = pep.part_id' : ''}
+      ORDER BY name COLLATE NOCASE
+    `).all()) {
+      pushGrouped(partsByEventId, row.event_id, {
+        name: row.name,
+        category: row.category,
+        unit: row.unit,
+        quantity: row.quantity
+      });
+    }
+  }
+
+  const eventsByModelId = new Map();
+  if (libraryTableExists('print_events')) {
+    const hasPrinters = libraryTableExists('printers');
+    const hasPrinterType = hasPrinters && libraryColumnExists('printers', 'printer_type');
+    const hasPrinterId = libraryColumnExists('print_events', 'printer_id');
+    const printerSelect = hasPrinters && hasPrinterId
+      ? `, pr.nickname AS printer_nickname, pr.manufacturer AS printer_manufacturer, pr.model AS printer_model, ${hasPrinterType ? 'pr.printer_type' : 'NULL'} AS printer_type`
+      : ', NULL AS printer_nickname, NULL AS printer_manufacturer, NULL AS printer_model, NULL AS printer_type';
+    const printerJoin = hasPrinters && hasPrinterId
+      ? 'LEFT JOIN printers pr ON pr.id = pe.printer_id'
+      : '';
+    for (const row of db.prepare(`
+      SELECT pe.id, pe.model_id, pe.printed_at, pe.outcome, pe.quantity, pe.notes, pe.created_at
+             ${printerSelect}
+      FROM print_events pe
+      ${printerJoin}
+      ORDER BY pe.printed_at DESC, pe.id DESC
+    `).all()) {
+      pushGrouped(eventsByModelId, row.model_id, {
+        printed_at: row.printed_at,
+        outcome: row.outcome,
+        quantity: row.quantity,
+        notes: row.notes,
+        created_at: row.created_at,
+        printer_nickname: row.printer_nickname || null,
+        printer_manufacturer: row.printer_manufacturer || null,
+        printer_model: row.printer_model || null,
+        printer_type: row.printer_type || null,
+        filaments: filamentsByEventId.get(row.id) || [],
+        parts: partsByEventId.get(row.id) || []
+      });
+    }
+  }
+
+  const logsByPrinterId = new Map();
+  if (libraryTableExists('printer_maintenance_logs')) {
+    for (const row of db.prepare(`
+      SELECT printer_id, maintenance_type, title, description, performed_at, created_at
+      FROM printer_maintenance_logs
+      ORDER BY performed_at DESC, id DESC
+    `).all()) {
+      pushGrouped(logsByPrinterId, row.printer_id, {
+        maintenance_type: row.maintenance_type,
+        title: row.title,
+        description: row.description,
+        performed_at: row.performed_at,
+        created_at: row.created_at
+      });
+    }
+  }
+
+  const remindersByPrinterId = new Map();
+  if (libraryTableExists('printer_maintenance_reminders')) {
+    const hasLastCompleted = libraryColumnExists('printer_maintenance_reminders', 'last_completed_at');
+    for (const row of db.prepare(`
+      SELECT printer_id, title, maintenance_type, due_date, interval_days, notes, status,
+             ${hasLastCompleted ? 'last_completed_at' : 'NULL AS last_completed_at'}, created_at
+      FROM printer_maintenance_reminders
+      ORDER BY due_date ASC, id ASC
+    `).all()) {
+      pushGrouped(remindersByPrinterId, row.printer_id, {
+        title: row.title,
+        maintenance_type: row.maintenance_type,
+        due_date: row.due_date,
+        interval_days: row.interval_days,
+        notes: row.notes,
+        status: row.status,
+        last_completed_at: row.last_completed_at,
+        created_at: row.created_at
+      });
+    }
+  }
+
+  const printers = libraryTableExists('printers')
+    ? db.prepare(`
+        SELECT id, nickname, manufacturer, model, ${libraryColumnExists('printers', 'printer_type') ? 'printer_type' : 'NULL AS printer_type'}, firmware_type, is_klipper, web_url, notes, created_at, updated_at
+        FROM printers
+        ORDER BY nickname COLLATE NOCASE, id ASC
+      `).all().map((row) => ({
+        nickname: row.nickname,
+        manufacturer: row.manufacturer,
+        model: row.model,
+        printer_type: row.printer_type || null,
+        firmware_type: row.firmware_type,
+        is_klipper: row.is_klipper ? 1 : 0,
+        web_url: row.web_url,
+        notes: row.notes,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        maintenanceLogs: logsByPrinterId.get(row.id) || [],
+        maintenanceReminders: remindersByPrinterId.get(row.id) || []
+      }))
+    : [];
+
+  const parts = libraryTableExists('parts')
+    ? db.prepare(`
+        SELECT name, category, quantity, unit, notes, low_stock
+        FROM parts
+        ORDER BY name COLLATE NOCASE, id ASC
+      `).all()
+    : [];
+
+  const slicers = libraryTableExists('slicers')
+    ? db.prepare('SELECT name, path FROM slicers ORDER BY name COLLATE NOCASE, id ASC').all()
+    : [];
+
+  return {
+    version: '1.0',
+    exportDate: new Date().toISOString(),
+    printers,
+    parts,
+    slicers,
+    models: models.map((model) => ({
+      filePath: model.filePath,
+      fileName: model.fileName,
+      designer: model.designer,
+      source: model.source,
+      notes: model.notes,
+      printed: model.printed,
+      print_status: model.print_status || (model.printed ? 'printed' : 'unprinted'),
+      print_count: model.print_count || 0,
+      last_printed_at: model.last_printed_at || null,
+      parentModel: model.parentModel,
+      license: model.license,
+      rating: model.rating || 0,
+      favorite: model.favorite ? 1 : 0,
+      tags: tagsByModelId.get(model.id) || [],
+      filaments: filamentsByModelId.get(model.id) || [],
+      printEvents: eventsByModelId.get(model.id) || []
+    }))
   };
+}
+
+ipcMain.handle('export-library', async () => {
 
   if (isServerMode) {
     try {
-      const exportData = buildExportData();
+      const exportData = buildLibraryExportData();
       const exportDir = path.dirname(getDatabasePath());
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const exportPath = path.join(exportDir, `printventory-library-${timestamp}.json`);
@@ -7529,7 +7570,7 @@ ipcMain.handle('export-library', async () => {
 
   if (!result.canceled && result.filePath) {
     try {
-      const exportData = buildExportData();
+      const exportData = buildLibraryExportData();
       await fs.promises.writeFile(result.filePath, JSON.stringify(exportData, null, 2), 'utf8');
       return true;
     } catch (error) {
@@ -9579,15 +9620,7 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         }
         if (confirmed) {
           try {
-            db.transaction(() => {
-              filePaths.forEach(fp => {
-                const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(fp);
-                if (model) {
-                  deleteModelJunctionRows(model.id);
-                  db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
-                }
-              });
-            })();
+            deleteModelsByFilePaths(filePaths);
             if (isServerMode && global.broadcastEvent) {
               global.broadcastEvent('refresh-grid');
             } else {
@@ -12977,8 +13010,10 @@ function createViewerWindow(filePath) {
     width: 800,
     height: 600,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true
     }
   });
 
@@ -13929,21 +13964,8 @@ async function saveModel(modelData) {
           `).all(modelId).map(row => row.name);
           
           // First, remove all existing tags for this model
-          try {
-            const deleteResult = db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
-            console.log(`Deleted ${deleteResult.changes} existing tag relationships`);
-          } catch (deleteError) {
-            // If delete fails due to models_old, clean up and try again
-            if (deleteError.message && deleteError.message.includes('models_old')) {
-              console.log('Delete failed due to models_old reference. Cleaning up...');
-              cleanupModelsOldReferences();
-              // Try delete again
-              const deleteResult = db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
-              console.log(`Deleted ${deleteResult.changes} existing tag relationships after cleanup`);
-            } else {
-              throw deleteError; // Re-throw if it's a different error
-            }
-          }
+          const deleteResult = db.prepare('DELETE FROM model_tags WHERE model_id = ?').run(modelId);
+          console.log(`Deleted ${deleteResult.changes} existing tag relationships`);
 
           // Process each tag individually (only if there are tags to add)
           if (tags.length > 0) {
@@ -13980,11 +14002,12 @@ async function saveModel(modelData) {
       } catch (tagError) {
         console.error('Error updating tags:', tagError);
         
-        // If the error is about models_old, try to clean it up and retry
+        // models_old means model_tags still references the renamed parent table.
+        // Repair outside this failed transaction, then retry the tag write.
         if (tagError.message && tagError.message.includes('models_old')) {
-          console.log('Detected models_old error. Attempting to clean up and retry...');
+          console.log('Detected models_old error. Repairing model_tags and retrying...');
           try {
-            cleanupModelsOldReferences();
+            repairModelTagsTable();
             // Retry the tag save operation in a new transaction
             db.transaction(() => {
               // Delete existing tags first
@@ -14008,7 +14031,7 @@ async function saveModel(modelData) {
                 }
               }
             })();
-            console.log('Successfully retried tag save after cleanup');
+            console.log('Successfully retried tag save after repairing model_tags');
           } catch (cleanupError) {
             console.error('Error during cleanup and retry:', cleanupError);
             // Don't throw - we want to preserve the model save even if tags fail
@@ -14089,43 +14112,7 @@ function verifyDatabaseIntegrity() {
     const integrityCheck = db.pragma('integrity_check');
     console.log(`Integrity check result: ${JSON.stringify(integrityCheck)}`);
     
-    // Check for orphaned records in model_tags
-    const orphanedModelTags = db.prepare(`
-      SELECT mt.model_id, mt.tag_id 
-      FROM model_tags mt
-      LEFT JOIN models m ON mt.model_id = m.id
-      LEFT JOIN tags t ON mt.tag_id = t.id
-      WHERE m.id IS NULL OR t.id IS NULL
-    `).all();
-    
-    if (orphanedModelTags.length > 0) {
-      console.error(`Found ${orphanedModelTags.length} orphaned model_tags records:`, orphanedModelTags);
-      
-      // Clean up orphaned records
-      db.prepare(`
-        DELETE FROM model_tags 
-        WHERE model_id IN (
-          SELECT mt.model_id 
-          FROM model_tags mt
-          LEFT JOIN models m ON mt.model_id = m.id
-          WHERE m.id IS NULL
-        )
-      `).run();
-      
-      db.prepare(`
-        DELETE FROM model_tags 
-        WHERE tag_id IN (
-          SELECT mt.tag_id 
-          FROM model_tags mt
-          LEFT JOIN tags t ON mt.tag_id = t.id
-          WHERE t.id IS NULL
-        )
-      `).run();
-      
-      console.log('Cleaned up orphaned model_tags records');
-    } else {
-      console.log('No orphaned model_tags records found');
-    }
+    repairModelTagsTable();
     
     return true;
   } catch (error) {

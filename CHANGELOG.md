@@ -4,6 +4,16 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.15] - 2026-10-02
+
+- Startup repairs tag links that still point at a removed models table, and retries a tag save that failed for that reason
+- Tag names are inserted as text, so a tag cannot inject markup into the page
+- Tag rename and other text prompts open in a sandboxed window
+- The details name no longer snaps back to the previous model when the filter or selection changes
+- The grid keeps the selected model selected when it repaints
+- Exporting the library and loading print history read each related table once
+- Send Logs in installed builds reads a bundled support webhook. The webhook URL stays out of the repository
+
 ## [2.2.14] - 2026-10-02
 
 - Tag from Folder can run on files a scan newly adds, using the folder levels from AI Configuration, without calling AI

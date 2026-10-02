@@ -6,6 +6,13 @@ function parseMaxFileSizeMBInput(raw) {
   if (Number.isNaN(n) || n < 1) return null;
   return n;
 }
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 console.log('[Renderer] script loaded');
 window.addEventListener('DOMContentLoaded', () => {
   console.log('[Renderer] DOMContentLoaded fired');
@@ -1135,6 +1142,7 @@ function rebuildVirtualGridFromCache(container, cachedModels) {
     closeListViewColumnsPopover();
   }
   if (container) {
+    clearFileItemPathIndex();
     container.innerHTML = '';
     container.currentModels = null;
     container.currentDisplayRecords = null;
@@ -2278,6 +2286,86 @@ function normalizePathForComparison(path) {
   return normalized;
 }
 
+// Visible tiles only. Keyed by normalized path so updates do not scan every .file-item
+// when the raw data-filepath string does not match the lookup path.
+const fileItemByNormalizedPath = new Map();
+
+function registerFileItemElement(element, filePath) {
+  if (!element || element.nodeType !== 1 || !element.classList?.contains('file-item')) return;
+  const raw = filePath || element.getAttribute('data-filepath') || element.dataset?.filepath || '';
+  const key = normalizePathForComparison(raw);
+  if (!key) return;
+  const prevKey = element._normalizedFilePathKey;
+  if (prevKey && prevKey !== key && fileItemByNormalizedPath.get(prevKey) === element) {
+    fileItemByNormalizedPath.delete(prevKey);
+  }
+  const occupant = fileItemByNormalizedPath.get(key);
+  if (occupant && occupant !== element && occupant._normalizedFilePathKey === key) {
+    delete occupant._normalizedFilePathKey;
+  }
+  element._normalizedFilePathKey = key;
+  fileItemByNormalizedPath.set(key, element);
+}
+
+function unregisterFileItemElement(element) {
+  if (!element || element.nodeType !== 1) return;
+  const key = element._normalizedFilePathKey
+    || normalizePathForComparison(element.getAttribute?.('data-filepath') || element.dataset?.filepath || '');
+  if (key && fileItemByNormalizedPath.get(key) === element) {
+    fileItemByNormalizedPath.delete(key);
+  }
+  if (element._normalizedFilePathKey) delete element._normalizedFilePathKey;
+}
+
+function clearFileItemPathIndex() {
+  fileItemByNormalizedPath.clear();
+}
+
+function findFileItemElement(filePath) {
+  const key = normalizePathForComparison(filePath);
+  if (!key) return null;
+  const cached = fileItemByNormalizedPath.get(key);
+  if (cached?.isConnected) {
+    const currentKey = normalizePathForComparison(
+      cached.getAttribute('data-filepath') || cached.dataset?.filepath || ''
+    );
+    if (currentKey === key) return cached;
+  }
+  if (cached) fileItemByNormalizedPath.delete(key);
+
+  try {
+    const exact = document.querySelector(`.file-item[data-filepath="${CSS.escape(filePath)}"]`);
+    if (exact) {
+      registerFileItemElement(exact, filePath);
+      return exact;
+    }
+  } catch (e) {
+    /* invalid path for selector */
+  }
+  return null;
+}
+
+function bindFileItemPathIndex(virtualContent) {
+  if (!virtualContent || virtualContent._fileItemPathIndexBound) return;
+  virtualContent._fileItemPathIndexBound = true;
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.removedNodes) {
+        if (node.nodeType === 1 && node.classList?.contains('file-item')) {
+          unregisterFileItemElement(node);
+        }
+      }
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1 && node.classList?.contains('file-item')) {
+          registerFileItemElement(node);
+        }
+      }
+    }
+  });
+  observer.observe(virtualContent, { childList: true });
+  virtualContent.querySelectorAll(':scope > .file-item').forEach((el) => registerFileItemElement(el));
+}
+
 /**
  * Full parent directory path for a model file (or zip file's folder for zip entries).
  * Used for filtering and tooltips — always drive/UNC aware.
@@ -2656,21 +2744,7 @@ async function updateModelElement(filePath) {
     }
 
     const normalizedTargetPath = normalizePathForComparison(filePath);
-    let existingElement = null;
-    try {
-      existingElement = document.querySelector(`.file-item[data-filepath="${CSS.escape(filePath)}"]`);
-    } catch (e) {
-      /* invalid path for selector */
-    }
-    if (!existingElement) {
-      for (const item of document.querySelectorAll('.file-item')) {
-        const itemPath = item.getAttribute('data-filepath') || item.dataset.filepath;
-        if (normalizePathForComparison(itemPath) === normalizedTargetPath) {
-          existingElement = item;
-          break;
-        }
-      }
-    }
+    const existingElement = findVisibleFileItem(filePath, normalizedTargetPath);
     
     if (!existingElement) {
       // Virtual grid only mounts visible rows — bulk edits often have no DOM node; still sync in-memory list.
@@ -2715,6 +2789,7 @@ async function updateModelElement(filePath) {
       }
       
       // Remove the element from DOM
+      unregisterFileItemElement(existingElement);
       existingElement.remove();
       
       // Trigger virtual grid refresh to reflow remaining items
@@ -3257,6 +3332,28 @@ async function updateModelElement(filePath) {
 // Track the current model being displayed to prevent race conditions
 let currentModelDetailsPath = null;
 let currentModelDetailsAbort = false;
+// Monotonic token for the deferred model-name write. Abort is not enough:
+// showModelDetails() clears the flag synchronously on the next selection, so a
+// setTimeout(0) from the previous load can still commit a stale name after
+// filter clear or a new selection (layout runs in that gap).
+let modelDetailsEpoch = 0;
+
+function bumpModelDetailsEpoch() {
+  modelDetailsEpoch += 1;
+  return modelDetailsEpoch;
+}
+
+// Apply after the current layout flush. Drop the write if a newer load, filter
+// clear, or deselect has already moved the epoch.
+function scheduleModelNameCommit(value, epoch) {
+  const committed = value == null ? '' : String(value);
+  setTimeout(() => {
+    if (epoch !== modelDetailsEpoch) return;
+    const input = document.getElementById('model-name');
+    if (!input) return;
+    input.value = committed;
+  }, 0);
+}
 
 // Parse file path into hierarchical structure
 function parsePath(filePath) {
@@ -3469,12 +3566,18 @@ function renderPathTree(filePath, containerId) {
 
 async function showModelDetails(filePath) {
   try {
-    // Cancel any previous operation
+    // Cancel any previous operation. Epoch retires deferred name writes from
+    // the previous load before abort is cleared below.
+    const detailsEpoch = bumpModelDetailsEpoch();
     currentModelDetailsAbort = true;
     
     // Set the new current path
     currentModelDetailsPath = filePath;
     currentModelDetailsAbort = false;
+
+    const modelNameAtStart = document.getElementById('model-name');
+    if (modelNameAtStart) modelNameAtStart.value = '';
+    scheduleModelNameCommit('', detailsEpoch);
     
     debugLog('Showing model details for:', filePath);
     const model = await window.electron.getModel(filePath);
@@ -3687,16 +3790,14 @@ async function showModelDetails(filePath) {
       pathTreeContainer.setAttribute('data-file-path', storedValues['model-path']);
     }
     
-    // Clear and set model name to prevent stuck values
+    // Clear and set model name to prevent stuck values.
+    // Defer the commit so layout settles. It must not run after filter clear
+    // or a new selection — that timer was writing the previous model's name
+    // back into the field (stale TIE name).
     const modelNameInput = document.getElementById('model-name');
     if (modelNameInput) {
       modelNameInput.value = '';
-      // Defer set so layout settles — must not run after filter clear / new selection (stale TIE name bug)
-      const nameForThisLoad = storedValues['model-name'];
-      setTimeout(() => {
-        if (currentModelDetailsAbort || currentModelDetailsPath !== filePath) return;
-        modelNameInput.value = nameForThisLoad;
-      }, 0);
+      scheduleModelNameCommit(storedValues['model-name'], detailsEpoch);
     }
     
     // For dropdowns, ensure the option exists before setting value
@@ -5066,6 +5167,27 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
   }
 }
 
+/** Visible grid card for a model path. Map lookup; exact selector only if the tile was not indexed. */
+function findVisibleFileItem(filePath) {
+  return findFileItemElement(filePath);
+}
+
+function replaceVisibleGridModel(filePath, normalizedPath, updatedModel) {
+  const container = document.querySelector('.file-grid');
+  const fileItem = findVisibleFileItem(filePath, normalizedPath);
+  if (!fileItem) return false;
+  unregisterFileItemElement(fileItem);
+  if (container?.currentModels) {
+    const modelIndex = container.currentModels.findIndex(
+      (m) => normalizePathForComparison(m.filePath) === normalizedPath
+    );
+    if (modelIndex >= 0) container.currentModels[modelIndex] = { ...updatedModel };
+  }
+  fileItem.remove();
+  if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+  return true;
+}
+
 /** After reordering the default thumbnail, sync the virtual grid cell (same approach as thumbnail-deleted IPC). */
 async function refreshGridModelAfterManageThumbnailsActiveChange(filePath) {
   await new Promise((r) => setTimeout(r, 200));
@@ -5086,37 +5208,11 @@ async function refreshGridModelAfterManageThumbnailsActiveChange(filePath) {
       window.dateAddedFilter = preservedDateAddedFilter;
       window._lastDateAddedFilter = preservedDateAddedFilter;
 
-      for (const fileItem of document.querySelectorAll('.file-item')) {
-        const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
-        if (normalizePathForComparison(itemPath) !== normalizedPath) continue;
-        const container = document.querySelector('.file-grid');
-        if (container?.currentModels) {
-          const modelIndex = container.currentModels.findIndex(
-            (m) => normalizePathForComparison(m.filePath) === normalizedPath
-          );
-          if (modelIndex >= 0) container.currentModels[modelIndex] = { ...updatedModel };
-        }
-        fileItem.remove();
-        if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
-        return;
-      }
+      replaceVisibleGridModel(filePath, normalizedPath, updatedModel);
       return;
     }
 
-    const container = document.querySelector('.file-grid');
-    for (const fileItem of document.querySelectorAll('.file-item')) {
-      const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
-      if (normalizePathForComparison(itemPath) !== normalizedPath) continue;
-      if (container?.currentModels) {
-        const modelIndex = container.currentModels.findIndex(
-          (m) => normalizePathForComparison(m.filePath) === normalizedPath
-        );
-        if (modelIndex >= 0) container.currentModels[modelIndex] = { ...updatedModel };
-      }
-      fileItem.remove();
-      if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
-      return;
-    }
+    if (replaceVisibleGridModel(filePath, normalizedPath, updatedModel)) return;
 
     if (typeof window.performCombinedSearch === 'function') {
       await window.performCombinedSearch();
@@ -7185,7 +7281,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         tag.setAttribute('data-tag-name', selectedTag);
         tag.setAttribute('title', selectedTag); // Show full tag name on hover
         tag.innerHTML = `
-          <span class="tag-text">${selectedTag}</span>
+          <span class="tag-text">${escapeHtml(selectedTag)}</span>
           <span class="tag-remove">×</span>
         `;
         
@@ -9451,13 +9547,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Helper function to escape HTML
-  function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-  }
-
   // Add search functionality - initialize when available
   function initializeMetadataSearch() {
     const metadataSearchInput = document.getElementById('metadata-editor-search');
@@ -9696,7 +9785,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       const success = await window.electron.purgeModels({ confirmedInDialog: true });
       if (success) {
         const container = document.querySelector('.file-grid');
-        if (container) container.innerHTML = '';
+        if (container) {
+          clearFileItemPathIndex();
+          container.innerHTML = '';
+        }
         await updateModelCounts(0);
         document.getElementById('purge-models-dialog')?.close();
         await window.electron.showMessage('Success', 'All models have been purged from the database.');
@@ -12083,7 +12175,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Try to open dialog anyway
       try {
         const dialog = document.getElementById('tag-preview-dialog');
-        if (dialog && !dialog.open) {
+        if (dialog && !dialog.open && !suppressTagPreviewReopen) {
           dialog.showModal();
           reviewDialogOpen = true;
         }
@@ -12124,8 +12216,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           const norm = normalizeFilePath(filePath);
           if (!norm || seenPaths.has(norm)) continue;
           seenPaths.add(norm);
+          if (suppressTagPreviewReopen) break;
           try {
             const model = await window.electron.getModel(filePath);
+            if (suppressTagPreviewReopen) break;
             if (model) {
               pendingTagData.push({
                 filePath: filePath,
@@ -12145,13 +12239,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const uniquePendingData = deduplicateModelData(pendingTagData);
       console.log('[Renderer] About to call showTagPreviewDialog with:', uniquePendingData.length, 'items');
       console.log('[Renderer] showTagPreviewDialog exists:', typeof showTagPreviewDialog);
-      if (typeof showTagPreviewDialog === 'function') {
+      if (!suppressTagPreviewReopen && typeof showTagPreviewDialog === 'function') {
         if (uniquePendingData.length > 0) {
           showTagPreviewDialog(uniquePendingData);
         } else {
           showTagPreviewDialog([]);
         }
-      } else {
+      } else if (!suppressTagPreviewReopen) {
         console.error('[Renderer] showTagPreviewDialog is not a function!');
         // If function doesn't exist, at least show the dialog with basic content
         if (dialog && dialog.open) {
@@ -12166,7 +12260,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Try to open dialog anyway
       try {
         const dialog = document.getElementById('tag-preview-dialog');
-        if (dialog && !dialog.open) {
+        if (dialog && !dialog.open && !suppressTagPreviewReopen) {
           dialog.showModal();
           reviewDialogOpen = true;
           const container = document.getElementById('tag-preview-container');
@@ -12251,8 +12345,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const renderGeneration = ++tagPreviewDialogRenderGeneration;
 
-    // Check if dialog is open BEFORE we use it (fix race condition)
-    const isDialogOpen = dialog.open || false;
+    // Check if dialog is open BEFORE we use it (fix race condition).
+    // A close during in-flight generation sets suppressTagPreviewReopen; do not
+    // reopen or rewrite the dialog from a call that started before that close.
+    const isDialogOpen = dialog.open === true;
+    if (!isDialogOpen && suppressTagPreviewReopen) {
+      return;
+    }
     reviewDialogOpen = isDialogOpen;
 
     // When dialog is already open, ALWAYS use pendingTagData as the single source of truth
@@ -12340,9 +12439,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Clear container completely to prevent duplicates
     container.innerHTML = '';
 
-    // Open dialog immediately (before loading settings) so it appears in desktop mode
+    // Open dialog immediately (before loading settings) so it appears in desktop mode.
+    // Re-check open state here: the user can only close across an await, but
+    // showModal throws if the dialog was opened by an earlier handler in this turn.
     if (!dialog.open) {
-      dialog.showModal();
+      if (suppressTagPreviewReopen) return;
+      try {
+        dialog.showModal();
+      } catch (err) {
+        if (!dialog.open) {
+          console.error('Failed to open tag preview dialog:', err);
+          return;
+        }
+      }
       reviewDialogOpen = true;
     }
 
@@ -12351,7 +12460,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (renderGeneration !== tagPreviewDialogRenderGeneration) {
         return;
       }
-      if (!dialog.open) {
+      if (!dialog.open || suppressTagPreviewReopen) {
         return;
       }
 
@@ -12503,8 +12612,29 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (existingTags.length > 0) {
           const existingDiv = document.createElement('div');
           existingDiv.style.marginBottom = '12px';
-          existingDiv.innerHTML = `<div style="color: #aaa; font-size: 12px; margin-bottom: 6px;">Existing tags (${existingTags.length}):</div>` +
-            `<div style="color: #ccc; line-height: 1.6;">${existingTags.map(t => `<span style="display: inline-block; background: #3a3a3a; padding: 3px 6px; margin: 2px; border-radius: 4px; font-size: 12px;">${t}</span>`).join('')}</div>`;
+          const existingLabel = document.createElement('div');
+          existingLabel.style.color = '#aaa';
+          existingLabel.style.fontSize = '12px';
+          existingLabel.style.marginBottom = '6px';
+          existingLabel.textContent = `Existing tags (${existingTags.length}):`;
+
+          const existingChips = document.createElement('div');
+          existingChips.style.color = '#ccc';
+          existingChips.style.lineHeight = '1.6';
+          existingTags.forEach((t) => {
+            const chip = document.createElement('span');
+            chip.style.display = 'inline-block';
+            chip.style.background = '#3a3a3a';
+            chip.style.padding = '3px 6px';
+            chip.style.margin = '2px';
+            chip.style.borderRadius = '4px';
+            chip.style.fontSize = '12px';
+            chip.textContent = t;
+            existingChips.appendChild(chip);
+          });
+
+          existingDiv.appendChild(existingLabel);
+          existingDiv.appendChild(existingChips);
           modelSection.appendChild(existingDiv);
         }
 
@@ -12937,7 +13067,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else {
           await window.electron.showMessage('Warning', 'Tags were selected but could not be applied. Please check the console for details.');
         }
-        document.getElementById('tag-preview-dialog').close();
+        const tagPreviewDialog = document.getElementById('tag-preview-dialog');
+        if (tagPreviewDialog?.open) tagPreviewDialog.close();
         pendingTagData = [];
         return;
       }
@@ -13040,7 +13171,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
-      document.getElementById('tag-preview-dialog').close();
+      const tagPreviewDialog = document.getElementById('tag-preview-dialog');
+      if (tagPreviewDialog?.open) tagPreviewDialog.close();
       pendingTagData = [];
     } catch (error) {
       console.error('Error applying tags:', error);
@@ -13057,7 +13189,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.getElementById('tag-preview-cancel')?.addEventListener('click', () => {
-    document.getElementById('tag-preview-dialog')?.close();
+    const tagPreviewDialog = document.getElementById('tag-preview-dialog');
+    if (tagPreviewDialog?.open) tagPreviewDialog.close();
   });
   
   // Add handlers for progress dialog
@@ -13437,7 +13570,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           
           if (hasNodeAccess) {
             try {
-              const { exec } = require('child_process');
+              const { execFile } = require('child_process');
+              const { buildSlicerSpawnSpec } = require('./slicer-launch');
               const rawPaths = Array.isArray(commandData.filePaths) && commandData.filePaths.length
                 ? commandData.filePaths
                 : [filePath];
@@ -13454,9 +13588,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
               }
 
-              const command = buildSlicerLaunchCommand(slicerPath, modelPaths);
-              
-              exec(command, (error) => {
+              // argv only. execFile does not run a shell, so quotes and metacharacters stay data.
+              const spec = buildSlicerSpawnSpec(slicerPath, modelPaths);
+              execFile(spec.command, spec.args, { windowsHide: false }, (error) => {
                 const failedToStart = error && (
                   error.code === 'ENOENT' ||
                   error.code === 'ENOTDIR' ||
@@ -13493,49 +13627,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.error('Error handling client command:', error);
     }
   });
-
-  function escapeSlicerShellArg(filePath) {
-    return `"${String(filePath).replace(/"/g, '\\"')}"`;
-  }
-
-  function getDarwinSlicerAppBundlePath(slicerPath) {
-    if (!slicerPath || process.platform !== 'darwin') return null;
-    const normalized = String(slicerPath).replace(/\\/g, '/');
-    if (/\.app$/i.test(normalized)) return normalized;
-    const match = normalized.match(/^(.*?\.app)\//i);
-    return match ? match[1] : null;
-  }
-
-  // PrusaSlicer / SuperSlicer / Slic3r accept --single-instance; Bambu / Orca / Snapmaker Orca reject it.
-  function slicerSupportsSingleInstanceFlag(slicerPath) {
-    const raw = String(slicerPath || '').toLowerCase();
-    if (/bambu|orca/.test(raw)) return false;
-    return /prusa|superslicer|slic3r/.test(raw);
-  }
-
-  function buildSlicerLaunchCommand(slicerPath, modelPaths) {
-    const paths = (Array.isArray(modelPaths) ? modelPaths : [modelPaths]).filter(Boolean);
-    const escapedPaths = paths.map(escapeSlicerShellArg).join(' ');
-    const appBundle = getDarwinSlicerAppBundlePath(slicerPath);
-    if (appBundle) {
-      return `open -n -a ${escapeSlicerShellArg(appBundle)} --args ${escapedPaths}`;
-    }
-    const raw = String(slicerPath || '').trim();
-    const flatpak = raw.match(/^flatpak\s+run\s+(\S+)([\s\S]*)$/i);
-    const snap = raw.match(/^snap\s+run\s+(\S+)([\s\S]*)$/i);
-    let command;
-    if (flatpak) {
-      command = `flatpak run ${flatpak[1]}${flatpak[2] || ''}`;
-    } else if (snap) {
-      command = `snap run ${snap[1]}${snap[2] || ''}`;
-    } else {
-      command = escapeSlicerShellArg(raw);
-    }
-    if (slicerSupportsSingleInstanceFlag(raw)) {
-      command += ' --single-instance=0';
-    }
-    return `${command} ${escapedPaths}`;
-  }
 
   // Helper function to show slicer instructions
   function showSlicerInstructions(filePath, slicerName, slicerPath, isZipEntry, zipPath, entryPath) {
@@ -14169,6 +14260,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       // First, clear any existing content
       const grid = document.getElementById('file-grid');
+      clearFileItemPathIndex();
       grid.innerHTML = '';
       
       // Show loading
@@ -14189,6 +14281,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const fileElement = document.createElement('div');
         fileElement.className = 'file-item';
         fileElement.setAttribute('data-filepath', model.filePath);
+        registerFileItemElement(fileElement, model.filePath);
         
         const thumbnailContainer = document.createElement('div');
         thumbnailContainer.className = 'thumbnail-container';
@@ -14413,7 +14506,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderVisibleItems(startIndex) {
     const container = document.getElementById('visible-items-container');
     if (!container) return;
-    
+
+    // Snapshot selection before the DOM wipe. Tiles can be selected in the
+    // DOM without a matching selectedModels entry, and the reverse is also true.
+    const preservedSelection = new Set();
+    container.querySelectorAll('.file-item.selected').forEach((item) => {
+      const filePath = item.getAttribute('data-filepath') || item.dataset.filepath;
+      if (filePath) preservedSelection.add(normalizePathForComparison(filePath));
+    });
+    if (typeof selectedModels !== 'undefined' && selectedModels) {
+      selectedModels.forEach((filePath) => {
+        if (filePath) preservedSelection.add(normalizePathForComparison(filePath));
+      });
+    }
+
     container.innerHTML = '';
     
     // Calculate grid layout
@@ -14434,9 +14540,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       item.style.left = `${col * (containerWidth / columns)}px`;
       item.style.width = `${containerWidth / columns - 20}px`; // 20px for margins
       
-      // Set selection state from global Set
-      if (isInSelectedModels(model.filePath)) {
+      const normalizedPath = normalizePathForComparison(model.filePath);
+      if (preservedSelection.has(normalizedPath)) {
         item.classList.add('selected');
+        addToSelectedModels(model.filePath);
+      } else {
+        item.classList.remove('selected');
       }
       
       container.appendChild(item);
@@ -14652,11 +14761,16 @@ function isFileGridScrollbarClick(event, grid) {
 }
 
 function clearGridItemSelection() {
+  const epoch = bumpModelDetailsEpoch();
   currentModelDetailsAbort = true;
+  currentModelDetailsPath = null;
   selectedModels.clear();
   document.querySelectorAll('.file-item.selected').forEach((item) => item.classList.remove('selected'));
   clearMobileTileFocus();
   document.getElementById('model-details')?.classList.add('hidden');
+  const clearedName = document.getElementById('model-name');
+  if (clearedName) clearedName.value = '';
+  scheduleModelNameCommit('', epoch);
   const bundlePanel = document.getElementById('bundle-details');
   if (bundlePanel && !bundlePanel.classList.contains('hidden') && typeof hideBundleDetailsPanel === 'function') {
     hideBundleDetailsPanel();
@@ -15551,6 +15665,7 @@ async function renderFile(file, container, skipThumbnail = false) {
   const fileElement = document.createElement('div');
   fileElement.className = 'file-item';
   fileElement.dataset.filepath = file.filePath; // Use dataset for data attributes
+  registerFileItemElement(fileElement, file.filePath);
 
   if (isInSelectedModels(file.filePath)) {
     fileElement.classList.add('selected');
@@ -16390,6 +16505,7 @@ function shouldSyncSelectionWithFilteredList() {
 }
 
 function clearModelDetailsSidebar() {
+  const epoch = bumpModelDetailsEpoch();
   currentModelDetailsPath = null;
   currentModelDetailsAbort = true;
   const pathTreeContainer = document.getElementById('path-tree-container');
@@ -16399,6 +16515,7 @@ function clearModelDetailsSidebar() {
   }
   const mn = document.getElementById('model-name');
   if (mn) mn.value = '';
+  scheduleModelNameCommit('', epoch);
   const md = document.getElementById('model-designer');
   if (md) md.value = '';
   const ms = document.getElementById('model-source');
@@ -17205,7 +17322,7 @@ async function refreshMultiEditTags() {
         tag.setAttribute('data-tag-name', tagName);
         tag.setAttribute('title', tagName);
         tag.innerHTML = `
-          <span class="tag-text">${tagName}</span>
+          <span class="tag-text">${escapeHtml(tagName)}</span>
           <span class="tag-remove">×</span>
         `;
         
@@ -17355,8 +17472,8 @@ async function addTagToModel(tagName, containerId, options = {}) {
   tag.setAttribute('data-tag-name', tagName);
   tag.setAttribute('title', tagName); // Show full tag name on hover
   tag.innerHTML = `
-    <span class="tag-text">${tagName}</span>
-    <span class=\"tag-remove\">×</span>
+    <span class="tag-text">${escapeHtml(tagName)}</span>
+    <span class="tag-remove">×</span>
   `;
 
   // Add remove handler with auto-save
@@ -18939,6 +19056,7 @@ async function handleDeleteSelected() {
 // Create a separate function for rendering filtered results
 async function renderFilteredFiles(files) {
   const container = document.querySelector('.file-grid');
+  clearFileItemPathIndex();
   container.innerHTML = '';
   
   // Render in batches without progress indication
@@ -19771,7 +19889,9 @@ function exitMultiEditMode() {
     }
   });
 
-  // Clear the current model details path to prevent stale event handlers
+  // Clear the current model details path to prevent stale event handlers.
+  // Bump before the name clear so an in-flight layout timer cannot restore it.
+  const exitEpoch = bumpModelDetailsEpoch();
   currentModelDetailsPath = null;
   currentModelDetailsAbort = true;
   
@@ -19809,7 +19929,9 @@ function exitMultiEditMode() {
     pathTreeContainer.innerHTML = '';
     pathTreeContainer.removeAttribute('data-file-path');
   }
-  document.getElementById('model-name').value = '';
+  const exitModelName = document.getElementById('model-name');
+  if (exitModelName) exitModelName.value = '';
+  scheduleModelNameCommit('', exitEpoch);
   document.getElementById('model-designer').value = '';
   document.getElementById('model-source').value = '';
   document.getElementById('model-notes').value = '';
@@ -21324,6 +21446,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   const item = document.createElement('div');
   item.className = `file-item file-item-${view}`;
   item.dataset.filepath = model.filePath;
+  registerFileItemElement(item, model.filePath);
 
   if (isInSelectedModels(model.filePath)) {
     item.classList.add('selected');
@@ -24320,6 +24443,13 @@ function renderVirtualGrid(models) {
   if (modelsChanged || viewStructureChanged) {
     console.log('renderVirtualGrid: Models changed! Clearing container and re-rendering.');
     console.log('Current model count:', currentModels.length, 'New model count:', models.length);
+    // Keep selection across the DOM wipe. Visible tiles can hold .selected
+    // before selectedModels is updated, and createModelItem restores from the set.
+    container.querySelectorAll('.file-item.selected').forEach((item) => {
+      const filePath = item.getAttribute('data-filepath') || item.dataset.filepath;
+      if (filePath) addToSelectedModels(filePath);
+    });
+    clearFileItemPathIndex();
     container.innerHTML = ''; // clear existing content
     container._virtualLayoutCache = null;
     container._virtualLayoutItemsByKey = new Map();
@@ -24508,6 +24638,7 @@ function renderVirtualGrid(models) {
     virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
     container.appendChild(virtualContent);
   }
+  bindFileItemPathIndex(virtualContent);
   
   // Adjust virtual content top position for list view header (always update, not just on creation)
   if (currentGridView === 'list') {
@@ -24848,6 +24979,11 @@ function renderVirtualGrid(models) {
                 applyParentGroupHighlightClasses(existingItem, record, recordIndex);
                 positionModelItem(existingItem, row, col);
                 syncModelNewBadge(existingItem, model);
+                if (isInSelectedModels(model.filePath)) {
+                  existingItem.classList.add('selected');
+                } else {
+                  existingItem.classList.remove('selected');
+                }
                 // On-screen placeholders must re-enter the queue after prune/soft-cap;
                 // recycled DOM nodes skip createModelItem so nothing else would enqueue them.
                 if (thumbPriority < THUMB_PRIORITY_LOW_TIER_MIN) {
@@ -24872,6 +25008,11 @@ function renderVirtualGrid(models) {
             const item = createModelItem(model, currentGridView, thumbPriority);
             item.dataset.index = String(recordIndex);
             registerLayoutItem(record.key, item);
+            if (isInSelectedModels(model.filePath)) {
+              item.classList.add('selected');
+            } else {
+              item.classList.remove('selected');
+            }
             applyParentGroupHighlightClasses(item, record, recordIndex);
             item.style.position = 'absolute';
             // Note: Header offset is handled by virtualContent top position for list view

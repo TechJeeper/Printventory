@@ -22,6 +22,7 @@ app.log
 .scp
 scripts/publish-beta-release.local.json
 scripts/.discord
+support-webhook.json
 .cursor/
 .deploySteps
 .env

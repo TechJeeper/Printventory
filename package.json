@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.14",
+  "version": "2.2.15",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -132,9 +132,12 @@
     },
     "files": [
       "main.js",
+      "db-repair.js",
       "bundle-keys.js",
       "zip-extract.js",
       "preload.js",
+      "input-dialog-preload.js",
+      "input-dialog.html",
       "renderer.js",
       "notes-markdown.js",
       "notes-markdown.css",
@@ -202,6 +205,7 @@
       "stl-sanity.js",
       "ai-rate-limit.js",
       "support-logs.js",
+      "support-webhook.json",
       "parse-worker.js",
       "vendor/**",
       "vendor/**/*",
