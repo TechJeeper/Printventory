@@ -11,7 +11,7 @@ const { deriveBundleFromFilePath } = require('./bundle-keys');
 const spoolman = require('./spoolman');
 const printEvents = require('./print-events');
 const printerManager = require('./printer-manager');
-const { buildFolderForest } = require('./folder-tree-lib');
+const { buildFolderForest, directoryFilterLikePrefix } = require('./folder-tree-lib');
 const {
   registerMcpRoutes,
   buildMcpClientConfig,
@@ -31,7 +31,8 @@ const {
   compileExcludeDirs,
   isExcludedPath
 } = require('./scan-skip');
-const { clampFolderLevels, folderTagsFromPath } = require('./library-context');
+const { clampFolderLevels } = require('./library-context');
+const { applyFolderTagsToModels: applyFolderTagsInDb, shouldAutoTagNewScanFiles } = require('./folder-tags');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -3800,6 +3801,7 @@ function initializeDefaultSettings() {
       { key: 'stlHomeDirectories', value: '[]' }, // JSON array of directories scanned as STL Home
       { key: 'stlHomeExcludeDirectories', value: '[]' }, // JSON array of directories skipped by STL Home scans
       { key: 'aiTagFolderLevels', value: '2' }, // Parent folders sent to AI tagging and used by Tag from Folder
+      { key: 'autoTagFromFolderOnScan', value: '0' }, // Add folder-name tags to files a scan newly inserts. No AI.
       { key: 'aiTagMaxTags', value: '10' }, // Maximum number of AI-generated tags
       { key: 'aiTagUseCategories', value: '0' }, // Use category-based tagging
       { key: 'aiTagMergeStrategy', value: 'merge' }, // How to merge AI tags: 'replace', 'merge', 'append'
@@ -4962,7 +4964,8 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
       const ingestState = {
         files: [],
         existingFilePaths: new Set(),
-        newFilesCount: 0
+        newFilesCount: 0,
+        newFilePaths: []
       };
       let ingestChain = Promise.resolve();
       const enqueueIngest = (task) => {
@@ -5020,6 +5023,7 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
                 bundle.bundleKind || null
               );
               ingestState.newFilesCount++;
+              ingestState.newFilePaths.push(file.filePath);
               ingestState.existingFilePaths.add(file.filePath);
             }
             ingestState.files.push(file);
@@ -5053,6 +5057,7 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
             const files = ingestState.files;
             const totalFiles = message.result.totalFiles;
             const newFilesCount = ingestState.newFilesCount;
+            const skippedDueToSize = Number(message.result.skippedDueToSize) || 0;
             const allFilePaths = files.map(f => f.filePath);
 
             worker.terminate();
@@ -5066,7 +5071,15 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
               }
             }
 
-            resolve({ files, totalFiles, newFilesCount });
+            if (ingestState.newFilePaths.length > 0) {
+              try {
+                applyFolderTagsToNewScanFiles(ingestState.newFilePaths);
+              } catch (tagErr) {
+                console.error('Tag from Folder on newly scanned files:', tagErr);
+              }
+            }
+
+            resolve({ files, totalFiles, newFilesCount, skippedDueToSize });
 
             scheduleBackgroundHashGeneration('scan-directory');
 
@@ -5281,6 +5294,9 @@ ipcMain.handle('show-message-box', async (event, options) => {
     // Test mode: auto-dismiss "New models found, would you like to see them?" so tests don't hang
     if (process.env.PRINTVENTORY_TEST_SCAN_PATH && options.title === 'New Models Found') {
       return { response: 1 };
+    }
+    if (process.env.PRINTVENTORY_TEST_SCAN_PATH && options.title === 'Files Skipped') {
+      return { response: 0 };
     }
     const window = BrowserWindow.fromWebContents(event.sender);
     const result = await dialog.showMessageBox(window || undefined, options);
@@ -5942,36 +5958,14 @@ function buildModelFilterConditions(filters) {
       }
     }
     
-    // Directory filter
+    // Directory filter. Stored zip entries mix separators (`C:\lib\pack.zip::folder/part.stl`),
+    // so compare a slash-normalized path instead of two LIKE patterns that each miss half the path.
     if (filters.directory) {
-      // Ensure the directory path ends with a separator to match only files within that directory
-      // This prevents matching subdirectories with similar names (e.g., "test" matching "test2")
-      // CRITICAL: Normalize the path to match database format (forward slashes)
-      // Paths in the database are stored with forward slashes, so we must normalize here
-      let directoryPath = normalizePath(filters.directory);
-      
-      // Add path separator if not already present at the end
-      if (!directoryPath.endsWith('/') && !directoryPath.endsWith('::')) {
-        // Use forward slash for normalized paths (consistent with database storage)
-        directoryPath += '/';
+      const directoryPrefix = directoryFilterLikePrefix(filters.directory);
+      if (directoryPrefix) {
+        conditions.push("REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?");
+        params.push(directoryPrefix);
       }
-      
-      // For zip entries (containing ::), ensure both zip path and entry path use forward slashes
-      if (directoryPath.includes('::')) {
-        const [zipPath, entryPath] = directoryPath.split('::');
-        const normalizedZipPath = normalizePath(zipPath);
-        const normalizedEntryPath = entryPath ? normalizePath(entryPath) : '';
-        directoryPath = normalizedEntryPath ? `${normalizedZipPath}::${normalizedEntryPath}` : normalizedZipPath;
-        if (normalizedEntryPath && !directoryPath.endsWith('/') && !directoryPath.endsWith('::')) {
-          directoryPath += '/';
-        }
-      }
-      
-      // Match both / and \ so directory filter works on Windows (DB may store paths with backslashes)
-      const directoryPathForward = `${directoryPath}%`;
-      const directoryPathBackslash = `${directoryPath.replace(/\//g, '\\')}%`;
-      conditions.push("(filePath LIKE ? OR filePath LIKE ?)");
-      params.push(directoryPathForward, directoryPathBackslash);
     }
     
     // Search: token expression (AND/OR/NOT), legacy clauses, or single string
@@ -12809,36 +12803,25 @@ ipcHandlerRegistry.set('generate-tags', generateTagsHandler);
 
 // Add this helper function (if it doesn't already exist) near the top of main.js
 function applyFolderTagsToModels(filePaths, levels) {
-  const namesForPath = folderTagsFromPath;
-  let updated = 0;
-  let tagsAdded = 0;
-  const findTag = db.prepare('SELECT id FROM tags WHERE name = ? COLLATE NOCASE');
-  const insertTag = db.prepare('INSERT INTO tags (name) VALUES (?)');
-  const linkTag = db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)');
-  const findModel = db.prepare('SELECT id FROM models WHERE filePath = ?');
+  return applyFolderTagsInDb(db, filePaths, levels);
+}
 
-  db.transaction(() => {
-    for (const filePath of filePaths) {
-      const model = findModel.get(filePath);
-      if (!model) continue;
-      let addedForModel = 0;
-      for (const name of namesForPath(filePath, levels)) {
-        let tag = findTag.get(name);
-        if (!tag) {
-          const info = insertTag.run(name);
-          tag = { id: info.lastInsertRowid };
-        }
-        const rel = linkTag.run(model.id, tag.id);
-        if (rel.changes) addedForModel += 1;
-      }
-      if (addedForModel) {
-        updated += 1;
-        tagsAdded += addedForModel;
-      }
-    }
-  })();
-
-  return { updated, tagsAdded };
+// Folder names only, and only for paths this scan inserted. Existing models are not passed in.
+function applyFolderTagsToNewScanFiles(filePaths) {
+  if (!db || !Array.isArray(filePaths) || filePaths.length === 0) {
+    return { updated: 0, tagsAdded: 0 };
+  }
+  const enabledRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('autoTagFromFolderOnScan');
+  const levelsRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('aiTagFolderLevels');
+  const levels = clampFolderLevels(levelsRow ? levelsRow.value : 2);
+  if (!shouldAutoTagNewScanFiles(enabledRow ? enabledRow.value : '0', levels)) {
+    return { updated: 0, tagsAdded: 0 };
+  }
+  const result = applyFolderTagsToModels(filePaths, levels);
+  if (result.tagsAdded > 0) {
+    console.log(`[Tag from Folder] Added ${result.tagsAdded} tag(s) on ${result.updated} newly scanned model(s).`);
+  }
+  return result;
 }
 
 function getSettings() {

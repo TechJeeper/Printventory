@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.13",
+  "version": "2.2.14",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -187,6 +187,8 @@
       "guide/*",
       "bg.png",
       "search.js",
+      "grid-refresh.js",
+      "folder-tags.js",
       "sidebar-layout.js",
       "folder-tree.js",
       "folder-tree-lib.js",

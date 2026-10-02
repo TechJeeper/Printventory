@@ -204,6 +204,21 @@ function toDirectoryFilter(path, isBundle) {
   return n;
 }
 
+/**
+ * LIKE prefix for a folder-tree selection. Zip entries are stored as
+ * `C:\lib\pack.zip::folder/part.stl` (backslashes before ::, forward slashes after),
+ * so the caller must compare against a slash-normalized path.
+ * A trailing slash or `::` keeps `folder` from also matching `folder2`.
+ */
+function directoryFilterLikePrefix(directoryPath) {
+  let directory = String(directoryPath || '').replace(/\\/g, '/').trim();
+  if (!directory) return '';
+  if (!directory.endsWith('/') && !directory.endsWith('::')) {
+    directory += '/';
+  }
+  return `${directory.toLowerCase()}%`;
+}
+
 function labelForRoot(path, stlHome) {
   const n = normalizeDir(path);
   const home = normalizeDir(stlHome);
@@ -324,6 +339,7 @@ module.exports = {
   pathIsUnder,
   ancestorChain,
   toDirectoryFilter,
+  directoryFilterLikePrefix,
   buildFolderForest,
   labelForRoot
 };

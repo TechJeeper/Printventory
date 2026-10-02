@@ -4,6 +4,16 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.14] - 2026-10-02
+
+- Tag from Folder can run on files a scan newly adds, using the folder levels from AI Configuration, without calling AI
+- Scans say how many files were skipped because they are larger than the max file size
+- Selecting a folder inside a zip matches entries stored with mixed slashes, and does not include a sibling folder with a similar name
+- Thumbnail updates keep your place in the library
+- The path tree shows distinct folder, file, and zip icons
+- Server mode scan and database progress events reach the page
+- Stopping the Docker container exits cleanly
+
 ## [2.2.13] - 2026-10-01
 
 - Saving slicer settings says which name or path is already used when two entries match

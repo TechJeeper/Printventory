@@ -405,6 +405,9 @@ window.saveFileTypeSettingsFromDialog = async function saveFileTypeSettingsFromD
     const excludeFoldersEl = dialogEl.querySelector('#scan-exclude-folders') || document.getElementById('scan-exclude-folders');
     await window.electron.saveSetting('scanExcludeFolders', excludeFoldersEl ? excludeFoldersEl.value : '');
 
+    const autoTagEl = dialogEl.querySelector('#auto-tag-from-folder-on-scan') || document.getElementById('auto-tag-from-folder-on-scan');
+    await window.electron.saveSetting('autoTagFromFolderOnScan', autoTagEl && autoTagEl.checked ? '1' : '0');
+
     if (typeof dialogEl.close === 'function') dialogEl.close();
     if (typeof window.populateFileTypeFilter === 'function') await window.populateFileTypeFilter();
   } catch (err) {
@@ -1204,9 +1207,12 @@ function runScanSTLHomeImpl() {
       if (renderProgressText) renderProgressText.textContent = progress.processed + ' / ' + (progress.total || 0);
     });
     try {
+      let skippedDueToSize = 0;
       for (const stlHomeDir of stlHomes) {
-        await scanAndRenderDirectory(stlHomeDir, false, true);
+        const scanInfo = await scanAndRenderDirectory(stlHomeDir, false, true, { suppressSizeNotice: true });
+        skippedDueToSize += Number(scanInfo && scanInfo.skippedDueToSize) || 0;
       }
+      await maybeShowSkippedFileSizeNotice(skippedDueToSize);
       await populateDesignerDropdown();
       await populateParentModelFilter();
       await populateTagFilter();
@@ -3358,9 +3364,9 @@ function renderPathTree(filePath, containerId) {
       const indentClass = `path-tree-indent`;
       
       if (isLastZipSegment) {
-        // This is the zip file itself - show it as a folder
+        // This is the zip file itself
         html += `<div class="path-tree-item" style="margin-left: ${index * 14}px;">
-          <span class="path-tree-icon path-tree-folder-icon"></span>
+          <span class="path-tree-icon path-tree-zip-icon"></span>
           <span class="path-tree-folder" data-path="${zipPath}">${segment}</span>
         </div>`;
       } else {
@@ -6532,6 +6538,12 @@ async function loadAndShowFileTypeSettings() {
     const excludeFoldersEl = document.getElementById('scan-exclude-folders');
     if (excludeFoldersEl) {
       excludeFoldersEl.value = excludeFolders || '';
+    }
+
+    const autoTagFromFolder = await window.electron.getSetting('autoTagFromFolderOnScan');
+    const autoTagEl = document.getElementById('auto-tag-from-folder-on-scan');
+    if (autoTagEl) {
+      autoTagEl.checked = autoTagFromFolder === '1';
     }
   } catch (err) {
     console.error('Error loading file type settings:', err);
@@ -9707,6 +9719,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Sort-select handler is now managed by search.js via initializeCombinedSearch()
   // which properly calls performCombinedSearch() to re-render with filters preserved
 
+  const scheduleThumbnailGridRefresh = window.gridRefresh.createCoalescedRefresh(
+    window.gridRefresh.THUMBNAIL_REFRESH_COALESCE_MS,
+    async () => {
+      const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
+      if (preservedDateAddedFilter) {
+        window.dateAddedFilter = preservedDateAddedFilter;
+        window._lastDateAddedFilter = preservedDateAddedFilter;
+      }
+      if (typeof window.performCombinedSearch === 'function') {
+        await window.performCombinedSearch({ preserveScroll: true });
+      } else {
+        const grid = document.querySelector('.file-grid');
+        const savedScrollTop = grid ? grid.scrollTop : 0;
+        const sortSelect = document.getElementById('sort-select');
+        const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+        await renderFiles(models);
+        if (grid && grid.scrollTop !== savedScrollTop) grid.scrollTop = savedScrollTop;
+      }
+    }
+  );
+
   // Add this near the top of the file with other initialization code
   // Handle thumbnail added event - refresh grid to show updated thumbnail
   window.electron.onThumbnailAdded(async (data) => {
@@ -9783,7 +9816,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
               }
             }
-            
+
+            const offscreenContainer = document.querySelector('.file-grid');
+            if (offscreenContainer && window.gridRefresh.patchLoadedModel(
+              offscreenContainer.currentModels,
+              normalizedPath,
+              updatedModel,
+              normalizePathForComparison
+            )) {
+              return;
+            }
+
             // If item wasn't found in current view, it might be filtered out or not visible
             // Don't refresh the whole grid - just return
             console.log('Thumbnail added for item not in current view, skipping refresh');
@@ -9826,38 +9869,30 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           }
           
-          // Trigger re-render of visible items
           const container = document.querySelector('.file-grid');
+
+          // Off-screen in the virtual grid: patch the loaded model in place.
+          if (!itemFound && container && window.gridRefresh.patchLoadedModel(
+            container.currentModels,
+            normalizedPath,
+            updatedModel,
+            normalizePathForComparison
+          )) {
+            return;
+          }
+
+          // Trigger re-render of visible items
           if (container && container.renderVisibleItemsFn) {
             container.renderVisibleItemsFn();
           }
-          
-          // If item wasn't found or we need a full refresh, do it
+
+          // Model is not in the loaded grid at all (or the grid has no renderer): reload, coalesced
           if (!itemFound || !container || !container.renderVisibleItemsFn) {
-            // Use performCombinedSearch to reload all models from database with current filters
-            if (typeof window.performCombinedSearch === 'function') {
-              await window.performCombinedSearch();
-            } else {
-              // Fallback: use onRefreshGrid handler approach
-              const sortSelect = document.getElementById('sort-select');
-              const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
-              await renderFiles(models);
-            }
+            scheduleThumbnailGridRefresh();
           }
         } catch (updateError) {
           console.error('Error refreshing grid after adding thumbnail:', updateError);
-          // Fallback to full refresh on error, but preserve dateAddedFilter if set
-          const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
-          if (preservedDateAddedFilter) {
-            window.dateAddedFilter = preservedDateAddedFilter;
-            window._lastDateAddedFilter = preservedDateAddedFilter;
-            const filteredModels = await window.electron.getModelsFiltered({
-              dateAdded: preservedDateAddedFilter
-            });
-            await renderFiles(filteredModels);
-          } else if (typeof window.performCombinedSearch === 'function') {
-            await window.performCombinedSearch();
-          }
+          scheduleThumbnailGridRefresh();
         }
       }, 300); // Delay to ensure database write completes
     }
@@ -10991,6 +11026,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dirs = explicit.length ? explicit : await getStlHomeDirectories();
     if (!dirs.length) return;
     let newFilesCount = 0;
+    let skippedDueToSize = 0;
     // Index every directory before thumbnail rendering. scanAndRenderDirectory waits on
     // thumbnails, and in the server window that wait never finishes, so later homes
     // were never scanned.
@@ -10999,6 +11035,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log(`Performing STL Home scan: ${dir}`);
         const result = await window.electron.scanDirectory(dir, { isStlHomeScan: true });
         newFilesCount += Number(result && result.newFilesCount) || 0;
+        skippedDueToSize += Number(result && result.skippedDueToSize) || 0;
       } catch (error) {
         console.error('Error during STL Home scan:', dir, error);
       }
@@ -11020,6 +11057,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         message: `${newFilesCount} new model(s) found, would you like to see them?`
       }).catch((error) => console.error('STL Home new-models prompt failed:', error));
     }
+    maybeShowSkippedFileSizeNotice(skippedDueToSize).catch((error) => {
+      console.error('Skipped file size notice failed:', error);
+    });
   }
   window.performSTLHomeScan = performSTLHomeScan;
   window.startPeriodicSTLHomeScan = startPeriodicSTLHomeScan;
@@ -11140,12 +11180,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       await populateTagFilter();
       await populateLicenseFilter();
       (async () => {
+        let skippedDueToSize = 0;
         for (const stlHomeDir of stlHomes) {
           try {
-            await scanAndRenderDirectory(stlHomeDir, true, true);
+            const scanInfo = await scanAndRenderDirectory(stlHomeDir, true, true, { suppressSizeNotice: true });
+            skippedDueToSize += Number(scanInfo && scanInfo.skippedDueToSize) || 0;
           } catch (err) {
             console.error('Background STL Home scan on startup:', stlHomeDir, err);
           }
+        }
+        try {
+          await maybeShowSkippedFileSizeNotice(skippedDueToSize);
+        } catch (err) {
+          console.error('Startup skipped file size notice failed:', err);
         }
         try {
           await populateDesignerDropdown();
@@ -14839,7 +14886,38 @@ function hideProgressBars() {
 }
 
 // Update function signature to include background and isStlHomeScan parameters
-async function scanAndRenderDirectory(directoryPath, background = false, isStlHomeScan = false) {
+const HIDE_SKIPPED_FILE_SIZE_NOTICE_KEY = 'hideSkippedFileSizeNotice';
+
+function skippedFileSizeNoticeMessage(count) {
+  if (count === 1) {
+    return '1 file was skipped because it is larger than the max file size. You can set the max file size under Settings > Performance.';
+  }
+  return `${count} files were skipped because they are larger than the max file size. You can set the max file size under Settings > Performance.`;
+}
+
+async function maybeShowSkippedFileSizeNotice(count) {
+  const skipped = Number(count) || 0;
+  if (skipped <= 0) return;
+  if (!window.electron || typeof window.electron.getSetting !== 'function' || typeof window.electron.showMessageBox !== 'function') {
+    return;
+  }
+  const hidden = await window.electron.getSetting(HIDE_SKIPPED_FILE_SIZE_NOTICE_KEY);
+  if (hidden === '1') return;
+  const result = await window.electron.showMessageBox({
+    type: 'info',
+    buttons: ['Okay', 'Never show again'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Files Skipped',
+    message: skippedFileSizeNoticeMessage(skipped)
+  });
+  if (result && result.response === 1 && typeof window.electron.saveSetting === 'function') {
+    await window.electron.saveSetting(HIDE_SKIPPED_FILE_SIZE_NOTICE_KEY, '1');
+  }
+}
+
+async function scanAndRenderDirectory(directoryPath, background = false, isStlHomeScan = false, scanUiOptions = null) {
+  const suppressSizeNotice = !!(scanUiOptions && scanUiOptions.suppressSizeNotice);
   const progressSection = document.getElementById('progress-section');
   const progressContainer = document.getElementById('progress-container');
   const progressBar = document.getElementById('progress-bar');
@@ -14895,6 +14973,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
     const scanOptions = isStlHomeScan ? { isStlHomeScan: true } : {};
     const scanResult = await window.electron.scanDirectory(directoryPath, scanOptions);
     const { files, totalFiles, newFilesCount, cancelScan } = scanResult || { files: [], totalFiles: 0, newFilesCount: 0 };
+    const skippedDueToSize = Number(scanResult && scanResult.skippedDueToSize) || 0;
     
     if (isCancelled) {
       if (cancelScan) cancelScan(); // Cancel the scan if possible
@@ -14909,7 +14988,10 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         renderProgressText.textContent = '';
       }
       console.log('No files found in directory:', directoryPath);
-      return; // Exit the function early instead of throwing error
+      if (!suppressSizeNotice) {
+        await maybeShowSkippedFileSizeNotice(skippedDueToSize);
+      }
+      return { skippedDueToSize };
     }
 
     console.log('Scanned files:', totalFiles);
@@ -15265,6 +15347,10 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
         await renderFiles(fallbackModels);
       }
     }
+    if (!suppressSizeNotice) {
+      await maybeShowSkippedFileSizeNotice(skippedDueToSize);
+    }
+    return { skippedDueToSize };
   } catch (error) {
     console.error('Error scanning directory:', error);
     window._scanThumbnailProgress = null;

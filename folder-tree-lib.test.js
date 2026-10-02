@@ -6,6 +6,7 @@ const {
   normalizeDir,
   ancestorChain,
   toDirectoryFilter,
+  directoryFilterLikePrefix,
   buildFolderForest
 } = require('./folder-tree-lib');
 
@@ -52,6 +53,21 @@ test('ancestorChain walks folders and zip entries', () => {
 test('toDirectoryFilter suffixes zip bundles with ::', () => {
   assert.strictEqual(toDirectoryFilter('C:/Models/pack.zip', true), 'C:/Models/pack.zip::');
   assert.strictEqual(toDirectoryFilter('C:/Models/Patreon', false), 'C:/Models/Patreon');
+});
+
+test('directory filter prefix matches mixed-slash zip entries and not sibling folders', () => {
+  const stored = 'C:\\Users\\cld\\Downloads\\pack.zip::3DPA/Build Plates/part.stl';
+  const normalized = stored.replace(/\\/g, '/').toLowerCase();
+  const inner = directoryFilterLikePrefix('C:/Users/cld/Downloads/pack.zip::3DPA/Build Plates');
+  assert.strictEqual(inner, 'c:/users/cld/downloads/pack.zip::3dpa/build plates/%');
+  assert.ok(normalized.startsWith(inner.slice(0, -1)));
+  const sibling = 'c:/users/cld/downloads/pack.zip::3dpa/build plates extra/part.stl';
+  assert.ok(!sibling.startsWith(inner.slice(0, -1)));
+  const zip = directoryFilterLikePrefix('C:\\Users\\cld\\Downloads\\pack.zip::');
+  assert.strictEqual(zip, 'c:/users/cld/downloads/pack.zip::%');
+  assert.ok(normalized.startsWith(zip.slice(0, -1)));
+  const folder = directoryFilterLikePrefix('C:\\Models\\Patreon');
+  assert.strictEqual(folder, 'c:/models/patreon/%');
 });
 
 test('STL Home is labeled and nested counts include children', () => {

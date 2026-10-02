@@ -240,7 +240,10 @@ echo "V8 max-old-space-size: ${MAX_OLD_SPACE_MB}MB (override with PRINTVENTORY_M
 
 # The --server flag is passed via CMD in Dockerfile.
 # Filter Chromium dbus probe failures from stderr so Docker users are not confused.
-exec npx electron . \
+# Run the local electron CLI directly. npx starts it under `sh -c`, which dies on
+# `docker stop`'s SIGTERM before Electron sees it, so npm exits 1. electron/cli.js
+# forwards SIGTERM and the container exits 0.
+exec ./node_modules/.bin/electron . \
   --no-sandbox \
   "${ELECTRON_GPU_ARGS[@]}" \
   --disable-dev-shm-usage \

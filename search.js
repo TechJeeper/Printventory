@@ -247,6 +247,27 @@ function syncSelectionAfterFilteredLoad(models) {
 
 async function performCombinedSearch(options) {
   const force = !!(options && options.force);
+  // Background refreshes keep the user's place. Rendering the short first page collapses the grid.
+  const preserveScroll = !!(options && options.preserveScroll);
+  const scrollGrid = preserveScroll ? document.querySelector(".file-grid") : null;
+  const savedScrollTop = scrollGrid ? scrollGrid.scrollTop : 0;
+  const shownCount = scrollGrid && Array.isArray(scrollGrid.currentModels) ? scrollGrid.currentModels.length : 0;
+  let scrollRestored = !scrollGrid;
+  let renderedCount = 0;
+  const holdProgressivePage = window.gridRefresh && window.gridRefresh.shouldHoldProgressiveRender
+    ? window.gridRefresh.shouldHoldProgressiveRender
+    : function (keep, modelsLength, shown, pageComplete) {
+        return !!(keep && !pageComplete && modelsLength < shown);
+      };
+  const renderPage = async (models, done) => {
+    if (holdProgressivePage(preserveScroll, models.length, shownCount, done)) return;
+    await window.renderFiles(models);
+    renderedCount = models.length;
+    if (!scrollRestored) {
+      scrollRestored = true;
+      if (scrollGrid.scrollTop !== savedScrollTop) scrollGrid.scrollTop = savedScrollTop;
+    }
+  };
   let myGeneration = 0;
   try {
     if (isFilteringInProgress && !force) {
@@ -293,13 +314,13 @@ async function performCombinedSearch(options) {
       if (emptyMsg) emptyMsg.style.display = "none";
       window._progressiveLibraryLoadActive = false;
       updateFilterIndicator(0);
-      await window.renderFiles(filteredModels);
+      await renderPage(filteredModels, true);
       if (filtersActive) syncSelectionAfterFilteredLoad(filteredModels);
       return;
     }
 
     updateFilterIndicator(filteredModels.length);
-    await window.renderFiles(filteredModels);
+    await renderPage(filteredModels, filteredModels.length < PROGRESSIVE_INITIAL);
     if (searchGeneration !== myGeneration) return;
 
     if (filteredModels.length < PROGRESSIVE_INITIAL) {
@@ -322,11 +343,12 @@ async function performCombinedSearch(options) {
           acc = acc.concat(chunk);
           offset += chunk.length;
           updateFilterIndicator(acc.length);
-          await window.renderFiles(acc);
+          await renderPage(acc, chunk.length < PROGRESSIVE_CHUNK);
           if (chunk.length < PROGRESSIVE_CHUNK) break;
           await yieldForProgressiveLibraryLoad();
         }
         if (searchGeneration !== myGeneration) return;
+        if (renderedCount !== acc.length) await renderPage(acc, true);
         window._progressiveLibraryLoadActive = false;
         if (filtersActive) syncSelectionAfterFilteredLoad(acc);
       } catch (err) {

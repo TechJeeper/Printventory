@@ -1029,6 +1029,14 @@
           </div>
         </div>
         <div class="settings-group">
+          <h4>Tag from Folder</h4>
+          <div class="form-group checkbox-container">
+            <input type="checkbox" id="auto-tag-from-folder-on-scan">
+            <label for="auto-tag-from-folder-on-scan">Apply Tag from Folder to newly added files</label>
+          </div>
+          <p class="setting-description">When a scan adds a file, add parent folder names as tags. Uses Folder levels from AI Configuration. Files already in the library are left unchanged, and tags already on a model are kept. This does not call AI.</p>
+        </div>
+        <div class="settings-group">
           <h4>3MF Metadata</h4>
           <p class="setting-description">When checked, if available, the model details will be pulled from the 3MF metadata when the 3MF file is added to the library. Not all 3MF models contain complete metadata.</p>
           <div class="form-group checkbox-container">
@@ -1272,7 +1280,7 @@
         <div class="form-group">
           <label for="ai-tag-folder-levels">Folder levels:</label>
           <input type="number" id="ai-tag-folder-levels" min="0" max="6" value="2">
-          <small>How many parent folders to send with the thumbnail, and to use for Tag from Folder. 0 omits folders from the AI prompt. For Kitchen/Bagel Slicer/model.3mf, 2 levels include Kitchen and Bagel Slicer.</small>
+          <small>How many parent folders to send with the thumbnail, and to use for Tag from Folder and for tagging newly scanned files. 0 omits folders from the AI prompt and adds no folder tags on scan. For Kitchen/Bagel Slicer/model.3mf, 2 levels include Kitchen and Bagel Slicer.</small>
         </div>
         <div class="form-group">
           <label for="ai-tag-merge-strategy">Tag Merge Strategy:</label>
@@ -2700,6 +2708,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="slicer-protocol.js"></script>
   <script src="preview.js"></script>
   <script src="query-builder.js"></script>
+  <script src="grid-refresh.js"></script>
   <script src="search.js"></script>
   <script src="sidebar-layout.js"></script>
   <script src="folder-tree.js"></script>

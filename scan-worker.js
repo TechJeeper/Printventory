@@ -226,6 +226,8 @@ async function calculateFileHash(filePath) {
 
 async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = null, excludeDirectories = null) {
   const files = [];
+  /** Model files (and zip entries) left out because they are larger than maxFileSize. */
+  let skippedDueToSize = 0;
   /** Every file-type dirent seen while walking the tree (matches legacy totalFiles meaning). */
   let traversedFileEntries = 0;
   const extSet = buildScanExtensionSet(scanExtensions);
@@ -279,7 +281,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
         });
       }
       flushDiscoveredFiles(true);
-      resolveDone({ files: [], totalFiles: traversedFileEntries });
+      resolveDone({ files: [], totalFiles: traversedFileEntries, skippedDueToSize });
       return;
     }
 
@@ -355,15 +357,22 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
             isZipArchive: false
           });
           flushDiscoveredFiles();
+        } else {
+          skippedDueToSize++;
         }
       } else if (enableZipArchives && ext === '.zip') {
           // Scan inside ZIP using same scanExtensions
         // ZIP files still need stat for size check
         const stats = await fs.promises.stat(filePath);
         if (stats.size <= maxFileSize) {
-          const zipFiles = await scanZipFile(filePath, maxFileSize, extSet);
-          files.push(...zipFiles);
-          flushDiscoveredFiles();
+          const zipScan = await scanZipFile(filePath, maxFileSize, extSet);
+          if (zipScan.files.length > 0) {
+            files.push(...zipScan.files);
+            flushDiscoveredFiles();
+          }
+          skippedDueToSize += zipScan.skippedDueToSize;
+        } else {
+          skippedDueToSize++;
         }
       }
       // For all other files, do nothing - no stat() call!
@@ -380,6 +389,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
 
   async function scanZipFile(zipPath, maxFileSize, extSet = new Set(['.stl', '.3mf'])) {
     const files = [];
+    let skippedDueToSize = 0;
   let zip = null;
     try {
     // Ensure StreamZip is loaded
@@ -407,6 +417,8 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
               zipEntryPath: entry.name,
               zip_path: entry.name
             });
+          } else {
+            skippedDueToSize++;
           }
         }
       }
@@ -428,7 +440,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
     }
   }
   
-  return files;
+  return { files, skippedDueToSize };
 }
 
 parentPort.on('message', async ({ directoryPath, maxFileSize, enableZipArchives, scanExtensions, excludeFolderNames, excludeDirectories, nodeModulesPath: passedNodeModulesPath }) => {
