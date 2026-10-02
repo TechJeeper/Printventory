@@ -7,7 +7,6 @@ const https = require('https');
 const util = require('util');
 const crypto = require('crypto');
 
-const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1555236206890061976/GXEbfxkjVRl5UiIthf6g0odsGaikk3XdEUJ3xSeN07eU8n9C-bhS2_HohIUvPUCBcwWW';
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const TAIL_BYTES = 2 * 1024 * 1024;
 const MAX_ZIP_BYTES = 8 * 1024 * 1024;
@@ -79,8 +78,27 @@ function buildDiscordMultipart({ payload, filename, fileBuffer, boundary }) {
   return Buffer.concat(chunks);
 }
 
+function resolveDiscordWebhookUrl(webhookUrl = process.env.DISCORD_WEBHOOK_URL) {
+  if (!webhookUrl) {
+    throw new Error('Discord support webhook is not configured.');
+  }
+  let url;
+  try {
+    url = new URL(webhookUrl);
+  } catch (_) {
+    throw new Error('Discord support webhook is invalid.');
+  }
+  const isDiscord = url.protocol === 'https:' &&
+    (url.hostname === 'discord.com' || url.hostname === 'discordapp.com') &&
+    /^\/api\/webhooks\/\d+\/[\w-]+$/.test(url.pathname);
+  if (!isDiscord) {
+    throw new Error('Discord support webhook is invalid.');
+  }
+  return url.toString();
+}
+
 function postDiscordWebhook(webhookUrl, { filename, fileBuffer, content }) {
-  const url = new URL(webhookUrl);
+  const url = new URL(resolveDiscordWebhookUrl(webhookUrl));
   const boundary = `----PrintventoryLogs${crypto.randomBytes(12).toString('hex')}`;
   const payload = JSON.stringify({ content: String(content || '').slice(0, 2000) });
   const body = buildDiscordMultipart({ payload, filename, fileBuffer, boundary });
@@ -361,7 +379,7 @@ function createCapture(options = {}) {
         `Platform: ${process.platform} ${process.arch} (${os.release()})`,
         `Sent: ${new Date().toISOString()}`
       ].join('\n');
-      const post = options.postZip || ((file) => postDiscordWebhook(options.webhookUrl || DISCORD_WEBHOOK_URL, file));
+      const post = options.postZip || ((file) => postDiscordWebhook(resolveDiscordWebhookUrl(options.webhookUrl), file));
       await post({ filename, fileBuffer: zipBuffer, content });
       await dialog.showMessageBox(parent, {
         type: 'info',
@@ -402,5 +420,5 @@ module.exports = {
   readLogTail,
   formatLogLine,
   buildDiscordMultipart,
-  DISCORD_WEBHOOK_URL
+  resolveDiscordWebhookUrl
 };
