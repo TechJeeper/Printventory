@@ -84,7 +84,12 @@ if ($packageJson.build -and $packageJson.build.files) {
 Write-Host "Copying root files..."
 foreach ($f in $rootFiles) {
     if (Test-Path $f) {
-        Copy-Item -Path $f -Destination (Join-Path $stagingPath $f) -Force
+        $dest = Join-Path $stagingPath $f
+        $destDir = Split-Path $dest -Parent
+        if (-not (Test-Path $destDir)) {
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        }
+        Copy-Item -Path $f -Destination $dest -Force
     }
 }
 
