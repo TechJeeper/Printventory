@@ -247,6 +247,24 @@ function syncSelectionAfterFilteredLoad(models) {
 
 async function performCombinedSearch(options) {
   const force = !!(options && options.force);
+  // Background refreshes (e.g. thumbnails arriving) keep the user's place in the grid. The first
+  // page alone is shorter than what is on screen, and rendering it collapses the grid and resets
+  // scroll to the top, so hold renders until the reload catches up, then restore scroll once.
+  const preserveScroll = !!(options && options.preserveScroll);
+  const scrollGrid = preserveScroll ? document.querySelector(".file-grid") : null;
+  const savedScrollTop = scrollGrid ? scrollGrid.scrollTop : 0;
+  const shownCount = scrollGrid && Array.isArray(scrollGrid.currentModels) ? scrollGrid.currentModels.length : 0;
+  let scrollRestored = !scrollGrid;
+  let renderedCount = 0;
+  const renderPage = async (models, done) => {
+    if (!scrollRestored && !done && models.length < shownCount) return;
+    await window.renderFiles(models);
+    renderedCount = models.length;
+    if (!scrollRestored) {
+      scrollRestored = true;
+      if (scrollGrid.scrollTop !== savedScrollTop) scrollGrid.scrollTop = savedScrollTop;
+    }
+  };
   let myGeneration = 0;
   try {
     if (isFilteringInProgress && !force) {
@@ -299,7 +317,7 @@ async function performCombinedSearch(options) {
     }
 
     updateFilterIndicator(filteredModels.length);
-    await window.renderFiles(filteredModels);
+    await renderPage(filteredModels, filteredModels.length < PROGRESSIVE_INITIAL);
     if (searchGeneration !== myGeneration) return;
 
     if (filteredModels.length < PROGRESSIVE_INITIAL) {
@@ -322,11 +340,12 @@ async function performCombinedSearch(options) {
           acc = acc.concat(chunk);
           offset += chunk.length;
           updateFilterIndicator(acc.length);
-          await window.renderFiles(acc);
+          await renderPage(acc, chunk.length < PROGRESSIVE_CHUNK);
           if (chunk.length < PROGRESSIVE_CHUNK) break;
           await yieldForProgressiveLibraryLoad();
         }
         if (searchGeneration !== myGeneration) return;
+        if (renderedCount !== acc.length) await renderPage(acc, true);
         window._progressiveLibraryLoadActive = false;
         if (filtersActive) syncSelectionAfterFilteredLoad(acc);
       } catch (err) {

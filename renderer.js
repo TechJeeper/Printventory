@@ -9724,12 +9724,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           window._lastDateAddedFilter = preservedDateAddedFilter;
         }
         if (typeof window.performCombinedSearch === 'function') {
-          await window.performCombinedSearch();
+          await window.performCombinedSearch({ preserveScroll: true });
         } else {
           // Fallback: use onRefreshGrid handler approach
+          const grid = document.querySelector('.file-grid');
+          const savedScrollTop = grid ? grid.scrollTop : 0;
           const sortSelect = document.getElementById('sort-select');
           const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
           await renderFiles(models);
+          if (grid && grid.scrollTop !== savedScrollTop) grid.scrollTop = savedScrollTop;
         }
       } catch (refreshError) {
         console.error('Error refreshing grid after thumbnails were added:', refreshError);
