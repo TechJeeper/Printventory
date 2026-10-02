@@ -9707,6 +9707,36 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Sort-select handler is now managed by search.js via initializeCombinedSearch()
   // which properly calls performCombinedSearch() to re-render with filters preserved
 
+  // MCP set_thumbnail and server thumbnail jobs emit one thumbnail-added per model. A full reload
+  // pages the whole library back in (several getModelsFiltered calls on a large library), so a
+  // bulk thumbnail run turned into a reload storm. Coalesce the reloads these events need.
+  const THUMBNAIL_REFRESH_COALESCE_MS = 3000;
+  let thumbnailRefreshTimer = null;
+  function scheduleThumbnailGridRefresh() {
+    if (thumbnailRefreshTimer) return;
+    thumbnailRefreshTimer = setTimeout(async () => {
+      thumbnailRefreshTimer = null;
+      try {
+        // Preserve dateAddedFilter if it's set (for new models view)
+        const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
+        if (preservedDateAddedFilter) {
+          window.dateAddedFilter = preservedDateAddedFilter;
+          window._lastDateAddedFilter = preservedDateAddedFilter;
+        }
+        if (typeof window.performCombinedSearch === 'function') {
+          await window.performCombinedSearch();
+        } else {
+          // Fallback: use onRefreshGrid handler approach
+          const sortSelect = document.getElementById('sort-select');
+          const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
+          await renderFiles(models);
+        }
+      } catch (refreshError) {
+        console.error('Error refreshing grid after thumbnails were added:', refreshError);
+      }
+    }, THUMBNAIL_REFRESH_COALESCE_MS);
+  }
+
   // Add this near the top of the file with other initialization code
   // Handle thumbnail added event - refresh grid to show updated thumbnail
   window.electron.onThumbnailAdded(async (data) => {
@@ -9826,38 +9856,32 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           }
           
-          // Trigger re-render of visible items
           const container = document.querySelector('.file-grid');
+          
+          // Off-screen in the virtual grid: patch the loaded model in place. Display records and the
+          // layout cache hold this same object, so the cell shows the new thumbnail when scrolled to.
+          if (!itemFound && container && Array.isArray(container.currentModels)) {
+            const loadedModel = container.currentModels.find(m =>
+              normalizePathForComparison(m.filePath) === normalizedPath
+            );
+            if (loadedModel) {
+              Object.assign(loadedModel, updatedModel);
+              return;
+            }
+          }
+          
+          // Trigger re-render of visible items
           if (container && container.renderVisibleItemsFn) {
             container.renderVisibleItemsFn();
           }
           
-          // If item wasn't found or we need a full refresh, do it
+          // Model is not in the loaded grid at all (or the grid has no renderer): reload, coalesced
           if (!itemFound || !container || !container.renderVisibleItemsFn) {
-            // Use performCombinedSearch to reload all models from database with current filters
-            if (typeof window.performCombinedSearch === 'function') {
-              await window.performCombinedSearch();
-            } else {
-              // Fallback: use onRefreshGrid handler approach
-              const sortSelect = document.getElementById('sort-select');
-              const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc');
-              await renderFiles(models);
-            }
+            scheduleThumbnailGridRefresh();
           }
         } catch (updateError) {
           console.error('Error refreshing grid after adding thumbnail:', updateError);
-          // Fallback to full refresh on error, but preserve dateAddedFilter if set
-          const preservedDateAddedFilter = window.dateAddedFilter || window._lastDateAddedFilter;
-          if (preservedDateAddedFilter) {
-            window.dateAddedFilter = preservedDateAddedFilter;
-            window._lastDateAddedFilter = preservedDateAddedFilter;
-            const filteredModels = await window.electron.getModelsFiltered({
-              dateAdded: preservedDateAddedFilter
-            });
-            await renderFiles(filteredModels);
-          } else if (typeof window.performCombinedSearch === 'function') {
-            await window.performCombinedSearch();
-          }
+          scheduleThumbnailGridRefresh();
         }
       }, 300); // Delay to ensure database write completes
     }
