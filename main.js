@@ -21,7 +21,8 @@ const {
 const serverTls = require('./server-tls');
 const extensionInbox = require('./extension-inbox');
 const { detectInstalledSlicers } = require('./slicer-detect');
-const { buildSlicerSpawnSpec } = require('./slicer-launch');
+const { buildSlicerSpawnSpec, launchSlicerProcess, invalidSlicerPathError } = require('./slicer-launch');
+const { registerHelperBundleRoute } = require('./helper/install-bundle');
 const {
   normalizeExcludeNames,
   shouldSkipDirectoryName,
@@ -868,6 +869,8 @@ ${bridgeCode}
       res.status(500).send('Error serving file');
     }
   });
+
+  registerHelperBundleRoute(expressApp, appDir);
 
   // Download endpoint for server mode - handles both regular files and zip entries
   expressApp.get('/api/download/*', async (req, res) => {
@@ -3920,10 +3923,10 @@ async function createWindow() {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
-        ...(isServerMode ? [] : [{
+        {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        }]),
+        },
         {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
@@ -4234,10 +4237,10 @@ function createApplicationMenu() {
           label: 'Performance',
           click: () => mainWindow.webContents.send('open-performance-settings')
         },
-        ...(isServerMode ? [] : [{
+        {
           label: 'Slicer Path',
           click: () => mainWindow.webContents.send('open-slicer-settings')
-        }]),
+        },
         {
           label: 'STL Home',
           click: () => mainWindow.webContents.send('open-stl-home')
@@ -8669,48 +8672,35 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     console.error('Error getting slicers:', error);
   }
   
-  // Add "Open in Slicer" submenu if there are configured slicers and only one file is selected (only in normal mode, not server mode)
-  if (!isServerMode && slicers.length > 0 && filePaths.length === 1) {
+  // Server mode hands the files to the local helper via printventory://.
+  // Desktop mode launches the slicer here, and only for a single selection.
+  if (slicers.length > 0 && filePaths.length >= 1 && (isServerMode || filePaths.length === 1)) {
     const slicerSubmenu = {
       label: 'Open in Slicer',
       submenu: slicers.map(slicer => ({
         label: slicer.name,
+        slicerName: slicer.name,
+        slicerPath: slicer.path,
         click: async () => {
           try {
-            // In server mode, "Open in Slicer" should execute on the client machine, not the server
-            // Send command to client to execute locally
+            // Browser clients launch the helper. Do not start a slicer inside Docker.
             if (isServerMode) {
-              let modelPath = filePaths[0];
-              
-              // If it's a zip entry, we need to handle it (extract on client or download)
-              if (isZipEntry && pathInfo) {
-                // For zip entries, send both zip path and entry path
-                modelPath = `${pathInfo.zipPath}::${pathInfo.entryPath}`;
-              }
-              
-              // Send command to client to execute slicer locally
+              const commandPayload = {
+                type: 'open-in-slicer',
+                filePaths: filePaths.slice(),
+                filePath: filePaths[0],
+                slicerName: slicer.name,
+                slicerPath: slicer.path,
+                isZipEntry: Boolean(isZipEntry),
+                zipPath: isZipEntry && pathInfo ? pathInfo.zipPath : null,
+                entryPath: isZipEntry && pathInfo ? pathInfo.entryPath : null
+              };
               if (global.broadcastEvent) {
-                global.broadcastEvent('execute-client-command', {
-                  type: 'open-in-slicer',
-                  filePath: modelPath,
-                  slicerName: slicer.name,
-                  slicerPath: slicer.path,
-                  isZipEntry: isZipEntry || false,
-                  zipPath: isZipEntry ? pathInfo.zipPath : null,
-                  entryPath: isZipEntry ? pathInfo.entryPath : null
-                });
+                global.broadcastEvent('execute-client-command', commandPayload);
               } else {
-                event.sender.send('execute-client-command', {
-                  type: 'open-in-slicer',
-                  filePath: modelPath,
-                  slicerName: slicer.name,
-                  slicerPath: slicer.path,
-                  isZipEntry: isZipEntry || false,
-                  zipPath: isZipEntry ? pathInfo.zipPath : null,
-                  entryPath: isZipEntry ? pathInfo.entryPath : null
-                });
+                event.sender.send('execute-client-command', commandPayload);
               }
-              return; // Don't try to execute on server
+              return;
             }
             
             // For hidden Electron window or normal mode, check Docker/Windows path compatibility
@@ -8745,6 +8735,12 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
             }
             
             // Execute slicer command (only in normal mode, not server mode)
+            const invalidSlicer = invalidSlicerPathError(slicer.path, slicer.name);
+            if (invalidSlicer) {
+              presentInvalidSlicer(getWindowFromEvent(event), invalidSlicer);
+              return;
+            }
+
             let modelPath = filePaths[0]; // Use the first file selected
             
             // If it's a zip entry, extract to OS temp first
@@ -8762,7 +8758,9 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           } catch (error) {
             console.error('Error slicing model:', error);
             const win = getWindowFromEvent(event);
-            if (win && !win.isDestroyed()) {
+            if (error && error.code === 'INVALID_SLICER') {
+              presentInvalidSlicer(win, error);
+            } else if (win && !win.isDestroyed()) {
               dialog.showMessageBox(win, {
                 type: 'error',
                 title: 'Error',
@@ -9704,12 +9702,23 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
       };
       // Handle submenus
       if (item.submenu) {
-        serialized.submenu = item.submenu.map((subItem, subIndex) => ({
-          label: subItem.label,
-          enabled: subItem.enabled !== false,
-          index: index,
-          subIndex: subIndex
-        }));
+        serialized.submenu = item.submenu.map((subItem, subIndex) => {
+          const entry = {
+            label: subItem.label,
+            enabled: subItem.enabled !== false,
+            index: index,
+            subIndex: subIndex
+          };
+          if (isServerMode && subItem.slicerPath) {
+            entry.clientAction = {
+              type: 'open-in-slicer',
+              slicerName: subItem.slicerName || subItem.label,
+              slicerPath: subItem.slicerPath,
+              filePaths: filePaths
+            };
+          }
+          return entry;
+        });
       }
       return serialized;
     });
@@ -10500,10 +10509,27 @@ function getSlicerBySelection(slicers, { slicerId, slicerName } = {}) {
   return slicers[0];
 }
 
+function presentInvalidSlicer(win, error) {
+  const options = {
+    type: 'error',
+    title: 'Slicer path is not valid',
+    message: 'Could not open the slicer',
+    detail: error.message
+  };
+  if (win && !win.isDestroyed()) {
+    dialog.showMessageBox(win, options);
+    return;
+  }
+  dialog.showMessageBox(options);
+}
+
 function runSlicerWithModelPaths(slicer, modelPaths) {
   if (!modelPaths.length) {
     return Promise.reject(new Error('No model files to open in slicer'));
   }
+
+  const invalid = invalidSlicerPathError(slicer.path, slicer.name);
+  if (invalid) return Promise.reject(invalid);
 
   const inDocker = isDockerContainer();
   if (inDocker && (/^[A-Za-z]:[\\/]/.test(slicer.path) || /^\\\\/.test(slicer.path))) {
@@ -10513,33 +10539,20 @@ function runSlicerWithModelPaths(slicer, modelPaths) {
     ));
   }
 
-  const { spawn } = require('child_process');
   const spec = buildSlicerSpawnSpec(slicer.path, modelPaths);
   console.log('[Slicer] Launching', spec.command, spec.args.join(' '));
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const child = spawn(spec.command, spec.args, {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false
-    });
-    child.once('error', (error) => {
-      if (settled) return;
-      settled = true;
-      scheduleExtractTempCleanupMany(modelPaths, 0);
-      reject(error);
-    });
-    // Resolve when the process starts. Slicers that are already open often hand the
-    // file to the existing window and exit non-zero; that is still a successful launch.
-    child.once('spawn', () => {
-      if (settled) return;
-      settled = true;
-      child.unref();
+  // Resolve when the process starts. Slicers that are already open often hand the
+  // file to the existing window and exit non-zero; that is still a successful launch.
+  return launchSlicerProcess(spec, { name: slicer.name, slicerPath: slicer.path }).then(
+    () => {
       scheduleExtractTempCleanupMany(modelPaths);
-      resolve({ success: true, count: modelPaths.length });
-    });
-  });
+      return { success: true, count: modelPaths.length };
+    },
+    (error) => {
+      scheduleExtractTempCleanupMany(modelPaths, 0);
+      throw error;
+    }
+  );
 }
 
 // Helper function to clean HTML entities and special characters from description text
@@ -13132,6 +13145,12 @@ const openFileInSlicerHandler = async (event, options = {}) => {
     throw new Error('No slicer configured. Add a slicer in Settings.');
   }
 
+  const invalidSlicer = invalidSlicerPathError(slicer.path, slicer.name);
+  if (!isServerMode && invalidSlicer) {
+    presentInvalidSlicer(getWindowFromEvent(event), invalidSlicer);
+    return { success: false, error: invalidSlicer.message };
+  }
+
   if (isServerMode) {
     const firstPath = paths[0];
     const pathInfo = parseZipPath(firstPath);
@@ -13246,6 +13265,11 @@ const executeClientCommandHandler = async (event, commandData) => {
       }
       return { success: true };
     } else if (type === 'open-in-slicer') {
+      const invalidSlicer = invalidSlicerPathError(slicerPath, slicerName);
+      if (invalidSlicer) {
+        return { success: false, error: invalidSlicer.message };
+      }
+
       const rawPaths = Array.isArray(commandData.filePaths) && commandData.filePaths.length
         ? commandData.filePaths
         : (filePath ? [filePath] : []);

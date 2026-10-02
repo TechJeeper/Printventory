@@ -778,7 +778,15 @@
         link.click();
         setTimeout(() => link.remove(), 100);
       } else if (type === 'open-in-slicer') {
-        // For browser clients, show instructions (can't execute local commands)
+        if (window.PrintventorySlicerProtocol) {
+          try {
+            window.PrintventorySlicerProtocol.launchFromCommand(commandData);
+          } catch (error) {
+            alert(`Could not send to slicer:\n${error.message}`);
+          }
+          return;
+        }
+        // Helper script was not loaded. Show the manual steps.
         console.log('[Bridge] Open in slicer requested:', filePath, slicerName);
         let message = `To open this file in ${slicerName}:\n\n`;
         

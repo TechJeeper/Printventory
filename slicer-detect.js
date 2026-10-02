@@ -160,6 +160,7 @@ function defaultCandidatePaths(platform, env, home) {
       ['SuperSlicer', 'SuperSlicer.exe'],
       ['ideaMaker', 'ideaMaker.exe'],
       ['LycheeSlicer', 'LycheeSlicer.exe'],
+      ['Lychee Slicer', 'LycheeSlicer.exe'],
       ['ChiTuBox', 'CHITUBOX.exe'],
       ['ElegooSlicer', 'ElegooSlicer.exe'],
       ['FlashPrint', 'FlashPrint.exe'],

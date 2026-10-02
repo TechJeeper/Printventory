@@ -6,6 +6,7 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [2.2.13] - 2026-10-01
 
+- Server and Docker mode can Send to Slicer through a local helper. Slicer Settings downloads a package already set to this server. The installer registers a printventory:// protocol on Windows, macOS, and Linux, and downloads the official Node.js LTS release when Node is not already installed.
 - STL Home accepts a list of directories, using the same add and remove controls as excluded directories
 - Startup scans every STL Home directory, on the desktop and in Docker
 - STL_HOME accepts one path or several, separated the same way as STL_HOME_EXCLUDE

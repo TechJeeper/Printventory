@@ -1358,6 +1358,20 @@ console.log('[Preview] preview.js script loaded');
   }
 
   async function sendPreviewToSlicer(slicer, filePaths) {
+    if (window._electronBridgeReady && window.PrintventorySlicerProtocol) {
+      try {
+        window.PrintventorySlicerProtocol.launchFromCommand({
+          slicerName: slicer.name,
+          slicerPath: slicer.path,
+          filePaths
+        });
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        alert(`Could not send to slicer:\n${message}`);
+      }
+      return;
+    }
+
     if (!window.electron?.openFileInSlicer) {
       alert('Send to slicer is not available in this mode.');
       return;
@@ -1419,8 +1433,6 @@ console.log('[Preview] preview.js script loaded');
     const slicers = await loadConfiguredSlicers();
 
     if (!slicers.length) {
-      const serverMode = await window.electron?.isServerMode?.().catch(() => false);
-      if (serverMode) return;
       const configure = confirm('No slicer configured. Open Slicer Settings now?');
       if (configure && typeof window.openSlicerSettings === 'function') {
         await window.openSlicerSettings();

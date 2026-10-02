@@ -255,9 +255,36 @@ async function createSlicerEntry(slicer = { name: '', path: '' }) {
   return container;
 }
 
+function updateSlicerHelperNote(serverMode) {
+  const panel = document.getElementById('slicer-helper-install');
+  const insecureRow = document.getElementById('slicer-helper-insecure-row');
+  const detectBtn = document.getElementById('detect-slicers-button');
+  if (detectBtn) {
+    detectBtn.disabled = !!serverMode;
+    detectBtn.title = serverMode
+      ? 'Auto Detect looks on the Printventory server. Type the slicer path from this computer.'
+      : '';
+  }
+  if (panel) panel.hidden = !serverMode;
+  if (insecureRow) insecureRow.hidden = window.location.protocol !== 'https:';
+}
+
+function downloadSlicerHelper(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const insecure = document.getElementById('slicer-helper-insecure')?.checked;
+  const link = document.createElement('a');
+  link.href = '/api/helper/bundle' + (insecure ? '?insecure=1' : '');
+  link.download = 'Printventory-Helper.zip';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 async function openSlicerSettings() {
   const serverMode = await window.electron?.isServerMode?.().catch(() => false);
-  if (serverMode) return;
+  updateSlicerHelperNote(serverMode);
 
   const dialog = document.getElementById('slicer-dialog');
   if (!dialog) return;
@@ -408,6 +435,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   
+  document.getElementById('download-slicer-helper')?.addEventListener('click', downloadSlicerHelper);
+
   document.getElementById('detect-slicers-button')?.addEventListener('click', async (e) => {
     e.preventDefault();
     e.stopPropagation();

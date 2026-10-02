@@ -210,6 +210,17 @@ body.server-mode #preview-slicer-menu {
   width: 100%;
 }
 
+/* Spyglass stays on the trailing edge. Clear sits immediately to its left. */
+.filter-section .search-models-field .input-with-icon #filter-search-button {
+  right: 4px;
+  z-index: 11;
+}
+
+.filter-section .search-models-field .input-with-icon #clear-filter-search-button {
+  right: 44px;
+  z-index: 10;
+}
+
 .filter-section .search-notes-toggle {
   display: inline-flex;
   align-items: center;
@@ -7901,6 +7912,14 @@ dialog:not([open]) {
 
 #slicer-detect-status {
   margin: 0 0 0.75rem;
+}
+
+#slicer-helper-install {
+  margin: 0 0 0.75rem;
+}
+
+#slicer-helper-install .full-width-button {
+  margin-top: 0.5rem;
 }
 
 #detect-slicers-button:disabled {

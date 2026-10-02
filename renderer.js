@@ -6719,6 +6719,13 @@ async function createServerMenuBar() {
         window.electron.send('open-performance-settings');
       }
     }},
+    { label: 'Slicer', action: async () => {
+      if (typeof window.openSlicerSettings === 'function') {
+        await window.openSlicerSettings();
+        return;
+      }
+      window.electron.send('open-slicer-settings');
+    }},
     { label: 'STL Home', action: async () => {
       await window.openSTLHomeDialog();
     }},
@@ -13347,6 +13354,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           setTimeout(() => link.remove(), 100);
         }
       } else if (type === 'open-in-slicer') {
+        if (window._electronBridgeReady && window.PrintventorySlicerProtocol) {
+          try {
+            window.PrintventorySlicerProtocol.launchFromCommand(commandData);
+          } catch (error) {
+            alert(`Could not send to slicer:\n${error.message}`);
+          }
+          return;
+        }
+
         // Try to execute slicer command on client machine
         // For Electron clients, use IPC handler; for browser clients, show instructions
         
@@ -13589,8 +13605,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   window._electronRealEventHandlers['open-slicer-settings'] = async function() {
-    const serverMode = await window.electron?.isServerMode?.().catch(() => false);
-    if (serverMode) return;
     if (typeof window.openSlicerSettings === 'function') {
       window.openSlicerSettings();
       return;
@@ -19248,6 +19262,14 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
                 subMenuItem.addEventListener('click', async (e) => {
                   e.stopPropagation();
                   try {
+                    if (subItem.clientAction && window.PrintventorySlicerProtocol) {
+                      try {
+                        window.PrintventorySlicerProtocol.launchFromCommand(subItem.clientAction);
+                      } finally {
+                        removeHtmlContextMenu();
+                      }
+                      return;
+                    }
                     if (!(await confirmHtmlContextDestructiveAction(subItem, menuData))) {
                       removeHtmlContextMenu();
                       return;

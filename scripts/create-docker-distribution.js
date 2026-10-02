@@ -59,6 +59,7 @@ const filesToCopy = [
   'scan-worker.js',
   'scan-skip.js',
   'slicer-launch.js',
+  'slicer-protocol.js',
   'library-context.js',
   'stl-sanity.js',
   'ai-rate-limit.js',
@@ -113,6 +114,11 @@ console.log('Copying assets...');
     // Ignore errors
   }
 });
+
+if (fs.existsSync('helper')) {
+  console.log('Copying helper directory...');
+  fs.cpSync('helper', path.join(dockerDistDir, 'helper'), { recursive: true });
+}
 
 // Copy guide directory
 if (fs.existsSync('guide')) {

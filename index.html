@@ -969,6 +969,14 @@
           <button type="button" id="detect-slicers-button" class="full-width-button">Auto Detect</button>
         </div>
         <p id="slicer-detect-status" class="setting-description" hidden></p>
+        <div id="slicer-helper-install" hidden>
+          <p class="setting-description">Send to Slicer uses a helper on this computer. Download the package for this server, unzip it, and run the installer. If Node.js is missing, the installer downloads it.</p>
+          <div class="form-group checkbox-container" id="slicer-helper-insecure-row" hidden>
+            <input type="checkbox" id="slicer-helper-insecure">
+            <label for="slicer-helper-insecure">This server uses a self-signed certificate</label>
+          </div>
+          <button type="button" id="download-slicer-helper" class="full-width-button">Download helper for this server</button>
+        </div>
         <div class="dialog-buttons">
           <button type="button" id="save-slicer-settings">Save</button>
           <button type="button" id="cancel-slicer-settings" onclick="document.getElementById('slicer-dialog')?.close()">Cancel</button>
@@ -2689,6 +2697,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
     });
   </script>
   <script src="thumbnail-progress.js"></script>
+  <script src="slicer-protocol.js"></script>
   <script src="preview.js"></script>
   <script src="query-builder.js"></script>
   <script src="search.js"></script>

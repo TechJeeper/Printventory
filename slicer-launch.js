@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+
 function splitCommandTokens(input) {
   const tokens = [];
   const re = /"([^"]*)"|'([^']*)'|\S+/g;
@@ -101,11 +103,86 @@ function buildSlicerShellCommand(slicerPath, modelPaths, platform = process.plat
   return [commandToken, ...headTokens, ...files.map(escapeShellArg)].join(' ');
 }
 
+function isWrappedLauncher(slicerPath) {
+  const raw = String(slicerPath || '').trim();
+  return /^flatpak\s+run\s+\S/i.test(raw) || /^snap\s+run\s+\S/i.test(raw);
+}
+
+/**
+ * Null when the configured slicer can be started.
+ * An Error when the path is missing, empty, or not a program, before spawn.
+ */
+function invalidSlicerPathError(slicerPath, name) {
+  const raw = String(slicerPath || '').trim();
+  const label = name || 'The slicer';
+  if (!raw) {
+    const error = new Error(`${label} has no program path. Open Slicer Settings and choose the installed program.`);
+    error.code = 'INVALID_SLICER';
+    return error;
+  }
+  if (isWrappedLauncher(raw)) return null;
+
+  const appMatch = raw.match(/^(.*?\.app)(?:[\\/]|$)/i);
+  if (appMatch) {
+    try {
+      if (fs.statSync(appMatch[1]).isDirectory()) return null;
+    } catch (_) {
+      // Missing app bundle.
+    }
+    const error = new Error(`${label} was not found at ${appMatch[1]}. Open Slicer Settings and choose the installed app.`);
+    error.code = 'INVALID_SLICER';
+    return error;
+  }
+
+  let stat = null;
+  try {
+    stat = fs.statSync(raw);
+  } catch (_) {
+    stat = null;
+  }
+  if (stat && stat.isFile()) return null;
+
+  const detail = stat && stat.isDirectory()
+    ? `${raw} is a folder. Choose the slicer program inside it.`
+    : `${label} was not found at ${raw}.`;
+  const error = new Error(`${detail} Open Slicer Settings and choose the installed program.`);
+  error.code = 'INVALID_SLICER';
+  return error;
+}
+
+function launchSlicerProcess(spec, options = {}) {
+  const invalid = invalidSlicerPathError(options.slicerPath || spec.command, options.name);
+  if (invalid) return Promise.reject(invalid);
+
+  const { spawn } = require('child_process');
+  const child = spawn(spec.command, spec.args || [], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false
+  });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.once('spawn', () => {
+      if (settled) return;
+      settled = true;
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 module.exports = {
   splitCommandTokens,
   escapeShellArg,
   slicerSupportsSingleInstanceFlag,
   parseSlicerLauncher,
   buildSlicerSpawnSpec,
-  buildSlicerShellCommand
+  buildSlicerShellCommand,
+  invalidSlicerPathError,
+  launchSlicerProcess
 };
