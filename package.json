@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.15",
+  "version": "2.2.16",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -43,6 +43,8 @@
     "test:stl-sanity": "node stl-sanity.test.js",
     "test:ai-rate-limit": "node ai-rate-limit.test.js",
     "test:notes": "node notes-markdown.test.js",
+    "test:dedup-preferred": "node dedup-preferred.test.js",
+    "test:organize-library": "node organize-library.test.js",
     "test:support-logs": "node support-logs.test.js",
     "test:full": "playwright test full-app-e2e.spec.js",
     "test:dedup-stress": "node tests/dedup-stress-test.js"
@@ -140,6 +142,10 @@
       "input-dialog.html",
       "renderer.js",
       "notes-markdown.js",
+      "dedup-preferred.js",
+      "organize-library.js",
+      "organize-library-ui.js",
+      "organize-library.css",
       "notes-markdown.css",
       "printer-manager.js",
       "slicer-detect.js",
@@ -158,6 +164,7 @@
       "mobile-ui.js",
       "mobile-ui.css",
       "styles.css",
+      "theme.css",
       "preview-wall.css",
       "thumbnail-progress.css",
       "thumbnail-progress.js",

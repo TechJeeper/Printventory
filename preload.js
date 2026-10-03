@@ -295,6 +295,7 @@ contextBridge.exposeInMainWorld('electron', {
       'open-system-report',
       'open-backup-restore',
       'open-dedup',
+      'open-organize-library',
       'open-tag-manager',
       'open-filament-manager',
       'open-printer-management',

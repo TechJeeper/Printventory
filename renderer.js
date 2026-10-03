@@ -75,7 +75,7 @@ window._electronRealEventHandlers = {};
 window._electronPendingEvents = {};
 const earlyEventChannels = [
   'open-theme-settings', 'clear-new-flags', 'regenerate-thumbnails', 'generate-missing-thumbnails',
-  'start-print-roulette', 'open-dedup', 'open-tag-manager', 'open-filament-manager', 'open-printer-management', 'open-parts-stock', 'open-stats',
+  'start-print-roulette', 'open-dedup', 'open-organize-library', 'open-tag-manager', 'open-filament-manager', 'open-printer-management', 'open-parts-stock', 'open-stats',
   'open-backup-restore', 'open-ai-config', 'open-file-type-settings', 'open-performance-settings',
   'open-slicer-settings', 'open-browser-extension-settings', 'open-mcp-server-settings', 'open-https-settings', 'open-purge-models',
   'open-metadata-editor', 'open-system-report', 'open-manage-thumbnails',
@@ -519,7 +519,7 @@ window.confirmPurgeModelsFromDialog = async function confirmPurgeModelsFromDialo
   }
 };
 
-// DeDup Easy: select all but one per group; keep archived (ZIP) when present (early for Docker/server)
+// DeDup Easy: select all but one per group. Prefer a copy under the preferred directory, then ZIP, then the first file.
 window.dedupEasyFromDialog = function dedupEasyFromDialog() {
   if (typeof window.applyDedupEasySelection === 'function' && window._dedupVirtualState?.groups?.length) {
     window.applyDedupEasySelection();
@@ -527,12 +527,27 @@ window.dedupEasyFromDialog = function dedupEasyFromDialog() {
   }
   const dialog = document.getElementById('dedup-dialog');
   if (!dialog) return;
+  const preferredDir = typeof getDedupPreferredDirectory === 'function' ? getDedupPreferredDirectory() : '';
   const groups = dialog.querySelectorAll('.duplicate-group');
   groups.forEach(function(group) {
     const fileRows = group.querySelectorAll('.duplicate-file');
     if (fileRows.length === 0) return;
-    const zipRow = Array.from(fileRows).find(function(row) { return row.classList.contains('zip-entry'); });
-    const keeperRow = zipRow || fileRows[0];
+    let keeperRow = null;
+    if (typeof pickDedupKeeperPath === 'function') {
+      const files = Array.from(fileRows).map(function(row) {
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        return { filePath: checkbox ? (checkbox.getAttribute('data-filepath') || '') : '' };
+      });
+      const keeperPath = pickDedupKeeperPath(files, preferredDir);
+      keeperRow = Array.from(fileRows).find(function(row) {
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        return checkbox && checkbox.getAttribute('data-filepath') === keeperPath;
+      }) || null;
+    }
+    if (!keeperRow) {
+      const zipRow = Array.from(fileRows).find(function(row) { return row.classList.contains('zip-entry'); });
+      keeperRow = zipRow || fileRows[0];
+    }
     fileRows.forEach(function(row) {
       const checkbox = row.querySelector('input[type="checkbox"]');
       if (!checkbox || checkbox.disabled) return;
@@ -565,11 +580,18 @@ window.dedupClearFromDialog = function dedupClearFromDialog() {
 
 // Free large dedup payloads when the dialog closes (register early — DOMContentLoaded may abort before late listeners)
 document.addEventListener('DOMContentLoaded', function() {
+  if (typeof bindDedupPreferredDirectoryControls === 'function') {
+    bindDedupPreferredDirectoryControls();
+  }
+  if (typeof loadDedupPreferredDirectory === 'function') {
+    loadDedupPreferredDirectory();
+  }
   const dedupDialog = document.getElementById('dedup-dialog');
   if (!dedupDialog || dedupDialog.dataset.dedupTeardownBound === '1') return;
   dedupDialog.dataset.dedupTeardownBound = '1';
   dedupDialog.addEventListener('close', function() {
     window._dedupScope = null;
+    window._dedupApplyPreferredOnLoad = false;
     if (typeof window.teardownDedupVirtualList === 'function') {
       window.teardownDedupVirtualList();
     } else {
@@ -1020,9 +1042,32 @@ const PREVIEW_TILE_PX = { s: 140, m: 180, l: 240 };
 const PREVIEW_COLUMNS = { s: 10, m: 6, l: 4 };
 const PREVIEW_COLUMNS_MOBILE = { s: 3, m: 2, l: 2 };
 
+function mobileListMetrics() {
+  if (!document.body?.classList.contains('mobile-ui')) return null;
+  return { height: 64, gap: 12, headerOffset: 52 };
+}
+
+function mobileLibraryColumns() {
+  if (!document.body?.classList.contains('mobile-ui')) return 0;
+  if (document.body.classList.contains('mobile-ui-wide')) return 3;
+  if (window.matchMedia('(orientation: landscape)').matches) return 3;
+  return 2;
+}
+
+function mobileDetailedMetrics(containerWidth) {
+  const cols = Math.max(1, mobileLibraryColumns() || 2);
+  const pad = 8;
+  const gap = 8;
+  const available = Math.max(0, containerWidth - pad * 2);
+  const width = Math.max(96, Math.floor((available - gap * (cols - 1)) / cols));
+  const thumb = Math.max(80, width - 12);
+  return { cols, pad, gap, width, height: thumb + 40, thumb };
+}
+
 function previewColumnCount() {
-  const table = document.body?.classList.contains('mobile-ui') ? PREVIEW_COLUMNS_MOBILE : PREVIEW_COLUMNS;
-  return table[currentPreviewTileSize] || table.m;
+  const mobileCols = mobileLibraryColumns();
+  if (mobileCols) return mobileCols;
+  return PREVIEW_COLUMNS[currentPreviewTileSize] || PREVIEW_COLUMNS.m;
 }
 
 /**
@@ -4512,13 +4557,19 @@ function createDuplicateGroupElement(group, selectedPaths) {
   header.textContent = `${group.files.length} duplicate files found`;
   filesList.appendChild(header);
 
+  const preferredDir = getDedupPreferredDirectory();
   group.files.forEach((file) => {
     const fileDiv = document.createElement('div');
     fileDiv.className = 'duplicate-file';
 
     const isZipEntry = file.filePath.includes('::');
+    const isPreferred = !!(preferredDir && typeof fileIsUnderPreferredDirectory === 'function'
+      && fileIsUnderPreferredDirectory(file.filePath, preferredDir));
     if (isZipEntry) {
       fileDiv.classList.add('zip-entry');
+    }
+    if (isPreferred) {
+      fileDiv.classList.add('preferred-directory');
     }
 
     const checkbox = document.createElement('input');
@@ -4543,19 +4594,25 @@ function createDuplicateGroupElement(group, selectedPaths) {
     const filePath = document.createElement('span');
     filePath.className = 'duplicate-file-path';
 
+    if (isPreferred) {
+      const preferredBadge = document.createElement('span');
+      preferredBadge.className = 'preferred-directory-badge';
+      preferredBadge.textContent = 'Preferred';
+      preferredBadge.title = 'This copy is inside the preferred directory. Easy keeps one copy from that folder.';
+      filePath.appendChild(preferredBadge);
+    }
+
     if (isZipEntry) {
       const zipBadge = document.createElement('span');
       zipBadge.className = 'zip-entry-badge';
       zipBadge.textContent = 'ZIP';
       zipBadge.title = 'Model in ZIP archive (cannot be deleted)';
       filePath.appendChild(zipBadge);
-
-      const pathText = document.createElement('span');
-      pathText.textContent = file.filePath;
-      filePath.appendChild(pathText);
-    } else {
-      filePath.textContent = file.filePath;
     }
+
+    const pathText = document.createElement('span');
+    pathText.textContent = file.filePath;
+    filePath.appendChild(pathText);
 
     const fileSize = document.createElement('span');
     fileSize.className = 'duplicate-file-size';
@@ -4572,6 +4629,123 @@ function createDuplicateGroupElement(group, selectedPaths) {
   return { groupEl, preview, filePath: group.files[0]?.filePath };
 }
 
+function getDedupPreferredDirectory() {
+  const input = document.getElementById('dedup-preferred-directory-input');
+  if (input) return input.value.trim();
+  return String(window._dedupPreferredDirectory || '').trim();
+}
+
+function persistDedupPreferredDirectory(value) {
+  const next = String(value || '').trim();
+  window._dedupPreferredDirectory = next;
+  const input = document.getElementById('dedup-preferred-directory-input');
+  if (input && input.value.trim() !== next) input.value = next;
+  if (window.electron?.saveSetting) {
+    window.electron.saveSetting('dedupPreferredDirectory', next).catch((err) => {
+      console.error('Error saving de-dup preferred directory:', err);
+    });
+  }
+}
+
+let dedupPreferredLoadPromise = null;
+
+function loadDedupPreferredDirectory() {
+  const input = document.getElementById('dedup-preferred-directory-input');
+  if (input?.dataset.loaded === '1') {
+    window._dedupPreferredDirectory = input.value.trim();
+    return Promise.resolve(window._dedupPreferredDirectory);
+  }
+  if (dedupPreferredLoadPromise) return dedupPreferredLoadPromise;
+  dedupPreferredLoadPromise = (async () => {
+    const field = document.getElementById('dedup-preferred-directory-input');
+    const typed = field ? field.value.trim() : '';
+    try {
+      const saved = await window.electron?.getSetting?.('dedupPreferredDirectory');
+      if (!typed && field && typeof saved === 'string') field.value = saved;
+    } catch (err) {
+      console.error('Error loading de-dup preferred directory:', err);
+    }
+    if (field) field.dataset.loaded = '1';
+    window._dedupPreferredDirectory = field ? field.value.trim() : typed;
+    return window._dedupPreferredDirectory;
+  })();
+  return dedupPreferredLoadPromise;
+}
+
+function refreshDedupPreferredMarks() {
+  if (window._dedupVirtualState?.groups?.length && typeof renderDedupVirtualWindow === 'function') {
+    renderDedupVirtualWindow(true);
+  }
+}
+
+async function setDedupPreferredDirectory(value, options) {
+  const next = String(value || '').trim();
+  persistDedupPreferredDirectory(next);
+  const applyEasy = !!(options && options.applyEasy && next);
+  window._dedupApplyPreferredOnLoad = applyEasy;
+  if (applyEasy && window._dedupVirtualState?.groups?.length && typeof applyDedupEasySelection === 'function') {
+    window._dedupApplyPreferredOnLoad = false;
+    applyDedupEasySelection();
+    return;
+  }
+  refreshDedupPreferredMarks();
+}
+
+function bindDedupPreferredDirectoryControls() {
+  const input = document.getElementById('dedup-preferred-directory-input');
+  const browse = document.getElementById('dedup-preferred-browse');
+  const clearBtn = document.getElementById('dedup-preferred-clear');
+  const form = input?.closest('form');
+  if (form && form.dataset.dedupPreferredSubmitBound !== '1') {
+    form.dataset.dedupPreferredSubmitBound = '1';
+    form.addEventListener('submit', (e) => {
+      if (document.activeElement && document.activeElement.id === 'dedup-preferred-directory-input') {
+        e.preventDefault();
+      }
+    });
+  }
+  if (input && input.dataset.bound !== '1') {
+    input.dataset.bound = '1';
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      e.stopPropagation();
+      const next = input.value.trim();
+      setDedupPreferredDirectory(next, { applyEasy: !!next });
+    });
+    input.addEventListener('change', () => {
+      const next = input.value.trim();
+      setDedupPreferredDirectory(next, { applyEasy: !!next });
+    });
+  }
+  if (browse && browse.dataset.bound !== '1') {
+    browse.dataset.bound = '1';
+    browse.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        const result = await window.electron.invoke('open-folder-dialog', 'Preferred directory');
+        if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
+        await setDedupPreferredDirectory(result.filePaths[0], { applyEasy: true });
+      } catch (err) {
+        console.error('Error choosing preferred directory:', err);
+        if (window.electron?.showMessage) {
+          await window.electron.showMessage('Preferred directory', 'Could not open the folder picker. Paste the directory path instead.');
+        }
+      }
+    });
+  }
+  if (clearBtn && clearBtn.dataset.bound !== '1') {
+    clearBtn.dataset.bound = '1';
+    clearBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDedupPreferredDirectory('', { applyEasy: false });
+    });
+  }
+}
+window.bindDedupPreferredDirectoryControls = bindDedupPreferredDirectoryControls;
+
 function updateDedupSelectionCount() {
   const state = window._dedupVirtualState;
   if (!state) return;
@@ -4585,12 +4759,17 @@ function updateDedupSelectionCount() {
 function applyDedupEasySelection() {
   const state = window._dedupVirtualState;
   if (!state?.groups?.length) return;
+  const preferredDir = getDedupPreferredDirectory();
+  if (preferredDir !== String(window._dedupPreferredDirectory || '')) {
+    persistDedupPreferredDirectory(preferredDir);
+  }
   state.selectedPaths.clear();
   for (const group of state.groups) {
     const files = group.files || [];
     if (files.length === 0) continue;
-    const zipFile = files.find((f) => f.filePath.includes('::'));
-    const keeperPath = zipFile ? zipFile.filePath : files[0].filePath;
+    const keeperPath = typeof pickDedupKeeperPath === 'function'
+      ? pickDedupKeeperPath(files, preferredDir)
+      : (files.find((f) => f.filePath.includes('::')) || files[0]).filePath;
     for (const file of files) {
       if (file.filePath.includes('::')) continue;
       if (file.filePath !== keeperPath) {
@@ -4814,6 +4993,8 @@ function prepareDedupDialog() {
   const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
   if (includeZipCheckbox) includeZipCheckbox.checked = false;
   window._dedupScope = null;
+  bindDedupPreferredDirectoryControls();
+  loadDedupPreferredDirectory();
   return dialog;
 }
 
@@ -5119,6 +5300,8 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
       }
     }
 
+    await loadDedupPreferredDirectory();
+
     if (groups.length === 0) {
       teardownDedupVirtualList();
       let emptyHtml = '';
@@ -5138,6 +5321,10 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
       duplicateGroups.innerHTML = emptyHtml;
     } else {
       setupDedupVirtualList(duplicateGroups, groups);
+      if (window._dedupApplyPreferredOnLoad && getDedupPreferredDirectory()) {
+        window._dedupApplyPreferredOnLoad = false;
+        applyDedupEasySelection();
+      }
       if (isGeneratingHashes) {
         const warningDiv = document.createElement('div');
         warningDiv.className = 'hash-generation-warning';
@@ -5480,34 +5667,33 @@ async function checkTermsOfService() {
 // Function to create menu dropdown for server mode
 function createMenuDropdown(label, items) {
   const menuContainer = document.createElement('div');
-  menuContainer.style.cssText = 'position: relative; margin-right: 15px;';
-  
+  menuContainer.className = 'server-menu-group';
+
   const menuButton = document.createElement('button');
+  menuButton.type = 'button';
+  menuButton.className = 'server-menu-button';
   menuButton.textContent = label;
-  menuButton.style.cssText = 'background: none; border: none; color: #e0e0e0; padding: 5px 10px; cursor: pointer; font-size: 13px; font-family: inherit;';
-  menuButton.onmouseover = () => menuButton.style.backgroundColor = '#3a3a3a';
-  menuButton.onmouseout = () => menuButton.style.backgroundColor = 'transparent';
-  
+
   const dropdown = document.createElement('div');
-  dropdown.style.cssText = 'display: none; position: absolute; top: 100%; left: 0; background-color: #2c2c2c; border: 1px solid #444; border-radius: 4px; min-width: 180px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); z-index: 10001; margin-top: 2px;';
-  
+  dropdown.className = 'server-menu-dropdown';
+  dropdown.style.display = 'none';
+
   items.forEach(item => {
     if (item.label === '---') {
       const separator = document.createElement('div');
-      separator.style.cssText = 'height: 1px; background-color: #444; margin: 4px 0;';
+      separator.className = 'server-menu-separator';
       dropdown.appendChild(separator);
     } else if (item.submenu && item.submenu.length) {
       const menuItem = document.createElement('div');
-      menuItem.style.cssText = 'position: relative; padding: 8px 12px; color: #e0e0e0; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 16px;';
+      menuItem.className = 'server-menu-item server-menu-item-has-submenu';
       menuItem.innerHTML = `<span>${item.label}</span><span aria-hidden="true">›</span>`;
       const submenu = document.createElement('div');
-      submenu.style.cssText = 'display: none; position: absolute; top: 0; left: 100%; background-color: #2c2c2c; border: 1px solid #444; border-radius: 4px; min-width: 160px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+      submenu.className = 'server-menu-submenu';
+      submenu.style.display = 'none';
       item.submenu.forEach((subItem) => {
         const subEl = document.createElement('div');
         subEl.textContent = subItem.label;
-        subEl.style.cssText = 'padding: 8px 12px; color: #e0e0e0; cursor: pointer; font-size: 13px;';
-        subEl.onmouseover = () => subEl.style.backgroundColor = '#3a3a3a';
-        subEl.onmouseout = () => subEl.style.backgroundColor = 'transparent';
+        subEl.className = 'server-menu-subitem';
         subEl.onclick = (e) => {
           e.stopPropagation();
           if (subItem.action) subItem.action();
@@ -5518,20 +5704,16 @@ function createMenuDropdown(label, items) {
       });
       menuItem.appendChild(submenu);
       menuItem.onmouseover = () => {
-        menuItem.style.backgroundColor = '#3a3a3a';
         submenu.style.display = 'block';
       };
       menuItem.onmouseout = () => {
-        menuItem.style.backgroundColor = 'transparent';
         submenu.style.display = 'none';
       };
       dropdown.appendChild(menuItem);
     } else {
       const menuItem = document.createElement('div');
       menuItem.textContent = item.label;
-      menuItem.style.cssText = 'padding: 8px 12px; color: #e0e0e0; cursor: pointer; font-size: 13px;';
-      menuItem.onmouseover = () => menuItem.style.backgroundColor = '#3a3a3a';
-      menuItem.onmouseout = () => menuItem.style.backgroundColor = 'transparent';
+      menuItem.className = 'server-menu-item';
       menuItem.onclick = () => {
         if (item.action) {
           item.action();
@@ -6653,7 +6835,7 @@ async function createServerMenuBar() {
   const serverMode = await window.electron.isServerMode().catch(() => false);
   const menuBar = document.createElement('div');
   menuBar.id = 'server-menu-bar';
-  menuBar.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; height: 30px; background-color: #2c2c2c; border-bottom: 1px solid #444; display: flex; align-items: center; padding: 0 10px; z-index: 10000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px;';
+  menuBar.className = 'server-menu-bar';
   
   // Tools menu
   const toolsMenu = createMenuDropdown('Tools', [
@@ -6670,6 +6852,13 @@ async function createServerMenuBar() {
         // Trigger the event which will open the dialog via the listener
         window.electron.send('open-dedup');
       }
+    }},
+    { label: 'Organize Library', action: () => {
+      if (typeof window.openOrganizeLibrary === 'function') {
+        window.openOrganizeLibrary();
+        return;
+      }
+      window.electron.send('open-organize-library');
     }},
     { label: '---', action: null },
     {
@@ -7657,6 +7846,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         root.style.setProperty('--primary-shadow', 'rgba(91, 159, 255, 0.3)');
         root.style.setProperty('--primary-shadow-hover', 'rgba(91, 159, 255, 0.4)');
     }
+    const accent = root.style.getPropertyValue('--primary-accent').trim() || '#00d4ff';
+    const accentHover = root.style.getPropertyValue('--primary-accent-hover').trim() || accent;
+    root.style.setProperty('--accent-color', accent);
+    root.style.setProperty('--primary-gradient', accent);
+    root.style.setProperty('--primary-gradient-hover', accentHover);
   }
 
   // Load theme on startup
@@ -14734,7 +14928,6 @@ function selectSingleModel(fileElement, filePath) {
   document.querySelectorAll('.file-item').forEach((item) => item.classList.remove('selected'));
   addToSelectedModels(filePath);
   fileElement.classList.add('selected');
-  if (isMobileUiActive()) focusMobileTile(fileElement);
 }
 
 function isGridBackgroundClickTarget(target) {
@@ -19325,36 +19518,16 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
   // Create menu container
   const menu = document.createElement('div');
   menu.id = 'html-context-menu';
-  menu.style.cssText = `
-    position: fixed;
-    left: ${x}px;
-    top: ${y}px;
-    background-color: #2d2d2d;
-    border: 1px solid #555;
-    border-radius: 4px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-    z-index: 13000;
-    min-width: 200px;
-    padding: ${showClose ? '20px 0 4px 0' : '4px 0'};
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 13px;
-  `;
+  menu.className = 'html-context-menu';
+  if (showClose) menu.classList.add('html-context-menu-with-close');
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
 
   if (showClose) {
     const closeButton = document.createElement('button');
     closeButton.type = 'button';
+    closeButton.className = 'html-context-menu-close';
     closeButton.textContent = 'x';
-    closeButton.style.cssText = `
-      position: absolute;
-      top: 4px;
-      right: 6px;
-      background: transparent;
-      border: none;
-      color: #ccc;
-      font-size: 14px;
-      cursor: pointer;
-      padding: 0;
-    `;
     closeButton.addEventListener('click', (e) => {
       e.stopPropagation();
       removeHtmlContextMenu();
@@ -19366,35 +19539,23 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
   menuData.items.forEach((item, index) => {
     if (item.type === 'separator') {
       const separator = document.createElement('div');
-      separator.style.cssText = 'height: 1px; background-color: #555; margin: 4px 0;';
+      separator.className = 'html-context-menu-separator';
       menu.appendChild(separator);
       return;
     }
     
     const menuItem = document.createElement('div');
-    menuItem.style.cssText = `
-      padding: 6px 20px;
-      color: ${item.enabled ? '#fff' : '#666'};
-      cursor: ${item.enabled ? 'pointer' : 'default'};
-      user-select: none;
-      position: relative;
-    `;
+    menuItem.className = 'html-context-menu-item';
+    if (!item.enabled) menuItem.classList.add('is-disabled');
     menuItem.textContent = item.label;
     
     if (item.enabled) {
-      menuItem.addEventListener('mouseenter', () => {
-        menuItem.style.backgroundColor = '#3d3d3d';
-      });
-      menuItem.addEventListener('mouseleave', () => {
-        menuItem.style.backgroundColor = 'transparent';
-      });
-      
       // Handle submenus
       if (item.submenu) {
         menuItem.style.paddingRight = '30px';
         const arrow = document.createElement('span');
         arrow.textContent = '▶';
-        arrow.style.cssText = 'position: absolute; right: 8px; font-size: 10px;';
+        arrow.className = 'html-context-menu-arrow';
         menuItem.appendChild(arrow);
         
         let submenuElement = null;
@@ -19411,19 +19572,8 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
           // Create submenu
           if (!submenuElement) {
             submenuElement = document.createElement('div');
-            submenuElement.style.cssText = `
-              position: absolute;
-              left: 100%;
-              top: 0;
-              background-color: #2d2d2d;
-              border: 1px solid #555;
-              border-radius: 4px;
-              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-              min-width: 200px;
-              padding: 4px 0;
-              z-index: 10001;
-              margin-left: 2px;
-            `;
+            submenuElement.className = 'html-context-menu-submenu';
+            submenuElement.style.display = 'none';
             
             // Add hover handlers to submenu to keep it visible
             submenuElement.addEventListener('mouseenter', () => {
@@ -19447,22 +19597,11 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
             
             item.submenu.forEach((subItem, subIndex) => {
               const subMenuItem = document.createElement('div');
-              subMenuItem.style.cssText = `
-                padding: 6px 20px;
-                color: ${subItem.enabled ? '#fff' : '#666'};
-                cursor: ${subItem.enabled ? 'pointer' : 'default'};
-                user-select: none;
-              `;
+              subMenuItem.className = 'html-context-menu-subitem';
+              if (!subItem.enabled) subMenuItem.classList.add('is-disabled');
               subMenuItem.textContent = subItem.label;
               
               if (subItem.enabled) {
-                subMenuItem.addEventListener('mouseenter', () => {
-                  subMenuItem.style.backgroundColor = '#3d3d3d';
-                });
-                subMenuItem.addEventListener('mouseleave', () => {
-                  subMenuItem.style.backgroundColor = 'transparent';
-                });
-                
                 subMenuItem.addEventListener('click', async (e) => {
                   e.stopPropagation();
                   try {
@@ -19522,6 +19661,7 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
         });
         
         menuItem.addEventListener('mouseleave', () => {
+          if (isMobileUiActive() && submenuElement?.dataset.mobileOpen === '1') return;
           if (submenuElement) {
             // Delay hiding to allow moving to submenu
             submenuTimeout = setTimeout(() => {
@@ -19530,6 +19670,17 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
               }
             }, 150);
           }
+        });
+        menuItem.addEventListener('click', (e) => {
+          if (!isMobileUiActive()) return;
+          e.stopPropagation();
+          if (!submenuElement) menuItem.dispatchEvent(new MouseEvent('mouseenter'));
+          if (!submenuElement) return;
+          const willOpen = submenuElement.dataset.mobileOpen !== '1';
+          submenuElement.dataset.mobileOpen = willOpen ? '1' : '0';
+          submenuElement.style.display = willOpen ? 'block' : 'none';
+          submenuElement.style.position = 'static';
+          submenuElement.style.width = '100%';
         });
       } else {
         // Regular menu item click
@@ -19573,17 +19724,18 @@ function showHtmlContextMenu(menuData, x, y, options = {}) {
   document.body.appendChild(backdrop);
   document.body.appendChild(menu);
   
-  // Adjust position if menu goes off screen
-  const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth) {
-    menu.style.left = `${Math.max(8, x - rect.width)}px`;
+  if (!isMobileUiActive()) {
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      menu.style.left = `${Math.max(8, x - rect.width)}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+      menu.style.top = `${Math.max(8, y - rect.height)}px`;
+    }
+    const adjusted = menu.getBoundingClientRect();
+    if (adjusted.left < 8) menu.style.left = '8px';
+    if (adjusted.top < 8) menu.style.top = '8px';
   }
-  if (rect.bottom > window.innerHeight) {
-    menu.style.top = `${Math.max(8, y - rect.height)}px`;
-  }
-  const adjusted = menu.getBoundingClientRect();
-  if (adjusted.left < 8) menu.style.left = '8px';
-  if (adjusted.top < 8) menu.style.top = '8px';
   
   const handleEscape = (e) => {
     if (e.key === 'Escape') {
@@ -20423,6 +20575,11 @@ async function initializeAppOnce() {
             root.style.setProperty('--primary-shadow-hover', 'rgba(75, 85, 99, 0.4)');
             break;
         }
+        const accent = root.style.getPropertyValue('--primary-accent').trim() || '#00d4ff';
+        const accentHover = root.style.getPropertyValue('--primary-accent-hover').trim() || accent;
+        root.style.setProperty('--accent-color', accent);
+        root.style.setProperty('--primary-gradient', accent);
+        root.style.setProperty('--primary-gradient-hover', accentHover);
       }
     } catch (error) {
       console.error('Error initializing settings:', error);
@@ -20712,6 +20869,8 @@ async function autoSaveModel(field, value, filePath) {
     return false;
   }
 }
+
+window.autoSaveModel = autoSaveModel;
 
 // Add implementation of autoSaveMultipleModels function
 async function autoSaveMultipleModels(field, value, options = {}) {
@@ -22546,11 +22705,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         return;
       }
       if (isMobileUiActive() && !isMultiSelectMode) {
-        if (item.classList.contains('is-mobile-focus')) {
-          openModelPreviewFromTile(model.filePath);
-          return;
-        }
-        selectSingleModel(item, model.filePath);
+        openModelDetailsFromTile(item, model.filePath);
         return;
       }
       toggleModelSelection(item, model.filePath);
@@ -22567,19 +22722,27 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   
   // Only add metadata in detailed view
   if (view === 'detailed') {
-    item.style.width = '300px';
-    item.style.height = '490px';
-    item.style.minHeight = '490px';
-    item.style.maxHeight = '490px';
-    item.style.padding = '16px 16px 0';
+    const compactMobile = isMobileUiActive();
     item.style.boxSizing = 'border-box';
     item.style.display = 'flex';
     item.style.flexDirection = 'column';
-    
-    // Slightly smaller thumbnail to give more room for metadata
-    thumbnailContainer.style.width = '276px'; // Reduced from 276px (actually same, but adjusted for padding)
-    thumbnailContainer.style.height = '276px'; // Reduced from 276px
-    thumbnailContainer.style.flexShrink = '0';
+    if (compactMobile) {
+      item.style.padding = '6px 6px 8px';
+      item.style.overflow = 'hidden';
+      thumbnailContainer.style.width = '100%';
+      thumbnailContainer.style.height = 'auto';
+      thumbnailContainer.style.aspectRatio = '1';
+      thumbnailContainer.style.flexShrink = '0';
+    } else {
+      item.style.width = '300px';
+      item.style.height = '490px';
+      item.style.minHeight = '490px';
+      item.style.maxHeight = '490px';
+      item.style.padding = '16px 16px 0';
+      thumbnailContainer.style.width = '276px';
+      thumbnailContainer.style.height = '276px';
+      thumbnailContainer.style.flexShrink = '0';
+    }
     
     // Add file name directly after thumbnail (in the red square area)
     if (fileName && fileName.textContent) {
@@ -23130,7 +23293,7 @@ function getModelRenderKey(model) {
 }
 
 function getParentModelGroupHeight(view) {
-  if (view === 'list') return 52;
+  if (view === 'list') return mobileListMetrics()?.height || 52;
   if (view === 'preview') return getPreviewTileSizePx();
   return 450;
 }
@@ -24292,17 +24455,8 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (event.target.closest('.thumbnail-nav-left, .thumbnail-nav-right, .thumbnail-menu-button')) return;
     event.preventDefault();
     event.stopPropagation();
-    const isBundle = isBundleGroupKind();
     if (isMobileUiActive() && view === 'preview') {
-      if (item.classList.contains('is-mobile-focus')) {
-        if (isBundle && typeof window.openBundlePreview === 'function') {
-          window.openBundlePreview(groupRecord);
-          return;
-        }
-        expandGroupAndShowDetails();
-        return;
-      }
-      focusMobileTile(item);
+      expandGroupAndShowDetails();
       return;
     }
     toggleGroupFromCard();
@@ -24529,17 +24683,20 @@ function renderVirtualGrid(models) {
   const containerRect = container.getBoundingClientRect();
   const viewportHeight = window.innerHeight;
   const containerTop = containerRect.top;
-  const mobileChrome = document.body.classList.contains('mobile-ui') ? 64 : 0;
+  const mobileChrome = document.body.classList.contains('mobile-ui')
+    ? (document.getElementById('mobile-bottom-nav')?.offsetHeight || 72)
+    : 0;
   container.style.height = `calc(100vh - ${containerTop}px - ${mobileChrome}px)`;
   container.style.maxHeight = `calc(100vh - ${containerTop}px - ${mobileChrome}px)`;
 
   // Assume fixed item size (in pixels) - optimized gaps
-  const paddingVertical = currentGridView === 'preview' ? 8 : 10;
-  const paddingHorizontal = currentGridView === 'preview' ? 0 : 20;
+  let paddingVertical = currentGridView === 'preview' ? 8 : 10;
+  let paddingHorizontal = currentGridView === 'preview' ? 0 : 20;
   // Different gaps for different views - optimized for better visual spacing
   let verticalGap, horizontalGap;
+  const mobileList = currentGridView === 'list' ? mobileListMetrics() : null;
   if (currentGridView === 'list') {
-    verticalGap = 4; // Slight padding between list items
+    verticalGap = mobileList ? mobileList.gap : 4;
     horizontalGap = 0;
   } else if (currentGridView === 'preview') {
     verticalGap = 2;
@@ -24551,6 +24708,13 @@ function renderVirtualGrid(models) {
   }
 
   const containerWidth = container.clientWidth;
+  const mobileDetailed = currentGridView === 'detailed' ? mobileDetailedMetrics(containerWidth) : null;
+  if (mobileDetailed && mobileLibraryColumns()) {
+    paddingVertical = 8;
+    paddingHorizontal = mobileDetailed.pad;
+    verticalGap = mobileDetailed.gap;
+    horizontalGap = mobileDetailed.gap;
+  }
   const previewAvailableW = containerWidth - paddingHorizontal * 2;
   let previewTilePx = null;
   if (currentGridView === 'preview') {
@@ -24563,16 +24727,13 @@ function renderVirtualGrid(models) {
 
   // Define item dimensions based on view mode
   const viewDimensions = {
-    'list': { width: '100%', height: 52, itemWidth: '100%' },
+    'list': { width: '100%', height: mobileList?.height || 52, itemWidth: '100%' },
     'preview':
       currentGridView === 'preview' && previewTilePx != null
         ? { width: previewTilePx, height: previewTilePx, itemWidth: previewTilePx }
         : getPreviewTileDims(),
-    'detailed': document.body.classList.contains('mobile-ui')
-      ? (() => {
-          const w = Math.max(148, Math.floor((containerWidth - 24) / 2));
-          return { width: w, height: Math.round(w + 132), itemWidth: w };
-        })()
+    'detailed': mobileDetailed && mobileLibraryColumns()
+      ? { width: mobileDetailed.width, height: mobileDetailed.height, itemWidth: mobileDetailed.width }
       : { width: 300, height: 490, itemWidth: 300 }
   };
 
@@ -24589,6 +24750,9 @@ function renderVirtualGrid(models) {
   } else if (currentGridView === 'preview') {
     // Keep fixed column count by preview size; tile dimensions scale to fit width.
     columns = previewColumnCount();
+  } else if (mobileDetailed && mobileLibraryColumns()) {
+    columns = mobileDetailed.cols;
+    container._centeredOffset = 0;
   } else {
     // For detailed view, calculate columns and center the grid
     const availableWidth = containerWidth - (paddingHorizontal * 2);
@@ -24642,7 +24806,7 @@ function renderVirtualGrid(models) {
   
   // Adjust virtual content top position for list view header (always update, not just on creation)
   if (currentGridView === 'list') {
-    virtualContent.style.top = '40px'; // Header height (36px + 4px margin)
+    virtualContent.style.top = (mobileList?.headerOffset || 40) + 'px';
   } else {
     virtualContent.style.top = '0';
   }
@@ -24676,7 +24840,7 @@ function renderVirtualGrid(models) {
     // Recalculate values each time to ensure we use current view settings
     let currentVerticalGap, currentHorizontalGap;
     if (currentGridView === 'list') {
-      currentVerticalGap = 4;
+      currentVerticalGap = mobileListMetrics()?.gap || 4;
       currentHorizontalGap = 0;
     } else if (currentGridView === 'preview') {
       currentVerticalGap = 2;
@@ -24859,6 +25023,11 @@ function renderVirtualGrid(models) {
             const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
             item.style.left = leftPosition + 'px';
             item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+            if (mobileDetailed && mobileLibraryColumns()) {
+              item.style.height = itemHeight + 'px';
+              item.style.minHeight = itemHeight + 'px';
+              item.style.maxHeight = itemHeight + 'px';
+            }
           }
         };
 
@@ -24960,7 +25129,7 @@ function renderVirtualGrid(models) {
             }
 
             const model = record.model;
-            const listHeaderOffset = currentGridView === 'list' ? 40 : 0;
+            const listHeaderOffset = currentGridView === 'list' ? (mobileListMetrics()?.headerOffset || 40) : 0;
             const itemContentY = listHeaderOffset + row.top;
             const thumbPriority = computeThumbPriorityForScroll(
               scrollTop,

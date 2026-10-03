@@ -12,6 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="theme.css">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="parts-stock.css">
   <link rel="stylesheet" href="printer-management.css">
@@ -19,6 +20,7 @@
   <link rel="stylesheet" href="preview-wall.css">
   <link rel="stylesheet" href="thumbnail-progress.css">
   <link rel="stylesheet" href="mobile-ui.css">
+  <link rel="stylesheet" href="organize-library.css">
   <script src="vendor/three.min.js"></script>
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
@@ -35,26 +37,96 @@
 </head>
 
 
-<body style="background-color: #1e1e2e;">
+<body>
   <div id="mobile-ui-overlay" hidden></div>
   <header id="mobile-app-bar" hidden aria-label="Printventory">
-    <button type="button" id="mobile-menu-toggle" class="mobile-icon-btn" aria-label="Open filters" aria-controls="sidebar">☰</button>
-    <div class="mobile-bar-text">
-      <div class="mobile-bar-title">Printventory</div>
-      <div class="mobile-bar-subtitle" id="mobile-bar-count"></div>
+    <div class="mobile-bar-top">
+      <span class="mobile-bar-logo" aria-hidden="true"></span>
+      <div class="mobile-bar-text">
+        <div class="mobile-bar-title" id="mobile-bar-title">Library</div>
+        <div class="mobile-bar-subtitle" id="mobile-bar-count"></div>
+      </div>
+      <div class="mobile-view-switch" role="group" aria-label="Library view">
+        <button type="button" data-mobile-view="preview" aria-pressed="false" aria-label="Wall">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/></svg>
+        </button>
+        <button type="button" data-mobile-view="list" aria-pressed="false" aria-label="List">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 5.5h16v2.6H4V5.5zm0 5.2h16v2.6H4v-2.6zm0 5.2h16v2.6H4v-2.6z"/></svg>
+        </button>
+      </div>
     </div>
-    <button type="button" id="mobile-search-toggle" class="mobile-icon-btn" aria-label="Search models" aria-expanded="false">⌕</button>
+    <div id="mobile-filter-chips" hidden></div>
   </header>
-  <form id="mobile-search-bar" hidden>
-    <input type="search" id="mobile-search-input" placeholder="Search models" enterkeyhint="search" autocomplete="off">
-    <button type="submit" id="mobile-search-go">Go</button>
-  </form>
   <nav id="mobile-bottom-nav" hidden aria-label="Mobile navigation">
-    <button type="button" id="mobile-nav-library" data-nav="library"><span class="nav-glyph">▦</span>Library</button>
-    <button type="button" id="mobile-nav-filters" data-nav="filters"><span class="nav-glyph">☰</span>Filters</button>
-    <button type="button" id="mobile-nav-folders" data-nav="folders"><span class="nav-glyph">▢</span>Folders</button>
-    <button type="button" id="mobile-nav-more" data-nav="more"><span class="nav-glyph">⋯</span>Menu</button>
+    <div class="mobile-dock">
+      <button type="button" id="mobile-nav-library" data-nav="library">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/></svg>
+        <span>Library</span>
+      </button>
+      <button type="button" id="mobile-nav-folders" data-nav="folders">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2 6.5A2.5 2.5 0 0 1 4.5 4H9l2 2.2h8.5A2.5 2.5 0 0 1 22 8.7v8.8a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5v-11z"/></svg>
+        <span>Folders</span>
+      </button>
+      <button type="button" id="mobile-nav-filters" data-nav="filters">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4.5h18v2.4l-6.2 6.8V20l-5.6 2.2v-8.5L3 6.9V4.5z"/></svg>
+        <span>Filters</span>
+      </button>
+      <button type="button" id="mobile-nav-more" data-nav="more">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.35" fill="currentColor"/><circle cx="12" cy="12" r="2.35" fill="currentColor"/><circle cx="19" cy="12" r="2.35" fill="currentColor"/></svg>
+        <span>More</span>
+      </button>
+    </div>
   </nav>
+  <section id="mobile-more-sheet" hidden aria-label="More">
+    <header id="mobile-more-head">
+      <span class="mobile-sheet-grab" aria-hidden="true"></span>
+      <div class="mobile-more-titlebar">
+        <button type="button" id="mobile-more-back" hidden>Back</button>
+        <h2 id="mobile-more-title">More</h2>
+        <button type="button" id="mobile-more-close">Close</button>
+      </div>
+    </header>
+    <div id="mobile-more-body">
+      <div id="mobile-more-home">
+        <div class="mobile-tool-grid">
+          <button type="button" class="mobile-tool" data-menu-label="Filament Manager">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 .01 20.01A10 10 0 0 0 12 2zm0 4.2a5.8 5.8 0 1 1 0 11.6 5.8 5.8 0 0 1 0-11.6z"/></svg>
+            <span>Filament</span>
+          </button>
+          <button type="button" class="mobile-tool" data-menu-label="Printer Manager">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 3h12v5H6V3zm-2 7h16a2 2 0 0 1 2 2v5h-4v4H6v-4H2v-5a2 2 0 0 1 2-2zm6 7v2h4v-2h-4z"/></svg>
+            <span>Printers</span>
+          </button>
+          <button type="button" class="mobile-tool" data-menu-label="Parts Manager">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a5 5 0 0 1-6.6 6.6L8.4 18.6a2 2 0 1 1-2.8-2.8l6.5-6.5a5 5 0 0 1 6.6-6.6l-3.8 3.8z"/></svg>
+            <span>Parts</span>
+          </button>
+          <button type="button" class="mobile-tool" data-menu-label="Tag Manager">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 12.5V4h8.5l9.2 9.2a2 2 0 0 1 0 2.8l-5.7 5.7a2 2 0 0 1-2.8 0L3 12.5zM7.5 8.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/></svg>
+            <span>Tags</span>
+          </button>
+          <button type="button" class="mobile-tool" data-menu-label="De-Dup">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 3h10a2 2 0 0 1 2 2v10h-2V5H7V3zm-2 4h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/></svg>
+            <span>De-Dup</span>
+          </button>
+          <button type="button" class="mobile-tool" data-menu-label="Organize Library">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 2h7v5h-7v-5z"/></svg>
+            <span>Organize</span>
+          </button>
+          <button type="button" class="mobile-tool" data-menu-label="Print Roulette">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 .01 20.01A10 10 0 0 0 12 2zm0 4a1.4 1.4 0 1 1 0 2.8A1.4 1.4 0 0 1 12 6zm5 7.5a1.4 1.4 0 1 1 0-2.8 1.4 1.4 0 0 1 0 2.8zM12 16.2a1.4 1.4 0 1 1 0 2.8 1.4 1.4 0 0 1 0-2.8zM7 13.5a1.4 1.4 0 1 1 0-2.8 1.4 1.4 0 0 1 0 2.8z"/></svg>
+            <span>Roulette</span>
+          </button>
+        </div>
+        <div class="mobile-more-actions">
+          <button type="button" data-menu-label="Scan Directory">Scan Directory</button>
+          <button type="button" data-menu-label="View Entire Library">View Entire Library</button>
+        </div>
+        <div id="mobile-more-sections"></div>
+      </div>
+      <div id="mobile-more-drill" hidden></div>
+    </div>
+  </section>
   <div class="sidebar">
     <div class="sidebar-chrome">
     <img src="logo.png" alt="Printventory Logo" id="logo">
@@ -79,7 +151,7 @@
     <button id="scan-directory-button">Scan Directory</button>
     <button id="scan-stl-home-button" class="secondary-button" style="display: none;">Scan STL Home</button>
     <button id="view-library-button">View Entire Library</button>
-    <div id="view-library-message" style="display: none; text-align: center; font-size: 14px; color: #000; margin-top: 5px; background-color: #FFD700; padding: 5px; border-radius: 4px; font-weight: bold;">
+    <div id="view-library-message" class="library-view-banner">
       <!-- Updated text will appear here -->
     </div>
     <div class="progress-section hidden" id="progress-section">
@@ -113,7 +185,7 @@
       <div class="form-group search-models-field">
         <label for="search-filter-input">Search Models:</label>
         <div class="input-with-icon">
-          <input type="text" id="search-filter-input" placeholder="Enter search term...">
+          <input type="search" id="search-filter-input" placeholder="Search models" enterkeyhint="search" autocomplete="off">
           <button id="filter-search-button" class="icon-button" title="Add this text to the active query (all fields)">🔍</button>
           <button id="clear-filter-search-button" class="icon-button" title="Clear search">×</button>
         </div>
@@ -322,7 +394,7 @@
     </div>
 
     <div id="model-details" class="model-details hidden">
-      <h3>Model Details <span class="mobile-details-actions"><button type="button" class="mobile-details-preview-btn" id="mobile-details-open-preview">3D</button><button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></span></h3>
+      <h3><span class="mobile-sheet-grab" aria-hidden="true"></span><span class="mobile-details-heading">Model Details</span><span class="mobile-details-name" id="mobile-details-name" hidden></span><button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button><span class="mobile-details-actions"><button type="button" class="mobile-details-preview-btn" id="mobile-details-open-preview" aria-label="View in 3D"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2.2 20.5 7v10L12 21.8 3.5 17V7L12 2.2zm0 2.3L6 8.2v6.3l6 3.4 6-3.4V8.2L12 4.5z"/></svg><span>3D</span></button><button type="button" class="mobile-details-preview-btn" id="mobile-details-favorite" aria-pressed="false" aria-label="Favorite"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 20.2s-6.8-4.3-9.2-8.2C1 9.2 2.2 5.8 5.6 5.2 7.6 4.8 9.4 5.8 12 8.2c2.6-2.4 4.4-3.4 6.4-3 3.4.6 4.6 4 2.8 6.8-2.4 3.9-9.2 8.2-9.2 8.2z"/></svg><span class="mobile-action-label">Favorite</span></button><button type="button" class="mobile-details-preview-btn" id="mobile-details-log-print" aria-label="Log a print"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 3h9l3 3v15H6V3zm8 1.5V7h2.5L14 4.5zM8 11h8v1.8H8V11zm0 3.2h8v1.8H8v-1.8zM8 17.4h5.2V19H8v-1.6z"/></svg><span>Log print</span></button></span></h3>
       <div class="form-group print-lifecycle-group">
         <label for="model-print-status">Print status</label>
         <div class="print-lifecycle-controls">
@@ -342,18 +414,19 @@
         </div>
         <p id="print-history-hint" class="print-history-hint"></p>
       </div>
-      <div class="form-group">
+      <button type="button" id="mobile-details-more" aria-expanded="false">More details</button>
+      <div class="form-group mobile-detail-skip">
         <label for="model-name">Name:</label>
         <input type="text" id="model-name" readonly>
       </div>
-      <div class="form-group">
+      <div class="form-group mobile-detail-extra">
         <label for="model-path">Path:</label>
         <div class="path-tree-field">
           <div id="path-tree-container" class="path-tree-container"></div>
           <button type="button" id="reveal-in-folders-button" class="icon-button" title="Reveal in folders">☰</button>
         </div>
       </div>
-      <div class="form-group">
+      <div class="form-group mobile-detail-extra">
         <label for="model-source">Source URL:</label>
         <div class="input-with-icon">
           <input type="text" id="model-source" placeholder="Enter source..." spellcheck="false">
@@ -361,7 +434,7 @@
         </div>
       </div>
 
-      <div class="form-group">
+      <div class="form-group mobile-detail-extra">
         <label for="model-designer">Designer:</label>
         <div class="designer-input-container">
           <select id="model-designer">
@@ -371,7 +444,7 @@
           <button type="button" id="add-new-designer-button" class="icon-button">+</button>
         </div>
       </div>
-      <div class="form-group">
+      <div class="form-group mobile-detail-extra">
         <label for="model-parent">Parent Model:</label>
         <div class="designer-input-container">
           <select id="model-parent">
@@ -382,7 +455,7 @@
         </div>
       </div>
 
-      <div class="form-group">
+      <div class="form-group mobile-detail-extra">
         <label for="model-license">License:</label>
         <div class="designer-input-container">
           <select id="model-license" class="form-control"></select>
@@ -416,7 +489,7 @@
           <div id="model-filaments" class="tags-list"></div>
         </div>
       </div>
-      <div class="form-group">
+      <div class="form-group mobile-detail-extra">
         <label for="model-notes">Notes:</label>
         <div class="notes-input-container">
           <textarea id="model-notes" class="notes-source" aria-hidden="true" tabindex="-1"></textarea>
@@ -439,7 +512,7 @@
     </div>
 
     <div id="bundle-details" class="model-details bundle-details hidden">
-      <h3 id="bundle-details-title">Bundle Details <span class="mobile-details-actions"><button type="button" class="mobile-details-preview-btn" id="mobile-bundle-open-preview">3D</button><button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></span></h3>
+      <h3><span class="mobile-sheet-grab" aria-hidden="true"></span><span class="mobile-details-heading" id="bundle-details-title">Bundle Details</span><button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button><span class="mobile-details-actions"><button type="button" class="mobile-details-preview-btn" id="mobile-bundle-open-preview" aria-label="View in 3D"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2.2 20.5 7v10L12 21.8 3.5 17V7L12 2.2zm0 2.3L6 8.2v6.3l6 3.4 6-3.4V8.2L12 4.5z"/></svg><span>3D</span></button></span></h3>
       <p id="bundle-details-subtitle" class="bundle-details-subtitle"></p>
       <div class="form-group">
         <label>Container path</label>
@@ -627,7 +700,7 @@
       </form>
     </dialog>
     <div id="multi-edit-panel" class="model-details hidden">
-      <h3>Multi-Edit Panel <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
+      <h3><span class="mobile-sheet-grab" aria-hidden="true"></span><span class="mobile-details-heading">Multi-Edit Panel</span> <button type="button" class="mobile-panel-close" data-mobile-close-details aria-label="Close details">×</button></h3>
       <button id="exit-multi-edit-button" class="full-width-button">Exit Multi-Edit Mode</button>
       <button id="select-all-button" class="full-width-button">Select All Visible</button>
       <button id="clear-selection-button" class="full-width-button">Clear Selection</button>
@@ -788,6 +861,15 @@
             </label>
             <p id="dedup-scope-summary" class="dedup-scope-summary"></p>
           </div>
+          <div id="dedup-preferred-directory" class="dedup-preferred">
+            <label class="dedup-scope-label" for="dedup-preferred-directory-input">Preferred directory</label>
+            <div class="dedup-preferred-row">
+              <input type="text" id="dedup-preferred-directory-input" placeholder="Folder whose copies should be kept" autocomplete="off" spellcheck="false">
+              <button type="button" id="dedup-preferred-browse" class="modal-fullscreen-toggle">Browse</button>
+              <button type="button" id="dedup-preferred-clear" class="modal-fullscreen-toggle" title="Clear the preferred directory">Clear path</button>
+            </div>
+            <p class="dedup-scope-summary">Easy keeps one copy from this folder, including subfolders, and selects the other duplicates.</p>
+          </div>
           <div id="include-zip-container" style="display: none; margin: 0.5rem 0;">
             <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
               <input type="checkbox" id="include-zipped-models" style="margin: 0;">
@@ -795,7 +877,7 @@
             </label>
           </div>
           <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
-            <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group (keeps archived/ZIP copy when present)" onclick="if(typeof window.dedupEasyFromDialog==='function')window.dedupEasyFromDialog()">Easy</button>
+            <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group. Keeps a copy in the preferred directory when one exists, otherwise an archived/ZIP copy." onclick="if(typeof window.dedupEasyFromDialog==='function')window.dedupEasyFromDialog()">Easy</button>
             <button type="button" id="dedup-clear-button" class="modal-fullscreen-toggle" title="Clear all selections" onclick="if(typeof window.dedupClearFromDialog==='function')window.dedupClearFromDialog()">Clear</button>
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
             <button type="button" id="dedup-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleDedupFullscreen==='function')window.toggleDedupFullscreen()">Full Screen</button>
@@ -804,6 +886,66 @@
         </div>
         <div class="duplicate-groups" style="max-height: 300px; overflow-y: auto; margin-top: 0.5rem;">
           <!-- Duplicate groups will be added here dynamically -->
+        </div>
+      </form>
+    </dialog>
+    <dialog id="organize-library-dialog" class="modal organize-library-dialog">
+      <form method="dialog" id="organize-library-form">
+        <h3>Organize Library</h3>
+        <p class="setting-description">Copy models from a scanned folder into the folders you choose. Each original is removed only after its copy is checked. Files that are not in the library stay where they are.</p>
+        <div class="form-group">
+          <label for="organize-source-button">Scanned directory</label>
+          <div class="organize-source-picker">
+            <button type="button" id="organize-source-button" class="organize-source-button" aria-haspopup="listbox" aria-expanded="false" aria-controls="organize-source-menu">
+              <span id="organize-source-label">No scanned directories yet</span>
+            </button>
+            <div id="organize-source-menu" class="organize-source-menu" hidden>
+              <input type="text" id="organize-source-search" class="organize-source-search" placeholder="Search folders" autocomplete="off" spellcheck="false" aria-label="Search scanned directories">
+              <div id="organize-source-options" class="organize-source-options" role="listbox"></div>
+              <p id="organize-source-empty" class="organize-source-empty" hidden>No matching folders</p>
+            </div>
+          </div>
+          <input type="hidden" id="organize-source-input">
+        </div>
+        <div class="form-group">
+          <label for="organize-source-subfolder">Folder inside it</label>
+          <div class="organize-path-row">
+            <input type="text" id="organize-source-subfolder" placeholder="Entire scanned folder" autocomplete="off" spellcheck="false">
+            <button type="button" id="organize-source-sub-browse">Browse</button>
+          </div>
+          <p class="setting-description">Leave this blank to use the whole scanned folder, or choose a folder inside it.</p>
+        </div>
+        <div class="form-group">
+          <label for="organize-dest-input">Destination directory</label>
+          <div class="organize-path-row">
+            <input type="text" id="organize-dest-input" placeholder="New library root" autocomplete="off" spellcheck="false">
+            <button type="button" id="organize-dest-browse">Browse</button>
+          </div>
+        </div>
+        <div class="organize-structure">
+          <span class="organize-structure-label">Folder structure</span>
+          <div id="organize-structure-rows"></div>
+          <p id="organize-structure-preview" class="setting-description"></p>
+          <button type="button" id="organize-structure-add">Add folder</button>
+        </div>
+        <div id="organize-include-zip" class="organize-include-zip" hidden>
+          <label for="organize-include-zip-input">
+            <input type="checkbox" id="organize-include-zip-input">
+            Include zip files
+          </label>
+          <p class="setting-description">Moves each zip archive into the library. Files inside the zip stay packed.</p>
+        </div>
+        <div id="organize-preview" class="organize-preview" hidden>
+          <p id="organize-preview-summary"></p>
+          <p id="organize-preview-space"></p>
+          <ul id="organize-preview-list"></ul>
+          <p id="organize-preview-skipped"></p>
+          <p id="organize-preview-error" class="organize-preview-error" hidden></p>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="organize-preview-button">Preview</button>
+          <button type="button" id="organize-confirm-button" disabled>Copy and remove originals</button>
+          <button type="button" id="organize-close-button">Close</button>
         </div>
       </form>
     </dialog>
@@ -2714,8 +2856,10 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
   <script src="folder-tree.js"></script>
   <script src="step-assembly.js"></script>
   <script src="notes-markdown.js"></script>
+  <script src="dedup-preferred.js"></script>
   <script src="stl-sanity.js"></script>
   <script src="renderer.js"></script>
+  <script src="organize-library-ui.js"></script>
   <script src="filament.js"></script>
   <script src="printer-management.js"></script>
   <script src="parts-stock.js"></script>

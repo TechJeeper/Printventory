@@ -4,6 +4,11 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.16] - 2026-10-02
+
+- Organize Library copies models from a scanned folder into a folder structure you choose, checks free space, and removes each original only after the copy is verified. Zip archives can move packed when zip support is on
+- De-duplication can keep the copy that lives under a preferred directory, including files in subfolders
+
 ## [2.2.15] - 2026-10-02
 
 - Startup repairs tag links that still point at a removed models table, and retries a tag save that failed for that reason

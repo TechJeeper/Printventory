@@ -86,9 +86,9 @@
 }
 
 .file-item.file-item-preview.preview-tile:hover {
-  transform: scale(1.02);
+  transform: none;
   z-index: 3;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-accent, #00d4ff) 55%, transparent);
   border-color: transparent !important;
 }
 
@@ -100,14 +100,14 @@
 
 /* Keep grouped-child highlighting visible in Preview wall despite neutralized tile chrome. */
 .file-grid.preview-wall .file-item.file-item-preview.preview-tile.parent-model-group-child {
-  border: 1px solid rgba(0, 212, 255, 0.72) !important;
-  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.22), 0 8px 20px rgba(0, 0, 0, 0.45) !important;
-  background: linear-gradient(180deg, rgba(10, 34, 44, 0.95) 0%, rgba(10, 14, 24, 0.98) 100%) !important;
+  border: 1px solid color-mix(in srgb, var(--primary-accent, #00d4ff) 72%, transparent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-accent, #00d4ff) 22%, transparent) !important;
+  background: color-mix(in srgb, var(--primary-accent, #00d4ff) 14%, #12121a) !important;
 }
 
 .file-grid.preview-wall .file-item.file-item-preview.preview-tile.parent-model-group-child:hover {
-  border-color: rgba(0, 212, 255, 0.9) !important;
-  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.3), 0 12px 28px rgba(0, 212, 255, 0.2), 0 8px 20px rgba(0, 0, 0, 0.45) !important;
+  border-color: color-mix(in srgb, var(--primary-accent, #00d4ff) 90%, transparent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-accent, #00d4ff) 30%, transparent) !important;
 }
 
 /* Thumbnail fills tile — beat .file-grid .thumbnail-container { object-fit: contain } + flex centering */

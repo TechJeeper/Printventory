@@ -176,9 +176,9 @@
 #parts-stock-dialog input[type="text"]:focus,
 #parts-stock-dialog input[type="number"]:focus {
   outline: none !important;
-  border-color: #00d4ff !important;
+  border-color: var(--primary-accent, #00d4ff) !important;
   background: rgba(255, 255, 255, 0.08) !important;
-  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.18) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-accent, #00d4ff) 18%, transparent) !important;
 }
 
 #parts-stock-dialog input::placeholder {
@@ -242,7 +242,7 @@
   align-items: center;
   justify-content: center;
   padding: 10px 22px !important;
-  background: linear-gradient(135deg, #0284c7 0%, #00d4ff 100%) !important;
+  background: var(--primary-accent, #00d4ff) !important;
   color: #fff !important;
   border: none !important;
   border-radius: 10px !important;
@@ -251,17 +251,18 @@
   cursor: pointer;
   height: 38px;
   line-height: 1;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-  box-shadow: 0 3px 12px rgba(0, 212, 255, 0.25) !important;
+  transition: background-color 0.15s ease !important;
+  box-shadow: none !important;
 }
 
 .parts-stock-btn-primary:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 5px 16px rgba(0, 212, 255, 0.4) !important;
+  transform: none;
+  background: var(--primary-accent-hover, #5b9fff) !important;
+  box-shadow: none !important;
 }
 
 .parts-stock-btn-primary:active {
-  transform: translateY(0);
+  transform: none;
 }
 
 .parts-stock-btn-cancel {

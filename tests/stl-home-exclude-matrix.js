@@ -195,6 +195,7 @@ function startContainer(dataDir, stlHome, stlExclude) {
     '-v', `${toPosix(path.join(APP_ROOT, 'renderer.js'))}:/app/renderer.js:ro`,
     '-v', `${toPosix(path.join(APP_ROOT, 'index.html'))}:/app/index.html:ro`,
     '-v', `${toPosix(path.join(APP_ROOT, 'styles.css'))}:/app/styles.css:ro`,
+    '-v', `${toPosix(path.join(APP_ROOT, 'theme.css'))}:/app/theme.css:ro`,
     '-v', `${toPosix(path.join(APP_ROOT, 'scan-worker.js'))}:/app/scan-worker.js:ro`,
     '-v', `${toPosix(path.join(APP_ROOT, 'scan-skip.js'))}:/app/scan-skip.js:ro`,
     IMAGE

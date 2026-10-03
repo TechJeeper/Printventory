@@ -291,9 +291,9 @@
 #printer-management-dialog select:focus,
 #printer-management-dialog textarea:focus {
   outline: none !important;
-  border-color: #00d4ff !important;
+  border-color: var(--primary-accent, #00d4ff) !important;
   background: rgba(255, 255, 255, 0.08) !important;
-  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.18) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-accent, #00d4ff) 18%, transparent) !important;
 }
 
 #printer-management-dialog input::placeholder,
@@ -346,10 +346,10 @@
 
 .printer-url-open-btn:hover,
 #printer-management-dialog .printer-url-open-btn:hover {
-  background: rgba(0, 212, 255, 0.22) !important;
-  border-color: #00d4ff !important;
+  background: color-mix(in srgb, var(--primary-accent, #00d4ff) 22%, transparent) !important;
+  border-color: var(--primary-accent, #00d4ff) !important;
   color: #fff !important;
-  transform: translateY(-1px);
+  transform: none;
 }
 
 /* Klipper toggle pill */
@@ -367,7 +367,7 @@
 .printer-klipper-toggle-row input[type="checkbox"] {
   width: 17px;
   height: 17px;
-  accent-color: #00d4ff;
+  accent-color: var(--primary-accent, #00d4ff);
   cursor: pointer;
   margin: 0;
 }
@@ -409,7 +409,7 @@
   display: inline-flex !important;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #00d4ff, #0077ff);
+  background: var(--primary-accent, #00d4ff);
   color: #fff;
   border: none;
   border-radius: 10px;
@@ -417,15 +417,15 @@
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
-  box-shadow: 0 4px 14px rgba(0, 119, 255, 0.35);
+  transition: background-color 0.15s ease;
+  box-shadow: none;
 }
 
 .printer-btn-primary:hover,
 #printer-management-dialog .printer-btn-primary:hover {
-  background: linear-gradient(135deg, #38bdf8, #0066ee);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(0, 119, 255, 0.45);
+  background: var(--primary-accent-hover, #5b9fff);
+  transform: none;
+  box-shadow: none;
 }
 
 .printer-btn-cancel,
@@ -636,16 +636,16 @@
 
 .printer-action-btn.web-ui,
 #printer-management-dialog .printer-action-btn.web-ui {
-  background: rgba(0, 212, 255, 0.12) !important;
-  border-color: rgba(0, 212, 255, 0.3) !important;
-  color: #38bdf8 !important;
+  background: color-mix(in srgb, var(--primary-accent, #00d4ff) 12%, transparent) !important;
+  border-color: color-mix(in srgb, var(--primary-accent, #00d4ff) 30%, transparent) !important;
+  color: var(--primary-accent, #00d4ff) !important;
 }
 
 .printer-action-btn.web-ui:hover,
 #printer-management-dialog .printer-action-btn.web-ui:hover {
-  background: rgba(0, 212, 255, 0.24) !important;
+  background: color-mix(in srgb, var(--primary-accent, #00d4ff) 24%, transparent) !important;
   color: #fff !important;
-  border-color: #00d4ff !important;
+  border-color: var(--primary-accent, #00d4ff) !important;
 }
 
 .printer-action-btn.maintenance,
