@@ -5,6 +5,8 @@
  * maintenance logs, and scheduled maintenance reminders.
  */
 
+const { normalizePrinterHost } = require('./printer-discovery');
+
 function ensurePrinterSchema(db) {
   db.prepare(`
     CREATE TABLE IF NOT EXISTS printers (
@@ -16,6 +18,11 @@ function ensurePrinterSchema(db) {
       firmware_type TEXT,
       is_klipper INTEGER DEFAULT 0,
       web_url TEXT,
+      host TEXT,
+      bambu_serial TEXT,
+      bambu_access_code TEXT,
+      prusa_username TEXT,
+      prusa_password TEXT,
       notes TEXT,
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL
@@ -27,6 +34,19 @@ function ensurePrinterSchema(db) {
     if (printerCols.length > 0 && !printerCols.some((col) => col.name === 'printer_type')) {
       db.prepare('ALTER TABLE printers ADD COLUMN printer_type TEXT').run();
       db.prepare('CREATE INDEX IF NOT EXISTS idx_printers_printer_type ON printers(printer_type)').run();
+    }
+    const connectionCols = [
+      ['host', 'TEXT'],
+      ['bambu_serial', 'TEXT'],
+      ['bambu_access_code', 'TEXT'],
+      ['prusa_username', 'TEXT'],
+      ['prusa_password', 'TEXT']
+    ];
+    const refreshedCols = db.prepare('PRAGMA table_info(printers)').all();
+    for (const [name, type] of connectionCols) {
+      if (refreshedCols.length > 0 && !refreshedCols.some((col) => col.name === name)) {
+        db.prepare(`ALTER TABLE printers ADD COLUMN ${name} ${type}`).run();
+      }
     }
   } catch (err) {
     // Ignore migration error if already exists
@@ -128,6 +148,37 @@ function getPrinterById(db, id) {
   };
 }
 
+function fieldProvided(printer, keys) {
+  return keys.some((key) => Object.prototype.hasOwnProperty.call(printer || {}, key));
+}
+
+function cleanOptionalText(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function resolveTextField(printer, keys, existingValue) {
+  if (!fieldProvided(printer, keys)) return existingValue ?? null;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(printer, key)) return cleanOptionalText(printer[key]);
+  }
+  return existingValue ?? null;
+}
+
+function resolveWebUrl(printer, existingValue) {
+  if (!fieldProvided(printer, ['webUrl', 'web_url'])) return existingValue ?? null;
+  const raw = Object.prototype.hasOwnProperty.call(printer, 'webUrl') ? printer.webUrl : printer.web_url;
+  let webUrl = cleanOptionalText(raw);
+  if (webUrl && !/^https?:\/\//i.test(webUrl)) webUrl = `http://${webUrl}`;
+  return webUrl;
+}
+
+function resolveHost(printer, existingValue) {
+  if (!fieldProvided(printer, ['host'])) return existingValue ?? null;
+  return normalizePrinterHost(printer.host);
+}
+
 function savePrinter(db, printer) {
   ensurePrinterSchema(db);
   const nickname = String(printer?.nickname || '').trim();
@@ -137,34 +188,38 @@ function savePrinter(db, printer) {
   const model = String(printer?.model || '').trim() || null;
   const printerType = String(printer?.printerType || printer?.printer_type || printer?.technology || printer?.type || '').trim() || null;
   const firmwareType = String(printer?.firmwareType || printer?.firmware_type || '').trim() || null;
-  const isKlipper = (firmwareType && firmwareType.toLowerCase() === 'klipper') || Boolean(printer?.isKlipper ?? printer?.is_klipper) ? 1 : 0;
-  
-  let webUrl = String(printer?.webUrl || printer?.web_url || '').trim() || null;
-  if (webUrl && !/^https?:\/\//i.test(webUrl)) {
-    webUrl = 'http://' + webUrl;
-  }
+  const isKlipper = firmwareType && firmwareType.toLowerCase() === 'klipper' ? 1 : 0;
   const notes = String(printer?.notes || '').trim() || null;
   const now = new Date().toISOString();
 
   const id = printer?.id != null && printer.id !== '' ? Number(printer.id) : null;
+  const existing = id ? db.prepare('SELECT * FROM printers WHERE id = ?').get(id) : null;
   if (id) {
     if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid printer ID');
-    const existing = db.prepare('SELECT id FROM printers WHERE id = ?').get(id);
     if (!existing) throw new Error('Printer not found');
+  }
 
+  const webUrl = resolveWebUrl(printer, existing?.web_url);
+  const host = resolveHost(printer, existing?.host);
+  const bambuSerial = resolveTextField(printer, ['bambuSerial', 'bambu_serial'], existing?.bambu_serial);
+  const bambuAccessCode = resolveTextField(printer, ['bambuAccessCode', 'bambu_access_code'], existing?.bambu_access_code);
+  const prusaUsername = resolveTextField(printer, ['prusaUsername', 'prusa_username'], existing?.prusa_username);
+  const prusaPassword = resolveTextField(printer, ['prusaPassword', 'prusa_password'], existing?.prusa_password);
+
+  if (id) {
     db.prepare(`
       UPDATE printers
-      SET nickname = ?, manufacturer = ?, model = ?, printer_type = ?, firmware_type = ?, is_klipper = ?, web_url = ?, notes = ?, updated_at = ?
+      SET nickname = ?, manufacturer = ?, model = ?, printer_type = ?, firmware_type = ?, is_klipper = ?, web_url = ?, host = ?, bambu_serial = ?, bambu_access_code = ?, prusa_username = ?, prusa_password = ?, notes = ?, updated_at = ?
       WHERE id = ?
-    `).run(nickname, manufacturer, model, printerType, firmwareType, isKlipper, webUrl, notes, now, id);
+    `).run(nickname, manufacturer, model, printerType, firmwareType, isKlipper, webUrl, host, bambuSerial, bambuAccessCode, prusaUsername, prusaPassword, notes, now, id);
 
     return getPrinterById(db, id);
   }
 
   const result = db.prepare(`
-    INSERT INTO printers (nickname, manufacturer, model, printer_type, firmware_type, is_klipper, web_url, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(nickname, manufacturer, model, printerType, firmwareType, isKlipper, webUrl, notes, now, now);
+    INSERT INTO printers (nickname, manufacturer, model, printer_type, firmware_type, is_klipper, web_url, host, bambu_serial, bambu_access_code, prusa_username, prusa_password, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(nickname, manufacturer, model, printerType, firmwareType, isKlipper, webUrl, host, bambuSerial, bambuAccessCode, prusaUsername, prusaPassword, notes, now, now);
 
   return getPrinterById(db, result.lastInsertRowid);
 }

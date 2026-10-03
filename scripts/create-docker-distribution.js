@@ -46,6 +46,7 @@ const filesToCopy = [
   'organize-library.css',
   'notes-markdown.css',
   'printer-manager.js',
+  'printer-discovery.js',
   'slicer-detect.js',
   'printer-management.js',
   'printer-management.css',
@@ -94,9 +95,13 @@ const filesToCopy = [
   'folder-tree-lib.js',
   'filament.js',
   'print-events.js',
+  'scheduled-backup.js',
   'print-history.js',
   'spoolman.js',
   'mcp-server.js',
+  'missing-thumbnails-query.js',
+  'flatten-3mf-stl.js',
+  'thumbnail-worker.js',
   'server-tls.js',
   'extension-inbox.js'
 ];

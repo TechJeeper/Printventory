@@ -2183,6 +2183,38 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
               </div>
             </div>
           </div>
+          <div class="scheduled-backup-section">
+            <h4 style="margin: 0 0 15px 0; font-size: 16px; font-weight: 600; color: rgba(255, 255, 255, 0.9);">Scheduled backup</h4>
+            <p class="setting-description">Daily and weekly copies run at the time you choose, including while Printventory is closed. On quit copies when the app closes. Server mode runs daily and weekly while the process is up. Older copies past the keep count are removed.</p>
+            <div class="form-group">
+              <label for="scheduled-backup-folder">Backup folder</label>
+              <div class="scheduled-backup-path-row">
+                <input type="text" id="scheduled-backup-folder" placeholder="Folder for timestamped copies" autocomplete="off" spellcheck="false">
+                <button type="button" id="scheduled-backup-browse">Browse</button>
+              </div>
+            </div>
+            <div class="scheduled-backup-options">
+              <div class="form-group">
+                <label for="scheduled-backup-frequency">Frequency</label>
+                <select id="scheduled-backup-frequency">
+                  <option value="off">Off</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="quit">On quit</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="scheduled-backup-time">Time</label>
+                <input type="time" id="scheduled-backup-time" value="03:00" step="60">
+              </div>
+              <div class="form-group">
+                <label for="scheduled-backup-keep">Keep last</label>
+                <input type="number" id="scheduled-backup-keep" min="1" max="100" value="10">
+              </div>
+            </div>
+            <p id="scheduled-backup-status" class="setting-description">No scheduled backup yet.</p>
+            <button type="button" id="scheduled-backup-now" class="full-width-button">Backup now</button>
+          </div>
           <div class="dialog-buttons">
             <button type="button" id="save-backup-restore" onclick="document.getElementById('backup-restore-dialog')?.close()">Close</button>
           </div>
@@ -2300,7 +2332,7 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
               </svg>
             </button>
           </div>
-          <p class="setting-description">Onboard your 3D printers, launch Klipper/OctoPrint web interfaces, track maintenance logs, and schedule reminders.</p>
+          <p class="setting-description">Onboard printers manually or scan the network. Klipper and Bambu Lab printers can show live status.</p>
           <div class="printer-management-tabs">
             <button type="button" id="printer-tab-printers" class="printer-tab-btn active">
               <span>🖨️ My Printers</span>
@@ -2319,7 +2351,10 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
             <div class="form-group printer-form-section collapsed" id="printer-form-section">
               <div class="printer-section-header">
                 <label id="printer-form-title" class="printer-section-title">Onboard a Printer</label>
-                <button type="button" id="printer-toggle-add-btn" class="printer-toggle-add-btn" aria-expanded="false">+ Add Printer</button>
+                <div class="printer-header-actions">
+                  <button type="button" id="printer-auto-detect-btn" class="printer-toggle-add-btn" aria-expanded="false">Auto Detect</button>
+                  <button type="button" id="printer-toggle-add-btn" class="printer-toggle-add-btn" aria-expanded="false">+ Add Printer</button>
+                </div>
               </div>
               <div id="printer-form-body" hidden>
                 <form id="printer-form">
@@ -2361,22 +2396,34 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                         <option value="Other">Other</option>
                       </select>
                     </div>
-                    <div class="printer-field printer-span">
-                      <label class="printer-klipper-toggle-row">
-                        <input type="checkbox" id="printer-form-klipper" checked>
-                        <span class="printer-klipper-toggle-label">
-                          <span>Running Klipper</span>
-                          <span class="klipper-tag-badge">Klipper</span>
-                          <span style="font-size:12px;color:#94a3b8;margin-left:4px;">(Enables Moonraker / Mainsail / Fluidd web interface integration)</span>
-                        </span>
-                      </label>
-                    </div>
-                    <div class="printer-field printer-span">
-                      <label class="printer-field-label" for="printer-form-web-url">Web Interface Address (Mainsail, Fluidd, OctoPrint, etc.)</label>
+                    <div class="printer-field printer-span" id="printer-web-field">
+                      <label class="printer-field-label" for="printer-form-web-url">Web Interface Address (Mainsail, Fluidd, PrusaLink)</label>
                       <div class="printer-url-group">
                         <input type="text" id="printer-form-web-url" placeholder="http://mainsail.local or http://192.168.1.100" autocomplete="off" spellcheck="false">
                         <button type="button" id="printer-form-test-url" class="printer-url-open-btn" title="Open URL in browser">🌐 Open ↗</button>
                       </div>
+                    </div>
+                    <div class="printer-field" id="printer-prusa-user-field" hidden>
+                      <label class="printer-field-label" for="printer-form-prusa-user">PrusaLink Username</label>
+                      <input type="text" id="printer-form-prusa-user" placeholder="maker" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="printer-field printer-span" id="printer-prusa-password-field" hidden>
+                      <label class="printer-field-label" for="printer-form-prusa-password">PrusaLink Password</label>
+                      <input type="password" id="printer-form-prusa-password" placeholder="Password from the printer network menu" autocomplete="new-password" spellcheck="false">
+                      <p class="printer-field-hint">Open launches the PrusaLink page. The password is used to read whether the printer is idle, printing, or paused.</p>
+                    </div>
+                    <div class="printer-field" id="printer-bambu-host-field" hidden>
+                      <label class="printer-field-label" for="printer-form-host">Printer IP Address</label>
+                      <input type="text" id="printer-form-host" placeholder="192.168.1.50" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="printer-field" id="printer-bambu-serial-field" hidden>
+                      <label class="printer-field-label" for="printer-form-serial">Serial Number</label>
+                      <input type="text" id="printer-form-serial" placeholder="01P00A000000000" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="printer-field printer-span" id="printer-bambu-code-field" hidden>
+                      <label class="printer-field-label" for="printer-form-access-code">Access Code</label>
+                      <input type="password" id="printer-form-access-code" placeholder="LAN access code from the printer" autocomplete="new-password" spellcheck="false">
+                      <p class="printer-field-hint">Enable LAN mode on the printer. The access code is the LAN key on that screen, and the serial number is in the printer's device info.</p>
                     </div>
                     <div class="printer-field printer-span">
                       <label class="printer-field-label" for="printer-form-notes">Notes / Location (Optional)</label>
@@ -2384,12 +2431,28 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                     </div>
                   </div>
                   <div class="printer-form-actions">
+                    <button type="button" id="printer-form-test-connection" class="printer-btn-cancel">Test Connection</button>
                     <button type="submit" id="printer-form-submit" class="printer-btn-primary">Add Printer</button>
                     <button type="button" id="printer-form-cancel" class="printer-btn-cancel">Cancel</button>
                   </div>
                   <div id="printer-form-status" class="printer-status-msg"></div>
                 </form>
               </div>
+            </div>
+
+            <div id="printer-detect-panel" class="printer-detect-panel" hidden>
+              <div class="printer-scan-range-bar">
+                <label class="printer-field-label" for="printer-scan-start">Scan range</label>
+                <div class="printer-scan-range-controls">
+                  <input type="text" id="printer-scan-start" placeholder="Start IP" aria-label="Start IP" autocomplete="off" spellcheck="false">
+                  <span class="printer-scan-range-sep">to</span>
+                  <input type="text" id="printer-scan-end" placeholder="End IP" aria-label="End IP" autocomplete="off" spellcheck="false">
+                  <button type="button" id="printer-scan-btn" class="printer-toggle-add-btn">Scan</button>
+                </div>
+                <p class="printer-field-hint">First and last address to check. Leave both blank to use this PC's network.</p>
+              </div>
+              <div id="printer-detect-status" class="printer-detect-status" hidden></div>
+              <div id="printer-detect-results" class="printer-detect-results"></div>
             </div>
 
             <div class="form-group printer-list-section">

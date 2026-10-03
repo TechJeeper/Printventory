@@ -241,6 +241,31 @@ async function runAsync() {
     }));
     assert.ok(res.result.content[0].text.includes('abc'));
   });
+
+  await test('get_models_missing_thumbnails passes offset and excludeIds', async () => {
+    let received;
+    const res = await handleMcpJsonRpc({
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'tools/call',
+      params: {
+        name: 'get_models_missing_thumbnails',
+        arguments: { limit: 25, offset: 40, excludeIds: [3, 3, '9', 0, 'nope'] }
+      }
+    }, mockCtx({
+      getModelsMissingThumbnails: async (options) => {
+        received = options;
+        return [];
+      }
+    }));
+    assert.strictEqual(received.limit, 25);
+    assert.strictEqual(received.offset, 40);
+    assert.deepStrictEqual(received.excludeIds, [3, 3, '9', 0, 'nope']);
+    assert.strictEqual(res.result.isError, undefined);
+    const tool = listToolDefinitions().find((entry) => entry.name === 'get_models_missing_thumbnails');
+    assert.ok(tool.inputSchema.properties.offset);
+    assert.ok(tool.inputSchema.properties.excludeIds);
+  });
 }
 
 runAsync().then(() => {

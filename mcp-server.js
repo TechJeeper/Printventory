@@ -298,11 +298,17 @@ const TOOL_DEFINITIONS = [
   {
     name: 'get_models_missing_thumbnails',
     description:
-      'List models that have no custom thumbnail. Use filePath to open the model file locally, generate an image, then call set_thumbnail.',
+      'List models that have no custom thumbnail. Pass excludeIds for models that cannot be rendered so they leave the front of the queue, and offset to page. Use filePath to open the model file locally, generate an image, then call set_thumbnail.',
     inputSchema: {
       type: 'object',
       properties: {
-        limit: { type: 'integer', description: 'Max results (default 50, max 500)' }
+        limit: { type: 'integer', description: 'Max results (default 50, max 500)' },
+        offset: { type: 'integer', description: 'Number of matching models to skip (default 0)' },
+        excludeIds: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'Model ids to leave out (known render failures). Max 2000.'
+        }
       }
     }
   },
@@ -771,7 +777,11 @@ async function callTool(name, args, ctx) {
     case 'list_licenses':
       return ctx.listLicenses();
     case 'get_models_missing_thumbnails':
-      return ctx.getModelsMissingThumbnails(clampLimit(a.limit, 50, 500));
+      return ctx.getModelsMissingThumbnails({
+        limit: a.limit,
+        offset: a.offset,
+        excludeIds: a.excludeIds
+      });
     case 'get_thumbnails':
       return ctx.getThumbnails({ id: a.id, filePath: a.filePath });
     case 'set_thumbnail':
@@ -859,7 +869,7 @@ async function callTool(name, args, ctx) {
     case 'sync_spoolman_filaments':
       return ctx.syncSpoolmanFilaments({ url: a.url, token: a.token });
     case 'get_models_with_default_thumbnails':
-      return ctx.getModelsMissingThumbnails(clampLimit(a.limit, 50, 500));
+      return ctx.getModelsMissingThumbnails({ limit: a.limit });
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

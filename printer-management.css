@@ -266,6 +266,7 @@
 
 /* Inputs & selects inside dialog */
 #printer-management-dialog input[type="text"],
+#printer-management-dialog input[type="password"],
 #printer-management-dialog input[type="datetime-local"],
 #printer-management-dialog select,
 #printer-management-dialog textarea {
@@ -305,6 +306,59 @@
 #printer-management-dialog select option {
   background-color: #1e1e2e;
   color: #fff;
+}
+
+/* Chromium paints input[list] with the light native field once a suggestion is chosen. */
+#printer-management-dialog input[list],
+#printer-management-dialog input[list]:hover,
+#printer-management-dialog input[list]:focus,
+#printer-management-dialog input[list]:-webkit-autofill,
+#printer-management-dialog input[list]:-webkit-autofill:hover,
+#printer-management-dialog input[list]:-webkit-autofill:focus,
+#printer-management-dialog input[list]:autofill {
+  color-scheme: dark;
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 34px !important;
+  background-color: #242432 !important;
+  background-image: none !important;
+  color: #fff !important;
+  -webkit-text-fill-color: #fff !important;
+  caret-color: #fff;
+  box-shadow: 0 0 0 1000px #242432 inset !important;
+  transition: background-color 600000s 0s, color 600000s 0s;
+}
+
+#printer-management-dialog input[list]:focus,
+#printer-management-dialog input[list]:-webkit-autofill:focus {
+  border-color: var(--primary-accent, #00d4ff) !important;
+  background-color: #2c2c3a !important;
+  box-shadow: 0 0 0 1000px #2c2c3a inset, 0 0 0 3px color-mix(in srgb, var(--primary-accent, #00d4ff) 18%, transparent) !important;
+}
+
+#printer-management-dialog input[list]::-webkit-calendar-picker-indicator {
+  display: none;
+  -webkit-appearance: none;
+  appearance: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#printer-management-dialog .printer-field:has(> input[list]) {
+  position: relative;
+}
+
+#printer-management-dialog .printer-field:has(> input[list])::after {
+  content: "";
+  position: absolute;
+  right: 14px;
+  bottom: 16px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid rgba(255, 255, 255, 0.55);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.55);
+  transform: rotate(45deg);
+  pointer-events: none;
 }
 
 /* Web Address input group with Open button */
@@ -352,44 +406,112 @@
   transform: none;
 }
 
-/* Klipper toggle pill */
-.printer-klipper-toggle-row {
+.printer-header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
-  padding: 9px 14px;
-  cursor: pointer;
+  gap: 8px;
 }
 
-.printer-klipper-toggle-row input[type="checkbox"] {
-  width: 17px;
-  height: 17px;
-  accent-color: var(--primary-accent, #00d4ff);
-  cursor: pointer;
-  margin: 0;
+.printer-field-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #94a3b8;
 }
 
-.printer-klipper-toggle-label {
+.printer-toggle-add-btn:disabled {
+  opacity: 0.65;
+  cursor: progress !important;
+}
+
+.printer-scan-range-bar {
+  margin: 0 0 12px;
+}
+
+.printer-scan-range-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.printer-scan-range-sep {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#printer-management-dialog .printer-scan-range-controls input[type="text"] {
+  flex: 1 1 auto;
+  width: auto !important;
+  min-width: 0;
+}
+
+.printer-scan-range-bar .printer-field-hint {
+  margin-top: 6px;
+}
+
+.printer-detect-panel {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 12px;
+  background: rgba(56, 189, 248, 0.06);
+}
+
+.printer-detect-status {
   font-size: 13px;
-  color: #f1f5f9;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  color: #e2e8f0;
+  margin-bottom: 8px;
 }
 
-.klipper-tag-badge {
-  background: linear-gradient(135deg, #a855f7, #6366f1);
-  color: #fff;
-  font-size: 10.5px;
-  font-weight: 700;
-  padding: 2px 7px;
-  border-radius: 6px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.printer-detect-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.printer-detect-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.printer-detect-info {
+  min-width: 0;
+}
+
+.printer-detect-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.printer-detect-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #94a3b8;
+  flex-wrap: wrap;
+}
+
+.printer-detect-empty {
+  font-size: 12.5px;
+  color: #94a3b8;
+  line-height: 1.45;
+}
+
+.printer-detect-added {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6ee7b7;
 }
 
 /* Form actions */
@@ -565,6 +687,42 @@
   border: 1px solid rgba(239, 68, 68, 0.4);
   color: #fca5a5;
   animation: pulse-glow 2s infinite ease-in-out;
+}
+
+.printer-badge.printer-status-badge {
+  letter-spacing: 0.03em;
+}
+
+.printer-badge.status-checking,
+.printer-badge.status-offline {
+  background: rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
+}
+
+.printer-badge.status-online,
+.printer-badge.status-complete {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #6ee7b7;
+}
+
+.printer-badge.status-printing {
+  background: rgba(56, 189, 248, 0.16);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  color: #7dd3fc;
+}
+
+.printer-badge.status-paused {
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+}
+
+.printer-badge.status-error {
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
 }
 
 .printer-search-filter-row {

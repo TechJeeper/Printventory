@@ -31,6 +31,7 @@
     
     # Don't remove user data on uninstall
     # RMDir /r "$LOCALAPPDATA\Printventory"
+    ExecWait 'schtasks /Delete /TN "Printventory\Database Backup" /F'
     
     # Instead, only remove the application files
     RMDir /r "$INSTDIR"

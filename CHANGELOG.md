@@ -4,6 +4,12 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.17] - 2026-10-03
+
+- Printer Management can scan the local network for Klipper, PrusaLink, and Bambu Lab printers, test the connection, and show live status
+- Settings can schedule database backups daily, weekly, or when Printventory quits, keep the last copies, and remove the Windows scheduled task on uninstall
+- Thumbnail requests can skip models that cannot be rendered and page through the rest. A worker flattens 3MF files to STL before rendering
+
 ## [2.2.16] - 2026-10-02
 
 - Organize Library copies models from a scanned folder into a folder structure you choose, checks free space, and removes each original only after the copy is verified. Zip archives can move packed when zip support is on

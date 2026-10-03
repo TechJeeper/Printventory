@@ -206,7 +206,7 @@ http://<your-host>:5000/mcp
 
 Agents can call the library, tag, filament, print-history, thumbnail, DeDup, scan, metadata, slicer, and backup tools listed in **Tools → MCP Server**. Destructive actions (`remove_model`, `trash_file`, `move_files`) require `confirm: true`.
 
-To generate thumbnails outside Printventory: list models with `get_models_missing_thumbnails`, open each `filePath` on disk, render an image, then call `set_thumbnail` with a PNG or JPEG data URL or raw base64.
+To generate thumbnails outside Printventory: list models with `get_models_missing_thumbnails`, open each `filePath` on disk, render an image, then call `set_thumbnail` with a PNG or JPEG data URL or raw base64. Pass `excludeIds` for models that cannot be rendered, and `offset` to page, so a batch of permanent failures does not stay at the front of the list. `node thumbnail-worker.js` does this with [stl-thumb](https://github.com/unlimitedbacon/stl-thumb), flattening 3MF files to STL first.
 
 ## Building from Source
 

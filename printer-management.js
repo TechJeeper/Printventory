@@ -5,6 +5,9 @@
   let editingPrinterId = null;
   let selectedPrinterId = null;
   let cachedPrinters = [];
+  let liveStatus = {};
+  let statusPollTimer = null;
+  let statusPollInFlight = false;
 
   function escapeHtml(str) {
     if (str == null) return '';
@@ -87,8 +90,12 @@
     const modelInput = document.getElementById('printer-form-model');
     const typeInput = document.getElementById('printer-form-type');
     const fwInput = document.getElementById('printer-form-firmware');
-    const klipperInput = document.getElementById('printer-form-klipper');
     const webInput = document.getElementById('printer-form-web-url');
+    const hostInput = document.getElementById('printer-form-host');
+    const serialInput = document.getElementById('printer-form-serial');
+    const accessInput = document.getElementById('printer-form-access-code');
+    const prusaUserInput = document.getElementById('printer-form-prusa-user');
+    const prusaPasswordInput = document.getElementById('printer-form-prusa-password');
     const notesInput = document.getElementById('printer-form-notes');
     const submitBtn = document.getElementById('printer-form-submit');
     const cancelBtn = document.getElementById('printer-form-cancel');
@@ -99,13 +106,18 @@
     if (modelInput) modelInput.value = '';
     if (typeInput) typeInput.value = 'FDM';
     if (fwInput) fwInput.value = 'Klipper';
-    if (klipperInput) klipperInput.checked = true;
     if (webInput) webInput.value = '';
+    if (hostInput) hostInput.value = '';
+    if (serialInput) serialInput.value = '';
+    if (accessInput) accessInput.value = '';
+    if (prusaUserInput) prusaUserInput.value = '';
+    if (prusaPasswordInput) prusaPasswordInput.value = '';
     if (notesInput) notesInput.value = '';
     if (submitBtn) submitBtn.textContent = 'Add Printer';
     if (cancelBtn) cancelBtn.textContent = 'Cancel';
     if (formTitle) formTitle.textContent = 'Onboard a Printer';
     setStatus('printer-form-status', '');
+    syncConnectionFields();
     setPrinterAddOpen(false);
   }
 
@@ -118,8 +130,12 @@
     const modelInput = document.getElementById('printer-form-model');
     const typeInput = document.getElementById('printer-form-type');
     const fwInput = document.getElementById('printer-form-firmware');
-    const klipperInput = document.getElementById('printer-form-klipper');
     const webInput = document.getElementById('printer-form-web-url');
+    const hostInput = document.getElementById('printer-form-host');
+    const serialInput = document.getElementById('printer-form-serial');
+    const accessInput = document.getElementById('printer-form-access-code');
+    const prusaUserInput = document.getElementById('printer-form-prusa-user');
+    const prusaPasswordInput = document.getElementById('printer-form-prusa-password');
     const notesInput = document.getElementById('printer-form-notes');
     const submitBtn = document.getElementById('printer-form-submit');
     const cancelBtn = document.getElementById('printer-form-cancel');
@@ -130,12 +146,17 @@
     if (modelInput) modelInput.value = printer.model || '';
     if (typeInput) typeInput.value = printer.printer_type || 'FDM';
     if (fwInput) fwInput.value = printer.firmware_type || 'Other';
-    if (klipperInput) klipperInput.checked = Boolean(printer.is_klipper);
     if (webInput) webInput.value = printer.web_url || '';
+    if (hostInput) hostInput.value = printer.host || '';
+    if (serialInput) serialInput.value = printer.bambu_serial || '';
+    if (accessInput) accessInput.value = printer.bambu_access_code || '';
+    if (prusaUserInput) prusaUserInput.value = printer.prusa_username || '';
+    if (prusaPasswordInput) prusaPasswordInput.value = printer.prusa_password || '';
     if (notesInput) notesInput.value = printer.notes || '';
     if (submitBtn) submitBtn.textContent = 'Save Changes';
     if (cancelBtn) cancelBtn.textContent = 'Cancel Edit';
     if (formTitle) formTitle.textContent = `Edit Printer: ${printer.nickname}`;
+    syncConnectionFields();
 
     switchTab('printers');
     document.querySelector('.printer-management-scroll-content')?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -227,6 +248,7 @@
               ${mfgModel ? `<span class="printer-card-model">(${escapeHtml(mfgModel)})</span>` : ''}
             </div>
             <div class="printer-card-meta">
+              ${renderStatusBadge(printer)}
               ${typeBadge}
               ${fwBadge}
               ${klipperBadge}
@@ -290,25 +312,54 @@
     const model = document.getElementById('printer-form-model')?.value?.trim() || null;
     const printerType = document.getElementById('printer-form-type')?.value?.trim() || null;
     const firmwareType = document.getElementById('printer-form-firmware')?.value?.trim() || null;
-    const isKlipper = document.getElementById('printer-form-klipper')?.checked || false;
-    let webUrl = document.getElementById('printer-form-web-url')?.value?.trim() || null;
-    if (webUrl && !/^https?:\/\//i.test(webUrl)) {
-      webUrl = 'http://' + webUrl;
-    }
     const notes = document.getElementById('printer-form-notes')?.value?.trim() || null;
+    const payload = {
+      id: editingPrinterId,
+      nickname,
+      manufacturer,
+      model,
+      printerType,
+      firmwareType,
+      notes
+    };
+    const firmwareKey = String(firmwareType || '').toLowerCase();
+    const normalizedWebUrl = () => {
+      let webUrl = document.getElementById('printer-form-web-url')?.value?.trim() || null;
+      if (webUrl && !/^https?:\/\//i.test(webUrl)) webUrl = `http://${webUrl}`;
+      return webUrl;
+    };
+    if (firmwareKey === 'klipper') {
+      payload.webUrl = normalizedWebUrl();
+      payload.host = '';
+      payload.bambuSerial = '';
+      payload.bambuAccessCode = '';
+      payload.prusaUsername = '';
+      payload.prusaPassword = '';
+    } else if (firmwareKey === 'bambu os') {
+      payload.webUrl = '';
+      payload.host = document.getElementById('printer-form-host')?.value?.trim() || '';
+      payload.bambuSerial = document.getElementById('printer-form-serial')?.value?.trim() || '';
+      payload.bambuAccessCode = document.getElementById('printer-form-access-code')?.value?.trim() || '';
+      payload.prusaUsername = '';
+      payload.prusaPassword = '';
+    } else if (firmwareKey === 'prusa buddy') {
+      payload.webUrl = normalizedWebUrl();
+      payload.host = '';
+      payload.bambuSerial = '';
+      payload.bambuAccessCode = '';
+      payload.prusaUsername = document.getElementById('printer-form-prusa-user')?.value?.trim() || 'maker';
+      payload.prusaPassword = document.getElementById('printer-form-prusa-password')?.value || '';
+    } else {
+      payload.webUrl = '';
+      payload.host = '';
+      payload.bambuSerial = '';
+      payload.bambuAccessCode = '';
+      payload.prusaUsername = '';
+      payload.prusaPassword = '';
+    }
 
     try {
-      await window.electron.savePrinter({
-        id: editingPrinterId,
-        nickname,
-        manufacturer,
-        model,
-        printerType,
-        firmwareType,
-        isKlipper,
-        webUrl,
-        notes
-      });
+      await window.electron.savePrinter(payload);
 
       setStatus('printer-form-status', editingPrinterId ? 'Printer updated successfully' : 'Printer added successfully');
       resetPrinterForm();
@@ -549,6 +600,368 @@
     }
   }
 
+  function currentFirmware() {
+    return document.getElementById('printer-form-firmware')?.value || '';
+  }
+
+  function syncConnectionFields() {
+    const firmware = currentFirmware();
+    const isKlipper = firmware === 'Klipper';
+    const isBambu = firmware === 'Bambu OS';
+    const isPrusa = firmware === 'Prusa Buddy';
+    const webField = document.getElementById('printer-web-field');
+    const hostField = document.getElementById('printer-bambu-host-field');
+    const serialField = document.getElementById('printer-bambu-serial-field');
+    const codeField = document.getElementById('printer-bambu-code-field');
+    const prusaUserField = document.getElementById('printer-prusa-user-field');
+    const prusaPasswordField = document.getElementById('printer-prusa-password-field');
+    const testBtn = document.getElementById('printer-form-test-connection');
+    if (webField) webField.hidden = !(isKlipper || isPrusa);
+    if (hostField) hostField.hidden = !isBambu;
+    if (serialField) serialField.hidden = !isBambu;
+    if (codeField) codeField.hidden = !isBambu;
+    if (prusaUserField) prusaUserField.hidden = !isPrusa;
+    if (prusaPasswordField) prusaPasswordField.hidden = !isPrusa;
+    if (testBtn) testBtn.hidden = !(isKlipper || isBambu || isPrusa);
+    const mfg = document.getElementById('printer-form-manufacturer');
+    if (isBambu && mfg && !mfg.value.trim()) mfg.value = 'Bambu Lab';
+    if (isPrusa && mfg && !mfg.value.trim()) mfg.value = 'Prusa Research';
+    const prusaUser = document.getElementById('printer-form-prusa-user');
+    if (isPrusa && prusaUser && !prusaUser.value.trim()) prusaUser.value = 'maker';
+  }
+
+  function printerCanReportStatus(printer) {
+    const firmware = String(printer?.firmware_type || '').toLowerCase();
+    if ((firmware === 'klipper' || printer?.is_klipper) && printer?.web_url) return true;
+    if (firmware === 'bambu os' && printer?.host && printer?.bambu_serial && printer?.bambu_access_code) return true;
+    if (firmware === 'prusa buddy' && printer?.web_url) return true;
+    return false;
+  }
+
+  function renderStatusBadge(printer) {
+    if (!printerCanReportStatus(printer)) return '';
+    const status = liveStatus[printer.id];
+    if (!status) return '<span class="printer-badge printer-status-badge status-checking">Checking…</span>';
+    if (status.supported === false) return '';
+    const title = status.detail || status.label || '';
+    const state = status.state || 'offline';
+    return `<span class="printer-badge printer-status-badge status-${escapeHtml(state)}" title="${escapeHtml(title)}">${escapeHtml(status.label || 'Offline')}</span>`;
+  }
+
+  function applyLiveStatusBadges() {
+    document.querySelectorAll('#printer-cards-list .printer-card').forEach((card) => {
+      const printer = cachedPrinters.find((p) => String(p.id) === card.dataset.printerId);
+      const meta = card.querySelector('.printer-card-meta');
+      if (!printer || !meta) return;
+      const html = renderStatusBadge(printer);
+      const existing = meta.querySelector('.printer-status-badge');
+      if (!html) {
+        existing?.remove();
+        return;
+      }
+      const holder = document.createElement('div');
+      holder.innerHTML = html;
+      const next = holder.firstElementChild;
+      if (!next) return;
+      if (existing) existing.replaceWith(next);
+      else meta.prepend(next);
+    });
+  }
+
+  async function refreshLiveStatus() {
+    if (statusPollInFlight || !window.electron?.getPrinterStatuses) return;
+    const dialog = document.getElementById('printer-management-dialog');
+    if (!dialog?.open) return;
+    statusPollInFlight = true;
+    try {
+      const next = await window.electron.getPrinterStatuses();
+      liveStatus = next && typeof next === 'object' ? next : {};
+      applyLiveStatusBadges();
+    } catch (err) {
+      console.error('Failed to refresh printer status:', err);
+    } finally {
+      statusPollInFlight = false;
+    }
+  }
+
+  function startStatusPolling() {
+    stopStatusPolling();
+    refreshLiveStatus();
+    statusPollTimer = setInterval(refreshLiveStatus, 20000);
+  }
+
+  function stopStatusPolling() {
+    if (statusPollTimer) clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
+
+  function connectionPayloadFromForm() {
+    const firmwareType = currentFirmware();
+    const payload = { firmwareType };
+    if (firmwareType === 'Klipper') {
+      payload.webUrl = document.getElementById('printer-form-web-url')?.value?.trim() || '';
+    }
+    if (firmwareType === 'Bambu OS') {
+      payload.host = document.getElementById('printer-form-host')?.value?.trim() || '';
+      payload.bambuSerial = document.getElementById('printer-form-serial')?.value?.trim() || '';
+      payload.bambuAccessCode = document.getElementById('printer-form-access-code')?.value?.trim() || '';
+    }
+    if (firmwareType === 'Prusa Buddy') {
+      payload.webUrl = document.getElementById('printer-form-web-url')?.value?.trim() || '';
+      payload.prusaUsername = document.getElementById('printer-form-prusa-user')?.value?.trim() || 'maker';
+      payload.prusaPassword = document.getElementById('printer-form-prusa-password')?.value || '';
+    }
+    return payload;
+  }
+
+  async function testCurrentConnection() {
+    const payload = connectionPayloadFromForm();
+    if (payload.firmwareType === 'Klipper' && !payload.webUrl) {
+      setStatus('printer-form-status', 'Enter the web interface address first', true);
+      return;
+    }
+    if (payload.firmwareType === 'Bambu OS' && (!payload.host || !payload.bambuSerial || !payload.bambuAccessCode)) {
+      setStatus('printer-form-status', 'IP address, serial number, and access code are required to connect', true);
+      return;
+    }
+    if (payload.firmwareType === 'Prusa Buddy' && !payload.webUrl) {
+      setStatus('printer-form-status', 'Enter the PrusaLink address first', true);
+      return;
+    }
+    if (!window.electron?.testPrinterConnection) {
+      setStatus('printer-form-status', 'Connection test is unavailable', true);
+      return;
+    }
+    setStatus('printer-form-status', 'Checking connection…');
+    try {
+      const result = await window.electron.testPrinterConnection(payload);
+      if (!result?.supported) {
+        setStatus('printer-form-status', 'This printer is not set up for a live connection yet', true);
+        return;
+      }
+      const detail = result.detail ? ` — ${result.detail}` : '';
+      const failed = result.state === 'offline' || result.state === 'error';
+      setStatus('printer-form-status', `${result.label || 'Offline'}${detail}`, failed);
+    } catch (err) {
+      setStatus('printer-form-status', err.message || 'Connection test failed', true);
+    }
+  }
+
+  function hostsMatch(left, right) {
+    const normalize = (value) => String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .split('/')[0]
+      .replace(/:\d+$/, '');
+    const a = normalize(left);
+    const b = normalize(right);
+    return Boolean(a) && a === b;
+  }
+
+  function isAlreadyOnboarded(device) {
+    return cachedPrinters.some((printer) => {
+      if (device.serial && printer.bambu_serial && printer.bambu_serial.toLowerCase() === device.serial.toLowerCase()) return true;
+      if (device.host && printer.host && hostsMatch(printer.host, device.host) && device.kind !== 'klipper' && device.kind !== 'prusa') return true;
+      if ((device.kind === 'klipper' || device.kind === 'prusa') && device.host && printer.web_url && hostsMatch(printer.web_url, device.host)) return true;
+      return false;
+    });
+  }
+
+  function configureDetectedPrinter(device) {
+    resetPrinterForm();
+    setPrinterAddOpen(true);
+    const nameInput = document.getElementById('printer-form-nickname');
+    const mfgInput = document.getElementById('printer-form-manufacturer');
+    const modelInput = document.getElementById('printer-form-model');
+    const typeInput = document.getElementById('printer-form-type');
+    const fwInput = document.getElementById('printer-form-firmware');
+    const webInput = document.getElementById('printer-form-web-url');
+    const hostInput = document.getElementById('printer-form-host');
+    const serialInput = document.getElementById('printer-form-serial');
+    if (nameInput) nameInput.value = device.name || device.model || '';
+    if (mfgInput) mfgInput.value = device.manufacturer || '';
+    if (modelInput) modelInput.value = device.model || '';
+    if (typeInput) typeInput.value = device.printerType || 'FDM';
+    if (fwInput) fwInput.value = device.firmwareType || 'Other';
+    if (webInput && device.webUrl) webInput.value = device.webUrl;
+    if (hostInput && device.host) hostInput.value = device.host;
+    if (serialInput && device.serial) serialInput.value = device.serial;
+    syncConnectionFields();
+    document.querySelector('.printer-management-scroll-content')?.scrollTo({ top: 0, behavior: 'smooth' });
+    if (device.firmwareType === 'Bambu OS') {
+      document.getElementById('printer-form-access-code')?.focus();
+    } else if (device.firmwareType === 'Prusa Buddy') {
+      document.getElementById('printer-form-prusa-password')?.focus();
+    } else if (!nameInput?.value) {
+      nameInput?.focus();
+    } else {
+      webInput?.focus();
+    }
+  }
+
+  function renderDetectResults(devices) {
+    const results = document.getElementById('printer-detect-results');
+    if (!results) return;
+    results.innerHTML = '';
+    if (!devices.length) {
+      const empty = document.createElement('div');
+      empty.className = 'printer-detect-empty';
+      empty.textContent = 'No printers responded. Klipper needs Moonraker on port 7125. PrusaLink answers on port 80. Bambu Lab printers need LAN mode enabled.';
+      results.appendChild(empty);
+      return;
+    }
+    devices.forEach((device) => {
+      const row = document.createElement('div');
+      row.className = 'printer-detect-row';
+      const onboarded = isAlreadyOnboarded(device);
+      const subtitle = [
+        device.host,
+        device.model,
+        device.serial,
+        device.discoveredVia === 'moonraker' ? 'Moonraker' : '',
+        device.discoveredVia === 'web' ? 'Web UI' : '',
+        device.discoveredVia === 'prusalink' ? 'PrusaLink' : '',
+        device.discoveredVia === 'ssdp' ? 'Bambu discovery' : '',
+        device.discoveredVia === 'mqtt' ? 'Bambu MQTT' : ''
+      ].filter(Boolean).join(' · ');
+      row.innerHTML = `
+        <div class="printer-detect-info">
+          <div class="printer-detect-name">${escapeHtml(device.name || device.host || 'Printer')}</div>
+          <div class="printer-detect-meta">
+            <span class="printer-badge ${device.kind === 'klipper' ? 'klipper' : ''}">${escapeHtml(device.firmwareType || device.kind || '')}</span>
+            <span>${escapeHtml(subtitle)}</span>
+          </div>
+        </div>
+      `;
+      if (onboarded) {
+        const added = document.createElement('span');
+        added.className = 'printer-detect-added';
+        added.textContent = 'Added';
+        row.appendChild(added);
+      } else {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'printer-toggle-add-btn';
+        button.textContent = 'Configure';
+        button.addEventListener('click', () => configureDetectedPrinter(device));
+        row.appendChild(button);
+      }
+      results.appendChild(row);
+    });
+  }
+
+  const SCAN_RANGE_KEY = 'printventory.printerScanRange';
+
+  function readSavedScanRange() {
+    let saved = '';
+    try { saved = localStorage.getItem(SCAN_RANGE_KEY) || ''; } catch (_) { return null; }
+    if (!saved) return null;
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { start: String(parsed.start || ''), end: String(parsed.end || '') };
+      }
+    } catch (_) { /* older single-field value */ }
+    const span = saved.match(/^(\d{1,3}(?:\.\d{1,3}){3})\s*-\s*(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (span) return { start: span[1], end: span[2] };
+    return null;
+  }
+
+  async function ensureScanRangeDefault() {
+    const startInput = document.getElementById('printer-scan-start');
+    const endInput = document.getElementById('printer-scan-end');
+    if (!startInput || !endInput || startInput.dataset.ready === '1') return;
+    startInput.dataset.ready = '1';
+    const saved = readSavedScanRange();
+    if (saved && (saved.start || saved.end)) {
+      startInput.value = saved.start;
+      endInput.value = saved.end;
+      return;
+    }
+    try {
+      const range = await window.electron?.getLocalScanNetworks?.();
+      if (!startInput.value.trim() && !endInput.value.trim() && range?.start && range?.end) {
+        startInput.value = range.start;
+        endInput.value = range.end;
+      }
+    } catch (_) { /* leave blank and scan this PC's network */ }
+  }
+
+  async function showAutoDetectPanel() {
+    const panel = document.getElementById('printer-detect-panel');
+    const button = document.getElementById('printer-auto-detect-btn');
+    if (!panel) return;
+    const opening = panel.hidden;
+    panel.hidden = !opening;
+    if (button) {
+      button.classList.toggle('active', opening);
+      button.setAttribute('aria-expanded', opening ? 'true' : 'false');
+    }
+    if (!opening) return;
+    await ensureScanRangeDefault();
+    document.getElementById('printer-scan-start')?.focus();
+  }
+
+  async function runAutoDetect() {
+    const panel = document.getElementById('printer-detect-panel');
+    const status = document.getElementById('printer-detect-status');
+    const results = document.getElementById('printer-detect-results');
+    const button = document.getElementById('printer-scan-btn');
+    const startInput = document.getElementById('printer-scan-start');
+    const endInput = document.getElementById('printer-scan-end');
+    if (panel) panel.hidden = false;
+    await ensureScanRangeDefault();
+    const cleanScanIp = (value) => String(value || '').trim().replace(/^https?:\/\//i, '').split('/')[0].replace(/:\d+$/, '');
+    const start = cleanScanIp(startInput?.value);
+    const end = cleanScanIp(endInput?.value);
+    if ((start && !end) || (!start && end)) {
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'Enter both a start IP and an end IP.';
+      }
+      return;
+    }
+    const range = start && end ? `${start}-${end}` : '';
+    try { localStorage.setItem(SCAN_RANGE_KEY, JSON.stringify({ start, end })); } catch (_) { /* private mode */ }
+    if (results) results.innerHTML = '';
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Scanning…';
+    }
+    if (status) {
+      status.hidden = false;
+      status.textContent = start && end
+        ? `Scanning ${start} to ${end} for Klipper, PrusaLink, and Bambu Lab printers…`
+        : 'Scanning this PC\'s network for Klipper, PrusaLink, and Bambu Lab printers…';
+    }
+    try {
+      if (!window.electron?.discoverPrinters) throw new Error('Network scan is unavailable');
+      const result = await window.electron.discoverPrinters(range);
+      const printers = Array.isArray(result?.printers) ? result.printers : [];
+      const where = Array.isArray(result?.networks) && result.networks.length
+        ? ` on ${result.networks.join(', ')}`
+        : '';
+      if (status) {
+        status.hidden = false;
+        status.textContent = printers.length
+          ? `Found ${printers.length} printer${printers.length === 1 ? '' : 's'}${where}.`
+          : `Scan finished${where}. No printers found.`;
+      }
+      renderDetectResults(printers);
+    } catch (err) {
+      if (status) {
+        status.hidden = false;
+        status.textContent = err.message || 'Scan failed';
+      }
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = 'Scan';
+      }
+    }
+  }
+
   function syncPrinterManagementFullscreenButton(isFullscreen) {
     const btn = document.getElementById('printer-management-fullscreen-toggle');
     if (!btn) return;
@@ -572,6 +985,13 @@
     dialog.classList.remove('modal-fullscreen');
     syncPrinterManagementFullscreenButton(false);
     resetPrinterForm();
+    const detectPanel = document.getElementById('printer-detect-panel');
+    const detectButton = document.getElementById('printer-auto-detect-btn');
+    if (detectPanel) detectPanel.hidden = true;
+    if (detectButton) {
+      detectButton.classList.remove('active');
+      detectButton.setAttribute('aria-expanded', 'false');
+    }
     if (printerId) selectedPrinterId = Number(printerId);
     await refreshPrintersList();
 
@@ -581,9 +1001,10 @@
       switchTab('printers');
     }
 
-    if (typeof dialog.showModal === 'function') {
+    if (typeof dialog.showModal === 'function' && !dialog.open) {
       dialog.showModal();
     }
+    startStatusPolling();
   }
 
   function init() {
@@ -627,22 +1048,30 @@
       const dialog = document.getElementById('printer-management-dialog');
       if (dialog) dialog.classList.remove('modal-fullscreen');
       syncPrinterManagementFullscreenButton(false);
+      stopStatusPolling();
       resetPrinterForm();
     });
 
-    // Auto Klipper detection when selecting Firmware dropdown
-    document.getElementById('printer-form-firmware')?.addEventListener('change', (e) => {
-      const val = e.target.value;
-      const klipperBox = document.getElementById('printer-form-klipper');
-      const webInput = document.getElementById('printer-form-web-url');
-      if (val === 'Klipper') {
-        if (klipperBox) klipperBox.checked = true;
-        if (webInput && !webInput.value) webInput.placeholder = 'http://mainsail.local or http://fluidd.local';
-      } else {
-        if (klipperBox) klipperBox.checked = false;
-        if (webInput && !webInput.value) webInput.placeholder = 'http://192.168.1.100';
-      }
+    document.getElementById('printer-form-firmware')?.addEventListener('change', () => {
+      syncConnectionFields();
     });
+    document.getElementById('printer-auto-detect-btn')?.addEventListener('click', () => {
+      showAutoDetectPanel();
+    });
+    document.getElementById('printer-scan-btn')?.addEventListener('click', () => {
+      runAutoDetect();
+    });
+    for (const id of ['printer-scan-start', 'printer-scan-end']) {
+      document.getElementById(id)?.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runAutoDetect();
+      });
+    }
+    document.getElementById('printer-form-test-connection')?.addEventListener('click', () => {
+      testCurrentConnection();
+    });
+    syncConnectionFields();
 
     // Test Open button next to Web Address input in form
     document.getElementById('printer-form-test-url')?.addEventListener('click', () => {

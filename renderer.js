@@ -6942,6 +6942,7 @@ async function createServerMenuBar() {
     { label: 'Backup/Restore', action: () => {
       const dialog = document.getElementById('backup-restore-dialog');
       if (dialog) {
+        if (typeof window.loadScheduledBackupSettings === 'function') window.loadScheduledBackupSettings();
         dialog.showModal();
       } else {
         // Fallback: trigger the event which will open the dialog via the listener
@@ -8917,8 +8918,120 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize dialog handlers
   initializeDialogHandlers();
 
+  let scheduledBackupFormLoading = false;
+
+  function scheduledBackupStatusText(lastAt, lastError) {
+    if (lastError) return 'Last backup failed: ' + lastError;
+    if (lastAt) {
+      const when = new Date(lastAt);
+      const label = Number.isNaN(when.getTime()) ? lastAt : when.toLocaleString();
+      return 'Last backup: ' + label;
+    }
+    return 'No scheduled backup yet.';
+  }
+
+  function scheduledBackupTimeValue(value) {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || '').trim());
+    if (!match) return '03:00';
+    const hour = parseInt(match[1], 10);
+    const minute = parseInt(match[2], 10);
+    if (hour > 23 || minute > 59) return '03:00';
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
+
+  async function loadScheduledBackupSettings() {
+    if (!window.electron?.getSetting) return;
+    scheduledBackupFormLoading = true;
+    try {
+      const folder = await window.electron.getSetting('scheduledBackupFolder');
+      const frequency = await window.electron.getSetting('scheduledBackupFrequency');
+      const time = await window.electron.getSetting('scheduledBackupTime');
+      const keep = await window.electron.getSetting('scheduledBackupKeep');
+      const lastAt = await window.electron.getSetting('scheduledBackupLastAt');
+      const lastError = await window.electron.getSetting('scheduledBackupLastError');
+      const folderEl = document.getElementById('scheduled-backup-folder');
+      const frequencyEl = document.getElementById('scheduled-backup-frequency');
+      const timeEl = document.getElementById('scheduled-backup-time');
+      const keepEl = document.getElementById('scheduled-backup-keep');
+      const statusEl = document.getElementById('scheduled-backup-status');
+      if (folderEl) folderEl.value = folder || '';
+      if (frequencyEl) frequencyEl.value = ['daily', 'weekly', 'quit'].includes(frequency) ? frequency : 'off';
+      if (timeEl) timeEl.value = scheduledBackupTimeValue(time);
+      if (keepEl) {
+        const parsed = parseInt(keep, 10);
+        keepEl.value = Number.isFinite(parsed) ? String(Math.min(100, Math.max(1, parsed))) : '10';
+      }
+      if (statusEl) statusEl.textContent = scheduledBackupStatusText(lastAt, lastError);
+    } catch (error) {
+      console.error('Failed to load scheduled backup settings:', error);
+    } finally {
+      scheduledBackupFormLoading = false;
+    }
+  }
+  window.loadScheduledBackupSettings = loadScheduledBackupSettings;
+
+  async function saveScheduledBackupControl(key, value) {
+    if (scheduledBackupFormLoading) return;
+    if (!window.electron?.saveSetting) return;
+    await window.electron.saveSetting(key, value);
+  }
+
+  document.getElementById('scheduled-backup-folder')?.addEventListener('change', (event) => {
+    saveScheduledBackupControl('scheduledBackupFolder', event.target.value.trim());
+  });
+  document.getElementById('scheduled-backup-frequency')?.addEventListener('change', (event) => {
+    saveScheduledBackupControl('scheduledBackupFrequency', event.target.value);
+  });
+  document.getElementById('scheduled-backup-time')?.addEventListener('change', (event) => {
+    const time = scheduledBackupTimeValue(event.target.value);
+    event.target.value = time;
+    saveScheduledBackupControl('scheduledBackupTime', time);
+  });
+  document.getElementById('scheduled-backup-keep')?.addEventListener('change', (event) => {
+    const parsed = parseInt(event.target.value, 10);
+    const keep = Number.isFinite(parsed) ? Math.min(100, Math.max(1, parsed)) : 10;
+    event.target.value = String(keep);
+    saveScheduledBackupControl('scheduledBackupKeep', String(keep));
+  });
+  document.getElementById('scheduled-backup-browse')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    try {
+      const result = await window.electron.invoke('open-folder-dialog', 'Select backup folder');
+      if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
+      const input = document.getElementById('scheduled-backup-folder');
+      if (input) input.value = result.filePaths[0];
+      await saveScheduledBackupControl('scheduledBackupFolder', result.filePaths[0]);
+    } catch (err) {
+      console.error('Backup folder picker failed:', err);
+    }
+  });
+  document.getElementById('scheduled-backup-now')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget;
+    if (button) button.disabled = true;
+    try {
+      const folder = document.getElementById('scheduled-backup-folder');
+      if (folder && window.electron?.saveSetting) {
+        await window.electron.saveSetting('scheduledBackupFolder', folder.value.trim());
+      }
+      const result = await window.electron.invoke('run-scheduled-backup');
+      await loadScheduledBackupSettings();
+      if (result && result.success) {
+        if (window.electron.showMessage) await window.electron.showMessage('Success', 'Database backup saved to ' + result.filePath);
+      } else if (window.electron?.showMessage) {
+        await window.electron.showMessage('Error', result && result.message ? result.message : 'Failed to create database backup');
+      }
+    } catch (err) {
+      console.error('Scheduled backup failed:', err);
+      if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to create database backup');
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+
   window._electronRealEventHandlers['open-backup-restore'] = function() {
     const dialog = document.getElementById('backup-restore-dialog');
+    loadScheduledBackupSettings();
     if (dialog) dialog.showModal();
   };
   if (window._electronPendingEvents['open-backup-restore']) {

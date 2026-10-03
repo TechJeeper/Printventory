@@ -11,6 +11,7 @@ const { deriveBundleFromFilePath } = require('./bundle-keys');
 const spoolman = require('./spoolman');
 const printEvents = require('./print-events');
 const printerManager = require('./printer-manager');
+const printerDiscovery = require('./printer-discovery');
 const { buildFolderForest, directoryFilterLikePrefix } = require('./folder-tree-lib');
 const {
   registerMcpRoutes,
@@ -18,6 +19,7 @@ const {
   listToolDefinitions,
   SERVER_NAME: MCP_SERVER_NAME
 } = require('./mcp-server');
+const { buildMissingThumbnailQuery } = require('./missing-thumbnails-query');
 const serverTls = require('./server-tls');
 const extensionInbox = require('./extension-inbox');
 const { detectInstalledSlicers } = require('./slicer-detect');
@@ -34,6 +36,7 @@ const {
 const { clampFolderLevels } = require('./library-context');
 const { applyFolderTagsToModels: applyFolderTagsInDb, shouldAutoTagNewScanFiles } = require('./folder-tags');
 const { repairModelTags } = require('./db-repair');
+const scheduledBackup = require('./scheduled-backup');
 const {
   planOrganize,
   withFreeSpace,
@@ -174,6 +177,9 @@ const {
   isFragileZipError
 } = require('./zip-extract');
 const os = require('os');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 const https = require('https');
 const {
   compressThumbnailBlob,
@@ -356,6 +362,7 @@ function debugLog(...args) {
 
 // Server mode detection
 const isServerMode = process.argv.includes('--server');
+const isScheduledBackupRun = process.argv.includes('--scheduled-backup');
 let httpServer = null;
 let httpServerEpoch = 0;
 let http80Server = null;
@@ -2176,15 +2183,9 @@ function getMcpToolContext() {
       const handler = ipcHandlerRegistry.get('get-licenses');
       return handler({ sender: { send() {} } });
     },
-    getModelsMissingThumbnails: async (limit) => {
-      const cap = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500);
-      return db.prepare(`
-        SELECT id, filePath, fileName, size, designer
-        FROM models
-        WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
-        ORDER BY fileName COLLATE NOCASE ASC
-        LIMIT ?
-      `).all(cap);
+    getModelsMissingThumbnails: async (options) => {
+      const { sql, params } = buildMissingThumbnailQuery(options);
+      return db.prepare(sql).all(...params);
     },
     getThumbnails: async (args) => {
       const model = resolveModelForMcp(args);
@@ -3058,6 +3059,13 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, commandLine, workingDirectory) => {
+    const args = Array.isArray(commandLine) ? commandLine : [];
+    if (args.includes('--scheduled-backup')) {
+      runScheduledDatabaseBackup('os-task', { force: true }).catch((error) => {
+        console.error('Scheduled backup from second instance failed:', error);
+      });
+      return;
+    }
     // Someone tried to run a second instance — show + focus our window.
     // Must call show(): a window created with show:false that never painted is
     // not minimized, so restore()/focus() alone leave it invisible.
@@ -3078,7 +3086,7 @@ if (!gotTheLock) {
 
       // Initialize database first
       if (!initializeDatabase()) {
-        if (isServerMode) {
+        if (isServerMode || isScheduledBackupRun) {
           console.error('Database Error: Failed to initialize database. The application will now quit.');
         } else {
           dialog.showErrorBox('Database Error', 'Failed to initialize database. The application will now quit.');
@@ -3105,6 +3113,23 @@ if (!gotTheLock) {
       applyStlHomeExcludeEnvIfNeeded(process.env.STL_HOME_EXCLUDE);
       applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
       applyDockerEnvSettingIfNeeded('serverHttpPort', process.env.PRINTVENTORY_PORT);
+
+      if (isScheduledBackupRun) {
+        try {
+          const result = await runScheduledDatabaseBackup('os-task', { force: true });
+          if (!result || result.success !== true) {
+            console.error('Scheduled backup failed:', result && result.message ? result.message : 'backup did not complete');
+            process.exitCode = 1;
+          } else {
+            console.log('Scheduled backup written to', result.filePath);
+          }
+        } catch (error) {
+          console.error('Scheduled backup failed:', error);
+          process.exitCode = 1;
+        }
+        app.quit();
+        return;
+      }
 
       // Clear leftover zip-extract temps off the critical path (can readdir a busy OS temp)
       setImmediate(() => {
@@ -3196,6 +3221,8 @@ if (!gotTheLock) {
         }, 3000);
         scheduleBackgroundThumbnailCompression('startup');
       }
+
+      armScheduledBackups();
       
       startExtensionInboxWatcher();
 
@@ -3207,7 +3234,7 @@ if (!gotTheLock) {
       }
     } catch (error) {
       console.error('Error during app initialization:', error);
-      if (isServerMode) {
+      if (isServerMode || isScheduledBackupRun) {
         console.error('Startup Error: Failed to start application properly.');
       } else {
         dialog.showErrorBox('Startup Error', 'Failed to start application properly.');
@@ -3222,37 +3249,14 @@ if (!gotTheLock) {
     }
   });
 
-  // Add this function to handle app updates
-  app.on('ready', () => {
-    // Store the user data path before any potential uninstall
-    const userDataPath = app.getPath('userData');
-    
-    // Create a backup of the database before updates
-    app.on('before-quit', async () => {
-      try {
-        await stopPort80Server();
-      } catch (error) {
-        console.error('Error stopping TLS HTTP-01 listener:', error);
-      }
-      try {
-        await stopElectronUiServer();
-      } catch (error) {
-        console.error('Error stopping Electron UI server:', error);
-      }
-      try {
-        await cleanupExtractTempDirectory({ maxAgeMs: 0 });
-      } catch (error) {
-        console.warn('Extract temp cleanup on quit failed:', error.message);
-      }
-      try {
-        const dbPath = getDatabasePath();
-        const backupPath = path.join(userDataPath, 'backup_printventory.db');
-        if (fs.existsSync(dbPath)) {
-          await fs.promises.copyFile(dbPath, backupPath);
-        }
-      } catch (error) {
-        console.error('Error creating backup:', error);
-      }
+  app.on('before-quit', (event) => {
+    if (quitBackupFinished) return;
+    event.preventDefault();
+    const quitWait = finishQuitBackups();
+    const quitTimeout = new Promise((resolve) => setTimeout(resolve, 120000));
+    Promise.race([quitWait, quitTimeout]).finally(() => {
+      quitBackupFinished = true;
+      app.quit();
     });
   });
 }
@@ -6464,6 +6468,47 @@ async function getAllPrintersHandler() {
 }
 ipcMain.handle('get-all-printers', getAllPrintersHandler);
 
+async function discoverPrintersHandler(event, range) {
+  try {
+    return await printerDiscovery.discoverPrinters({ range: typeof range === 'string' ? range : '' });
+  } catch (error) {
+    console.error('Error discovering printers:', error);
+    throw error;
+  }
+}
+ipcMain.handle('discover-printers', discoverPrintersHandler);
+
+async function getLocalScanNetworksHandler() {
+  try {
+    return printerDiscovery.getLocalScanRange();
+  } catch (error) {
+    console.error('Error reading local scan networks:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-local-scan-networks', getLocalScanNetworksHandler);
+
+async function getPrinterStatusesHandler() {
+  try {
+    const printers = printerManager.getAllPrinters(db);
+    return await printerDiscovery.getLiveStatuses(printers);
+  } catch (error) {
+    console.error('Error getting printer statuses:', error);
+    throw error;
+  }
+}
+ipcMain.handle('get-printer-statuses', getPrinterStatusesHandler);
+
+async function testPrinterConnectionHandler(event, printer) {
+  try {
+    return await printerDiscovery.getPrinterLiveStatus(printer || {});
+  } catch (error) {
+    console.error('Error testing printer connection:', error);
+    throw error;
+  }
+}
+ipcMain.handle('test-printer-connection', testPrinterConnectionHandler);
+
 async function savePrinterHandler(event, printer) {
   try {
     return printerManager.savePrinter(db, printer);
@@ -6717,15 +6762,25 @@ const saveSettingHandler = async (event, key, value) => {
     // Execute the database update
     const result = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
     console.log('Database update result:', result);
-    
-    // Verify the save worked
+
     const verify = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-    console.log(`Verified setting '${key}' saved as:`, verify?.value);
+    if (verify?.value !== undefined) {
+      console.log(`Verified setting '${key}' saved as:`, verify?.value);
+    }
     
     // Verify the update
     if (key === 'CollectUsage') {
       const newValue = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
       console.log('CollectUsage - Verified new value in database:', newValue);
+    }
+
+    if (scheduledBackup.SETTING_KEYS.includes(key)) {
+      syncOsScheduledBackupTask().catch((error) => {
+        console.error('[Backup] Could not update the OS backup task:', error);
+        try {
+          writeSettingValue('scheduledBackupLastError', error.message || String(error));
+        } catch (_) { /* ignore */ }
+      });
     }
     
     return true;
@@ -7173,6 +7228,288 @@ ipcMain.handle('show-input-dialog', async (event, options) => {
 });
 
 // Update the backup-database handler
+let scheduledBackupTimer = null;
+let scheduledBackupRunning = null;
+let quitBackupFinished = false;
+
+function writeSettingValue(key, value) {
+  if (!db) return;
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
+}
+
+function readScheduledBackupSettings() {
+  return {
+    folder: String(getSettingValueOr('scheduledBackupFolder', '') || '').trim(),
+    frequency: scheduledBackup.normalizeFrequency(getSettingValueOr('scheduledBackupFrequency', 'off')),
+    time: scheduledBackup.normalizeTime(getSettingValueOr('scheduledBackupTime', scheduledBackup.DEFAULT_TIME)),
+    keep: scheduledBackup.normalizeKeep(getSettingValueOr('scheduledBackupKeep', String(scheduledBackup.DEFAULT_KEEP))),
+    lastAt: getSettingValueOr('scheduledBackupLastAt', '') || '',
+    lastError: getSettingValueOr('scheduledBackupLastError', '') || ''
+  };
+}
+
+async function pruneScheduledBackups(folder, keep) {
+  const names = await fs.promises.readdir(folder);
+  const doomed = scheduledBackup.filesToPrune(names, keep);
+  for (const name of doomed) {
+    await fs.promises.rm(path.join(folder, name), { force: true });
+  }
+}
+
+async function writeScheduledBackupFile(folder) {
+  const dbPath = getDatabasePath();
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    throw new Error('Database file was not found');
+  }
+  await fs.promises.mkdir(folder, { recursive: true });
+  const fileName = scheduledBackup.backupFileName(new Date());
+  const destPath = path.join(folder, fileName);
+  if (path.resolve(destPath) === path.resolve(dbPath)) {
+    throw new Error('Backup destination cannot be the live database file');
+  }
+  const tempPath = path.join(os.tmpdir(), `printventory-backup-${process.pid}-${Date.now()}.db`);
+  const partialPath = `${destPath}.partial`;
+  let published = false;
+  try {
+    if (db && db.open && typeof db.backup === 'function') {
+      await db.backup(tempPath);
+    } else {
+      await fs.promises.copyFile(dbPath, tempPath);
+    }
+    await fs.promises.copyFile(tempPath, partialPath);
+    await fs.promises.rm(destPath, { force: true });
+    try {
+      await fs.promises.rename(partialPath, destPath);
+    } catch (_) {
+      await fs.promises.copyFile(partialPath, destPath);
+      await fs.promises.rm(partialPath, { force: true });
+    }
+    published = true;
+    return destPath;
+  } finally {
+    await fs.promises.rm(tempPath, { force: true });
+    if (!published) await fs.promises.rm(partialPath, { force: true });
+  }
+}
+
+async function runScheduledDatabaseBackup(reason, options = {}) {
+  if (scheduledBackupRunning) return scheduledBackupRunning;
+  scheduledBackupRunning = (async () => {
+    const settings = readScheduledBackupSettings();
+    if (!settings.folder) {
+      return { success: false, message: 'Choose a backup folder first.' };
+    }
+    if (!options.force && !scheduledBackup.isBackupDue(settings.frequency, settings.lastAt, Date.now(), settings.time)) {
+      return { success: false, skipped: true };
+    }
+    try {
+      const filePath = await writeScheduledBackupFile(settings.folder);
+      await pruneScheduledBackups(settings.folder, settings.keep);
+      const at = new Date().toISOString();
+      writeSettingValue('scheduledBackupLastAt', at);
+      writeSettingValue('scheduledBackupLastError', '');
+      console.log(`[Backup] ${reason || 'scheduled'} copy written to ${filePath}`);
+      return { success: true, filePath, at };
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.error(`[Backup] ${reason || 'scheduled'} copy failed:`, message);
+      try {
+        writeSettingValue('scheduledBackupLastError', message);
+      } catch (saveErr) {
+        console.error('[Backup] Could not record backup error:', saveErr);
+      }
+      return { success: false, message };
+    }
+  })().finally(() => {
+    scheduledBackupRunning = null;
+  });
+  return scheduledBackupRunning;
+}
+
+async function writeLocalQuitBackup() {
+  const dbPath = getDatabasePath();
+  if (!dbPath || !fs.existsSync(dbPath)) return;
+  const backupPath = path.join(app.getPath('userData'), 'backup_printventory.db');
+  const prevPath = path.join(app.getPath('userData'), 'backup_printventory.prev.db');
+  if (fs.existsSync(backupPath)) {
+    await fs.promises.rm(prevPath, { force: true });
+    await fs.promises.rename(backupPath, prevPath);
+  }
+  if (db && db.open && typeof db.backup === 'function') {
+    await db.backup(backupPath);
+  } else {
+    await fs.promises.copyFile(dbPath, backupPath);
+  }
+}
+
+function ignoreMissingScheduledTask(error) {
+  const text = `${error && error.stderr ? error.stderr : ''} ${error && error.message ? error.message : ''}`;
+  return /cannot find the file specified|does not exist|not found|no such file/i.test(text);
+}
+
+async function syncWindowsScheduledBackupTask(enable, frequency, time) {
+  const taskName = scheduledBackup.WINDOWS_TASK_NAME;
+  if (!enable) {
+    try {
+      await execFileAsync('schtasks', ['/Delete', '/TN', taskName, '/F']);
+    } catch (error) {
+      if (!ignoreMissingScheduledTask(error)) {
+        console.warn('[Backup] Could not delete Windows scheduled task:', error.message);
+      }
+    }
+    return;
+  }
+  const xml = scheduledBackup.windowsTaskXml({ exePath: process.execPath, frequency, time });
+  const xmlPath = path.join(os.tmpdir(), `printventory-backup-task-${process.pid}.xml`);
+  const body = Buffer.concat([
+    Buffer.from([0xFF, 0xFE]),
+    Buffer.from(xml, 'utf16le')
+  ]);
+  await fs.promises.writeFile(xmlPath, body);
+  try {
+    await execFileAsync('schtasks', ['/Create', '/TN', taskName, '/XML', xmlPath, '/F']);
+  } finally {
+    await fs.promises.rm(xmlPath, { force: true });
+  }
+}
+
+async function syncMacScheduledBackupTask(enable, frequency, time) {
+  const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${scheduledBackup.LAUNCH_AGENT_LABEL}.plist`);
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const domainTarget = uid == null ? null : `gui/${uid}`;
+  const serviceTarget = uid == null ? null : `gui/${uid}/${scheduledBackup.LAUNCH_AGENT_LABEL}`;
+  if (serviceTarget) {
+    try {
+      await execFileAsync('launchctl', ['bootout', serviceTarget]);
+    } catch (_) { /* not loaded */ }
+  }
+  if (!enable) {
+    await fs.promises.rm(plistPath, { force: true });
+    return;
+  }
+  await fs.promises.mkdir(path.dirname(plistPath), { recursive: true });
+  await fs.promises.writeFile(
+    plistPath,
+    scheduledBackup.launchAgentPlist({ exePath: process.execPath, frequency, time }),
+    'utf8'
+  );
+  if (domainTarget) {
+    await execFileAsync('launchctl', ['bootstrap', domainTarget, plistPath]);
+  }
+}
+
+async function syncLinuxScheduledBackupTask(enable, frequency, time) {
+  const unit = scheduledBackup.SYSTEMD_UNIT_NAME;
+  const dir = path.join(os.homedir(), '.config', 'systemd', 'user');
+  const servicePath = path.join(dir, `${unit}.service`);
+  const timerPath = path.join(dir, `${unit}.timer`);
+  if (!enable) {
+    try {
+      await execFileAsync('systemctl', ['--user', 'disable', '--now', `${unit}.timer`]);
+    } catch (error) {
+      if (!ignoreMissingScheduledTask(error)) {
+        console.warn('[Backup] Could not disable systemd timer:', error.message);
+      }
+    }
+    await fs.promises.rm(servicePath, { force: true });
+    await fs.promises.rm(timerPath, { force: true });
+    try {
+      await execFileAsync('systemctl', ['--user', 'daemon-reload']);
+    } catch (error) {
+      console.warn('[Backup] systemd daemon-reload failed:', error.message);
+    }
+    return;
+  }
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(servicePath, scheduledBackup.systemdService({ exePath: process.execPath }), 'utf8');
+  await fs.promises.writeFile(timerPath, scheduledBackup.systemdTimer({ frequency, time }), 'utf8');
+  await execFileAsync('systemctl', ['--user', 'daemon-reload']);
+  await execFileAsync('systemctl', ['--user', 'enable', '--now', `${unit}.timer`]);
+}
+
+let osScheduledBackupSync = Promise.resolve();
+
+function syncOsScheduledBackupTask() {
+  osScheduledBackupSync = osScheduledBackupSync
+    .catch(() => {})
+    .then(() => applyOsScheduledBackupTask());
+  return osScheduledBackupSync;
+}
+
+async function applyOsScheduledBackupTask() {
+  if (isServerMode || !app.isPackaged) return;
+  const settings = readScheduledBackupSettings();
+  const enable = scheduledBackup.shouldRegisterOsTask({
+    packaged: true,
+    serverMode: false,
+    folder: settings.folder,
+    frequency: settings.frequency
+  });
+  if (process.platform === 'win32') {
+    await syncWindowsScheduledBackupTask(enable, settings.frequency, settings.time);
+  } else if (process.platform === 'darwin') {
+    await syncMacScheduledBackupTask(enable, settings.frequency, settings.time);
+  } else {
+    await syncLinuxScheduledBackupTask(enable, settings.frequency, settings.time);
+  }
+}
+
+function armScheduledBackups() {
+  if (!scheduledBackupTimer) {
+    const tick = () => {
+      runScheduledDatabaseBackup('timer').catch((error) => {
+        console.error('[Backup] Scheduled check failed:', error);
+      });
+    };
+    setTimeout(tick, 5000);
+    scheduledBackupTimer = setInterval(tick, 60 * 1000);
+    if (typeof scheduledBackupTimer.unref === 'function') scheduledBackupTimer.unref();
+  }
+  if (!isServerMode && app.isPackaged) {
+    syncOsScheduledBackupTask().catch((error) => {
+      console.error('[Backup] Could not update the OS backup task:', error);
+      try {
+        writeSettingValue('scheduledBackupLastError', error.message || String(error));
+      } catch (_) { /* ignore */ }
+    });
+  }
+}
+
+async function finishQuitBackups() {
+  try {
+    await stopPort80Server();
+  } catch (error) {
+    console.error('Error stopping TLS HTTP-01 listener:', error);
+  }
+  try {
+    await stopElectronUiServer();
+  } catch (error) {
+    console.error('Error stopping Electron UI server:', error);
+  }
+  try {
+    await cleanupExtractTempDirectory({ maxAgeMs: 0 });
+  } catch (error) {
+    console.warn('Extract temp cleanup on quit failed:', error.message);
+  }
+  try {
+    await writeLocalQuitBackup();
+  } catch (error) {
+    console.error('Error creating backup:', error);
+  }
+  try {
+    const frequency = scheduledBackup.normalizeFrequency(getSettingValueOr('scheduledBackupFrequency', 'off'));
+    if (frequency === 'quit') {
+      await runScheduledDatabaseBackup('quit', { force: true });
+    }
+  } catch (error) {
+    console.error('Error creating scheduled quit backup:', error);
+  }
+}
+
+ipcMain.handle('run-scheduled-backup', async () => {
+  return runScheduledDatabaseBackup('manual', { force: true });
+});
+
 ipcMain.handle('backup-database', async () => {
   if (isServerMode) {
     try {

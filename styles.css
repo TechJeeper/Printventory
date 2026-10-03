@@ -304,6 +304,78 @@ body.server-mode #preview-slicer-menu {
   box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1), 0 4px 12px var(--primary-shadow, rgba(0, 212, 255, 0.2));
 }
 
+.scheduled-backup-section {
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#backup-restore-dialog {
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+#backup-restore-dialog .dialog-buttons {
+  position: sticky;
+  bottom: 0;
+  background: var(--surface, #1e1e2e);
+  padding-top: 12px;
+}
+
+#backup-restore-dialog .scheduled-backup-path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+#backup-restore-dialog .scheduled-backup-path-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  margin: 0;
+  background-image: none;
+  padding-right: 16px;
+}
+
+#backup-restore-dialog #scheduled-backup-browse {
+  width: auto;
+  flex-shrink: 0;
+  margin: 0;
+}
+
+#backup-restore-dialog .scheduled-backup-options {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  width: 85%;
+  padding: 0 20px;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+
+#backup-restore-dialog .scheduled-backup-options .form-group {
+  width: auto;
+  padding: 0;
+  margin-bottom: 0;
+}
+
+#backup-restore-dialog .scheduled-backup-options .form-group:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#backup-restore-dialog .scheduled-backup-options .form-group:last-child {
+  flex: 0 0 auto;
+}
+
+#backup-restore-dialog #scheduled-backup-time,
+#backup-restore-dialog #scheduled-backup-keep {
+  width: 6.5rem;
+  background-image: none;
+  padding-right: 12px;
+  color-scheme: dark;
+}
+
 /* Model name field - text input without dropdown arrow */
 #model-name {
   background-image: none !important;

@@ -433,6 +433,7 @@
       'generateMissingHashes': 600000,
       'calculate-missing-hashes': 600000,
       'scan-directory': 600000,
+      'run-scheduled-backup': 600000,
       'test-ai-config': 60000
     };
     var timeoutMs = heavyIpcChannels[channel] || 30000;
@@ -523,6 +524,10 @@
     'savePart': 'save-part',
     'deletePart': 'delete-part',
     'getAllPrinters': 'get-all-printers',
+    'discoverPrinters': 'discover-printers',
+    'getLocalScanNetworks': 'get-local-scan-networks',
+    'getPrinterStatuses': 'get-printer-statuses',
+    'testPrinterConnection': 'test-printer-connection',
     'savePrinter': 'save-printer',
     'deletePrinter': 'delete-printer',
     'getPrinterMaintenanceLogs': 'get-printer-maintenance-logs',

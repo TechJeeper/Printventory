@@ -33,7 +33,7 @@ test('creates and retrieves a printer', () => {
   assert.equal(all[0].nickname, 'Living Room Ender');
 });
 
-test('auto-detects Klipper from firmwareType or explicit flag', () => {
+test('marks Klipper only when the firmware type is Klipper', () => {
   const db = createTestDb();
   const voron = printerManager.savePrinter(db, {
     nickname: 'Stealth Voron 2.4',
@@ -52,7 +52,53 @@ test('auto-detects Klipper from firmwareType or explicit flag', () => {
     firmwareType: 'Custom',
     isKlipper: true
   });
-  assert.equal(customKlipper.is_klipper, true);
+  assert.equal(customKlipper.is_klipper, false);
+});
+
+test('stores Bambu LAN credentials and keeps them when a rename omits them', () => {
+  const db = createTestDb();
+  const created = printerManager.savePrinter(db, {
+    nickname: 'X1C',
+    manufacturer: 'Bambu Lab',
+    model: 'X1 Carbon',
+    firmwareType: 'Bambu OS',
+    host: 'http://192.168.1.50:8883',
+    bambuSerial: '01P00A392000494',
+    bambuAccessCode: '40918761'
+  });
+
+  assert.equal(created.is_klipper, false);
+  assert.equal(created.host, '192.168.1.50');
+  assert.equal(created.bambu_serial, '01P00A392000494');
+  assert.equal(created.bambu_access_code, '40918761');
+
+  const renamed = printerManager.savePrinter(db, {
+    id: created.id,
+    nickname: 'Workshop X1C',
+    manufacturer: 'Bambu Lab',
+    model: 'X1 Carbon',
+    firmwareType: 'Bambu OS'
+  });
+  assert.equal(renamed.host, '192.168.1.50');
+  assert.equal(renamed.bambu_serial, '01P00A392000494');
+  assert.equal(renamed.bambu_access_code, '40918761');
+});
+
+test('stores PrusaLink credentials with the web address', () => {
+  const db = createTestDb();
+  const printer = printerManager.savePrinter(db, {
+    nickname: 'MK4',
+    manufacturer: 'Prusa Research',
+    model: 'MK4',
+    firmwareType: 'Prusa Buddy',
+    webUrl: '192.168.68.40',
+    prusaUsername: 'maker',
+    prusaPassword: 'shop-password'
+  });
+  assert.equal(printer.is_klipper, false);
+  assert.equal(printer.web_url, 'http://192.168.68.40');
+  assert.equal(printer.prusa_username, 'maker');
+  assert.equal(printer.prusa_password, 'shop-password');
 });
 
 test('updates and deletes a printer', () => {
@@ -230,6 +276,10 @@ test('migrates older schema without printer_type column safely', () => {
   assert.equal(printers.length, 1);
   assert.equal(printers[0].nickname, 'Legacy Ender');
   assert.equal(printers[0].printer_type, null);
+  const cols = db.prepare('PRAGMA table_info(printers)').all().map((col) => col.name);
+  assert.equal(cols.includes('host'), true);
+  assert.equal(cols.includes('bambu_serial'), true);
+  assert.equal(cols.includes('bambu_access_code'), true);
 
   // Now update it with a printer_type
   const updated = printerManager.savePrinter(db, {
