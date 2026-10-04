@@ -4,6 +4,15 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.20] - 2026-10-04
+
+- Resizing the window scales preview tiles and detailed columns, including in Docker
+- List view scrolls sideways when the columns are wider than the pane
+- Quick Start Guide is four steps: scan a library, find a model, add what you know, and where the other tools live
+- Settings marks which extra file types can get a thumbnail
+- Printer Manager opens from the printer icon under the logo
+- Purging the library clears related print and stock rows, not only the model list
+
 ## [2.2.19] - 2026-10-04
 
 - Fixes de-dup hash generation introduced in 2.2.18

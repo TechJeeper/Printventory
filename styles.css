@@ -1171,6 +1171,30 @@ body.mobile-ui #stl-home-dialog .stl-home-exclude-add-row button {
   text-overflow: ellipsis;
 }
 
+.file-type-thumb-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+.file-type-thumb-mark {
+  --icon-file-type-thumb: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2M8.5 13.5 11 16.51 14.5 12 19 18H5z'/%3E%3C/svg%3E");
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  flex-shrink: 0;
+  background-color: var(--primary-accent, #00d4ff);
+  -webkit-mask: var(--icon-file-type-thumb) center / contain no-repeat;
+  mask: var(--icon-file-type-thumb) center / contain no-repeat;
+}
+
+.file-type-thumb-legend .file-type-thumb-mark {
+  margin-left: 0;
+}
+
 main {
   position: relative;
 }
@@ -1446,6 +1470,17 @@ main {
   align-items: center;
   justify-content: center;
   gap: 6px;
+}
+
+/* List view scrolls sideways when the columns are wider than the pane. */
+.file-grid.is-list-view {
+  overflow-x: auto;
+}
+
+.file-grid.is-list-view .list-view-header {
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
 }
 
 /* List view header styles */
@@ -7530,9 +7565,12 @@ dialog:not([open]) {
 }
 
 .icon-buttons-container .icon-button {
-  width: 56px;
-  height: 56px;
-  padding: 10px;
+  width: 46px;
+  height: 46px;
+  padding: 8px;
+  margin-left: 0;
+  margin-right: 0;
+  flex: 0 0 46px;
   background: var(--surface-raised, #2a2a3c);
   border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
   border-radius: 10px;
@@ -7632,8 +7670,25 @@ dialog:not([open]) {
    QUICK START GUIDE - MODERN STYLING
    ============================================ */
 
-#quickstart-guide {
+#quickstart-guide[open] {
   opacity: 1;
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+  overflow: hidden;
+  background: var(--surface, #1e1e2e);
+}
+
+#quickstart-guide .guide-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#quickstart-guide .guide-scroll-container {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 @keyframes guideFadeIn {
@@ -7705,7 +7760,7 @@ dialog:not([open]) {
 }
 
 .guide-scroll-container {
-  max-height: 450px;
+  max-height: 580px;
   overflow-y: auto;
   padding: 2rem;
   background: rgba(255, 255, 255, 0.03);
@@ -7801,12 +7856,48 @@ dialog:not([open]) {
 }
 
 /* Pro Tip styling */
-.guide-text p:has(strong[style*="color: Green"]) {
+.guide-text p:has(strong[style*="color: Green"]),
+.guide-text .guide-tip {
   background: rgba(74, 222, 128, 0.1);
   border-left: 3px solid #4ade80;
   padding: 1rem 1.25rem;
   border-radius: 8px;
   margin: 1.5rem 0;
+}
+
+.guide-text .guide-tip strong {
+  color: #4ade80;
+}
+
+.guide-later {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin: 0.25rem 0 1rem;
+}
+
+.guide-later-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+}
+
+.guide-later-card h4 {
+  margin: 0 0 0.35rem;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.guide-later-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.guide-text .guide-closer {
+  margin-bottom: 0;
 }
 
 .guide-image {
@@ -7920,6 +8011,10 @@ dialog:not([open]) {
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
+  .guide-later {
+    grid-template-columns: 1fr;
+  }
+
   .guide-text .guide-two-column {
     flex-direction: column;
     gap: 1.5rem;

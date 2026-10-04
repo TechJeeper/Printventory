@@ -1,88 +1,79 @@
 /* guide.js
  *
- * This module handles the quick‐start guide pages.
- * The guide is automatically shown after the welcome dialog is dismissed
- * and when the Help > Guide menu item is clicked.
+ * Quick-start guide shown after the welcome dialog and from Help > Quick Start Guide.
+ * Dialog markup: <dialog id="quickstart-guide"> in index.html.
  *
- * It uses the dialog element (<dialog id="quickstart-guide">) defined in index.html.
+ * Four steps, in the order a new library is actually used:
+ *   1. Scan your library
+ *   2. Find a model
+ *   3. Add what you know
+ *   4. When you need more (short menu map, not a feature list)
  *
- * The guide consists of five pages:
- *   • Page 1: Scanning for models (image: guide/guide-scan.png)
- *   • Page 2: Editing model details (image: guide/guide-edit.png)
- *   • Page 3: Filtering and searching (image: guide/guide-filter.png)
- *   • Page 4: Settings (no image)
- *   • Page 5: Advanced tools and a thank you message (no image)
+ * Blocks wrapped in <!--desktop--> are removed in server mode (no local slicer).
  */
 
 const guidePages = [
   {
-    title: "Scanning for Models",
-    content: `🚀 Ready to dive into your 3D model collection? Click the <strong>Scan Directory</strong> button to effortlessly scan for your 3D models! 🌟 
-    You can also set up a <strong>STL Home</strong> in <strong>Settings</strong> to automatically scan a folder every time you launch Printventory. 
-    <p><strong style="color: Green;">Pro Tip:</strong><br> 
-    <span style="color: Green;">Scan multiple directories to build your ultimate library of 3D models!</span>`,
+    title: "Scan your library",
+    layout: "image-top",
+    content: `<p>Click <strong>Scan Directory</strong> and choose a folder of models. Printventory catalogs STL and 3MF files, plus any other types you turn on under <strong>Settings → File Type</strong>.</p>
+    <p>Add the same folders in <strong>Settings → STL Home</strong> to scan them each time the app opens. You can list more than one.</p>
+    <p>A folder or ZIP with several models shows up as one row. Click the row to see the parts inside.</p>
+    <p class="guide-tip"><strong>Tip:</strong> Scan every folder you print from. You can add another later.</p>`,
     image: "guide/guide-scan.png"
   },
   {
-    title: "Editing Model Details",
-    content: `✨ Click on any model to unlock its details! Here, you can edit essential information like the:<br>
-    <ul>
-      <li><strong>Designer</strong></li>
-      <li><strong>Parent Model</strong></li>
-      <li><strong>License</strong></li>
-      <li><strong>Tags</strong></li>
-    </ul>
-    Use the add (+) button to enrich your dropdowns with new entries. 
-    <p><strong style="color: Green;">Pro Tip:</strong><br> 
-    <span style="color: Green;">Activate <strong>Multi-Edit Mode</strong> to modify multiple models at once and streamline your workflow!</span></p>`,
-    image: "guide/guide-edit.png"
-  },
-  {
-    title: "Filtering and Searching",
-    content: `🔍 Searching for that perfect model? Use the filtering options at the top to quickly find models by:<br>
-    <ul>
-      <li><strong>Designer</strong></li>
-      <li><strong>Parent Model</strong></li>
-      <li><strong>License</strong></li>
-      <li><strong>File Type</strong></li>
-      <li><strong>Tags</strong></li>
-    </ul>
-    You can also type in the search box for instant results! Plus, right-click on any model to access powerful options like move, delete, open, or slice it. 
-    Your 3D printing journey just got easier!`,
+    title: "Find a model",
+    layout: "split",
+    content: `<p>Switch the grid with <strong>Detailed</strong>, <strong>Preview</strong>, and <strong>List</strong>. <strong>Folders</strong> opens the tree of libraries you have scanned.</p>
+    <p>The filters narrow that grid by designer, parent model, license, file type, tags, and print status. Search matches names as you type.</p>
+    <p>Right-click a model to open it, move it, delete it, or preview it in 3D.</p>`,
     image: "guide/guide-filter.png"
   },
   {
-    title: "Settings",
-    content: `⚙️ Customize your Printventory experience! From the <strong>Settings</strong> menu, you can:<br>
-    <ul>
-      <li>Change the <strong>Theme</strong> to match your style! 🎨</li>
-      <li>Adjust <strong>Performance</strong> settings to optimize your workflow! 🚀</li>
-      <li>Set your <strong>STL Home</strong> directories for automatic scans on startup! 🏠</li>
-      <li>Specify the <strong>Slicer Path</strong> to open models directly in your favorite slicer! 🖨️</li>
-    </ul>`,
-    image: ""
+    title: "Add what you know",
+    layout: "split",
+    content: `<p>Click a model to set designer, parent model, license, tags, filament, and notes. Use <strong>+</strong> when a name is not in the list yet.</p>
+    <p>Set <strong>Print status</strong>, or <strong>Log a print</strong> to record when it ran and how it turned out. A successful log marks the model printed.</p>
+    <p class="guide-tip"><strong>Tip:</strong> <strong>Multi-Edit Mode</strong> applies one change to every model you select.</p>`,
+    image: "guide/guide-edit.png"
   },
   {
-    title: "Advanced Tools",
-    content: `🌟 Explore powerful features under the <strong>Tools</strong> menu!<br>
-    <ul>
-      <li><strong>Filament Manager</strong> – Track which filament a model uses. Add filaments yourself, or open <strong>Spoolman Setup</strong> in that same window to sync your catalog! 🧵</li>
-      <li><strong>Printer Manager</strong> – Onboard your 3D printers, launch Klipper/OctoPrint web interfaces, track maintenance logs, and schedule reminders. 🖨️</li>
-      <li><strong>Parts Manager</strong> – Keep a count of screws, bearings, inserts, and other hardware. When you log a print, pick the parts it used and they come out of stock. 🔩</li>
-      <li><strong>Tag Manager</strong> – Organize your models with tags for easy access! Click a tag to rename it across the library, or clear the name to delete it. 🏷️</li>
-      <li><strong>Print Roulette</strong> – Feeling indecisive? Let Printventory randomly select your next model to print! 🎲</li>
-      <li><strong>Backup/Restore</strong> – Safeguard your data with easy backup and restore options! 💾</li>
-      <li><strong>De-Dup</strong> – Say goodbye to clutter! Clean up duplicate files in your library, and limit the scan to the models currently in view (designer, tags, search, and other filters) so a large collection does not have to be processed all at once. 🧹</li>
-      <li><strong>AI Tagging</strong> – Configure your AI services in <strong>Settings > AI Config</strong> to enable powerful AI-assisted tagging. Cloud providers need an API key; local OpenAI-compatible servers (Ollama, LM Studio, and similar) do not. Tag generation also sees the parent folder names and the model's description. Right-click one or more models for <strong>Generate Tags</strong>, or use <strong>Tag from Folder</strong> to copy those folder names onto the models without calling the AI. 🤖</li>
-      <li><strong>Slicer Integration</strong> – Configure slicers in <strong>Settings</strong> for right-click <strong>Open in Slicer</strong> and the preview dialog <strong>Send to Slicer</strong> button. Sending again while a slicer is open starts a new instance with your model loaded. 🖨️</li>
-      <li><strong>Folder &amp; ZIP bundles</strong> – Multi-part folders and ZIP archives group into one row. Click to expand; right-click <strong>Preview</strong> for an all-parts 3D view; double-click for bundle details. 📦</li>
-    </ul>
-    Thank you for choosing Printventory! Visit <strong>Help > Support Printventory</strong> to learn how you can support this amazing project!`,
+    title: "When you need more",
+    layout: "text",
+    content: `<p>Scanning, finding, and filling in details is the daily loop. Open these when the job comes up.</p>
+    <div class="guide-later">
+      <!--desktop-->
+      <div class="guide-later-card">
+        <h4>Send to a slicer</h4>
+        <p><strong>Settings → Slicer</strong>, then right-click <strong>Open in Slicer</strong> or use <strong>Send to Slicer</strong> from the 3D preview.</p>
+      </div>
+      <!--/desktop-->
+      <div class="guide-later-card">
+        <h4>Run the workshop</h4>
+        <p><strong>Filament Manager</strong>, <strong>Printer Manager</strong>, and <strong>Parts Manager</strong> live under <strong>Tools</strong>. Printer Manager is also the printer icon under the logo. It can find printers on your network, and logging a print draws down the filament and parts you pick.</p>
+      </div>
+      <div class="guide-later-card">
+        <h4>Tidy the library</h4>
+        <p><strong>De-Dup</strong> checks the whole library or just the current view. <strong>Organize Library</strong> copies models into folders you choose. <strong>Backup/Restore</strong> can run on a schedule.</p>
+      </div>
+      <div class="guide-later-card">
+        <h4>Tags that write themselves</h4>
+        <p>New scans can tag a model from its folder names. <strong>Settings → AI Config</strong> turns on suggestions, and right-click <strong>Tag from Folder</strong> copies those names with no AI. <strong>Tag Manager</strong> renames a tag everywhere.</p>
+      </div>
+    </div>
+    <p class="guide-closer"><strong>Help → Keyboard Shortcuts</strong> and <strong>Help → FAQ</strong> cover the rest.</p>`,
     image: ""
   }
 ];
 
-// Update the guide dialog with the current page's content and image.
+let guidePageIndex = 0;
+
+function guideMarkup(page) {
+  return `<h3>${page.title}</h3>${page.content}`;
+}
+
+// Paint the current page immediately. A delayed fade left the dialog blank if the timer never ran.
 function updateGuide() {
   const guideText = document.getElementById("guide-text");
   const guideImage = document.getElementById("guide-image");
@@ -90,53 +81,36 @@ function updateGuide() {
   const nextButton = document.getElementById("guide-next-button");
   const progressFill = document.getElementById("guide-progress-fill");
   const progressText = document.getElementById("guide-progress-text");
+  const page = guidePages[guidePageIndex];
+  if (!page || !guideText) return;
 
-  const page = guidePages[currentPage];
+  const progress = ((guidePageIndex + 1) / guidePages.length) * 100;
+  if (progressFill) progressFill.style.width = `${progress}%`;
+  if (progressText) progressText.textContent = `Step ${guidePageIndex + 1} of ${guidePages.length}`;
 
-  // Update progress indicator
-  const progress = ((currentPage + 1) / guidePages.length) * 100;
-  if (progressFill) {
-    progressFill.style.width = `${progress}%`;
-  }
-  if (progressText) {
-    progressText.textContent = `Page ${currentPage + 1} of ${guidePages.length}`;
-  }
+  guideText.innerHTML = "";
+  guideText.style.opacity = "1";
 
-  // Fade out the current content
-  guideText.style.opacity = 0;
-  guideImage.style.opacity = 0;
+  if (page.layout === "split" && page.image) {
+    const twoColumnContainer = document.createElement("div");
+    twoColumnContainer.className = "guide-two-column";
 
-  // Set a timeout to allow the fade-out to complete before changing content
-  setTimeout(() => {
-    // Clear existing contents before adding new content
-    guideText.innerHTML = '';
+    const imgElement = document.createElement("img");
+    imgElement.src = page.image;
+    imgElement.alt = page.title;
 
-    // For pages 2 and 3 (indexes 1 and 2) show a two-column layout (image on left, text on right)
-    if (currentPage === 1 || currentPage === 2) {
-      // Create a two-column container
-      const twoColumnContainer = document.createElement("div");
-      twoColumnContainer.className = "guide-two-column";
+    const textContainer = document.createElement("div");
+    textContainer.className = "guide-text-content";
+    textContainer.innerHTML = guideMarkup(page);
 
-      // Create the image element
-      const imgElement = document.createElement("img");
-      imgElement.src = page.image;
-      imgElement.alt = page.title;
-
-      // Create a text container for the title and content
-      const textContainer = document.createElement("div");
-      textContainer.className = "guide-text-content";
-      textContainer.innerHTML = `<h3>${page.title}</h3><p>${page.content}</p>`;
-
-      // Append to two-column container
-      twoColumnContainer.appendChild(imgElement);
-      twoColumnContainer.appendChild(textContainer);
-      guideText.appendChild(twoColumnContainer);
-
-      // Hide the standalone guideImage element (not used in this layout)
-      guideImage.style.display = "none";
-    } else {
-      // Default layout: show title and content in guideText, and if an image exists, display it.
-      guideText.innerHTML = `<h3>${page.title}</h3><p>${page.content}</p>`;
+    twoColumnContainer.appendChild(imgElement);
+    twoColumnContainer.appendChild(textContainer);
+    guideText.appendChild(twoColumnContainer);
+    if (guideImage) guideImage.style.display = "none";
+  } else {
+    guideText.innerHTML = guideMarkup(page);
+    if (guideImage) {
+      guideImage.style.opacity = "1";
       if (page.image) {
         guideImage.src = page.image;
         guideImage.alt = page.title;
@@ -145,40 +119,53 @@ function updateGuide() {
         guideImage.style.display = "none";
       }
     }
+  }
 
-    // Fade in the new content
-    guideText.style.opacity = 1;
-    guideImage.style.opacity = 1;
-
-    // Disable the Back button on the first page.
-    backButton.disabled = currentPage === 0;
-
-    // Update Next button text and icon
-    const nextButtonSpans = nextButton.querySelectorAll('span');
-    if (currentPage === guidePages.length - 1) {
-      // Last page: show "Finish" without arrow
-      nextButton.innerHTML = '<span>Finish</span>';
-    } else {
-      // Other pages: show "Next" with arrow
-      nextButton.innerHTML = '<span>Next</span><span class="guide-nav-icon">→</span>';
-    }
-  }, 400); // Smooth transition timing
+  if (backButton) backButton.disabled = guidePageIndex === 0;
+  if (nextButton) {
+    nextButton.innerHTML = guidePageIndex === guidePages.length - 1
+      ? "<span>Finish</span>"
+      : '<span>Next</span><span class="guide-nav-icon">→</span>';
+  }
 }
 
-// Increment the current page or close the guide if on the last page.
+function openGuideDialog(guideDialog) {
+  const openModals = [...document.querySelectorAll("dialog[open]")].filter((dialog) => dialog !== guideDialog);
+  const host = openModals.length ? openModals[openModals.length - 1] : document.body;
+  if (guideDialog.parentElement !== host) host.appendChild(guideDialog);
+
+  guideDialog.style.background = "";
+  guideDialog.style.backgroundColor = "";
+
+  if (guideDialog.open) {
+    guideDialog.focus();
+    return;
+  }
+  try {
+    guideDialog.showModal();
+  } catch (err) {
+    console.error("Quick Start Guide could not open as a modal:", err);
+    try {
+      guideDialog.show();
+    } catch (fallbackErr) {
+      console.error("Quick Start Guide could not open:", fallbackErr);
+    }
+  }
+  guideDialog.focus();
+}
+
 function nextGuide() {
-  if (currentPage < guidePages.length - 1) {
-    currentPage++;
+  if (guidePageIndex < guidePages.length - 1) {
+    guidePageIndex++;
     updateGuide();
   } else {
     closeGuide();
   }
 }
 
-// Decrement the current page if possible.
 function prevGuide() {
-  if (currentPage > 0) {
-    currentPage--;
+  if (guidePageIndex > 0) {
+    guidePageIndex--;
     updateGuide();
   }
 }
@@ -186,37 +173,43 @@ function prevGuide() {
 let serverGuideAdjusted = false;
 
 async function omitSlicerGuideForServerMode() {
-  if (serverGuideAdjusted) return;
+  if (serverGuideAdjusted) return false;
+  let serverMode = false;
+  try {
+    serverMode = await window.electron?.isServerMode?.();
+  } catch {
+    serverMode = false;
+  }
   serverGuideAdjusted = true;
-  const serverMode = await window.electron?.isServerMode?.().catch(() => false);
-  if (!serverMode) return;
+  if (!serverMode) return false;
+  let changed = false;
   for (const page of guidePages) {
-    page.content = page.content
-      .replace(', or slice it', '')
-      .replace(/\s*<li>Specify the <strong>Slicer Path<\/strong>[\s\S]*?<\/li>/, '')
-      .replace(/\s*<li><strong>Slicer Integration<\/strong>[\s\S]*?<\/li>/, '');
+    const next = page.content.replace(/<!--desktop-->[\s\S]*?<!--\/desktop-->/g, "");
+    if (next !== page.content) {
+      page.content = next;
+      changed = true;
+    }
   }
+  return changed;
 }
 
-// Opens the guide dialog starting at the first page.
 async function showGuide() {
-  await omitSlicerGuideForServerMode();
-  currentPage = 0;
-  updateGuide();
   const guideDialog = document.getElementById("quickstart-guide");
-  if (guideDialog) {
-    guideDialog.showModal();
-    // Add styles to ensure dialog has no black background
-    guideDialog.style.backgroundColor = 'transparent';
-    guideDialog.style.background = 'none';
-    // Focus the dialog for keyboard navigation
-    guideDialog.focus();
-  } else {
-    console.error('Guide dialog not found');
+  if (!guideDialog) {
+    console.error("Guide dialog not found");
+    return;
+  }
+  guidePageIndex = 0;
+  updateGuide();
+  openGuideDialog(guideDialog);
+  try {
+    const changed = await omitSlicerGuideForServerMode();
+    if (changed && guideDialog.open) updateGuide();
+  } catch (err) {
+    console.warn("Quick Start Guide could not adjust for server mode:", err);
   }
 }
 
-// Closes the guide dialog.
 function closeGuide() {
   const guideDialog = document.getElementById("quickstart-guide");
   if (guideDialog) {
@@ -224,7 +217,6 @@ function closeGuide() {
   }
 }
 
-// Set up event listeners when the DOM content is fully loaded.
 document.addEventListener("DOMContentLoaded", () => {
   const nextButton = document.getElementById("guide-next-button");
   const backButton = document.getElementById("guide-back-button");
@@ -241,35 +233,28 @@ document.addEventListener("DOMContentLoaded", () => {
     closeButton.addEventListener("click", closeGuide);
   }
 
-  // Keyboard navigation support
   if (guideDialog) {
     guideDialog.addEventListener("keydown", (e) => {
-      // Only handle keyboard events when the dialog is open
       if (!guideDialog.open) return;
 
-      // Prevent default behavior for arrow keys
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
       }
 
-      // Navigate with arrow keys
-      if (e.key === "ArrowLeft" && currentPage > 0) {
+      if (e.key === "ArrowLeft" && guidePageIndex > 0) {
         prevGuide();
-      } else if (e.key === "ArrowRight" && currentPage < guidePages.length - 1) {
+      } else if (e.key === "ArrowRight" && guidePageIndex < guidePages.length - 1) {
         nextGuide();
       } else if (e.key === "Escape") {
         closeGuide();
       }
     });
 
-    // Focus management: focus the dialog when it opens
     guideDialog.addEventListener("close", () => {
-      // Reset to first page when closing
-      currentPage = 0;
+      guidePageIndex = 0;
     });
   }
-  
-  // After the welcome dialog is dismissed, automatically show the guide.
+
   const dismissWelcomeButton = document.getElementById("dismiss-welcome");
   if (dismissWelcomeButton) {
     dismissWelcomeButton.addEventListener("click", async () => {
@@ -283,7 +268,6 @@ document.addEventListener("DOMContentLoaded", () => {
         console.warn("Unable to read/save hasSeenQuickStartGuide setting:", error);
       }
 
-      // Give a small delay so the welcome dialog can close.
       setTimeout(() => {
         showGuide();
       }, 500);
@@ -291,5 +275,4 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 });
 
-// Export the showGuide function so it can be called from other files
-window.showGuide = showGuide; 
+window.showGuide = showGuide;

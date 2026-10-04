@@ -67,6 +67,7 @@ $rootFiles = @(
     "roulette.png",
     "tag.png",
     "filament.png",
+    "printer.png",
     "3d.png",
     "file-icon.png",
     "sidebar-bg.jpg",

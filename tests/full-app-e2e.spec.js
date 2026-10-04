@@ -116,6 +116,7 @@ test.describe('Printventory full application E2E', () => {
     await expect(window.locator('#dup-button')).toBeVisible();
     await expect(window.locator('#tag-button')).toBeVisible();
     await expect(window.locator('#filament-button')).toBeVisible();
+    await expect(window.locator('#printer-button')).toBeVisible();
     await expect(window.locator('#roulette-button')).toBeVisible();
     await expect(window.locator('#edit-mode-toggle')).toBeAttached();
   });
@@ -789,7 +790,7 @@ test.describe('Printventory full application E2E', () => {
 
   // ─── Sidebar De-Dup / Tag buttons ───────────────────────────────────────────
 
-  test('Sidebar: De-Dup, Tag Manager, and Filament buttons open dialogs', async () => {
+  test('Sidebar: De-Dup, Tag Manager, Filament, and Printer buttons open dialogs', async () => {
     await window.locator('#dup-button').click();
     await expect(window.locator('#dedup-dialog')).toBeVisible();
     await closeDialog(window, 'dedup-dialog', '#close-dedup');
@@ -801,5 +802,9 @@ test.describe('Printventory full application E2E', () => {
     await window.locator('#filament-button').click();
     await expect(window.locator('#filament-manager-dialog')).toBeVisible();
     await closeDialog(window, 'filament-manager-dialog', 'button:has-text("Close")');
+
+    await window.locator('#printer-button').click();
+    await expect(window.locator('#printer-management-dialog')).toBeVisible();
+    await closeDialog(window, 'printer-management-dialog', '#printer-management-close');
   });
 });

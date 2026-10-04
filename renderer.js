@@ -1075,14 +1075,23 @@ function previewColumnCount() {
  * S → 10 columns; M → 6 columns; L → 4 columns.
  */
 function computePreviewTilePxFromWidth(availableWidth, horizontalGap = 2) {
-  const g = horizontalGap;
-  const aw = Math.max(0, availableWidth);
   const cols = previewColumnCount();
   if (cols <= 0) return PREVIEW_TILE_PX.m;
-
-  // Use fixed column count and scale tile so the row fills available width.
+  if (window.gridRefresh?.previewTilePx) {
+    return window.gridRefresh.previewTilePx(availableWidth, cols, horizontalGap);
+  }
+  const g = horizontalGap;
+  const aw = Math.max(0, availableWidth);
   const computed = Math.floor((aw - (cols - 1) * g) / cols);
   return Math.max(1, computed);
+}
+
+function detailedColumnsForWidth(availableWidth, itemWidth) {
+  if (window.gridRefresh?.detailedColumnCount) {
+    return window.gridRefresh.detailedColumnCount(availableWidth, itemWidth);
+  }
+  const item = Math.max(1, Number(itemWidth) || 1);
+  return Math.max(Math.floor(Math.max(0, availableWidth) / item), 1);
 }
 
 function getPreviewTileSizePx() {
@@ -1101,6 +1110,17 @@ function getPreviewTileSizePx() {
 function getPreviewTileDims() {
   const tile = getPreviewTileSizePx();
   return { width: tile, height: tile, itemWidth: tile };
+}
+
+/** Width the virtual grid should lay out against, including a window-resize lag. */
+function measuredLibraryGridWidth(container) {
+  const client = container?.clientWidth || 0;
+  const pick = window.gridRefresh?.libraryGridWidth;
+  if (!pick) return client;
+  const rootStyle = getComputedStyle(document.documentElement);
+  const sidebar = parseFloat(rootStyle.getPropertyValue('--sidebar-width')) || 0;
+  const folder = parseFloat(rootStyle.getPropertyValue('--folder-rail-width')) || 0;
+  return pick(client, window.innerWidth, sidebar, folder);
 }
 
 // Per-folder view preference (when "View Entire Library" is off): remember list/preview/detailed per scanned root
@@ -1179,6 +1199,10 @@ function invalidateVirtualGridRenderer(container) {
   container.renderVisibleItemsFn = null;
   container.pendingModels = null;
   container.isRendering = false;
+  if (container._windowResizeHandler) {
+    window.removeEventListener('resize', container._windowResizeHandler);
+    container._windowResizeHandler = null;
+  }
 }
 
 function rebuildVirtualGridFromCache(container, cachedModels) {
@@ -7435,11 +7459,11 @@ async function createServerMenuBar() {
   // Help menu - Quick Start Guide opens multi-page quickstart-guide, not guide-dialog
   const helpMenu = createMenuDropdown('Help', [
     { label: 'Quick Start Guide', action: () => {
-      if (typeof showGuide === 'function') {
-        showGuide();
-      } else {
-        window.electron.send('open-guide');
+      if (typeof window.showGuide === 'function') {
+        Promise.resolve(window.showGuide()).catch((err) => console.error('Quick Start Guide failed:', err));
+        return;
       }
+      window.electron.send('open-guide');
     }},
     { label: 'Keyboard Shortcuts', action: () => {
       const dialog = document.getElementById('keyboard-shortcuts-dialog');
@@ -12068,15 +12092,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     // const guideDialog = document.getElementById('guide-dialog'); // Remove this line if it exists
 
     // Assuming this is where the menu item is defined
-    document.getElementById("guide-button").addEventListener("click", function() {
-      // Call the new guide function
-      window.electron.send('open-guide'); // Ensure this sends the correct event to show the new guide
+    document.getElementById("guide-button")?.addEventListener("click", function() {
+      window.electron.send('open-guide');
     });
   });
 
   // Add this listener at the top of the file or within the DOMContentLoaded event
   window._electronRealEventHandlers['open-guide'] = function() {
-    if (typeof showGuide === 'function') showGuide();
+    if (typeof window.showGuide !== 'function') {
+      console.error('Quick Start Guide is not loaded');
+      return;
+    }
+    Promise.resolve(window.showGuide()).catch((err) => console.error('Quick Start Guide failed:', err));
   };
   if (window._electronPendingEvents['open-guide']) {
     window._electronPendingEvents['open-guide'].forEach((args) => {
@@ -18940,10 +18967,80 @@ function applyListViewColumnLayoutToSubtree(root) {
   applyListViewColumnOrderToSubtree(root);
 }
 
+function listViewColumnsBoxWidth() {
+  const state = ensureListViewColumnState();
+  let width = 0;
+  let visible = 0;
+  for (const id of normalizeListViewColumnOrder(state.order)) {
+    const def = LIST_VIEW_COLUMN_DEFS.find(c => c.id === id);
+    if (!def || state.visibility[id] === false) continue;
+    visible += 1;
+    width += state.widths[id] ?? def.defaultWidth;
+  }
+  if (visible > 1) width += (visible - 1) * 12;
+  return width;
+}
+
+/** Row chrome (padding, thumbnail, gap) plus the fixed columns. */
+function listViewNaturalRowWidth() {
+  const state = ensureListViewColumnState();
+  const widths = [];
+  for (const id of normalizeListViewColumnOrder(state.order)) {
+    const def = LIST_VIEW_COLUMN_DEFS.find(c => c.id === id);
+    if (!def || state.visibility[id] === false) continue;
+    widths.push(state.widths[id] ?? def.defaultWidth);
+  }
+  if (window.gridRefresh?.listViewScrollWidth) {
+    return window.gridRefresh.listViewScrollWidth(widths, 0).natural;
+  }
+  return 32 + 60 + 12 + listViewColumnsBoxWidth();
+}
+
+function syncListViewHorizontalScroll(container) {
+  const grid = container || document.querySelector('.file-grid');
+  if (!grid) return 0;
+  if (currentGridView !== 'list') {
+    grid.classList.remove('is-list-view');
+    grid.style.overflowX = 'hidden';
+    grid._listRowWidth = 0;
+    return 0;
+  }
+  grid.classList.add('is-list-view');
+  grid.style.overflowX = 'auto';
+  const header = grid.querySelector('.list-view-header');
+  if (header) {
+    header.style.width = 'max-content';
+    header.style.minWidth = '100%';
+    header.style.maxWidth = 'none';
+    header.style.flexShrink = '0';
+  }
+  const natural = listViewNaturalRowWidth();
+  const measured = header ? header.offsetWidth : 0;
+  const width = Math.max(natural, measured);
+  grid._listRowWidth = width;
+  if (header) {
+    header.style.width = width + 'px';
+    header.style.minWidth = width + 'px';
+  }
+  const spacer = grid.querySelector('.virtual-spacer');
+  if (spacer) spacer.style.minWidth = width + 'px';
+  const columnsBox = listViewColumnsBoxWidth();
+  grid.querySelectorAll('.file-item-list .file-info, .parent-model-group-list .file-info, .list-view-header-info').forEach(el => {
+    el.style.minWidth = columnsBox + 'px';
+    el.style.flex = '1 0 ' + columnsBox + 'px';
+  });
+  grid.querySelectorAll('.file-item-list, .parent-model-group-list').forEach(el => {
+    el.style.width = width + 'px';
+    el.style.minWidth = width + 'px';
+  });
+  return width;
+}
+
 function applyListViewColumnLayoutToGrid() {
   const grid = document.querySelector('.file-grid');
   if (!grid) return;
   applyListViewColumnLayoutToSubtree(grid);
+  if (currentGridView === 'list') syncListViewHorizontalScroll(grid);
 }
 
 async function persistListViewColumnState() {
@@ -25393,7 +25490,7 @@ function renderVirtualGrid(models) {
   
   container.style.position = 'relative';
   container.style.overflowY = 'auto';
-  container.style.overflowX = 'hidden';
+  container.style.overflowX = currentGridView === 'list' ? 'auto' : 'hidden';
   container.style.overflowAnchor = 'none';
   container.style.display = 'block'; // Override CSS grid display for virtual scrolling
   
@@ -25425,7 +25522,7 @@ function renderVirtualGrid(models) {
     horizontalGap = 20; // Consistent horizontal spacing
   }
 
-  const containerWidth = container.clientWidth;
+  const containerWidth = measuredLibraryGridWidth(container);
   const mobileDetailed = currentGridView === 'detailed' ? mobileDetailedMetrics(containerWidth) : null;
   if (mobileDetailed && mobileLibraryColumns()) {
     paddingVertical = 8;
@@ -25474,7 +25571,7 @@ function renderVirtualGrid(models) {
   } else {
     // For detailed view, calculate columns and center the grid
     const availableWidth = containerWidth - (paddingHorizontal * 2);
-    columns = Math.max(Math.floor(availableWidth / itemWidth), 1);
+    columns = detailedColumnsForWidth(availableWidth, itemWidth);
     
     // Center the grid if we have fewer columns than would fill the width
     if (currentGridView === 'detailed') {
@@ -25597,7 +25694,7 @@ function renderVirtualGrid(models) {
         }
 
         // Recalculate columns in case of resize
-        const currentContainerWidth = container.clientWidth;
+        const currentContainerWidth = measuredLibraryGridWidth(container);
         let effectivePreviewTilePx = itemWidth;
         let effectiveItemHeight = itemHeight;
         let currentColumns;
@@ -25612,7 +25709,7 @@ function renderVirtualGrid(models) {
           currentColumns = previewColumnCount();
         } else {
           const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
-          currentColumns = Math.max(Math.floor(currentAvailableWidth / itemWidth), 1);
+          currentColumns = detailedColumnsForWidth(currentAvailableWidth, itemWidth);
           
           // Center the grid for detailed view
           if (currentGridView === 'detailed') {
@@ -25629,6 +25726,15 @@ function renderVirtualGrid(models) {
         const layoutRowHeight =
           currentGridView === 'preview' ? effectiveItemHeight : itemHeight;
         const cache = container._virtualLayoutCache;
+        const geometryChanged = window.gridRefresh?.virtualGridGeometryChanged
+          ? window.gridRefresh.virtualGridGeometryChanged(cache, {
+            width: currentContainerWidth,
+            columns: currentColumns,
+            view: currentGridView,
+            rowHeight: layoutRowHeight,
+            verticalGap: currentVerticalGap
+          })
+          : (!cache || cache.width !== currentContainerWidth || cache.columns !== currentColumns);
         let currentDisplayRecords;
         let layout;
         if (
@@ -25730,7 +25836,12 @@ function renderVirtualGrid(models) {
           }
           return true;
         };
-        const bufferCovered = visibleRows.length > 0 && visibleRows.every(rowIsMounted);
+        // Mounted cards still sit at the previous column positions after a resize.
+        // Short filtered lists (New, no designer) keep every key mounted, so the
+        // scroll fast-path would otherwise skip the move.
+        const bufferCovered = !geometryChanged
+          && visibleRows.length > 0
+          && visibleRows.every(rowIsMounted);
 
         const findExistingLayoutItem = (layoutKey) => {
           const existing = layoutItemsByKey.get(layoutKey);
@@ -25748,11 +25859,15 @@ function renderVirtualGrid(models) {
           layoutItemsByKey.set(layoutKey, item);
         };
 
+        const listRowWidth = currentGridView === 'list' ? syncListViewHorizontalScroll(container) : 0;
+
         const positionModelItem = (item, row, col) => {
           item.style.top = row.top + 'px';
           if (currentGridView === 'list') {
             item.style.left = paddingHorizontal + 'px';
-            item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+            item.style.width = (listRowWidth || container._listRowWidth || 0) > 0
+              ? (listRowWidth || container._listRowWidth) + 'px'
+              : `calc(100% - ${paddingHorizontal * 2}px)`;
           } else if (currentGridView === 'preview') {
             const w = effectivePreviewTilePx;
             const leftPosition = (col * (w + currentHorizontalGap)) + paddingHorizontal;
@@ -25777,7 +25892,11 @@ function renderVirtualGrid(models) {
         const positionGroupItem = (item, row) => {
           item.style.top = row.top + 'px';
           item.style.left = paddingHorizontal + 'px';
-          item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+          if (currentGridView === 'list' && (listRowWidth || container._listRowWidth)) {
+            item.style.width = (listRowWidth || container._listRowWidth) + 'px';
+          } else {
+            item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
+          }
           item.style.height = row.height + 'px';
         };
 
@@ -26017,25 +26136,34 @@ function renderVirtualGrid(models) {
   container.virtualScrollHandler = throttledScrollHandler;
   container.addEventListener('scroll', throttledScrollHandler, { passive: true });
 
-  // Throttled resize handler
+  // Throttled resize handler. Clear the timeout id before painting so a
+  // resize that arrives mid-paint is not dropped. Drop the layout cache so
+  // preview tile size and detailed columns are rebuilt for the new width.
   let resizeTimeout = null;
   function throttledResizeHandler() {
     container._virtualCover = null;
+    container._virtualLayoutCache = null;
     if (resizeTimeout) {
       cancelAnimationFrame(resizeTimeout);
     }
     resizeTimeout = requestAnimationFrame(() => {
-      renderVisibleItems();
       resizeTimeout = null;
+      renderVisibleItems();
     });
   }
   
-  // Handle window resize
+  // Handle window resize. ResizeObserver misses some Mac window resizes, so
+  // the window event paints the same way.
   if (container.resizeObserver) {
     container.resizeObserver.disconnect();
   }
   container.resizeObserver = new ResizeObserver(throttledResizeHandler);
   container.resizeObserver.observe(container);
+  if (container._windowResizeHandler) {
+    window.removeEventListener('resize', container._windowResizeHandler);
+  }
+  container._windowResizeHandler = throttledResizeHandler;
+  window.addEventListener('resize', throttledResizeHandler);
 
   // Store renderVisibleItems function reference for later use
   container.renderVisibleItemsFn = renderVisibleItems;

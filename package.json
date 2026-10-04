@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.19",
+  "version": "2.2.20",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "prebuild:mac": "node scripts/check-mac-dependencies.js",
     "build:mac": "node scripts/build-mac.js",
     "build:win": "node scripts/build-win.js",
+    "build:store": "node scripts/build-store.js",
     "build:linux": "node scripts/build-linux-appimage.js",
     "build:linux:internal": "electron-builder --linux --x64",
     "build:docker": "node scripts/create-docker-distribution.js",
@@ -137,6 +138,21 @@
       "artifactName": "Printventory-Setup-${version}.${ext}",
       "deleteAppDataOnUninstall": false
     },
+    "appx": {
+      "applicationId": "Printventory",
+      "identityName": "TechJeeperDesign.PrintventoryBeta",
+      "publisher": "CN=D53EB836-A86E-487A-9EEE-DF4BFE2D1A00",
+      "publisherDisplayName": "TechJeeper Design",
+      "displayName": "Printventory Beta",
+      "backgroundColor": "#16161e",
+      "minVersion": "10.0.17763.0",
+      "maxVersionTested": "10.0.26100.0",
+      "languages": [
+        "en-US"
+      ],
+      "showNameOnTiles": true,
+      "artifactName": "Printventory-${version}.${ext}"
+    },
     "files": [
       "main.js",
       "db-repair.js",
@@ -182,6 +198,7 @@
       "roulette.png",
       "tag.png",
       "filament.png",
+      "printer.png",
       "aitagging.js",
       "thumbnail-compress.js",
       "extract-lys-preview.js",

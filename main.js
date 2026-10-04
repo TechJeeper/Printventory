@@ -8836,6 +8836,52 @@ ipcMain.handle('delete-metadata', async (event, type, name) => {
   }
 });
 
+// Child rows (print history, tags, filaments) reference models. Delete those first
+// or SQLite rejects the models delete with FOREIGN KEY constraint failed.
+function purgeAllModels(database) {
+  const names = database.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+  ).all().map((row) => row.name);
+  const nameSet = new Set(names);
+
+  const childrenOf = new Map();
+  for (const name of names) {
+    const quoted = name.replace(/"/g, '""');
+    const foreignKeys = database.prepare(`PRAGMA foreign_key_list("${quoted}")`).all();
+    for (const foreignKey of foreignKeys) {
+      if (!childrenOf.has(foreignKey.table)) childrenOf.set(foreignKey.table, []);
+      childrenOf.get(foreignKey.table).push(name);
+    }
+  }
+
+  const deleteOrder = [];
+  const seen = new Set();
+  const visit = (table) => {
+    if (seen.has(table)) return;
+    seen.add(table);
+    for (const child of childrenOf.get(table) || []) visit(child);
+    if (table !== 'models' && nameSet.has(table)) deleteOrder.push(table);
+  };
+  visit('models');
+
+  // print_event_parts stores event ids without a foreign key, so the graph misses it.
+  if (nameSet.has('print_event_parts') && !deleteOrder.includes('print_event_parts')) {
+    deleteOrder.unshift('print_event_parts');
+  }
+
+  const purge = database.transaction(() => {
+    for (const table of deleteOrder) {
+      const quoted = table.replace(/"/g, '""');
+      database.prepare(`DELETE FROM "${quoted}"`).run();
+    }
+    if (nameSet.has('models')) database.prepare('DELETE FROM models').run();
+    if (nameSet.has('tags') && nameSet.has('model_tags')) {
+      database.prepare('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM model_tags)').run();
+    }
+  });
+  purge();
+}
+
 // Update the purge-models handler
 const purgeModelsHandler = async (event, options = {}) => {
   try {
@@ -8867,17 +8913,7 @@ const purgeModelsHandler = async (event, options = {}) => {
       }
 
       try {
-        // Execute each statement individually to avoid transaction issues
-        // First clear the model_tags table (child table)
-        db.prepare('DELETE FROM model_tags').run();
-        db.prepare('DELETE FROM model_filaments').run();
-
-        // Then clear the models table (parent table)
-        db.prepare('DELETE FROM models').run();
-
-        // Finally clear unused tags
-        db.prepare('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM model_tags)').run();
-
+        purgeAllModels(db);
         return true;
       } catch (dbError) {
         console.error('Database error during purge:', dbError);

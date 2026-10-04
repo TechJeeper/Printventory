@@ -37,6 +37,7 @@ test.describe('Printventory features', () => {
     await expect(window.locator('#dup-button')).toBeVisible();
     await expect(window.locator('#tag-button')).toBeVisible();
     await expect(window.locator('#filament-button')).toBeVisible();
+    await expect(window.locator('#printer-button')).toBeVisible();
     await expect(window.locator('#roulette-button')).toBeVisible();
   });
 

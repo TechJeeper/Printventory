@@ -70,6 +70,33 @@ test('detailed and preview keep a selection in view', () => {
   assert.strictEqual(gridRefresh.scrollTopForSelectedLayout(layout, 600, () => false), null);
 });
 
+test('preview width follows the window when the grid box lags', () => {
+  assert.strictEqual(gridRefresh.libraryGridWidth(900, 1400, 350, 0), 1010);
+  assert.strictEqual(gridRefresh.libraryGridWidth(1010, 1400, 350, 0), 1010);
+  assert.strictEqual(gridRefresh.libraryGridWidth(1000, 1400, 350, 0), 1000);
+  assert.strictEqual(gridRefresh.libraryGridWidth(0, 1400, 350, 0), 1010);
+});
+
+test('a resize still repositions a fully mounted filtered grid', () => {
+  const same = {
+    width: 1200,
+    columns: 3,
+    view: 'detailed',
+    rowHeight: 490,
+    verticalGap: 20
+  };
+  assert.strictEqual(gridRefresh.virtualGridGeometryChanged(same, same), false);
+  assert.strictEqual(gridRefresh.virtualGridGeometryChanged(null, same), true);
+  assert.strictEqual(
+    gridRefresh.virtualGridGeometryChanged(same, Object.assign({}, same, { width: 900, columns: 2 })),
+    true
+  );
+  assert.strictEqual(
+    gridRefresh.virtualGridGeometryChanged(same, Object.assign({}, same, { width: 1280 })),
+    true
+  );
+});
+
 test('progressive render holds a short page only while preserving scroll', () => {
   assert.strictEqual(gridRefresh.shouldHoldProgressiveRender(true, 500, 2000, false), true);
   assert.strictEqual(gridRefresh.shouldHoldProgressiveRender(true, 2000, 2000, false), false);

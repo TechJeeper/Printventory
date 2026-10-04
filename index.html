@@ -144,6 +144,9 @@
       <button id="filament-button" class="icon-button" title="Filament - Filament Manager">
         <img src="filament.png" alt="Filament Manager">
       </button>
+      <button id="printer-button" class="icon-button" title="Printer - Printer Manager">
+        <img src="printer.png" alt="Printer Manager">
+      </button>
       <button id="roulette-button" class="icon-button" title="Roulette - Print Roulette">
         <img src="roulette.png" alt="Print Roulette">
       </button>
@@ -1144,26 +1147,27 @@
         </div>
         <div class="settings-group">
           <h4>Additional file types to discover during scan</h4>
-          <p class="setting-description">These types will be discovered when scanning folders. Most do not support 3D preview; a placeholder with the file type (e.g. OBJ, STEP) will be shown and you can add your own images.</p>
+          <p class="setting-description">These types are included when scanning folders. A mark means Printventory can generate a thumbnail. STL and 3MF always get thumbnails. Types without a mark show a file-type label until you add your own image.</p>
+          <p class="setting-description file-type-thumb-legend"><span class="file-type-thumb-mark" aria-hidden="true"></span> Thumbnail</p>
           <div id="scan-additional-types-container" class="scan-file-types-grid">
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-3ds"><label for="scan-type-3ds">3DS (.3ds)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-amf"><label for="scan-type-amf">AMF (.amf)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-blender"><label for="scan-type-blender">Blender (.blender)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-chitubox"><label for="scan-type-chitubox">ChiTuBox (.chitubox)</label></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-chitubox"><label for="scan-type-chitubox">ChiTuBox (.chitubox)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="Thumbnail from the embedded preview, when the file includes one"></span></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-dae"><label for="scan-type-dae">DAE (.dae)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-dxf"><label for="scan-type-dxf">DXF (.dxf)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-dwg"><label for="scan-type-dwg">DWG (.dwg)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-fbx"><label for="scan-type-fbx">FBX (.fbx)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-f3d"><label for="scan-type-f3d">F3D (.f3d)</label></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-f3d"><label for="scan-type-f3d">F3D (.f3d)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="Thumbnail from the embedded preview, when the file includes one"></span></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-f3z"><label for="scan-type-f3z">F3Z (.f3z)</label></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-gcode"><label for="scan-type-gcode">G-code (.gcode)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-igs"><label for="scan-type-igs">IGES (.igs/.iges)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-lys"><label for="scan-type-lys">LYS/LYT (.lys/.lyt)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-obj"><label for="scan-type-obj">OBJ (.obj)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-ply"><label for="scan-type-ply">PLY (.ply)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-step"><label for="scan-type-step">STEP (.step/.stp)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-svg"><label for="scan-type-svg">SVG (.svg)</label></div>
-            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-voxl"><label for="scan-type-voxl">VOXL (.voxl)</label></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-igs"><label for="scan-type-igs">IGES (.igs/.iges)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="3D thumbnail for .igs and .iges"></span></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-lys"><label for="scan-type-lys">LYS/LYT (.lys/.lyt)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="Thumbnail for .lys from the embedded preview or a 3D render. .lyt shows a type label."></span></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-obj"><label for="scan-type-obj">OBJ (.obj)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="3D thumbnail"></span></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-ply"><label for="scan-type-ply">PLY (.ply)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="3D thumbnail"></span></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-step"><label for="scan-type-step">STEP (.step/.stp)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="3D thumbnail for .step and .stp"></span></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-svg"><label for="scan-type-svg">SVG (.svg)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="The SVG is used as the thumbnail"></span></div>
+            <div class="scan-file-type-option"><input type="checkbox" id="scan-type-voxl"><label for="scan-type-voxl">VOXL (.voxl)</label><span class="file-type-thumb-mark" role="img" aria-label="Thumbnail" title="Thumbnail from the embedded preview, when the file includes one"></span></div>
             <div class="scan-file-type-option"><input type="checkbox" id="scan-type-x3d"><label for="scan-type-x3d">X3D (.x3d)</label></div>
           </div>
         </div>
@@ -1793,7 +1797,7 @@
               <div class="guide-progress-bar">
                 <div class="guide-progress-fill" id="guide-progress-fill"></div>
               </div>
-              <div class="guide-progress-text" id="guide-progress-text">Page 1 of 5</div>
+              <div class="guide-progress-text" id="guide-progress-text">Step 1 of 4</div>
             </div>
           </div>
           <div class="guide-scroll-container">
@@ -2889,6 +2893,13 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       });
       document.getElementById("filament-button").addEventListener("click", function() {
         window.electron.send('open-filament-manager');
+      });
+      document.getElementById("printer-button").addEventListener("click", function() {
+        if (typeof window.openPrinterManagement === 'function') {
+          window.openPrinterManagement();
+          return;
+        }
+        window.electron.send('open-printer-management');
       });
       document.getElementById("roulette-button").addEventListener("click", function() {
         window.electron.send('start-print-roulette');
