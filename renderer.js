@@ -5225,7 +5225,17 @@ function notifyHashGenerationFailures(result) {
 }
 
 function finishHashProgressDialog(progressDialog, { reloadDuplicates = false } = {}) {
-  if (!progressDialog || progressDialog.dataset.closed === '1') return;
+  if (!progressDialog) return;
+  // Completion can close this dialog before the progress listener asks to
+  // open De-Dup. A later reload request still has to run.
+  if (progressDialog.dataset.closed === '1') {
+    if (reloadDuplicates && progressDialog.dataset.reloaded !== '1') {
+      progressDialog.dataset.reloaded = '1';
+      isHashDialogShowing = false;
+      loadDuplicateFiles(true);
+    }
+    return;
+  }
   progressDialog.dataset.closed = '1';
   try {
     progressDialog.close();
@@ -5233,6 +5243,7 @@ function finishHashProgressDialog(progressDialog, { reloadDuplicates = false } =
   progressDialog.remove();
   isHashDialogShowing = false;
   if (reloadDuplicates) {
+    progressDialog.dataset.reloaded = '1';
     loadDuplicateFiles(true);
   }
 }
@@ -5247,8 +5258,29 @@ function wireHashProgressCancel(progressDialog, onCancel) {
   actions.appendChild(button);
   progressDialog.appendChild(actions);
 
+  // Yes on the hash prompt sits under this dialog. Enter or that same click
+  // would activate Cancel immediately, so hashing never starts and nothing stays open.
+  let cancelArmed = false;
+  const armCancel = () => { cancelArmed = true; };
+  const onKeyUp = () => armCancel();
+  window.addEventListener('keyup', onKeyUp, { once: true });
+  button.addEventListener('pointerdown', armCancel);
+  progressDialog.tabIndex = -1;
+  setTimeout(() => {
+    if (progressDialog.isConnected && progressDialog.open) progressDialog.focus();
+  }, 0);
+  progressDialog.addEventListener('close', () => {
+    window.removeEventListener('keyup', onKeyUp);
+  }, { once: true });
+  progressDialog.addEventListener('keydown', (event) => {
+    if (!cancelArmed && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+
   const requestCancel = async () => {
-    if (button.disabled) return;
+    if (!cancelArmed || button.disabled) return;
     button.disabled = true;
     button.textContent = 'Cancelling…';
     if (typeof onCancel === 'function') onCancel();
@@ -5351,8 +5383,18 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
     // First check for models without file hash (unless we're skipping the check)
     if (!skipHashCheck) {
       // Check if a hash dialog is already showing or if we're currently checking
-      if (isHashDialogShowing || isCheckingForHashes) {
-        return; // Exit early if dialog is already showing or check is in progress
+      if (isCheckingForHashes) {
+        return;
+      }
+      if (isHashDialogShowing) {
+        const hashDialogOpen = [...document.querySelectorAll('dialog')].some((openDialog) => {
+          if (!openDialog.open) return false;
+          const text = openDialog.textContent || '';
+          return text.includes('Generate File Hashes') || text.includes('Generating File Hashes');
+        });
+        if (hashDialogOpen) return;
+        // 2.2.18 could clear the progress dialog and leave this flag set, so the next De-Dup did nothing.
+        isHashDialogShowing = false;
       }
       
       isCheckingForHashes = true; // Set flag before checking
@@ -5411,12 +5453,10 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           };
           
           const completionListener = (result) => {
-            if (result && result.cancelled) {
-              isCompleting = true;
-              finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
-              return;
-            }
             notifyHashGenerationFailures(result);
+            if (isCompleting) return;
+            isCompleting = true;
+            finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
           };
           
           window.electron.onHashGenerationProgress(progressListener);
@@ -5486,12 +5526,10 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           
           // Set up completion listener to handle success/failure counts
           const completionListener = (result) => {
-            if (result && result.cancelled) {
-              isCompleting = true;
-              finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
-              return;
-            }
             notifyHashGenerationFailures(result);
+            if (isCompleting) return;
+            isCompleting = true;
+            finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
           };
           
           // Listen for completion event
@@ -5505,7 +5543,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
               await window.electron.cancelHashGeneration();
               return;
             }
-            finishHashProgressDialog(progressDialog);
+            finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
             return;
           }
 
@@ -5516,7 +5554,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
               await window.electron.cancelHashGeneration();
               return;
             }
-            finishHashProgressDialog(progressDialog);
+            finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
             return;
           }
           if (isAlreadyRunning) {
@@ -5562,14 +5600,14 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
             if (result && result.failed === result.total && result.total > 0) {
               // All hashes failed - error dialog will be shown by completion listener
               isCheckingForHashes = false;
-              finishHashProgressDialog(progressDialog);
+              finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
               return;
             }
             // If some or all succeeded, the completion listener will handle the dialog closing
           } catch (error) {
             console.error('Error generating hashes:', error);
             isCheckingForHashes = false;
-            finishHashProgressDialog(progressDialog);
+            finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
             // Only show error if it's a critical error, not just some failed hashes
             await window.electron.showMessage('Error', 'Failed to generate file hashes. Please check file permissions and network connectivity.');
             return;
@@ -20382,12 +20420,9 @@ window.electron.on('hash-generation-progress', async (progress) => {
       progressText.textContent = `${progress.processed}/${progress.total}`;
     }
     
-    // Close dialog when complete
-    if (progress.processed >= progress.total && progressDialog) {
+    if (progress.processed >= progress.total && progress.total > 0 && progressDialog) {
       setTimeout(() => {
-        progressDialog.close();
-        progressDialog.remove();
-        isHashDialogShowing = false;
+        finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
       }, 500);
     }
   }
@@ -20400,14 +20435,11 @@ window.electron.on('hash-generation-complete', async (result) => {
     const serverMode = await window.electron.isServerMode().catch(() => false);
     if (!serverMode) return;
     const dialog = document.getElementById('dedup-dialog');
-    if (dialog && dialog.open) {
-      // Reload duplicates if DeDup window is open
-      await loadDuplicateFiles(true);
-    }
-    // Also close any hash progress dialog that might be open
     const progressDialog = document.getElementById('hash-progress-dialog') || document.querySelector('.progress-dialog');
     if (progressDialog) {
-      finishHashProgressDialog(progressDialog);
+      finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
+    } else if (dialog && dialog.open) {
+      await loadDuplicateFiles(true);
     }
     // Log completion result for debugging
     if (result) {

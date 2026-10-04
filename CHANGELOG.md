@@ -4,6 +4,10 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.19] - 2026-10-04
+
+- Fixes de-dup hash generation introduced in 2.2.18
+
 ## [2.2.18] - 2026-10-03
 
 - De-duplication records the disk space freed when duplicate copies are deleted, and shows that total in De-Dup and in library statistics
