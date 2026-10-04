@@ -100,6 +100,8 @@ const filesToCopy = [
   'spoolman.js',
   'mcp-server.js',
   'missing-thumbnails-query.js',
+  'primary-thumbnails-query.js',
+  'delete-model-file.js',
   'flatten-3mf-stl.js',
   'thumbnail-worker.js',
   'server-tls.js',

@@ -185,6 +185,13 @@ contextBridge.exposeInMainWorld('electron', {
     console.log('preload: deleteFile called with:', filePath);
     return ipcRenderer.invoke('delete-file', filePath);
   },
+  deleteFiles: (filePaths, options) => ipcRenderer.invoke('delete-files', filePaths, options),
+  onDeleteFilesProgress: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const handler = (_event, progress) => callback(progress);
+    ipcRenderer.on('delete-files-progress', handler);
+    return () => ipcRenderer.removeListener('delete-files-progress', handler);
+  },
   fetchThangsPage: (url) => ipcRenderer.invoke('fetch-thangs-page', url),
   purgeModels: (options) => ipcRenderer.invoke('purge-models', options || {}),
   clearNewFlags: () => ipcRenderer.invoke('clear-new-model-flags'),
@@ -236,6 +243,7 @@ contextBridge.exposeInMainWorld('electron', {
   isGeneratingHashes: () => ipcRenderer.invoke('is-generating-hashes'),
   getModelsWithoutHash: (filters) => ipcRenderer.invoke('getModelsWithoutHash', filters),
   generateMissingHashes: (filters) => ipcRenderer.invoke('generateMissingHashes', filters),
+  cancelHashGeneration: () => ipcRenderer.invoke('cancel-hash-generation'),
   calculateFileHash: (filePath) => ipcRenderer.invoke('calculate-file-hash', filePath),
   onHashGenerationProgress: (callback) => {
     ipcRenderer.on('hash-generation-progress', (_, progress) => callback(progress));
@@ -244,6 +252,7 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.on('hash-generation-complete', (_, result) => callback(result || {}));
   },
   getThumbnail: (filePath) => ipcRenderer.invoke('getThumbnail', filePath),
+  getThumbnailsPrimaryBatch: (filePaths) => ipcRenderer.invoke('get-thumbnails-primary-batch', filePaths),
   getAllThumbnails: (filePath) => ipcRenderer.invoke('get-all-thumbnails', filePath),
   addThumbnail: (filePath, imageDataUrl) => ipcRenderer.invoke('add-thumbnail', filePath, imageDataUrl),
   addMultipleThumbnails: (filePath, imageDataUrls) => ipcRenderer.invoke('add-multiple-thumbnails', filePath, imageDataUrls),

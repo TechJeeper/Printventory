@@ -4,6 +4,14 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.18] - 2026-10-03
+
+- De-duplication records the disk space freed when duplicate copies are deleted, and shows that total in De-Dup and in library statistics
+- Deleting library files reports progress, retries files that are briefly locked, and explains when a file cannot be removed
+- Hash generation can be cancelled
+- The library loads primary thumbnails in batches and keeps your scroll position while the grid is moving quickly
+- The parts list on Log Print keeps the add button on one line
+
 ## [2.2.17] - 2026-10-03
 
 - Printer Management can scan the local network for Klipper, PrusaLink, and Bambu Lab printers, test the connection, and show live status

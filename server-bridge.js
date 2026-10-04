@@ -574,6 +574,7 @@
     'getDuplicateFiles': 'get-duplicate-files',
     'checkFilesExist': 'check-files-exist',
     'deleteFile': 'delete-file',
+    'deleteFiles': 'delete-files',
     'fetchThangsPage': 'fetch-thangs-page',
     'purgeModels': 'purge-models',
     'clearNewFlags': 'clear-new-model-flags',
@@ -593,8 +594,10 @@
     'isGeneratingHashes': 'is-generating-hashes',
     'getModelsWithoutHash': 'getModelsWithoutHash',
     'generateMissingHashes': 'generateMissingHashes',
+    'cancelHashGeneration': 'cancel-hash-generation',
     'calculateFileHash': 'calculate-file-hash',
     'getThumbnail': 'getThumbnail',
+    'getThumbnailsPrimaryBatch': 'get-thumbnails-primary-batch',
     'getAllThumbnails': 'get-all-thumbnails',
     'addThumbnail': 'add-thumbnail',
     'addMultipleThumbnails': 'add-multiple-thumbnails',
@@ -819,6 +822,18 @@
     window.electron.on('open-purge-models', callback);
   };
   
+  window.electron.onDeleteFilesProgress = function(callback) {
+    if (!window._electronEventListeners) window._electronEventListeners = {};
+    const listener = (progress) => {
+      try { callback(progress); } catch (error) {
+        console.error('[Bridge] Error in delete-files-progress callback:', error);
+      }
+    };
+    if (typeof window.electron.on === 'function') {
+      window.electron.on('delete-files-progress', listener);
+    }
+  };
+
   window.electron.onHashGenerationProgress = function(callback) {
     console.log('[Bridge] ===== onHashGenerationProgress CALLED =====');
     console.log('[Bridge] Callback type:', typeof callback);

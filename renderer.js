@@ -1311,6 +1311,107 @@ let pendingThumbnails = new Set(); // Track files currently being rendered
 let activeThumbnailRenders = new Set();
 /** Soft cap so fast scrolling cannot enqueue thousands of 3MF extract/WebGL jobs. */
 const RENDER_QUEUE_SOFT_CAP = 120;
+/** Models that missed the fast thumbnail timeout. Rendered after the main queue goes idle. */
+const deferredSlowThumbnails = new Map();
+/** Long pass also timed out. Leave the placeholder instead of looping. */
+const slowThumbnailExhausted = new Set();
+let activeSlowThumbRenders = 0;
+const SLOW_THUMB_TIMEOUT_MS = 300000;
+
+function isThumbnailLoadTimeout(error) {
+  return !!(error && (error.thumbnailLoadTimeout || error.thumbnailLoadAborted));
+}
+
+function thumbnailQueueShouldWait(filePath) {
+  return !!(filePath && (deferredSlowThumbnails.has(filePath) || slowThumbnailExhausted.has(filePath)));
+}
+
+function rememberDeferredThumbnail(filePath, container) {
+  if (!filePath || slowThumbnailExhausted.has(filePath)) return;
+  const prev = deferredSlowThumbnails.get(filePath);
+  deferredSlowThumbnails.set(filePath, {
+    filePath,
+    container: (container && container.isConnected) ? container : ((prev && prev.container) || container || null)
+  });
+}
+
+function liveThumbnailContainer(filePath, fallback) {
+  const item = findFileItemElement(filePath);
+  const live = item && item.querySelector('.thumbnail-container');
+  if (live && live.isConnected) return live;
+  if (fallback && fallback.isConnected) return fallback;
+  return null;
+}
+
+async function commitDeferredThumbnail(filePath, container, thumbnail) {
+  if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) return;
+  if (await isMostlyEmptyThumbnailDataUrl(thumbnail)) return;
+  try {
+    await window.electron.saveThumbnail(filePath, thumbnail);
+  } catch (_) { /* ignore */ }
+  invalidatePrimaryThumbnailCache(filePath);
+  setCachedPrimaryThumbnail(filePath, thumbnail);
+  const grid = document.querySelector('.file-grid');
+  const models = grid && grid.currentModels;
+  if (Array.isArray(models)) {
+    const norm = normalizePathForComparison(filePath);
+    const model = models.find((m) => m && normalizePathForComparison(m.filePath) === norm);
+    if (model) {
+      model.thumbnail = thumbnail;
+      model.hasThumbnail = true;
+    }
+  }
+  const host = liveThumbnailContainer(filePath, container);
+  const img = host && host.querySelector('img');
+  if (img) img.src = thumbnail;
+}
+
+function scheduleDeferredThumbnailPass() {
+  if (deferredSlowThumbnails.size === 0) return;
+  if (renderQueue.length > 0 || activeRenders > 0 || activeSlowThumbRenders > 0) return;
+  if (window._serverBulkThumbnailJobActive) return;
+
+  const room = Math.max(0, RENDER_QUEUE_SOFT_CAP - renderQueue.length);
+  if (room === 0) return;
+  const batch = [];
+  for (const [path, item] of deferredSlowThumbnails) {
+    if (batch.length >= room) break;
+    batch.push(item);
+    deferredSlowThumbnails.delete(path);
+  }
+  if (batch.length === 0) return;
+  const waiting = deferredSlowThumbnails.size;
+  console.log(
+    `[thumb] Queue idle. Rendering ${batch.length} model(s) that timed out.` +
+    (waiting ? ` ${waiting} still waiting.` : '')
+  );
+
+  for (const item of batch) {
+    const live = liveThumbnailContainer(item.filePath, item.container);
+    const container = live || document.createElement('div');
+    pendingThumbnails.add(item.filePath);
+    enqueueRenderTask({
+      filePath: item.filePath,
+      container,
+      thumbPriority: THUMB_PRIORITY_BACKGROUND,
+      retainDetached: true,
+      slowPass: true,
+      resolve: async (thumbnail) => {
+        pendingThumbnails.delete(item.filePath);
+        if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+          slowThumbnailExhausted.add(item.filePath);
+          return;
+        }
+        slowThumbnailExhausted.delete(item.filePath);
+        await commitDeferredThumbnail(item.filePath, container, thumbnail);
+      },
+      reject: () => {
+        pendingThumbnails.delete(item.filePath);
+      }
+    });
+  }
+  setTimeout(processRenderQueue, 0);
+}
 
 function isBenignThumbnailDropError(error) {
   const msg = (error && error.message) ? String(error.message) : String(error || '');
@@ -1326,6 +1427,9 @@ function dropRenderTask(task, reason) {
     pendingThumbnails.delete(task.filePath);
   }
   // Scan/bulk waiters must not hang forever if a task is discarded.
+  if (task.slowPass && task.filePath) {
+    rememberDeferredThumbnail(task.filePath, task.container);
+  }
   if (typeof task.reject === 'function') {
     try {
       const err = new Error(reason || 'Render task dropped');
@@ -1333,7 +1437,9 @@ function dropRenderTask(task, reason) {
       task.reject(err);
     } catch (_) { /* already settled */ }
   }
-  // Soft-cap / prune often leaves a still-visible cell on 3d.png — re-hydrate next frame.
+  // A dropped slow-pass task stays on the deferred list. Visible cells still on
+  // 3d.png are re-hydrated, except paths already waiting on that list.
+  if (task.slowPass) return;
   scheduleVisibleThumbnailHydrate();
 }
 
@@ -1368,6 +1474,7 @@ function findQueuedThumbnailTask(filePath) {
 function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
   if (window._serverBulkThumbnailJobActive) return false;
   if (!itemEl || !model || !model.filePath) return false;
+  if (thumbnailQueueShouldWait(model.filePath)) return false;
   if (model.hasThumbnail) return false;
   if (hasImageOnlyPreviewMiss(model.filePath)) return false;
 
@@ -1399,6 +1506,7 @@ function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
     thumbPriority: thumbPriority != null ? thumbPriority : 0,
     resolve: async (thumbnail) => {
       pendingThumbnails.delete(model.filePath);
+      if (thumbnailQueueShouldWait(model.filePath)) return;
       if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
         // Image-only extract miss: never re-hydrate (cannot mesh-render).
         if (hasImageOnlyPreviewMiss(model.filePath)) {
@@ -1436,6 +1544,10 @@ function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
       }
     },
     reject: (error) => {
+      if (thumbnailQueueShouldWait(model.filePath)) {
+        pendingThumbnails.delete(model.filePath);
+        return;
+      }
       if (isBenignThumbnailDropError(error)) {
         scheduleVisibleThumbnailHydrate();
         return;
@@ -1543,16 +1655,19 @@ function pruneDisconnectedRenderTasks() {
 function dequeueNextRenderTask() {
   pruneDisconnectedRenderTasks();
   if (renderQueue.length === 0) return null;
-  if (renderQueue.length === 1) return renderQueue.shift();
-  let minIdx = 0;
-  let minP = renderQueue[0].thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
-  for (let i = 1; i < renderQueue.length; i++) {
-    const p = renderQueue[i].thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
+  let minIdx = -1;
+  let minP = Infinity;
+  for (let i = 0; i < renderQueue.length; i++) {
+    const task = renderQueue[i];
+    // One long model at a time, so a second huge mesh cannot stall the slow pass.
+    if (task && task.slowPass && activeSlowThumbRenders >= 1) continue;
+    const p = task?.thumbPriority ?? THUMB_PRIORITY_BACKGROUND;
     if (p < minP) {
       minP = p;
       minIdx = i;
     }
   }
+  if (minIdx < 0) return null;
   return renderQueue.splice(minIdx, 1)[0];
 }
 // When set during scan, any thumbnail completion (scan or grid) increments progress so bar stays in sync with visible renders
@@ -1680,17 +1795,28 @@ function generateCorruptedPlaceholder() {
 }
 
 /** True for failure art that must not be persisted (keeps hasThumbnail=0 so Docker can retry). */
+const FAILURE_PLACEHOLDER_EXTS = ['stl', '3mf', 'obj', 'ply', 'step', 'stp', 'lys', 'lyt', 'igs', 'iges', 'f3d', 'chitubox', 'voxl', 'svg', 'f3z'];
+let failurePlaceholderThumbnails = null;
+
+function getFailurePlaceholderThumbnails() {
+  if (failurePlaceholderThumbnails) return failurePlaceholderThumbnails;
+  const set = new Set();
+  try {
+    const corrupted = generateCorruptedPlaceholder();
+    if (corrupted && corrupted !== '3d.png') set.add(corrupted);
+    for (const ext of FAILURE_PLACEHOLDER_EXTS) {
+      const typed = generateTypedPlaceholder(ext);
+      if (typed && typed !== '3d.png') set.add(typed);
+    }
+  } catch (_) { /* ignore */ }
+  failurePlaceholderThumbnails = set;
+  return set;
+}
+
 function isFailurePlaceholderThumbnail(thumb) {
   if (!thumb || thumb === '3d.png') return true;
   if (typeof thumb !== 'string' || !thumb.startsWith('data:image')) return false;
-  try {
-    if (thumb === generateCorruptedPlaceholder()) return true;
-    // Bulk-gen used to save typed STL/3MF/OBJ placeholders "to prevent future attempts"
-    for (const ext of ['stl', '3mf', 'obj', 'ply', 'step', 'stp', 'lys', 'lyt', 'igs', 'iges', 'f3d', 'chitubox', 'voxl', 'svg', 'f3z']) {
-      if (thumb === generateTypedPlaceholder(ext)) return true;
-    }
-  } catch (_) { /* ignore */ }
-  return false;
+  return getFailurePlaceholderThumbnails().has(thumb);
 }
 
 /**
@@ -1775,32 +1901,140 @@ function syncPrimaryThumbnailCacheFromThumbnailString(filePath, thumbnailString)
   setCachedPrimaryThumbnail(filePath, parts[0] || null);
 }
 
-/** Load only the default/primary thumbnail for a grid cell (never getAllThumbnails). */
-async function fetchPrimaryThumbnailForGrid(filePath) {
-  if (!filePath || !window.electron?.getThumbnail) return null;
-  const cached = getCachedPrimaryThumbnail(filePath);
-  if (cached !== undefined) return cached;
-  try {
-    const thumb = await window.electron.getThumbnail(filePath);
-    const valid =
-      thumb &&
-      thumb !== '3d.png' &&
-      typeof thumb === 'string' &&
-      thumb.startsWith('data:image') &&
-      !isFailurePlaceholderThumbnail(thumb)
-        ? thumb
-        : null;
-    if (valid && typeof isMostlyEmptyThumbnailDataUrl === 'function') {
-      if (await isMostlyEmptyThumbnailDataUrl(valid)) {
-        setCachedPrimaryThumbnail(filePath, null);
-        return null;
-      }
-    }
-    setCachedPrimaryThumbnail(filePath, valid);
-    return valid;
-  } catch (_) {
+const PRIMARY_THUMB_FETCH_LIMIT = 8;
+const pendingPrimaryThumbWaiters = new Map();
+const inflightPrimaryThumbFetches = new Map();
+let primaryThumbFlushScheduled = false;
+let primaryThumbBatchInFlight = false;
+
+function acceptStoredPrimaryThumbnail(thumb) {
+  if (
+    !thumb ||
+    thumb === '3d.png' ||
+    typeof thumb !== 'string' ||
+    !thumb.startsWith('data:image') ||
+    isFailurePlaceholderThumbnail(thumb)
+  ) {
     return null;
   }
+  return thumb;
+}
+
+function lookupBatchedPrimaryThumbnail(thumbs, filePath) {
+  if (!thumbs || typeof thumbs !== 'object') return undefined;
+  if (Object.prototype.hasOwnProperty.call(thumbs, filePath)) return thumbs[filePath];
+  const wanted = normalizeThumbCacheKey(filePath);
+  if (!wanted) return undefined;
+  for (const key of Object.keys(thumbs)) {
+    if (normalizeThumbCacheKey(key) === wanted) return thumbs[key];
+  }
+  return undefined;
+}
+
+function schedulePrimaryThumbnailFlush() {
+  if (primaryThumbFlushScheduled || primaryThumbBatchInFlight) return;
+  primaryThumbFlushScheduled = true;
+  // Yield so tag and detail IPC from this paint are sent before thumbnail bytes.
+  setTimeout(() => {
+    primaryThumbFlushScheduled = false;
+    flushPrimaryThumbnailBatch();
+  }, 0);
+}
+
+async function flushPrimaryThumbnailBatch() {
+  if (primaryThumbBatchInFlight || pendingPrimaryThumbWaiters.size === 0) return;
+  primaryThumbBatchInFlight = true;
+
+  try {
+    const batch = [];
+    for (const [key, entry] of pendingPrimaryThumbWaiters) {
+      batch.push({ key, filePath: entry.filePath, resolvers: entry.resolvers });
+      pendingPrimaryThumbWaiters.delete(key);
+      if (batch.length >= PRIMARY_THUMB_FETCH_LIMIT) break;
+    }
+
+    let thumbs = null;
+    const batchFn = window.electron && window.electron.getThumbnailsPrimaryBatch;
+    if (typeof batchFn === 'function') {
+      try {
+        const result = await batchFn(batch.map((entry) => entry.filePath));
+        thumbs = result && result.thumbs ? result.thumbs : {};
+      } catch (_) {
+        thumbs = null;
+      }
+    }
+
+    if (!thumbs && window.electron?.getThumbnail) {
+      thumbs = {};
+      await Promise.all(batch.map(async (entry) => {
+        try {
+          thumbs[entry.filePath] = await window.electron.getThumbnail(entry.filePath);
+        } catch (_) {
+          thumbs[entry.filePath] = null;
+        }
+      }));
+    }
+
+    for (const entry of batch) {
+      if (!thumbs) {
+        entry.resolvers.forEach((resolve) => resolve(null));
+        continue;
+      }
+      let raw = lookupBatchedPrimaryThumbnail(thumbs, entry.filePath);
+      if (raw === undefined && window.electron?.getThumbnail) {
+        try {
+          raw = await window.electron.getThumbnail(entry.filePath);
+        } catch (_) {
+          entry.resolvers.forEach((resolve) => resolve(null));
+          continue;
+        }
+      }
+      const valid = acceptStoredPrimaryThumbnail(raw);
+      if (valid && valid.length > 200000) {
+        setCachedPrimaryThumbnail(entry.filePath, null);
+        entry.resolvers.forEach((resolve) => resolve(null));
+        continue;
+      }
+      setCachedPrimaryThumbnail(entry.filePath, valid);
+      entry.resolvers.forEach((resolve) => resolve(valid));
+    }
+  } finally {
+    primaryThumbBatchInFlight = false;
+    if (pendingPrimaryThumbWaiters.size > 0) schedulePrimaryThumbnailFlush();
+  }
+}
+
+/**
+ * Load only the default/primary thumbnail for a grid cell (never getAllThumbnails).
+ * Calls from one grid paint are coalesced into small batches so a large library
+ * still only reads visible paths, and tag/detail loads are not stuck behind them.
+ */
+function fetchPrimaryThumbnailForGrid(filePath) {
+  if (!filePath || (!window.electron?.getThumbnail && !window.electron?.getThumbnailsPrimaryBatch)) {
+    return Promise.resolve(null);
+  }
+  const cached = getCachedPrimaryThumbnail(filePath);
+  if (cached !== undefined) return Promise.resolve(cached);
+
+  const key = normalizeThumbCacheKey(filePath) || filePath;
+  const inflight = inflightPrimaryThumbFetches.get(key);
+  if (inflight) return inflight;
+
+  const promise = new Promise((resolve) => {
+    let entry = pendingPrimaryThumbWaiters.get(key);
+    if (!entry) {
+      entry = { filePath, resolvers: [] };
+      pendingPrimaryThumbWaiters.set(key, entry);
+    }
+    entry.resolvers.push(resolve);
+    schedulePrimaryThumbnailFlush();
+  }).finally(() => {
+    if (inflightPrimaryThumbFetches.get(key) === promise) {
+      inflightPrimaryThumbFetches.delete(key);
+    }
+  });
+  inflightPrimaryThumbFetches.set(key, promise);
+  return promise;
 }
 
 /** Only persist real renders — never corrupted/typed failure art. */
@@ -1906,6 +2140,14 @@ async function loadModel(filePath, options = {}) {
   if (filePath && filePath.startsWith('url::')) {
     return null;
   }
+  const signal = options && options.signal;
+  const throwIfAborted = () => {
+    if (signal && signal.aborted) {
+      const err = new Error('Load aborted');
+      err.thumbnailLoadAborted = true;
+      throw err;
+    }
+  };
   const startTime = Date.now();
   console.log(`[DEBUG] loadModel: Start loading ${filePath}`);
   try {
@@ -1922,6 +2164,7 @@ async function loadModel(filePath, options = {}) {
         // Extract to temp file
         actualFilePath = await window.electron.extractModelFromZip(filePath);
         tempFilePath = actualFilePath;
+        throwIfAborted();
         console.log(`[DEBUG] loadModel: Extracted to temp file: ${actualFilePath}`);
       } catch (error) {
         console.error(`[DEBUG] loadModel: Error extracting zip entry: ${error}`);
@@ -2075,8 +2318,9 @@ async function loadModel(filePath, options = {}) {
     const loadBuffer = window.loadLibraryFileBuffer;
     if (typeof loadBuffer === 'function') {
       try {
-        modelArrayBuffer = await loadBuffer(filePath);
+        modelArrayBuffer = await loadBuffer(filePath, { signal });
       } catch (e) {
+        if (signal && signal.aborted) throwIfAborted();
         console.warn('loadModel: loadLibraryFileBuffer failed, worker will use URL:', e);
       }
     } else if (window.electron && typeof window.electron.readModelFile === 'function') {
@@ -2120,6 +2364,8 @@ async function loadModel(filePath, options = {}) {
       }
     }
 
+    throwIfAborted();
+
     return new Promise((resolve, reject) => {
       const reuseWorker = fileExtension === 'step' || fileExtension === 'stp'
         || fileExtension === 'igs' || fileExtension === 'iges';
@@ -2140,6 +2386,21 @@ async function loadModel(filePath, options = {}) {
         }
         fn();
       };
+
+      const abortLoad = () => {
+        finish(() => {
+          const err = new Error('Load aborted');
+          err.thumbnailLoadAborted = true;
+          reject(err);
+        });
+      };
+      if (signal) {
+        if (signal.aborted) {
+          abortLoad();
+          return;
+        }
+        signal.addEventListener('abort', abortLoad, { once: true });
+      }
 
       const handleMessage = function(e) {
         const data = e.data;
@@ -2258,7 +2519,9 @@ async function loadModel(filePath, options = {}) {
       console.log(`[DEBUG] loadModel: Finished loading ${filePath}. Took ${endTime - startTime}ms.`);
     });
   } catch (error) {
-    console.error('loadModel error:', error);
+    if (!isThumbnailLoadTimeout(error)) {
+      console.error('loadModel error:', error);
+    }
     throw error;
   }
 }
@@ -4746,6 +5009,32 @@ function bindDedupPreferredDirectoryControls() {
 }
 window.bindDedupPreferredDirectoryControls = bindDedupPreferredDirectoryControls;
 
+function renderDedupSpaceSaved(stats) {
+  const bytesEl = document.getElementById('dedup-space-saved-bytes');
+  const filesEl = document.getElementById('dedup-space-saved-files');
+  const bytes = Math.max(0, Number(stats?.bytes) || 0);
+  const files = Math.max(0, Number(stats?.files) || 0);
+  if (bytesEl) bytesEl.textContent = formatFileSize(bytes);
+  if (filesEl) {
+    filesEl.textContent = `${files.toLocaleString()} file${files === 1 ? '' : 's'} removed`;
+  }
+}
+
+async function refreshDedupSpaceSaved() {
+  try {
+    const [bytesRaw, filesRaw] = await Promise.all([
+      window.electron?.getSetting?.('dedupSpaceSavedBytes'),
+      window.electron?.getSetting?.('dedupSpaceSavedFiles')
+    ]);
+    renderDedupSpaceSaved({
+      bytes: Number(bytesRaw) || 0,
+      files: Number(filesRaw) || 0
+    });
+  } catch (err) {
+    console.error('Error loading de-dup space saved:', err);
+  }
+}
+
 function updateDedupSelectionCount() {
   const state = window._dedupVirtualState;
   if (!state) return;
@@ -4924,7 +5213,7 @@ function hashGenerationFailedMessage(result) {
 }
 
 function notifyHashGenerationFailures(result) {
-  if (!result || !(result.failed > 0)) return;
+  if (!result || result.cancelled || !(result.failed > 0)) return;
   const failedMsg = hashGenerationFailedMessage(result);
   if (result.failed === result.total) {
     setTimeout(async () => {
@@ -4933,6 +5222,52 @@ function notifyHashGenerationFailures(result) {
   } else {
     console.warn(failedMsg);
   }
+}
+
+function finishHashProgressDialog(progressDialog, { reloadDuplicates = false } = {}) {
+  if (!progressDialog || progressDialog.dataset.closed === '1') return;
+  progressDialog.dataset.closed = '1';
+  try {
+    progressDialog.close();
+  } catch (_) { /* already closed */ }
+  progressDialog.remove();
+  isHashDialogShowing = false;
+  if (reloadDuplicates) {
+    loadDuplicateFiles(true);
+  }
+}
+
+function wireHashProgressCancel(progressDialog, onCancel) {
+  const actions = document.createElement('div');
+  actions.className = 'dialog-buttons hash-progress-actions';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'hash-progress-cancel';
+  button.textContent = 'Cancel';
+  actions.appendChild(button);
+  progressDialog.appendChild(actions);
+
+  const requestCancel = async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    button.textContent = 'Cancelling…';
+    if (typeof onCancel === 'function') onCancel();
+    try {
+      await window.electron.cancelHashGeneration();
+    } catch (error) {
+      console.error('Error cancelling hash generation:', error);
+      button.disabled = false;
+      button.textContent = 'Cancel';
+    }
+  };
+
+  button.addEventListener('click', () => {
+    requestCancel();
+  });
+  progressDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    requestCancel();
+  });
 }
 
 let dedupScopeUiSync = false;
@@ -4995,6 +5330,7 @@ function prepareDedupDialog() {
   window._dedupScope = null;
   bindDedupPreferredDirectoryControls();
   loadDedupPreferredDirectory();
+  refreshDedupSpaceSaved();
   return dialog;
 }
 
@@ -5046,6 +5382,7 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
             </p>
           `;
           document.body.appendChild(progressDialog);
+          wireHashProgressCancel(progressDialog);
           progressDialog.showModal();
           
           // Set up progress listener to attach to existing process
@@ -5067,16 +5404,18 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
               if (progress.processed >= progress.total && !isCompleting) {
                 isCompleting = true;
                 setTimeout(() => {
-                  progressDialog.close();
-                  progressDialog.remove();
-                  isHashDialogShowing = false;
-                  loadDuplicateFiles(true);
+                  finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
                 }, 500);
               }
             }
           };
           
           const completionListener = (result) => {
+            if (result && result.cancelled) {
+              isCompleting = true;
+              finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
+              return;
+            }
             notifyHashGenerationFailures(result);
           };
           
@@ -5111,6 +5450,10 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
             </p>
           `;
           document.body.appendChild(progressDialog);
+          let cancelBeforeStart = false;
+          wireHashProgressCancel(progressDialog, () => {
+            cancelBeforeStart = true;
+          });
           progressDialog.showModal();
           
           // Set up progress listener (works in both normal and server mode via WebSocket)
@@ -5134,15 +5477,8 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
               if (progress.processed >= progress.total && !isCompleting) {
                 isCompleting = true;
                 setTimeout(() => {
-                  progressDialog.close();
-                  progressDialog.remove();
-                  
-                  // Reset flag after hash generation completes
-                  isHashDialogShowing = false;
-                  
-                  // Reload duplicate files now that we have generated hashes
                   // Skip hash check to prevent loop
-                  loadDuplicateFiles(true);
+                  finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
                 }, 500);
               }
             }
@@ -5150,6 +5486,11 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           
           // Set up completion listener to handle success/failure counts
           const completionListener = (result) => {
+            if (result && result.cancelled) {
+              isCompleting = true;
+              finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
+              return;
+            }
             notifyHashGenerationFailures(result);
           };
           
@@ -5159,8 +5500,25 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           // Set up the listener (works in both normal and server mode)
           window.electron.onHashGenerationProgress(progressListener);
           
+          if (cancelBeforeStart) {
+            if (await window.electron.isGeneratingHashes()) {
+              await window.electron.cancelHashGeneration();
+              return;
+            }
+            finishHashProgressDialog(progressDialog);
+            return;
+          }
+
           // Check if hash generation is already running before starting
           const isAlreadyRunning = await window.electron.isGeneratingHashes();
+          if (cancelBeforeStart) {
+            if (isAlreadyRunning) {
+              await window.electron.cancelHashGeneration();
+              return;
+            }
+            finishHashProgressDialog(progressDialog);
+            return;
+          }
           if (isAlreadyRunning) {
             console.log('Hash generation already in progress, attaching to existing process');
             // Don't start a new process, just attach to the existing one
@@ -5177,6 +5535,11 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
           // Start hash generation
           try {
             const result = await window.electron.generateMissingHashes(scopeFilters);
+
+            if (cancelBeforeStart) {
+              await window.electron.cancelHashGeneration();
+              return;
+            }
             
             // Check if it's already running (shouldn't happen after the check above, but handle it)
             if (result && result.alreadyRunning) {
@@ -5190,25 +5553,23 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
             }
             
             // Check if all hashes failed
+            if (result && result.cancelled) {
+              isCheckingForHashes = false;
+              finishHashProgressDialog(progressDialog, { reloadDuplicates: true });
+              return;
+            }
+
             if (result && result.failed === result.total && result.total > 0) {
               // All hashes failed - error dialog will be shown by completion listener
-              // Reset flags
-              isHashDialogShowing = false;
               isCheckingForHashes = false;
-              // Close progress dialog
-              progressDialog.close();
-              progressDialog.remove();
+              finishHashProgressDialog(progressDialog);
               return;
             }
             // If some or all succeeded, the completion listener will handle the dialog closing
           } catch (error) {
             console.error('Error generating hashes:', error);
-            // Reset flags on error
-            isHashDialogShowing = false;
             isCheckingForHashes = false;
-            // Close progress dialog
-            progressDialog.close();
-            progressDialog.remove();
+            finishHashProgressDialog(progressDialog);
             // Only show error if it's a critical error, not just some failed hashes
             await window.electron.showMessage('Error', 'Failed to generate file hashes. Please check file permissions and network connectivity.');
             return;
@@ -8617,6 +8978,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       // Update tags
       document.getElementById('stats-total-tags').textContent = stats.tags.total.toLocaleString();
+      const spaceSavedEl = document.getElementById('stats-space-saved');
+      const spaceSavedFilesEl = document.getElementById('stats-space-saved-files');
+      const spaceSaved = stats.dedupSpaceSaved || {};
+      if (spaceSavedEl) spaceSavedEl.textContent = formatFileSize(Math.max(0, Number(spaceSaved.bytes) || 0));
+      if (spaceSavedFilesEl) {
+        spaceSavedFilesEl.textContent = Math.max(0, Number(spaceSaved.files) || 0).toLocaleString();
+      }
       const mostUsedTagElement = document.getElementById('stats-most-used-tag');
       if (stats.tags.mostUsed) {
         mostUsedTagElement.textContent = `${stats.tags.mostUsed.name} (${stats.tags.mostUsed.count})`;
@@ -16211,7 +16579,36 @@ async function renderFile(file, container, skipThumbnail = false) {
   return fileElement;
 }
 
+/** True once a fast library scroll has been idle long enough to resume thumbnail work. */
+let libraryScrollSettled = true;
+let libraryScrollSettleTimer = null;
+
+function libraryGridScrollBusy() {
+  return !libraryScrollSettled;
+}
+
+/** A fling blocks the main thread if WebGL thumbnail work starts mid-gesture.
+ *  Scroll events then coalesce past the mounted rows and the viewport goes blank. */
+function noteLibraryGridScroll() {
+  libraryScrollSettled = false;
+  const grid = document.querySelector('.file-grid');
+  if (grid) grid.classList.add('is-fast-scroll');
+  if (libraryScrollSettleTimer) clearTimeout(libraryScrollSettleTimer);
+  libraryScrollSettleTimer = setTimeout(() => {
+    libraryScrollSettleTimer = null;
+    libraryScrollSettled = true;
+    const settledGrid = document.querySelector('.file-grid');
+    if (settledGrid) settledGrid.classList.remove('is-fast-scroll');
+    if (settledGrid && typeof settledGrid.renderVisibleItemsFn === 'function') {
+      try { settledGrid.renderVisibleItemsFn(); } catch (_) { /* ignore */ }
+    } else {
+      processRenderQueue();
+    }
+  }, 120);
+}
+
 async function processRenderQueue() {
+  if (libraryGridScrollBusy()) return;
   if (window._serverBulkThumbnailJobActive) {
     // Drain only after the bulk job ends; do not start WebGL work meanwhile.
     return;
@@ -16230,11 +16627,13 @@ async function processRenderQueue() {
       activeRenders++;
 
       if (task.filePath) activeThumbnailRenders.add(task.filePath);
+      if (task.slowPass) activeSlowThumbRenders++;
 
       (async () => {
         try {
           const result = await renderModelToPNG(task.filePath, task.container, task.existingThumbnail, {
-            retainDetached: !!task.retainDetached
+            retainDetached: !!task.retainDetached,
+            slowPass: !!task.slowPass
           });
           task.resolve(result);
           // So progress bar stays in sync with visible thumbnails (scan and grid share the same queue)
@@ -16242,24 +16641,32 @@ async function processRenderQueue() {
             window._scanThumbnailProgress.onComplete();
           }
         } catch (error) {
-          if (!isBenignThumbnailDropError(error)) {
+          if (!isBenignThumbnailDropError(error) && !isThumbnailLoadTimeout(error)) {
             console.error(`Render task failed: ${error.message}`);
           }
           const isWebGLHardFail = /Error creating WebGL context/i.test(error && error.message ? error.message : '');
           if (isWebGLHardFail) {
             // Do not requeue forever when the GPU/WebGL stack cannot create a context.
             task.reject(error);
-          } else if (isBenignThumbnailDropError(error)) {
-            if (typeof task.reject === 'function') task.reject(error);
+          } else if (isBenignThumbnailDropError(error) || isThumbnailLoadTimeout(error)) {
+            if (typeof task.resolve === 'function' && isThumbnailLoadTimeout(error)) {
+              task.resolve(null);
+            } else if (typeof task.reject === 'function') {
+              task.reject(error);
+            }
           } else {
             // Retry once after longer delay
             setTimeout(() => enqueueRenderTask(task), 2000);
           }
         } finally {
           if (task.filePath) activeThumbnailRenders.delete(task.filePath);
+          if (task.slowPass) activeSlowThumbRenders = Math.max(0, activeSlowThumbRenders - 1);
           activeRenders--;
           const pauseMs = isLowPriorityThumbnailTask(task) ? RENDER_DELAY_BACKGROUND : RENDER_DELAY;
           await new Promise(resolve => setTimeout(resolve, pauseMs));
+          if (renderQueue.length === 0 && activeRenders === 0 && activeSlowThumbRenders === 0) {
+            scheduleDeferredThumbnailPass();
+          }
           if (renderQueue.length > 0) {
             setTimeout(processRenderQueue, 0);
           }
@@ -16622,17 +17029,29 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
       throw new Error('loadModel function is not available.');
     }
 
-    // Add a timeout to prevent hanging indefinitely (e.g. on network shares or parsing errors)
-    // Split 3MF (MeshyAI / Bambu Production Extension) can be 100MB+ of XML.
-    const timeoutMs = fileExtension === '3mf' ? 120000 : 30000;
+    // Fast pass stays short so one huge mesh cannot block the rest of the grid.
+    // Timed-out models are rendered later, one at a time, with SLOW_THUMB_TIMEOUT_MS.
+    const timeoutMs = options.slowPass
+      ? SLOW_THUMB_TIMEOUT_MS
+      : (fileExtension === '3mf' ? 120000 : 30000);
+    const abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(`Loading model timed out after ${timeoutMs}ms`)), timeoutMs);
+      timeoutId = setTimeout(() => {
+        if (abortController) abortController.abort();
+        const err = new Error(`Loading model timed out after ${timeoutMs}ms`);
+        err.thumbnailLoadTimeout = true;
+        reject(err);
+      }, timeoutMs);
     });
 
     try {
+      const loadPromise = loadModelFunc(filePath, abortController ? { signal: abortController.signal } : {});
+      // The timeout can win the race while loadModel rejects later. Observe that
+      // rejection so an aborted download does not surface as an unhandled error.
+      loadPromise.catch(() => {});
       model = await Promise.race([
-        loadModelFunc(filePath),
+        loadPromise,
         timeoutPromise
       ]);
     } finally {
@@ -16686,6 +17105,17 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     return imgData;
 
   } catch (error) {
+    if (isThumbnailLoadTimeout(error)) {
+      if (options.slowPass) {
+        slowThumbnailExhausted.add(filePath);
+        deferredSlowThumbnails.delete(filePath);
+        console.warn(`[thumb] Still timed out after the long pass, leaving placeholder: ${filePath}`);
+      } else {
+        rememberDeferredThumbnail(filePath, container);
+        console.log(`[thumb] Timed out, deferring until the queue is idle: ${filePath}`);
+      }
+      return null;
+    }
     console.error('Error rendering model:', error);
     const corruptedDataUrl = generateCorruptedPlaceholder();
     const img = document.createElement('img');
@@ -18242,10 +18672,10 @@ async function parseSourceUrl(url) {
 
 // Fix syntax error in formatFileSize function
 function formatFileSize(bytes) {
-  if (bytes === 0) return '0 B';
+  if (!bytes || bytes <= 0) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
@@ -19272,6 +19702,36 @@ async function showDuplicateFiles(duplicates) {
   setupDedupVirtualList(duplicateGroups, groups);
 }
 
+function applyDedupDeletionProgress(progress) {
+  const state = window._dedupVirtualState;
+  const removed = Array.isArray(progress?.removedPaths) ? progress.removedPaths : [];
+  if (state && removed.length) {
+    const gone = new Set(removed);
+    for (const filePath of removed) state.selectedPaths?.delete(filePath);
+    state.groups = (state.groups || []).reduce((next, group) => {
+      const files = (group.files || []).filter((file) => !gone.has(file.filePath));
+      if (files.length > 1) next.push({ ...group, files });
+      return next;
+    }, []);
+    state.lastStart = -1;
+    state.lastEnd = -1;
+    if (typeof renderDedupVirtualWindow === 'function') renderDedupVirtualWindow(true);
+  }
+  const countEl = document.querySelector('#dedup-dialog .dedup-group-count');
+  if (countEl && progress) {
+    const left = state?.groups?.length;
+    const processed = Number(progress.processed) || 0;
+    const total = Number(progress.total) || 0;
+    countEl.textContent = `Deleting ${processed.toLocaleString()} of ${total.toLocaleString()}` +
+      (left != null ? ` · ${left.toLocaleString()} group${left === 1 ? '' : 's'} left` : '');
+  }
+  const deleteButton = document.querySelector('.dialog-buttons #delete-selected');
+  if (deleteButton && progress) {
+    deleteButton.disabled = true;
+    deleteButton.textContent = `Deleting ${Number(progress.processed || 0).toLocaleString()}/${Number(progress.total || 0).toLocaleString()}...`;
+  }
+}
+
 async function handleDeleteSelected() {
   console.log('Delete button clicked!');
   
@@ -19314,49 +19774,83 @@ async function handleDeleteSelected() {
   const moreCount = selectedFiles.length - maxFilesToShow;
   const moreFiles = moreCount > 0 ? `\n... and ${moreCount} more` : '';
 
-  isDeletingDuplicates = true; // Set flag before showing confirmation
-  let confirm;
+  isDeletingDuplicates = true;
+  const deleteButton = document.querySelector('.dialog-buttons #delete-selected');
+  let unsubscribeDeleteProgress = null;
   try {
-    confirm = await window.electron.showMessage(
+    const confirm = await window.electron.showMessage(
       'Confirm Delete',
       `Are you sure you want to DELETE ${selectedFiles.length} files?\nThis cannot be undone!\n\nFiles:\n${fileList}${moreFiles}`,
       ['Yes', 'No']
     );
+    if (confirm !== 'Yes') return;
+
+    if (deleteButton) {
+      deleteButton.disabled = true;
+      deleteButton.textContent = `Deleting 0/${selectedFiles.length.toLocaleString()}...`;
+    }
+    applyDedupDeletionProgress({ processed: 0, total: selectedFiles.length, removedPaths: [] });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    if (window.electron.onDeleteFilesProgress) {
+      unsubscribeDeleteProgress = window.electron.onDeleteFilesProgress(applyDedupDeletionProgress);
+    }
+    const result = window.electron.deleteFiles
+      ? await window.electron.deleteFiles(selectedFiles, { trackDedupSpace: true })
+      : await deleteDuplicateFilesOneByOne(selectedFiles);
+    if (result?.spaceSaved) renderDedupSpaceSaved(result.spaceSaved);
+
+    selectedModels.clear();
+    // Update the de-dup list before the full library reload so the count drops
+    // instead of sitting still while the grid query runs.
+    await loadDuplicateFiles(true, true);
+    const sortSelect = document.getElementById('sort-select');
+    window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc').then(models => {
+      renderFiles(models);
+    }).catch((err) => console.error('Error refreshing grid after de-dup delete:', err));
+
+    if (result && result.summary) {
+      await window.electron.showMessage(
+        result.failed && result.failed.length ? 'Delete finished' : 'Delete',
+        result.summary
+      );
+    }
+  } catch (error) {
+    console.error('Error deleting files:', error);
+    await window.electron.showMessage('Error', `An error occurred: ${error.message}`);
   } finally {
-    // Reset flag after confirmation dialog closes (whether Yes or No)
+    if (typeof unsubscribeDeleteProgress === 'function') unsubscribeDeleteProgress();
     isDeletingDuplicates = false;
-  }
-
-  if (confirm === 'Yes') {
-    try {
-      for (const filePath of selectedFiles) {
-        console.log('Attempting to delete:', filePath);
-        const success = await window.electron.deleteFile(filePath);
-        console.log('Delete result:', success);
-        if (!success) {
-          await window.electron.showMessage('Error', `Failed to delete file: ${filePath}`);
-        }
-      }
-
-      const dialog = document.getElementById('dedup-dialog');
-      // Keep dialog open: refresh grid in background, then refresh duplicate list in place until user clicks Close
-      selectedModels.clear();
-      
-      // Refresh the main grid (non-blocking feel: don't await before refreshing de-dupe list)
-      const sortSelect = document.getElementById('sort-select');
-      window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc').then(models => {
-        renderFiles(models);
-      });
-
-      // Reload duplicate list in place; skip hash check and do not close/reopen dialog (refreshOnly)
-      await loadDuplicateFiles(true, true);
-
-    } catch (error) {
-      console.error('Error deleting files:', error);
-      await window.electron.showMessage('Error', `An error occurred: ${error.message}`);
+    const btn = document.querySelector('.dialog-buttons #delete-selected');
+    if (btn && btn.textContent.indexOf('Deleting') === 0) {
+      btn.disabled = false;
+      btn.textContent = 'Delete Selected';
     }
   }
-  // Flag is already reset in the try/finally block above
+}
+
+async function deleteDuplicateFilesOneByOne(selectedFiles) {
+  const failed = [];
+  for (const filePath of selectedFiles) {
+    try {
+      const success = await window.electron.deleteFile(filePath);
+      if (!success) {
+        failed.push({ filePath, message: 'Could not delete file' });
+      }
+    } catch (error) {
+      failed.push({ filePath, message: error.message || 'Could not delete file' });
+    }
+  }
+  const deleted = selectedFiles.length - failed.length;
+  return {
+    deleted,
+    alreadyMissing: 0,
+    failed,
+    total: selectedFiles.length,
+    summary: failed.length
+      ? `${failed.length} of ${selectedFiles.length} files could not be deleted.`
+      : ''
+  };
 }
 
 // Create a separate function for rendering filtered results
@@ -19913,9 +20407,7 @@ window.electron.on('hash-generation-complete', async (result) => {
     // Also close any hash progress dialog that might be open
     const progressDialog = document.getElementById('hash-progress-dialog') || document.querySelector('.progress-dialog');
     if (progressDialog) {
-      progressDialog.close();
-      progressDialog.remove();
-      isHashDialogShowing = false;
+      finishHashProgressDialog(progressDialog);
     }
     // Log completion result for debugging
     if (result) {
@@ -20901,16 +21393,25 @@ document.getElementById('delete-selected-button')?.addEventListener('click', asy
   );
   if (confirmation !== 'Yes') return;
 
-  // Delete selected models one-by-one.
-  for (const filePath of selectedModels) {
-    try {
-      await window.electron.deleteFile(filePath);
-    } catch (error) {
-      console.error(`Error deleting file ${filePath}:`, error);
+  let result = null;
+  if (window.electron.deleteFiles) {
+    result = await window.electron.deleteFiles(Array.from(selectedModels));
+  } else {
+    for (const filePath of selectedModels) {
+      try {
+        await window.electron.deleteFile(filePath);
+      } catch (error) {
+        console.error(`Error deleting file ${filePath}:`, error);
+      }
     }
   }
-  // Clear selected models after deletion.
   selectedModels.clear();
+  if (result && result.summary) {
+    await window.electron.showMessage(
+      result.failed && result.failed.length ? 'Delete finished' : 'Delete',
+      result.summary
+    );
+  }
   // Refresh the display (assuming 'refreshModelDisplay' exists).
   await refreshModelDisplay();
 });
@@ -21395,7 +21896,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /**
  * Grid queries omit the full `thumbnail` blob (only hasThumbnail / hasMultipleThumbnails).
- * Cards load the primary thumb via getThumbnail for visible rows only.
+ * Cards load the primary thumb in one batch for the visible rows only.
  * When hasMultipleThumbnails is set, upgrade to carousel via getAllThumbnails
  * (detailed/preview only — never for every grid cell).
  */
@@ -21817,7 +22318,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     thumbnailContainer.appendChild(newStatusEl);
   }
 
-  // Visible-row thumbnail hydrate: primary only (getThumbnail). Virtual scroll already
+  // Visible-row thumbnail hydrate: primary only, batched across this paint. Virtual scroll
   // limits createModelItem to on-screen (+buffer) rows — never fetch all thumbs for the grid
   // unless hasMultipleThumbnails (then upgrade to carousel in detailed/preview).
   if (model.filePath && !currentThumbnail && hasThumbnailFlag) {
@@ -21838,6 +22339,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       // Flagged as having a thumb but empty/clipped — queue a re-render (detailed/preview).
       if (view !== 'detailed' && view !== 'preview') return;
       if (hasImageOnlyPreviewMiss(model.filePath)) return;
+      if (thumbnailQueueShouldWait(model.filePath)) return;
       if (pendingThumbnails.has(model.filePath)) return;
       pendingThumbnails.add(model.filePath);
       enqueueRenderTask({
@@ -21847,6 +22349,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
         resolve: async (thumbnail) => {
           pendingThumbnails.delete(model.filePath);
           if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+            if (thumbnailQueueShouldWait(model.filePath)) return;
             if (hasImageOnlyPreviewMiss(model.filePath) && img.isConnected) {
               img.src = thumbnail && thumbnail !== '3d.png'
                 ? thumbnail
@@ -22119,6 +22622,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       // keep placeholder; job will fill thumbs server-side
     } else if (hasImageOnlyPreviewMiss(model.filePath)) {
       img.src = generateTypedPlaceholder(extensionFromModelPath(model.filePath));
+    } else if (thumbnailQueueShouldWait(model.filePath)) {
+      // Fast pass deferred this file, or the long pass already gave up.
     } else if (!pendingThumbnails.has(model.filePath)) {
       pendingThumbnails.add(model.filePath);
 
@@ -22133,6 +22638,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
           // Never persist failure placeholders — leave retryable (hasThumbnail=0 via 3d.png).
           // Image-only extract misses cannot mesh-render — stop the hydrate loop.
           if (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail)) {
+            if (thumbnailQueueShouldWait(model.filePath)) return;
             if (hasImageOnlyPreviewMiss(model.filePath)) {
               const imgEl = thumbnailContainer.querySelector('img');
               if (imgEl) {
@@ -24617,6 +25123,71 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   return item;
 }
 
+/** Cheap stand-in so a fast flick always has cards on screen. Replaced once scrolling settles. */
+function createVirtualGridShell(model, view, rowHeight) {
+  const item = document.createElement('div');
+  item.className = `file-item file-item-${view} virtual-grid-shell`;
+  item.dataset.shell = '1';
+  const filePath = model && model.filePath ? model.filePath : '';
+  item.dataset.filepath = filePath;
+  if (filePath) item.setAttribute('data-filepath', filePath);
+  if (filePath && isInSelectedModels(filePath)) item.classList.add('selected');
+
+  const thumb = document.createElement('div');
+  thumb.className = 'thumbnail-container';
+  if (view === 'list') {
+    thumb.style.width = '48px';
+    thumb.style.height = '48px';
+    thumb.style.margin = '0';
+    thumb.style.flex = '0 0 48px';
+  } else if (view === 'preview') {
+    thumb.style.height = '100%';
+    thumb.style.margin = '0';
+  }
+  const cached = getCachedPrimaryThumbnail(filePath);
+  let src = cached && String(cached).startsWith('data:image') ? String(cached) : '';
+  if (!src && model && model.thumbnail && String(model.thumbnail).startsWith('data:image')) {
+    src = String(model.thumbnail).split('::')[0];
+  }
+  if (src) {
+    const img = document.createElement('img');
+    img.alt = '';
+    img.draggable = false;
+    img.src = src;
+    thumb.appendChild(img);
+  }
+  item.appendChild(thumb);
+
+  if (view !== 'preview') {
+    const info = document.createElement('div');
+    info.className = 'file-info';
+    const name = document.createElement('div');
+    name.className = 'file-name';
+    name.textContent = (model && (model.fileName || filePath.split(/[/\\]/).pop())) || '';
+    info.appendChild(name);
+    item.appendChild(info);
+  }
+
+  if (rowHeight) {
+    item.style.height = rowHeight + 'px';
+    item.style.boxSizing = 'border-box';
+    item.style.overflow = 'hidden';
+  }
+  if (view === 'list') {
+    item.style.display = 'flex';
+    item.style.alignItems = 'center';
+    item.style.gap = '10px';
+  }
+
+  item.addEventListener('click', (e) => {
+    if (wasTileTapSuppressed(item, e)) return;
+    if (e.ctrlKey || e.metaKey) handleFileClick(e, filePath);
+    else toggleModelSelection(item, filePath);
+  });
+  addContextMenuHandler(item, filePath);
+  return item;
+}
+
 // Virtual grid function—renders only items visible in the scroll window.
 function renderVirtualGrid(models) {
   const container = document.querySelector('.file-grid');
@@ -24718,6 +25289,7 @@ function renderVirtualGrid(models) {
     });
     clearFileItemPathIndex();
     container.innerHTML = ''; // clear existing content
+    container._virtualCover = null;
     container._virtualLayoutCache = null;
     container._virtualLayoutItemsByKey = new Map();
     // Drop queued hydrate jobs whose cells were just destroyed (in-flight jobs keep pending).
@@ -24790,6 +25362,7 @@ function renderVirtualGrid(models) {
   container.style.position = 'relative';
   container.style.overflowY = 'auto';
   container.style.overflowX = 'hidden';
+  container.style.overflowAnchor = 'none';
   container.style.display = 'block'; // Override CSS grid display for virtual scrolling
   
   // Calculate proper height based on viewport, accounting for any headers/footers
@@ -24896,6 +25469,7 @@ function renderVirtualGrid(models) {
     spacer.style.position = 'relative';
     container.appendChild(spacer);
   }
+  spacer.style.overflowAnchor = 'none';
   // Calculate total height including variable-height group rows.
   spacer.style.height = initialLayout.totalHeight + 'px';
   
@@ -24915,6 +25489,7 @@ function renderVirtualGrid(models) {
     virtualContent.style.pointerEvents = 'none'; // Let clicks pass through to items
     container.appendChild(virtualContent);
   }
+  virtualContent.style.overflowAnchor = 'none';
   bindFileItemPathIndex(virtualContent);
   
   // Adjust virtual content top position for list view header (always update, not just on creation)
@@ -24929,22 +25504,22 @@ function renderVirtualGrid(models) {
     container.resizeObserver.disconnect();
   }
 
-  // Throttle render function to prevent excessive re-renders
-  let renderTimeout = null;
-  let isRendering = false;
+  // Paint on the scroll frame. A second rAF, or bailing while a paint was
+  // already running, left the viewport on rows that had scrolled away.
+  let painting = false;
+  let rerenderQueued = false;
   
   // Function to (re)render only the visible rows (plus a small buffer)
   function renderVisibleItems() {
     if (container._gridRenderGeneration !== gridGeneration) return;
     if (currentGridView !== gridViewForThisRender) return;
 
-    // Cancel any pending render
-    if (renderTimeout) {
-      cancelAnimationFrame(renderTimeout);
+    if (painting) {
+      rerenderQueued = true;
+      return;
     }
-    
-    // Skip if already rendering
-    if (isRendering) return;
+    painting = true;
+    rerenderQueued = false;
     
     // Use currentModels from container to ensure we have the latest data
     // This is critical for showing updated metadata after edits
@@ -24963,19 +25538,31 @@ function renderVirtualGrid(models) {
       currentVerticalGap = 20;
       currentHorizontalGap = 20;
     }
+
+    const overscanAnchor = Number.isFinite(container._lastVirtualScrollTop)
+      ? container._lastVirtualScrollTop
+      : container.scrollTop;
     
-    // Use requestAnimationFrame for smooth updates
-    renderTimeout = requestAnimationFrame(() => {
-      if (container._gridRenderGeneration !== gridGeneration || currentGridView !== gridViewForThisRender) {
-        isRendering = false;
-        renderTimeout = null;
-        return;
-      }
-      isRendering = true;
-      
-      try {
-        let scrollTop = container.scrollTop;
+    try {
+      // Removing every mounted row can make the browser clamp or anchor
+      // scrollTop. Repaint against the position that wins before the frame composites.
+      let passes = 0;
+      do {
+        const scrollTopAtPassStart = container.scrollTop;
+        let scrollTop = scrollTopAtPassStart;
         const containerHeight = container.clientHeight;
+        const cover = container._virtualCover;
+        if (
+          cover &&
+          cover.gen === gridGeneration &&
+          libraryGridScrollBusy() &&
+          scrollTop >= cover.top &&
+          scrollTop + containerHeight <= cover.bottom
+        ) {
+          passes++;
+          if (Math.abs(container.scrollTop - scrollTopAtPassStart) <= 1) break;
+          continue;
+        }
 
         // Recalculate columns in case of resize
         const currentContainerWidth = container.clientWidth;
@@ -25067,11 +25654,26 @@ function renderVirtualGrid(models) {
           }
         }
 
-        const groupH =
-          currentGridView === 'preview' ? effectivePreviewTilePx : getParentModelGroupHeight(currentGridView);
-        const bufferPx = Math.max(layoutRowHeight, groupH) * 2;
+        const maxScroll = Math.max(0, layout.totalHeight - containerHeight);
+        if (scrollTop > maxScroll) {
+          scrollTop = maxScroll;
+          if (container.scrollTop > maxScroll) container.scrollTop = maxScroll;
+        }
+        const rowStride = Math.max(1, layoutRowHeight + currentVerticalGap);
+        const viewportSpan = Math.max(containerHeight, rowStride);
+        const travel = scrollTop - overscanAnchor;
+        const aheadPx = viewportSpan * (travel >= 0 ? 2 : 1);
+        const behindPx = viewportSpan * (travel < 0 ? 2 : 1);
         const visibleRows = layout.rows.filter(row => {
-          return row.bottom >= scrollTop - bufferPx && row.top <= scrollTop + containerHeight + bufferPx;
+          return row.bottom >= scrollTop - behindPx && row.top <= scrollTop + containerHeight + aheadPx;
+        });
+        const viewportRowList = layout.rows.filter(row => {
+          return row.bottom >= scrollTop && row.top <= scrollTop + containerHeight;
+        });
+        const viewportKeySet = new Set();
+        viewportRowList.forEach((row) => {
+          if (row.type === 'group') viewportKeySet.add(row.key);
+          else (row.records || []).forEach((record) => viewportKeySet.add(record.key));
         });
 
         // Track which items should be visible
@@ -25085,22 +25687,18 @@ function renderVirtualGrid(models) {
         });
 
         const layoutItemsByKey = container._virtualLayoutItemsByKey || (container._virtualLayoutItemsByKey = new Map());
-
-        // Remove items that are no longer visible
-        const existingItems = Array.from(virtualContent.children);
-        existingItems.forEach(item => {
-          const layoutKey = item.dataset.layoutKey;
-          if (!layoutKey || !visibleKeys.has(layoutKey)) {
-            if (layoutKey && layoutItemsByKey.get(layoutKey) === item) {
-              layoutItemsByKey.delete(layoutKey);
-            }
-            item.remove();
+        const allowShellNow = libraryGridScrollBusy();
+        const rowIsMounted = (row) => {
+          const keys = row.type === 'group' ? [row.key] : (row.records || []).map((record) => record.key);
+          if (!keys.length) return true;
+          for (let i = 0; i < keys.length; i++) {
+            const el = layoutItemsByKey.get(keys[i]);
+            if (!el || el.parentNode !== virtualContent) return false;
+            if (!allowShellNow && el.dataset.shell === '1') return false;
           }
-        });
-        // Drop queued thumbnail work for cells that scrolled off-screen so
-        // Docker/server mode does not keep extracting 3MF images / WebGL-rendering them.
-        pruneDisconnectedRenderTasks();
-        refreshThumbnailQueuePriorities();
+          return true;
+        };
+        const bufferCovered = visibleRows.length > 0 && visibleRows.every(rowIsMounted);
 
         const findExistingLayoutItem = (layoutKey) => {
           const existing = layoutItemsByKey.get(layoutKey);
@@ -25183,8 +25781,15 @@ function renderVirtualGrid(models) {
           }
         };
 
-        // Add or update visible items
-        for (const row of visibleRows) {
+        const viewportRowSet = new Set(viewportRowList);
+        const rowQueue = bufferCovered
+          ? []
+          : viewportRowList.concat(visibleRows.filter((row) => !viewportRowSet.has(row)));
+        let createdThisPass = 0;
+        const createBudget = libraryGridScrollBusy() ? 64 : 8;
+
+        // Viewport rows first, then the lookahead, so the screen fills before extra cards.
+        for (const row of rowQueue) {
           if (row.type === 'group') {
             const existingGroup = findExistingLayoutItem(row.key);
             if (existingGroup &&
@@ -25252,7 +25857,16 @@ function renderVirtualGrid(models) {
               col
             );
 
-            if (existingItem) {
+            if (existingItem && existingItem.dataset.shell === '1') {
+              const inViewport = viewportKeySet.has(record.key);
+              if (libraryGridScrollBusy() || (!inViewport && createdThisPass >= createBudget)) {
+                if (!libraryGridScrollBusy()) rerenderQueued = true;
+                positionModelItem(existingItem, row, col);
+                continue;
+              }
+              if (layoutItemsByKey.get(record.key) === existingItem) layoutItemsByKey.delete(record.key);
+              existingItem.remove();
+            } else if (existingItem) {
               const existingFilePath = existingItem.getAttribute('data-filepath');
               const normalizedExistingPath = normalizePathForComparison(existingFilePath);
               const normalizedExpectedPath = normalizePathForComparison(model.filePath);
@@ -25268,14 +25882,18 @@ function renderVirtualGrid(models) {
                 }
                 // On-screen placeholders must re-enter the queue after prune/soft-cap;
                 // recycled DOM nodes skip createModelItem so nothing else would enqueue them.
-                if (thumbPriority < THUMB_PRIORITY_LOW_TIER_MIN) {
-                  ensureVisibleThumbnailQueued(existingItem, model, thumbPriority);
-                } else {
-                  const queued = findQueuedThumbnailTask(model.filePath);
-                  if (queued) {
-                    const tc = existingItem.querySelector('.thumbnail-container');
-                    if (tc) queued.container = tc;
-                    queued.thumbPriority = thumbPriority;
+                // Skip this while a fling is in progress — it starts WebGL work and the
+                // settle timer paints again once scrolling stops.
+                if (!libraryGridScrollBusy()) {
+                  if (thumbPriority < THUMB_PRIORITY_LOW_TIER_MIN) {
+                    ensureVisibleThumbnailQueued(existingItem, model, thumbPriority);
+                  } else {
+                    const queued = findQueuedThumbnailTask(model.filePath);
+                    if (queued) {
+                      const tc = existingItem.querySelector('.thumbnail-container');
+                      if (tc) queued.container = tc;
+                      queued.thumbPriority = thumbPriority;
+                    }
                   }
                 }
                 continue;
@@ -25286,8 +25904,14 @@ function renderVirtualGrid(models) {
               existingItem.remove();
             }
 
-            // Create new item — prioritize thumbnails for cells in/near the viewport
-            const item = createModelItem(model, currentGridView, thumbPriority);
+            if (!viewportKeySet.has(record.key) && createdThisPass >= createBudget) {
+              rerenderQueued = true;
+              continue;
+            }
+            createdThisPass++;
+            const item = libraryGridScrollBusy()
+              ? createVirtualGridShell(model, currentGridView, layoutRowHeight)
+              : createModelItem(model, currentGridView, thumbPriority);
             item.dataset.index = String(recordIndex);
             registerLayoutItem(record.key, item);
             if (isInSelectedModels(model.filePath)) {
@@ -25304,25 +25928,56 @@ function renderVirtualGrid(models) {
             virtualContent.appendChild(item);
           }
         }
-      } finally {
-        isRendering = false;
-        renderTimeout = null;
+        const viewportReady = viewportRowList.length === 0 || viewportRowList.every(rowIsMounted);
+        if (viewportReady) {
+          const stale = Array.from(virtualContent.children);
+          for (let i = 0; i < stale.length; i++) {
+            const node = stale[i];
+            const layoutKey = node.dataset.layoutKey;
+            if (!layoutKey || !visibleKeys.has(layoutKey)) {
+              if (layoutKey && layoutItemsByKey.get(layoutKey) === node) layoutItemsByKey.delete(layoutKey);
+              node.remove();
+            }
+          }
+          if (visibleRows.length && visibleRows.every(rowIsMounted)) {
+            container._virtualCover = {
+              gen: gridGeneration,
+              top: visibleRows[0].top,
+              bottom: visibleRows[visibleRows.length - 1].bottom
+            };
+          } else {
+            container._virtualCover = null;
+          }
+          if (!libraryGridScrollBusy()) pruneDisconnectedRenderTasks();
+        } else {
+          container._virtualCover = null;
+          rerenderQueued = true;
+        }
+        passes++;
+        if (Math.abs(container.scrollTop - scrollTopAtPassStart) <= 1) break;
+      } while (passes < 3);
+    } finally {
+      painting = false;
+      container._lastVirtualScrollTop = container.scrollTop;
+      if (rerenderQueued) {
+        requestAnimationFrame(() => {
+          if (container._gridRenderGeneration === gridGeneration && currentGridView === gridViewForThisRender) {
+            renderVisibleItems();
+          }
+        });
+      }
+      if (!libraryGridScrollBusy()) {
         refreshThumbnailQueuePriorities();
         processRenderQueue();
       }
-    });
-
-
+    }
   }
 
-  // Throttled scroll handler to prevent excessive renders
-  let scrollTimeout = null;
+  // Scroll updates the mounted window directly. A deferred frame let the
+  // viewport move past the cards that were still on screen.
   function throttledScrollHandler() {
-    if (scrollTimeout) return;
-    scrollTimeout = requestAnimationFrame(() => {
-      renderVisibleItems();
-      scrollTimeout = null;
-    });
+    noteLibraryGridScroll();
+    renderVisibleItems();
   }
   
   // Attach the scroll event handler to update visible items on scroll
@@ -25333,6 +25988,7 @@ function renderVirtualGrid(models) {
   // Throttled resize handler
   let resizeTimeout = null;
   function throttledResizeHandler() {
+    container._virtualCover = null;
     if (resizeTimeout) {
       cancelAnimationFrame(resizeTimeout);
     }

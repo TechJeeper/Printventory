@@ -13,6 +13,7 @@ const FILES_PER_GROUP = Math.max(2, Number(process.argv[3] || 2));
 const DB_PATH = process.argv[4]
   ? path.resolve(process.argv[4])
   : path.join(__dirname, '..', 'test-dedup-stress', 'printventory.db');
+const ROOT = process.argv[5] ? path.resolve(process.argv[5]) : '';
 
 function removeSqliteFiles(dbPath) {
   for (const suffix of ['', '-wal', '-shm']) {
@@ -105,7 +106,13 @@ app.whenReady().then(() => {
         const size = 1000 + (g % 5000);
         for (let f = 0; f < FILES_PER_GROUP; f++) {
           const fileName = `dup_${g}_${f}.stl`;
-          const filePath = `C:\\stress\\dedup\\group_${g}\\${fileName}`;
+          const filePath = ROOT
+            ? path.join(ROOT, `group_${g}`, fileName)
+            : `C:\\stress\\dedup\\group_${g}\\${fileName}`;
+          if (ROOT) {
+            fs.mkdirSync(path.dirname(filePath), { recursive: true });
+            if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, 'solid stress');
+          }
           insert.run(filePath, fileName, hash, size);
         }
       }

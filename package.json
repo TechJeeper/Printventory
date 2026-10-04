@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.17",
+  "version": "2.2.18",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -35,7 +35,7 @@
     "test:inbox": "node extension-inbox.test.js",
     "test:extractors": "node chrome-extension/extractors.test.js",
     "test:mcp": "node mcp-server.test.js",
-    "test:thumb-worker": "node missing-thumbnails-query.test.js && node flatten-3mf-stl.test.js && node thumbnail-worker.test.js",
+    "test:thumb-worker": "node missing-thumbnails-query.test.js && node primary-thumbnails-query.test.js && node flatten-3mf-stl.test.js && node thumbnail-worker.test.js",
     "test:slicer-detect": "node slicer-detect.test.js",
     "test:slicer-launch": "node slicer-launch.test.js",
     "test:slicer-protocol": "node slicer-protocol.test.js",
@@ -46,11 +46,13 @@
     "test:ai-rate-limit": "node ai-rate-limit.test.js",
     "test:notes": "node notes-markdown.test.js",
     "test:dedup-preferred": "node dedup-preferred.test.js",
+    "test:delete-model-file": "node delete-model-file.test.js",
     "test:organize-library": "node organize-library.test.js",
     "test:scheduled-backup": "node scheduled-backup.test.js",
     "test:support-logs": "node support-logs.test.js",
     "test:full": "playwright test full-app-e2e.spec.js",
-    "test:dedup-stress": "node tests/dedup-stress-test.js"
+    "test:dedup-stress": "node tests/dedup-stress-test.js",
+    "test:dedup-delete-load": "node tests/dedup-delete-load-test.js"
   },
   "author": "TechJeeper Designs",
   "license": "MIT",
@@ -209,6 +211,8 @@
       "scan-worker.js",
       "scheduled-backup.js",
       "missing-thumbnails-query.js",
+      "primary-thumbnails-query.js",
+      "delete-model-file.js",
       "scan-skip.js",
       "slicer-launch.js",
       "slicer-protocol.js",

@@ -20,6 +20,11 @@ const {
   SERVER_NAME: MCP_SERVER_NAME
 } = require('./mcp-server');
 const { buildMissingThumbnailQuery } = require('./missing-thumbnails-query');
+const {
+  buildPrimaryThumbnailsQuery,
+  normalizePrimaryThumbnail,
+  PRIMARY_THUMBNAIL_BATCH_LIMIT
+} = require('./primary-thumbnails-query');
 const serverTls = require('./server-tls');
 const extensionInbox = require('./extension-inbox');
 const { detectInstalledSlicers } = require('./slicer-detect');
@@ -36,6 +41,7 @@ const {
 const { clampFolderLevels } = require('./library-context');
 const { applyFolderTagsToModels: applyFolderTagsInDb, shouldAutoTagNewScanFiles } = require('./folder-tags');
 const { repairModelTags } = require('./db-repair');
+const { unlinkLibraryFile, buildDeleteSummary } = require('./delete-model-file');
 const scheduledBackup = require('./scheduled-backup');
 const {
   planOrganize,
@@ -2588,6 +2594,8 @@ async function restartHttpServer() {
 let db;
 let mainWindow;
 let isGeneratingHashes = false; // Track hash generation state
+let hashGenerationCancelRequested = false;
+let activeHashAbortController = null;
 let isHashGenerationScheduled = false;
 let isCompressingThumbnailsBackground = false;
 const THUMBNAIL_MIGRATION_DELAY_MS = Math.max(
@@ -2739,6 +2747,66 @@ function loadThumbnailForModel(filePath) {
     console.error(`Failed to load thumbnail for ${filePath}:`, error);
     return null;
   }
+}
+
+/**
+ * Keep a single IPC payload small. Huge data URLs in one result crash Electron
+ * (dangling raw_ptr while V8 copies the message). Oversized primaries are omitted
+ * so the grid can load that one file through the normal compressed path.
+ */
+function shrinkPrimaryThumbnailForIpc(value) {
+  const normalized = normalizePrimaryThumbnail(value);
+  if (!normalized) return null;
+  if (normalized.length <= THUMBNAIL_MAX_STORED_CHARS) return normalized;
+  try {
+    const compressed = compressDataUrl(normalized);
+    if (
+      compressed &&
+      compressed.startsWith('data:image') &&
+      compressed.length <= THUMBNAIL_MAX_STORED_CHARS
+    ) {
+      return compressed;
+    }
+  } catch (_) { /* omit */ }
+  return undefined;
+}
+
+/**
+ * Grid hydrate: one indexed lookup per chunk, primary image only.
+ * Callers must pass only visible paths — this never scans the library.
+ */
+function loadPrimaryThumbnailsBatch(filePaths) {
+  const thumbs = {};
+  if (!db || !Array.isArray(filePaths) || filePaths.length === 0) return { thumbs };
+
+  const maxPaths = PRIMARY_THUMBNAIL_BATCH_LIMIT * 3;
+  const capped = filePaths.slice(0, maxPaths);
+  for (let i = 0; i < capped.length; i += PRIMARY_THUMBNAIL_BATCH_LIMIT) {
+    const chunk = capped.slice(i, i + PRIMARY_THUMBNAIL_BATCH_LIMIT);
+    const { sql, params, paths } = buildPrimaryThumbnailsQuery(chunk, THUMBNAIL_MAX_STORED_CHARS);
+    if (!sql) continue;
+    try {
+      const rows = db.prepare(sql).all(...params);
+      const byPath = new Map();
+      for (const row of rows) {
+        byPath.set(row.filePath, row);
+      }
+      for (const filePath of paths) {
+        const row = byPath.get(filePath);
+        if (!row) {
+          thumbs[filePath] = null;
+          continue;
+        }
+        if (row.oversized) continue;
+        const safe = shrinkPrimaryThumbnailForIpc(row.primaryThumb);
+        if (safe === undefined) continue;
+        thumbs[filePath] = safe;
+      }
+    } catch (error) {
+      console.error('Failed to load primary thumbnail batch:', error);
+    }
+  }
+  return { thumbs };
 }
 
 const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, print_status, print_count, last_printed_at, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind';
@@ -4439,8 +4507,26 @@ ipcMain.handle('open-file-dialog', async () => {
   }
 });
 
-// Update the calculateFileHash function to be more robust and handle zip entries
-async function calculateFileHash(filePath) {
+function hashAbortError() {
+  const error = new Error('Hash generation cancelled');
+  error.code = 'ABORT_ERR';
+  error.name = 'AbortError';
+  return error;
+}
+
+function isHashAbortError(error) {
+  return !!(error && (error.code === 'ABORT_ERR' || error.name === 'AbortError'));
+}
+
+// Update the calculateFileHash function to be more robust and handle zip entries.
+// options.signal aborts an in-progress read when hash generation is cancelled.
+async function calculateFileHash(filePath, options = null) {
+  const signal = options && options.signal;
+
+  if (signal?.aborted) {
+    throw hashAbortError();
+  }
+
   // Check if this is a zip entry
   const pathInfo = parseZipPath(filePath);
 
@@ -4449,10 +4535,12 @@ async function calculateFileHash(filePath) {
     try {
       const zipPath = resolveReadableDiskPath(pathInfo.zipPath) || pathInfo.zipPath;
       const entryData = await extractZipEntryBuffer(zipPath, pathInfo.entryPath);
+      if (signal?.aborted) throw hashAbortError();
       const fileHash = crypto.createHash('md5').update(entryData).digest('hex');
       debugLog(`Generated hash for ${filePath}: ${fileHash}`);
       return fileHash;
     } catch (error) {
+      if (isHashAbortError(error)) throw error;
       console.error(`Error extracting zip entry for hashing: ${filePath}`, error);
       throw new Error(`Failed to extract zip entry for hashing: ${error.message}`);
     }
@@ -4461,31 +4549,61 @@ async function calculateFileHash(filePath) {
   const actualFilePath = resolveReadableDiskPath(filePath) || filePath;
 
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(hashAbortError());
+      return;
+    }
+
     const hash = crypto.createHash('md5');
     const stream = fs.createReadStream(actualFilePath);
+    let settled = false;
+
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      settle(value);
+    };
+
+    const onAbort = () => {
+      stream.destroy();
+      finish(reject, hashAbortError());
+    };
+
+    if (signal) signal.addEventListener('abort', onAbort);
 
     stream.on('error', err => {
+      if (isHashAbortError(err) || signal?.aborted) {
+        finish(reject, hashAbortError());
+        return;
+      }
       console.error(`Error reading file for hashing: ${actualFilePath}`, err);
-      reject(err);
+      finish(reject, err);
     });
 
     stream.on('data', chunk => {
+      if (signal?.aborted) return;
       try {
         hash.update(chunk);
       } catch (err) {
         console.error(`Error updating hash for file: ${actualFilePath}`, err);
-        reject(err);
+        stream.destroy();
+        finish(reject, err);
       }
     });
 
     stream.on('end', () => {
+      if (signal?.aborted) {
+        finish(reject, hashAbortError());
+        return;
+      }
       try {
         const fileHash = hash.digest('hex');
         debugLog(`Generated hash for ${filePath}: ${fileHash}`);
-        resolve(fileHash);
+        finish(resolve, fileHash);
       } catch (err) {
         console.error(`Error generating final hash for file: ${filePath}`, err);
-        reject(err);
+        finish(reject, err);
       }
     });
   });
@@ -7142,6 +7260,11 @@ ipcMain.handle('open-path', async (event, path) => {
 });
 
 ipcMain.handle('show-message', async (event, title, message, buttons = ['OK']) => {
+  if (process.env.PRINTVENTORY_SUPPRESS_DIALOGS === '1') {
+    if (!global.__testDialogs) global.__testDialogs = [];
+    global.__testDialogs.push({ title: title || '', message: message || '', buttons });
+    return buttons[0];
+  }
   let parent = null;
   try {
     parent = event && event.sender ? BrowserWindow.fromWebContents(event.sender) : null;
@@ -8195,6 +8318,24 @@ ipcMain.handle('delete-file', async (event, filePath) => {
   }
 });
 
+ipcMain.handle('delete-files', async (event, filePaths, options) => {
+  const sendProgress = (payload) => {
+    try {
+      if (isServerMode && global.broadcastEvent) {
+        global.broadcastEvent('delete-files-progress', payload);
+      } else if (event && event.sender) {
+        event.sender.send('delete-files-progress', payload);
+      }
+    } catch (_) { /* progress is best-effort */ }
+  };
+  // Caller refreshes its own view. A full grid reload here blocks the de-dup
+  // list from updating until that query finishes, so a large delete looks stuck.
+  return deleteLibraryFiles(Array.isArray(filePaths) ? filePaths : [], {
+    onProgress: sendProgress,
+    trackDedupSpace: !!(options && options.trackDedupSpace)
+  });
+});
+
 // Update the fetch-thangs-page handler
 ipcMain.handle('fetch-thangs-page', async (event, url) => {
   try {
@@ -8364,6 +8505,7 @@ ipcMain.handle('get-stats', async () => {
     return {
       totalModels: totalCount,
       totalBytes,
+      dedupSpaceSaved: readDedupSpaceSaved(),
       fileTypes: {
         stl: stlStats ? stlStats.count : 0,
         threeMf: threeMfStats ? threeMfStats.count : 0,
@@ -10016,25 +10158,23 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
           confirmed = confirm.response === 0;
         }
         if (confirmed) {
-          for (const fp of filePaths) {
-            try {
-              const success = await deleteFile(fp);
-              if (!success && !isServerMode) {
-                await dialog.showMessageBox({
-                  type: 'error',
-                  title: 'Error',
-                  message: `Failed to delete file: ${fp}`
-                });
-              }
-            } catch (error) {
-              console.error('Error deleting file:', error);
-              if (!isServerMode) {
-                await dialog.showMessageBox({
-                  type: 'error',
-                  title: 'Error',
-                  message: `An error occurred: ${error.message}`
-                });
-              }
+          try {
+            const result = await deleteLibraryFiles(filePaths);
+            if (result.summary && !isServerMode) {
+              await dialog.showMessageBox({
+                type: result.failed.length ? 'warning' : 'info',
+                title: 'Delete finished',
+                message: result.summary
+              });
+            }
+          } catch (error) {
+            console.error('Error deleting files:', error);
+            if (!isServerMode) {
+              await dialog.showMessageBox({
+                type: 'error',
+                title: 'Error',
+                message: `An error occurred: ${error.message}`
+              });
             }
           }
           if (isServerMode && global.broadcastEvent) {
@@ -10254,32 +10394,179 @@ ipcHandlerRegistry.set('execute-context-menu-action', executeContextMenuActionHa
 
 // Update the deleteFile function
 async function deleteFile(filePath) {
+  const result = await deleteLibraryFiles([filePath]);
+  return result.failed.length === 0;
+}
+
+/**
+ * Delete many library files in one pass.
+ * A file that is already gone (ENOENT) is still removed from the library.
+ * Failures are collected; callers show one summary instead of a dialog per file.
+ */
+const DEDUP_SPACE_SAVED_BYTES_KEY = 'dedupSpaceSavedBytes';
+const DEDUP_SPACE_SAVED_FILES_KEY = 'dedupSpaceSavedFiles';
+
+function readSettingNonNegativeInt(key) {
   try {
-    if (!isUrlModel(filePath)) {
-      // Delete the actual file
-      await fs.promises.unlink(filePath);
-    }
-    
-    // Use a transaction to handle database operations
-    db.transaction(() => {
-      // Get the model ID first
-      const model = db.prepare('SELECT id FROM models WHERE filePath = ?').get(filePath);
-      if (model) {
-        deleteModelJunctionRows(model.id);
-        db.prepare('DELETE FROM models WHERE id = ?').run(model.id);
-      }
-    })();
-    
-    return true;
-  } catch (err) {
-    console.error("Error deleting file:", err);
-    console.error("Error details:", {
-      message: err.message,
-      code: err.code,
-      path: filePath
-    });
-    return false;
+    const raw = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  } catch (error) {
+    console.error('Error reading setting', key, error);
+    return 0;
   }
+}
+
+function readDedupSpaceSaved() {
+  return {
+    bytes: readSettingNonNegativeInt(DEDUP_SPACE_SAVED_BYTES_KEY),
+    files: readSettingNonNegativeInt(DEDUP_SPACE_SAVED_FILES_KEY)
+  };
+}
+
+function addDedupSpaceSaved(bytes, files) {
+  const current = readDedupSpaceSaved();
+  const next = {
+    bytes: current.bytes + Math.max(0, Math.floor(Number(bytes) || 0)),
+    files: current.files + Math.max(0, Math.floor(Number(files) || 0))
+  };
+  const upsert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+  db.transaction(() => {
+    upsert.run(DEDUP_SPACE_SAVED_BYTES_KEY, String(next.bytes));
+    upsert.run(DEDUP_SPACE_SAVED_FILES_KEY, String(next.files));
+  })();
+  return next;
+}
+
+/** One size per path. Duplicate DB rows for the same path must not be summed. */
+function lookupModelBytesByPath(filePaths) {
+  const sizes = new Map();
+  const batchSize = 400;
+  for (let i = 0; i < filePaths.length; i += batchSize) {
+    const batch = filePaths.slice(i, i + batchSize);
+    if (!batch.length) continue;
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT filePath, MAX(size) as size FROM models WHERE filePath IN (${placeholders}) GROUP BY filePath`
+    ).all(...batch);
+    for (const row of rows) {
+      const size = Number(row.size);
+      sizes.set(row.filePath, Number.isFinite(size) && size > 0 ? Math.floor(size) : 0);
+    }
+  }
+  return sizes;
+}
+
+async function deleteLibraryFiles(filePaths, options = {}) {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const trackDedupSpace = options.trackDedupSpace === true;
+  const unique = [];
+  const seen = new Set();
+  const failed = [];
+  for (const raw of filePaths || []) {
+    if (typeof raw !== 'string' || !raw) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    try {
+      validateUncPath(raw, 'delete-files');
+    } catch (err) {
+      failed.push({
+        filePath: raw,
+        code: 'EINVAL',
+        message: err.message || 'Path is not allowed'
+      });
+      continue;
+    }
+    unique.push(raw);
+  }
+
+  let deleted = 0;
+  let alreadyMissing = 0;
+  let loggedFailures = 0;
+  let freedBytes = 0;
+  let freedCount = 0;
+  const CHUNK = 40;
+  let processed = 0;
+
+  const report = (removedPaths) => {
+    if (!onProgress) return;
+    onProgress({
+      processed,
+      total: unique.length,
+      deleted,
+      alreadyMissing,
+      failed: failed.length,
+      removedPaths
+    });
+  };
+
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const slice = unique.slice(i, i + CHUNK);
+    const removedNow = [];
+    const deletedNow = [];
+    await Promise.all(slice.map(async (filePath) => {
+      try {
+        const disk = await unlinkLibraryFile(filePath);
+        if (!disk.ok) {
+          failed.push({ filePath, code: disk.code, message: disk.message });
+          if (loggedFailures < 3) {
+            loggedFailures += 1;
+            console.error('Error deleting file:', filePath, disk.code, disk.message);
+          }
+          return;
+        }
+        removedNow.push(filePath);
+        if (disk.missing) alreadyMissing += 1;
+        else {
+          deleted += 1;
+          deletedNow.push(filePath);
+        }
+      } catch (err) {
+        failed.push({
+          filePath,
+          code: err.code || 'EIO',
+          message: err.message || 'Could not delete file'
+        });
+        if (loggedFailures < 3) {
+          loggedFailures += 1;
+          console.error('Error deleting file:', filePath, err);
+        }
+      }
+    }));
+    if (trackDedupSpace && deletedNow.length) {
+      const sizes = lookupModelBytesByPath(deletedNow);
+      for (const filePath of deletedNow) {
+        freedCount += 1;
+        freedBytes += sizes.get(filePath) || 0;
+      }
+    }
+    if (removedNow.length) {
+      deleteModelsByFilePaths(removedNow);
+    }
+    processed += slice.length;
+    report(removedNow);
+  }
+
+  if (failed.length > loggedFailures) {
+    console.error(`Delete finished with ${failed.length} failures (${failed.length - loggedFailures} more not logged individually)`);
+  }
+
+  const result = {
+    deleted,
+    alreadyMissing,
+    failed,
+    total: seen.size
+  };
+  if (trackDedupSpace) {
+    result.freedBytes = freedBytes;
+    result.freedCount = freedCount;
+    result.spaceSaved = freedCount > 0
+      ? addDedupSpaceSaved(freedBytes, freedCount)
+      : readDedupSpaceSaved();
+  }
+  result.summary = buildDeleteSummary(result);
+  return result;
 }
 
 // Update the handler name to match the convention
@@ -12306,9 +12593,15 @@ async function calculateMissingHashesInternal(event, filters = null) {
   if (isGeneratingHashes) {
     return { alreadyRunning: true, calculated: 0, failed: 0, total: 0 };
   }
+  const abortController = new AbortController();
+  activeHashAbortController = abortController;
+  let cancelled = false;
   try {
     // Set hash generation state
     isGeneratingHashes = true;
+    if (hashGenerationCancelRequested) {
+      abortController.abort();
+    }
 
     // Missing hashes, plus SHA256 (64 hex chars) that can be regenerated as MD5.
     // SHA256 still groups duplicates correctly — conversion is best-effort.
@@ -12350,21 +12643,37 @@ async function calculateMissingHashesInternal(event, filters = null) {
     // Keep Docker/server concurrency low — high parallelism + thumb renders saturates UNC/CIFS.
     const concurrencyLimit = isServerMode ? 4 : 50;
     
+    const hashSignal = abortController.signal;
+
     // Helper function to calculate hash with retry and timeout
     const calculateFileHashWithRetry = async (filePath, maxRetries = 2) => {
       let lastError;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (hashSignal.aborted) throw hashAbortError();
         try {
           // Add timeout for file operations (especially important for network files in Docker)
           const timeoutMs = isServerMode ? 300000 : 60000; // 5 min for server mode, 1 min for normal
-          const hashPromise = calculateFileHash(filePath);
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error(`Hash calculation timeout after ${timeoutMs}ms`)), timeoutMs)
+          const hashPromise = calculateFileHash(filePath, { signal: hashSignal });
+          // Observe the hash promise so a late abort/timeout rejection is not unhandled.
+          const observedHash = hashPromise.then(
+            (value) => ({ ok: true, value }),
+            (error) => ({ ok: false, error })
           );
-          
-          return await Promise.race([hashPromise, timeoutPromise]);
+          let timeoutId;
+          const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error(`Hash calculation timeout after ${timeoutMs}ms`)), timeoutMs);
+          });
+
+          try {
+            const winner = await Promise.race([observedHash, timeoutPromise]);
+            if (!winner.ok) throw winner.error;
+            return winner.value;
+          } finally {
+            clearTimeout(timeoutId);
+          }
         } catch (error) {
           lastError = error;
+          if (isHashAbortError(error) || hashSignal.aborted) throw hashAbortError();
           // Only retry on certain errors (network issues, timeouts, temporary file system errors)
           const isRetryableError = error.code === 'ETIMEDOUT' || 
                                    error.code === 'ENOENT' || 
@@ -12377,7 +12686,19 @@ async function calculateMissingHashesInternal(event, filters = null) {
           if (attempt < maxRetries && isRetryableError) {
             console.warn(`Retry ${attempt + 1}/${maxRetries} for ${filePath}: ${error.message}`);
             // Exponential backoff: 1s, 2s, 4s
-            await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+            await new Promise((resolve) => {
+              const timer = setTimeout(resolve, Math.pow(2, attempt) * 1000);
+              if (hashSignal.aborted) {
+                clearTimeout(timer);
+                resolve();
+                return;
+              }
+              hashSignal.addEventListener('abort', () => {
+                clearTimeout(timer);
+                resolve();
+              }, { once: true });
+            });
+            if (hashSignal.aborted) throw hashAbortError();
             continue;
           }
           throw error;
@@ -12387,6 +12708,7 @@ async function calculateMissingHashesInternal(event, filters = null) {
     };
 
     const processFile = async (model) => {
+      if (hashSignal.aborted) return;
       try {
         const readablePath = resolveReadableModelPath(model.filePath);
         const existingHash = model.hash && String(model.hash).trim();
@@ -12399,6 +12721,7 @@ async function calculateMissingHashesInternal(event, filters = null) {
             successCount++;
             console.log(`Hash calculated for: ${model.filePath} (${successCount} succeeded, ${failedCount} failed, ${processedCount + 1}/${modelsWithMissingHashes.length} total)`);
           } catch (hashError) {
+            if (isHashAbortError(hashError) || hashSignal.aborted) return;
             if (hasSha256) {
               skippedCount++;
               console.warn(`Keeping existing SHA256 hash; MD5 regeneration failed for ${model.filePath}: ${hashError.message}`);
@@ -12416,10 +12739,12 @@ async function calculateMissingHashesInternal(event, filters = null) {
           failedCount++;
           if (!firstError) firstError = `File not found: ${model.filePath}`;
         }
-        
+
+        if (hashSignal.aborted) return;
         processedCount++;
         emitHashGenerationProgress(event, progressPayload());
       } catch (error) {
+        if (isHashAbortError(error) || hashSignal.aborted) return;
         console.error(`Unexpected error processing ${model.filePath}:`, error);
         failedCount++;
         if (!firstError) firstError = error.message || String(error);
@@ -12428,22 +12753,31 @@ async function calculateMissingHashesInternal(event, filters = null) {
       }
     };
 
-    // Process files in parallel batches
+    // Process files in parallel batches. A cancel stops new batches and aborts in-flight reads.
     for (let i = 0; i < modelsWithMissingHashes.length; i += concurrencyLimit) {
+      if (hashSignal.aborted) {
+        cancelled = true;
+        break;
+      }
       const batch = modelsWithMissingHashes.slice(i, i + concurrencyLimit);
       await Promise.all(batch.map(processFile));
     }
+    if (hashSignal.aborted) cancelled = true;
 
-    isGeneratingHashes = false;
-
-    console.log(`Hash generation complete: ${successCount} succeeded, ${failedCount} failed, ${skippedCount} skipped out of ${modelsWithMissingHashes.length} total`);
+    if (cancelled) {
+      console.log(`Hash generation cancelled: ${successCount} succeeded, ${failedCount} failed, ${skippedCount} skipped, ${processedCount}/${modelsWithMissingHashes.length} processed`);
+    } else {
+      console.log(`Hash generation complete: ${successCount} succeeded, ${failedCount} failed, ${skippedCount} skipped out of ${modelsWithMissingHashes.length} total`);
+    }
 
     const completePayload = {
       success: successCount,
       failed: failedCount,
       skipped: skippedCount,
       total: modelsWithMissingHashes.length,
-      firstError: firstError || undefined
+      processed: processedCount,
+      cancelled,
+      firstError: cancelled ? undefined : (firstError || undefined)
     };
     emitHashGenerationComplete(event, completePayload);
 
@@ -12452,12 +12786,27 @@ async function calculateMissingHashesInternal(event, filters = null) {
       failed: failedCount,
       skipped: skippedCount,
       total: modelsWithMissingHashes.length,
-      firstError: firstError || undefined
+      cancelled,
+      firstError: cancelled ? undefined : (firstError || undefined)
     };
   } catch (error) {
-    isGeneratingHashes = false;
+    if (isHashAbortError(error) || abortController.signal.aborted) {
+      emitHashGenerationComplete(event, {
+        success: 0,
+        failed: 0,
+        total: 0,
+        cancelled: true
+      });
+      return { calculated: 0, failed: 0, total: 0, cancelled: true };
+    }
     console.error('Error calculating missing hashes:', error);
     throw error;
+  } finally {
+    isGeneratingHashes = false;
+    hashGenerationCancelRequested = false;
+    if (activeHashAbortController === abortController) {
+      activeHashAbortController = null;
+    }
   }
 }
 
@@ -12483,6 +12832,7 @@ const generateMissingHashesHandler = async (event, filters = null) => {
   // Don't hold the WebSocket IPC slot for the entire hash run (default 30s timeout
   // made Docker/server Dedup report that every hash failed).
   calculateMissingHashesInternal(event, filters).catch((error) => {
+    if (isHashAbortError(error)) return;
     isGeneratingHashes = false;
     console.error('Error calculating missing hashes:', error);
     emitHashGenerationComplete(event, {
@@ -12514,6 +12864,17 @@ ipcMain.handle('is-generating-hashes', async () => {
   return isGeneratingHashes;
 });
 
+ipcMain.handle('cancel-hash-generation', async () => {
+  if (!isGeneratingHashes && !activeHashAbortController) {
+    return { cancelling: false };
+  }
+  hashGenerationCancelRequested = true;
+  if (activeHashAbortController) {
+    activeHashAbortController.abort();
+  }
+  return { cancelling: true };
+});
+
 // Add IPC handler to calculate and save hash for a single file
 ipcMain.handle('calculate-file-hash', async (event, filePath) => {
   if (isUrlModel(filePath)) return '';
@@ -12537,6 +12898,15 @@ ipcMain.handle('getThumbnail', async (event, filePath) => {
   } catch (error) {
     console.error('Error getting thumbnail:', error);
     return null;
+  }
+});
+
+ipcMain.handle('get-thumbnails-primary-batch', async (_event, filePaths) => {
+  try {
+    return loadPrimaryThumbnailsBatch(filePaths);
+  } catch (error) {
+    console.error('Error getting primary thumbnail batch:', error);
+    return { thumbs: {} };
   }
 });
 

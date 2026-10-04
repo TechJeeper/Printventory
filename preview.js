@@ -213,7 +213,7 @@ console.log('[Preview] preview.js script loaded');
     return s.startsWith('<!') || s.startsWith('<html') || s.startsWith('{') || s.startsWith('file not');
   }
 
-  async function loadLibraryFileBuffer(filePath) {
+  async function loadLibraryFileBuffer(filePath, options = {}) {
     const tryIpc = async () => {
       if (window.electron && typeof window.electron.readModelFile === 'function') {
         return toArrayBuffer(await window.electron.readModelFile(filePath));
@@ -239,13 +239,14 @@ console.log('[Preview] preview.js script loaded');
       }
     }
 
+    const signal = options && options.signal;
     const origin = window.location && window.location.origin;
     const httpOrigin = origin && origin !== 'null' && /^https?:/i.test(origin) ? origin : null;
     if (httpOrigin && filePath) {
       const encoded = encodeURIComponent(filePath);
       const url = `${httpOrigin}${isZipEntry ? '/api/download/' : '/api/file/'}${encoded}`;
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, signal ? { signal } : undefined);
         if (response.ok) {
           const httpBuf = await response.arrayBuffer();
           if (httpBuf && httpBuf.byteLength > 0 && !looksLikeHtmlOrJson(httpBuf)) {
@@ -253,8 +254,21 @@ console.log('[Preview] preview.js script loaded');
           }
         }
       } catch (error) {
+        const aborted = (signal && signal.aborted) || (error && error.name === 'AbortError');
+        if (aborted) {
+          const err = new Error('Load aborted');
+          err.thumbnailLoadAborted = true;
+          err.name = 'AbortError';
+          throw err;
+        }
         console.warn('[Preview] HTTP model fetch failed, falling back to IPC:', error);
       }
+    }
+
+    if (signal && signal.aborted) {
+      const err = new Error('Load aborted');
+      err.thumbnailLoadAborted = true;
+      throw err;
     }
 
     const ipcBuf = await tryIpc();

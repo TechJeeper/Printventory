@@ -849,6 +849,11 @@
             De-duplication is performed using the file hash to ensure that only identical files are considered duplicates.
             Limit the scan to your current library filters so a large collection does not have to be processed all at once.
           </p>
+          <div id="dedup-space-saved" class="dedup-space-saved" title="Disk space freed by deleting duplicate copies in Printventory">
+            <span class="dedup-space-saved-label">Space saved</span>
+            <strong id="dedup-space-saved-bytes">0 B</strong>
+            <span id="dedup-space-saved-files" class="dedup-space-saved-files">0 files removed</span>
+          </div>
           <div id="dedup-scope-container" class="dedup-scope">
             <span class="dedup-scope-label">Scope</span>
             <label class="dedup-scope-option" for="dedup-scope-current">
@@ -2144,6 +2149,16 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                   <span class="stats-label-small">Most Used:</span>
                   <span class="stats-value-small" id="stats-most-used-tag">-</span>
                 </div>
+              </div>
+
+              <div class="stats-section stats-space-saved">
+                <h3>Space Saved</h3>
+                <div class="stats-value-large" id="stats-space-saved">0 B</div>
+                <div class="stats-row-compact">
+                  <span class="stats-label-small">Duplicate files removed:</span>
+                  <span class="stats-value-small" id="stats-space-saved-files">0</span>
+                </div>
+                <p class="stats-description">Disk space freed by deleting duplicate copies in De-Dup.</p>
               </div>
             </div>
           </div>

@@ -1256,6 +1256,8 @@ main {
   background-size: 60px 52px;
   background-position: 0 0;
   position: relative;
+  /* Recycled virtual-grid rows must not move the scroll offset. */
+  overflow-anchor: none;
 }
 
 /* Theme-aware hexagon pattern */
@@ -4165,6 +4167,35 @@ dialog:not([open]) {
   color: #9ad;
 }
 
+.dedup-space-saved {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+  margin: 0.55rem 0 0.15rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(74, 158, 255, 0.08);
+  border: 1px solid rgba(74, 158, 255, 0.22);
+  font-size: 0.9rem;
+}
+
+.dedup-space-saved-label {
+  font-weight: 600;
+  color: #9ad;
+}
+
+#dedup-space-saved-bytes {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.dedup-space-saved-files {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 0.85rem;
+}
+
 .dedup-preferred {
   margin: 0.55rem 0 0.15rem;
 }
@@ -6533,6 +6564,11 @@ dialog:not([open]) {
   gap: 4px;
 }
 
+.stats-space-saved .stats-value-large {
+  text-align: left;
+  margin: 2px 0 6px;
+}
+
 .stats-row {
   display: flex;
   justify-content: space-between;
@@ -8064,6 +8100,16 @@ dialog:not([open]) {
   background-position: 0 0;
 }
 
+.file-grid.is-fast-scroll .file-item {
+  transition: none;
+}
+
+.file-grid .file-item.virtual-grid-shell {
+  transition: none;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
 .file-grid .file-item {
   position: relative;
   background: var(--surface, #1e1e2e);
@@ -8576,6 +8622,16 @@ dialog:not([open]) {
   padding: 8px;
   border-radius: 4px;
   margin-top: 0;
+}
+
+.progress-dialog .hash-progress-actions {
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.progress-dialog .hash-progress-cancel:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* Make the hash-generation-warning stand out */
