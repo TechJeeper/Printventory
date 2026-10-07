@@ -7253,6 +7253,30 @@ async function loadAndShowFileTypeSettings() {
   dialog.showModal();
 }
 
+async function sendServerModeSupportLogs() {
+  const confirmed = confirm('This will send the Printventory logs to the support team on Discord.\n\nConsole, app, and server logs will be zipped and uploaded.');
+  if (!confirmed) return;
+  try {
+    const clientConsole = typeof window.__printventoryClientConsole === 'function'
+      ? window.__printventoryClientConsole()
+      : '';
+    if (typeof window.electron.sendSupportLogs !== 'function') {
+      alert('Could not send Printventory logs.\n\nSend Logs is not available in this session.');
+      return;
+    }
+    const result = await window.electron.sendSupportLogs({ clientConsole });
+    if (result && result.sent) {
+      alert('Printventory logs were sent to the support team on Discord.');
+      return;
+    }
+    const detail = result && result.error ? `\n\n${result.error}` : '';
+    alert(`Could not send Printventory logs.${detail}`);
+  } catch (error) {
+    console.error('Send Logs failed:', error);
+    alert(`Could not send Printventory logs.\n\n${error && error.message ? error.message : error}`);
+  }
+}
+
 // Function to create server mode menu bar
 async function createServerMenuBar() {
   const serverMode = await window.electron.isServerMode().catch(() => false);
@@ -7511,7 +7535,8 @@ async function createServerMenuBar() {
     }},
     { label: 'Server Mode Info', action: () => {
       window.electron.openExternal('https://github.com/TechJeeper/Printventory?tab=readme-ov-file#server-mode');
-    }}
+    }},
+    { label: 'Send Logs', action: () => { sendServerModeSupportLogs(); } }
   ]);
   
   menuBar.appendChild(toolsMenu);

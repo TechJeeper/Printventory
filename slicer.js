@@ -2,6 +2,7 @@
 // This module handles the Slicer Settings panel in the renderer process
 
 let slicerEntries = [];
+let slicerSettingsLoadId = 0;
 
 function normalizeSlicerPathKey(slicerPath) {
   return String(slicerPath || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -291,33 +292,34 @@ async function openSlicerSettings() {
   
   const slicerList = dialog.querySelector('#slicer-list');
   if (!slicerList) return;
-  
-  // Prevent form submission
-  const form = dialog.querySelector('form');
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
-  });
-  
+
+  // Menu IPC and the in-page Settings menu can both open this dialog.
+  // Ignore a slower in-flight load so it cannot append a second copy.
+  const loadId = ++slicerSettingsLoadId;
   slicerList.innerHTML = '';
   setSlicerDetectStatus('');
-  
-  // Load existing slicers
-  window.electron.getSlicers()
-    .then(async (slicers) => {
-      if (slicers && slicers.length > 0) {
-        for (const slicer of slicers) {
-          const entry = await createSlicerEntry(slicer);
-          if (entry) {
-            slicerList.appendChild(entry);
-          }
-        }
-      }
-    })
-    .catch(err => {
-      console.error('Error loading slicers:', err);
-    });
-  
-  dialog.showModal();
+
+  let slicers = [];
+  try {
+    slicers = await window.electron.getSlicers();
+  } catch (err) {
+    console.error('Error loading slicers:', err);
+  }
+  if (loadId !== slicerSettingsLoadId) return;
+
+  slicerList.innerHTML = '';
+  if (slicers && slicers.length > 0) {
+    for (const slicer of slicers) {
+      if (loadId !== slicerSettingsLoadId) return;
+      const entry = await createSlicerEntry(slicer);
+      if (loadId !== slicerSettingsLoadId) return;
+      if (entry) slicerList.appendChild(entry);
+    }
+  }
+
+  if (!dialog.open) {
+    try { dialog.showModal(); } catch (err) { console.error('Error opening slicer settings:', err); }
+  }
 }
 
 async function autoDetectSlicers() {
@@ -494,10 +496,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('slicer-dialog').close();
   });
   
-  // Listen for the event from main process
-  window.electron.onOpenSlicerSettings(() => {
-    openSlicerSettings();
-  });
-
+  // renderer.js already routes open-slicer-settings to window.openSlicerSettings.
+  // A second listener here runs the load twice and duplicates every row.
   window.openSlicerSettings = openSlicerSettings;
 });

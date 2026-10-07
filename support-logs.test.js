@@ -61,6 +61,7 @@ async function main() {
     const appLog = await zip.file('app.log').async('string');
     const consoleLog = await zip.file('console.log').async('string');
     const system = await zip.file('system.txt').async('string');
+    assert.ok(zip.file('server.log'));
     assert.ok(appLog.includes('starting'));
     assert.strictEqual(appLog.includes('sk-abcdefghijklmnopqrstuvwxyz'), false);
     assert.ok(appLog.includes('[api-key]'));
@@ -137,6 +138,29 @@ async function main() {
     assert.ok(posted.fileBuffer.slice(0, 2).toString() === 'PK');
     assert.strictEqual(dialogs[0].message, 'This will send the Printventory logs to the support team on Discord.');
     assert.strictEqual(dialogs[1].message, 'Printventory logs were sent to the support team on Discord.');
+    assert.ok(dialogs[0].detail.includes('server logs'));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  await test('zip includes browser console and server stdout', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'printventory-logs-'));
+    const capture = createCapture();
+    capture.beginCapture();
+    process.stdout.write('docker-server-marker\n');
+    capture.openLogDirectory(dir);
+    const zipBuffer = await capture.createLogsZip('3.0.0', undefined, {
+      clientConsole: 'page error sk-abcdefghijklmnopqrstuvwxyz'
+    });
+    const JSZip = require('jszip');
+    const zip = await JSZip.loadAsync(zipBuffer);
+    const serverLog = await zip.file('server.log').async('string');
+    const consoleLog = await zip.file('console.log').async('string');
+    const appLog = await zip.file('app.log').async('string');
+    assert.ok(serverLog.includes('docker-server-marker'));
+    assert.ok(consoleLog.includes('page error'));
+    assert.ok(consoleLog.includes('browser console'));
+    assert.strictEqual(consoleLog.includes('sk-abcdefghijklmnopqrstuvwxyz'), false);
+    assert.ok(appLog.includes('log session') || appLog.length > 0);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 }

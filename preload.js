@@ -57,6 +57,7 @@ ipcRenderer.on = function(channel, ...args) {
 
 contextBridge.exposeInMainWorld('electron', {
   isServerMode: () => ipcRenderer.invoke('is-server-mode'),
+  sendSupportLogs: (payload) => ipcRenderer.invoke('send-support-logs', payload || {}),
   // True only in the Electron hidden window while --server is active (not browser clients).
   isServerThumbnailWorker: () => checkIsServerMode(),
   startServerThumbnailJob: (options) => ipcRenderer.invoke('start-server-thumbnail-job', options || {}),

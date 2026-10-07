@@ -4,6 +4,11 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.21] - 2026-10-06
+
+- Send Logs works in server mode. The browser console is included, and the uploaded zip stays redacted
+- Slicer Settings lists each slicer once when the dialog is opened from the menu
+
 ## [2.2.20] - 2026-10-04
 
 - Resizing the window scales preview tiles and detailed columns, including in Docker

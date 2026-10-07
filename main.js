@@ -3857,6 +3857,12 @@ function sendSupportLogsFromMenu() {
   });
 }
 
+ipcMain.handle('send-support-logs', async (_event, payload = {}) => {
+  const raw = payload && typeof payload.clientConsole === 'string' ? payload.clientConsole : '';
+  const clientConsole = raw.length > 1024 * 1024 ? raw.slice(-1024 * 1024) : raw;
+  return supportLogs.sendCapturedLogs({ version, clientConsole });
+});
+
 async function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({

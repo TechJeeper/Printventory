@@ -164,65 +164,84 @@ function postDiscordWebhook(webhookUrl, { filename, fileBuffer, content }) {
 function createCapture(options = {}) {
   const state = {
     installed: false,
+    streamsHooked: false,
     appBuffer: [],
     consoleBuffer: [],
+    serverBuffer: [],
     appBufferBytes: 0,
     consoleBufferBytes: 0,
+    serverBufferBytes: 0,
     directory: null,
     appPath: null,
     consolePath: null,
+    serverPath: null,
     appStream: null,
     consoleStream: null,
+    serverStream: null,
     appBytes: 0,
     consoleBytes: 0,
+    serverBytes: 0,
     appRotating: false,
     consoleRotating: false,
+    serverRotating: false,
     appPending: null,
     consolePending: null,
+    serverPending: null,
     sending: false,
     attached: new WeakSet()
   };
 
+  function fields(kind) {
+    return {
+      buffer: `${kind}Buffer`,
+      bufferBytes: `${kind}BufferBytes`,
+      path: `${kind}Path`,
+      stream: `${kind}Stream`,
+      bytes: `${kind}Bytes`,
+      rotating: `${kind}Rotating`,
+      pending: `${kind}Pending`,
+      rotateGaveUp: `${kind}RotateGaveUp`
+    };
+  }
+
   function pushBuffer(kind, line) {
-    const lines = kind === 'app' ? state.appBuffer : state.consoleBuffer;
-    const key = kind === 'app' ? 'appBufferBytes' : 'consoleBufferBytes';
+    const f = fields(kind);
+    const lines = state[f.buffer];
     lines.push(line);
-    state[key] += line.length;
-    while (state[key] > MAX_BUFFER_BYTES && lines.length > 1) {
-      state[key] -= lines.shift().length;
+    state[f.bufferBytes] += line.length;
+    while (state[f.bufferBytes] > MAX_BUFFER_BYTES && lines.length > 1) {
+      state[f.bufferBytes] -= lines.shift().length;
     }
   }
 
   function writeLine(kind, line) {
+    const f = fields(kind);
     if (!state.directory) {
       pushBuffer(kind, line);
       return;
     }
-    if (kind === 'app' ? state.appRotating : state.consoleRotating) {
-      const pending = kind === 'app' ? state.appPending : state.consolePending;
+    if (state[f.rotating]) {
+      const pending = state[f.pending];
       if (pending) pending.push(line);
       return;
     }
-    const stream = kind === 'app' ? state.appStream : state.consoleStream;
+    const stream = state[f.stream];
     if (!stream) return;
     stream.write(line);
-    if (kind === 'app') state.appBytes += line.length;
-    else state.consoleBytes += line.length;
-    const gaveUp = kind === 'app' ? state.appRotateGaveUp : state.consoleRotateGaveUp;
-    if (!gaveUp && (kind === 'app' ? state.appBytes : state.consoleBytes) >= MAX_FILE_BYTES) {
+    state[f.bytes] += line.length;
+    if (!state[f.rotateGaveUp] && state[f.bytes] >= MAX_FILE_BYTES) {
       rotate(kind);
     }
   }
 
   function rotate(kind) {
-    const rotatingKey = kind === 'app' ? 'appRotating' : 'consoleRotating';
-    if (state[rotatingKey]) return;
-    state[rotatingKey] = true;
-    const currentPath = kind === 'app' ? state.appPath : state.consolePath;
-    const stream = kind === 'app' ? state.appStream : state.consoleStream;
+    const f = fields(kind);
+    if (state[f.rotating]) return;
+    state[f.rotating] = true;
+    const currentPath = state[f.path];
+    const stream = state[f.stream];
     const pending = [];
-    if (kind === 'app') state.appPending = pending;
-    else state.consolePending = pending;
+    state[f.pending] = pending;
     const finish = () => {
       const previous = `${currentPath}.1`;
       let renamed = !fs.existsSync(currentPath);
@@ -239,23 +258,14 @@ function createCapture(options = {}) {
       if (!renamed) {
         try { nextBytes = fs.statSync(currentPath).size; } catch (_) { nextBytes = MAX_FILE_BYTES; }
       }
-      if (kind === 'app') {
-        state.appStream = next;
-        state.appBytes = nextBytes;
-        state.appRotating = false;
-        state.appPending = null;
-        if (!renamed) state.appRotateGaveUp = true;
-      } else {
-        state.consoleStream = next;
-        state.consoleBytes = nextBytes;
-        state.consoleRotating = false;
-        state.consolePending = null;
-        if (!renamed) state.consoleRotateGaveUp = true;
-      }
+      state[f.stream] = next;
+      state[f.bytes] = nextBytes;
+      state[f.rotating] = false;
+      state[f.pending] = null;
+      if (!renamed) state[f.rotateGaveUp] = true;
       for (const queued of pending) {
         next.write(queued);
-        if (kind === 'app') state.appBytes += queued.length;
-        else state.consoleBytes += queued.length;
+        state[f.bytes] += queued.length;
       }
     };
     if (stream) stream.end(finish);
@@ -275,6 +285,33 @@ function createCapture(options = {}) {
     writeLine('console', formatLogLine(level || 'info', `${message || ''}${suffix}`));
   }
 
+  function chunkToText(chunk) {
+    if (typeof chunk === 'string') return chunk;
+    if (Buffer.isBuffer(chunk)) return chunk.toString('utf8');
+    if (chunk instanceof Uint8Array) return Buffer.from(chunk).toString('utf8');
+    return String(chunk ?? '');
+  }
+
+  function hookOutputStream(stream, level) {
+    if (!stream || stream.__printventoryLogHook || typeof stream.write !== 'function') return;
+    const original = stream.write;
+    let capturing = false;
+    stream.write = function (chunk, encoding, callback) {
+      if (!capturing) {
+        capturing = true;
+        try {
+          chunkToText(chunk).split(/\r?\n/).forEach((line) => {
+            if (!line) return;
+            writeLine('server', formatLogLine(level, line));
+          });
+        } catch (_) { /* keep logging */ }
+        capturing = false;
+      }
+      return original.apply(stream, arguments);
+    };
+    stream.__printventoryLogHook = true;
+  }
+
   function beginCapture() {
     if (state.installed) return;
     state.installed = true;
@@ -286,42 +323,47 @@ function createCapture(options = {}) {
         return original.apply(console, args);
       };
     }
+    if (!state.streamsHooked) {
+      state.streamsHooked = true;
+      try {
+        hookOutputStream(process.stdout, 'stdout');
+        hookOutputStream(process.stderr, 'stderr');
+      } catch (_) { /* stdout may be read-only */ }
+    }
+  }
+
+  function openKindStream(kind, fileName) {
+    const f = fields(kind);
+    state[f.path] = path.join(state.directory, fileName);
+    const stream = fs.createWriteStream(state[f.path], { flags: 'a' });
+    stream.on('error', () => {});
+    state[f.stream] = stream;
+    try {
+      state[f.bytes] = fs.statSync(state[f.path]).size;
+    } catch (_) {
+      state[f.bytes] = 0;
+    }
+    if (state[f.buffer].length) {
+      const pending = state[f.buffer].join('');
+      stream.write(pending);
+      state[f.bytes] += pending.length;
+      state[f.buffer] = [];
+      state[f.bufferBytes] = 0;
+    }
   }
 
   function openLogDirectory(directory) {
     if (state.directory) return;
     fs.mkdirSync(directory, { recursive: true });
     state.directory = directory;
-    state.appPath = path.join(directory, 'app.log');
-    state.consolePath = path.join(directory, 'console.log');
-    state.appStream = fs.createWriteStream(state.appPath, { flags: 'a' });
-    state.consoleStream = fs.createWriteStream(state.consolePath, { flags: 'a' });
-    state.appStream.on('error', () => {});
-    state.consoleStream.on('error', () => {});
-    try {
-      state.appBytes = fs.statSync(state.appPath).size;
-      state.consoleBytes = fs.statSync(state.consolePath).size;
-    } catch (_) {
-      state.appBytes = 0;
-      state.consoleBytes = 0;
-    }
+    openKindStream('app', 'app.log');
+    openKindStream('console', 'console.log');
+    openKindStream('server', 'server.log');
     const header = formatLogLine('info', `--- log session ${process.pid} ---`);
     state.appStream.write(header);
     state.appBytes += header.length;
-    if (state.appBuffer.length) {
-      const pending = state.appBuffer.join('');
-      state.appStream.write(pending);
-      state.appBytes += pending.length;
-      state.appBuffer = [];
-      state.appBufferBytes = 0;
-    }
-    if (state.consoleBuffer.length) {
-      const pending = state.consoleBuffer.join('');
-      state.consoleStream.write(pending);
-      state.consoleBytes += pending.length;
-      state.consoleBuffer = [];
-      state.consoleBufferBytes = 0;
-    }
+    state.serverStream.write(header);
+    state.serverBytes += header.length;
   }
 
   function attachWebContents(webContents) {
@@ -348,19 +390,29 @@ function createCapture(options = {}) {
     });
   }
 
-  async function createLogsZip(version, tailBytes = TAIL_BYTES) {
+  function readKindLog(kind, tailBytes) {
+    const f = fields(kind);
+    return [
+      readLogTail(state[f.path] ? `${state[f.path]}.1` : '', tailBytes),
+      readLogTail(state[f.path], tailBytes),
+      state[f.buffer].join('')
+    ].filter(Boolean).join('');
+  }
+
+  async function createLogsZip(version, tailBytes = TAIL_BYTES, extra = {}) {
     const JSZip = require('jszip');
-    await Promise.all([flushStream(state.appStream), flushStream(state.consoleStream)]);
-    const appLog = [
-      readLogTail(state.appPath ? `${state.appPath}.1` : '', tailBytes),
-      readLogTail(state.appPath, tailBytes),
-      state.appBuffer.join('')
-    ].filter(Boolean).join('');
-    const consoleLog = [
-      readLogTail(state.consolePath ? `${state.consolePath}.1` : '', tailBytes),
-      readLogTail(state.consolePath, tailBytes),
-      state.consoleBuffer.join('')
-    ].filter(Boolean).join('');
+    await Promise.all([
+      flushStream(state.appStream),
+      flushStream(state.consoleStream),
+      flushStream(state.serverStream)
+    ]);
+    const appLog = readKindLog('app', tailBytes);
+    let consoleLog = readKindLog('console', tailBytes);
+    const clientConsole = extra && extra.clientConsole ? redactLogText(String(extra.clientConsole)).slice(-tailBytes) : '';
+    if (clientConsole) {
+      consoleLog = [consoleLog, `--- browser console ---\n${clientConsole}`].filter(Boolean).join('\n');
+    }
+    const serverLog = readKindLog('server', tailBytes);
     const system = [
       `Printventory ${version || 'unknown'}`,
       `Electron ${process.versions.electron || 'unknown'}`,
@@ -373,8 +425,27 @@ function createCapture(options = {}) {
     const zip = new JSZip();
     zip.file('app.log', appLog || '(no app logs captured)\n');
     zip.file('console.log', consoleLog || '(no console logs captured)\n');
+    zip.file('server.log', serverLog || '(no server logs captured)\n');
     zip.file('system.txt', system);
     return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  }
+
+  async function uploadLogs({ version, clientConsole } = {}) {
+    let zipBuffer = await createLogsZip(version, TAIL_BYTES, { clientConsole });
+    if (zipBuffer.length > MAX_ZIP_BYTES) {
+      const shorter = clientConsole ? String(clientConsole).slice(-256 * 1024) : '';
+      zipBuffer = await createLogsZip(version, 256 * 1024, { clientConsole: shorter });
+    }
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    const filename = `printventory-logs-${stamp}.zip`;
+    const content = [
+      'Printventory support logs',
+      `Version: ${version || 'unknown'}`,
+      `Platform: ${process.platform} ${process.arch} (${os.release()})`,
+      `Sent: ${new Date().toISOString()}`
+    ].join('\n');
+    const post = options.postZip || ((file) => postDiscordWebhook(resolveDiscordWebhookUrl(options.webhookUrl), file));
+    await post({ filename, fileBuffer: zipBuffer, content });
   }
 
   async function confirmAndSend({ dialog, parentWindow, version } = {}) {
@@ -389,24 +460,11 @@ function createCapture(options = {}) {
         cancelId: 1,
         title: 'Send Logs',
         message: 'This will send the Printventory logs to the support team on Discord.',
-        detail: 'Console logs and app logs will be zipped and uploaded.'
+        detail: 'Console logs, app logs, and server logs will be zipped and uploaded.'
       });
       if (choice.response !== 0) return { sent: false };
 
-      let zipBuffer = await createLogsZip(version, TAIL_BYTES);
-      if (zipBuffer.length > MAX_ZIP_BYTES) {
-        zipBuffer = await createLogsZip(version, 256 * 1024);
-      }
-      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-      const filename = `printventory-logs-${stamp}.zip`;
-      const content = [
-        'Printventory support logs',
-        `Version: ${version || 'unknown'}`,
-        `Platform: ${process.platform} ${process.arch} (${os.release()})`,
-        `Sent: ${new Date().toISOString()}`
-      ].join('\n');
-      const post = options.postZip || ((file) => postDiscordWebhook(resolveDiscordWebhookUrl(options.webhookUrl), file));
-      await post({ filename, fileBuffer: zipBuffer, content });
+      await uploadLogs({ version });
       await dialog.showMessageBox(parent, {
         type: 'info',
         title: 'Send Logs',
@@ -429,6 +487,20 @@ function createCapture(options = {}) {
     }
   }
 
+  async function sendCapturedLogs({ version, clientConsole } = {}) {
+    if (state.sending) return { sent: false, error: 'Logs are already being sent.' };
+    state.sending = true;
+    try {
+      await uploadLogs({ version, clientConsole });
+      return { sent: true };
+    } catch (error) {
+      const detail = redactLogText(error && error.message ? error.message : String(error)).slice(0, 500);
+      return { sent: false, error: detail };
+    } finally {
+      state.sending = false;
+    }
+  }
+
   return {
     beginCapture,
     openLogDirectory,
@@ -436,7 +508,8 @@ function createCapture(options = {}) {
     appendApp,
     appendConsole,
     createLogsZip,
-    confirmAndSend
+    confirmAndSend,
+    sendCapturedLogs
   };
 }
 

@@ -1,4 +1,41 @@
 // Server mode bridge - replaces window.electron when served via HTTP
+(function installBrowserConsoleCapture() {
+  if (typeof window === 'undefined' || typeof window.__printventoryClientConsole === 'function') return;
+  const maxBytes = 1024 * 1024;
+  const lines = [];
+  let bytes = 0;
+  function push(level, args) {
+    let text = '';
+    try {
+      text = Array.prototype.map.call(args, (arg) => {
+        if (typeof arg === 'string') return arg;
+        if (arg instanceof Error) return arg.stack || arg.message;
+        try { return JSON.stringify(arg); } catch (_) { return String(arg); }
+      }).join(' ');
+    } catch (_) {
+      text = '[unprintable]';
+    }
+    if (text.length > 8000) text = `${text.slice(0, 8000)} …`;
+    const line = `${new Date().toISOString()} [${level}] ${text}\n`;
+    lines.push(line);
+    bytes += line.length;
+    while (bytes > maxBytes && lines.length > 1) {
+      bytes -= lines.shift().length;
+    }
+  }
+  ['log', 'info', 'warn', 'error', 'debug'].forEach((level) => {
+    const original = console[level];
+    if (typeof original !== 'function') return;
+    console[level] = function () {
+      try { push(level === 'log' ? 'info' : level, arguments); } catch (_) { /* keep logging */ }
+      return original.apply(console, arguments);
+    };
+  });
+  window.__printventoryClientConsole = function () {
+    return lines.join('');
+  };
+})();
+
 (function() {
   'use strict';
   
@@ -634,6 +671,7 @@
     'parse3MFPreview': 'parse-3mf-preview',
     'cancel3MFPreview': 'cancel-3mf-preview',
     'executeClientCommand': 'execute-client-command',
+    'sendSupportLogs': 'send-support-logs',
     'getGpuInfo': 'get-gpu-info',
     'benchmarkFilesystem': 'benchmark-filesystem',
     'benchmarkDatabase': 'benchmark-database'
