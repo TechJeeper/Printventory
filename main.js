@@ -946,22 +946,27 @@ ${bridgeCode}
       }
       
       // Validate path (UNC paths on Windows, absolute paths in Docker)
-      // Normalize temp dir path for comparison
-      const normalizedTempDir = os.tmpdir().replace(/\\/g, '/');
+      // Normalize path for comparison; use resolved (canonicalized) paths so
+      // '../' traversal sequences cannot spoof the temp/server-managed checks.
       const normalizedFilePath = actualFilePath.replace(/\\/g, '/');
       let isServerManagedPath = false;
+      let isTempFile = false;
       try {
         const resolvedFilePath = path.resolve(actualFilePath);
         const resolvedUserData = path.resolve(app.getPath('userData'));
         const resolvedDbDir = path.resolve(path.dirname(getDatabasePath()));
+        const resolvedTempDir = path.resolve(os.tmpdir());
         isServerManagedPath =
           resolvedFilePath === resolvedDbDir ||
           resolvedFilePath.startsWith(resolvedUserData + path.sep) ||
           resolvedFilePath.startsWith(resolvedDbDir + path.sep);
+        isTempFile =
+          resolvedFilePath === resolvedTempDir ||
+          resolvedFilePath.startsWith(resolvedTempDir + path.sep);
       } catch (error) {
         isServerManagedPath = false;
+        isTempFile = false;
       }
-      const isTempFile = normalizedFilePath.includes(normalizedTempDir);
       
       if (isDockerContainer()) {
         // In Docker, require absolute paths starting with /
