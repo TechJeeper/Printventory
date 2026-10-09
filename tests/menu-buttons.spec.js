@@ -180,6 +180,17 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#dedup-scope-current')).toBeVisible();
     await expect(window.locator('#dedup-scope-entire')).toBeVisible();
     await expect(window.locator('#close-dedup')).toBeVisible();
+    await expect(window.locator('#dedup-fullscreen-toggle')).toBeVisible();
+    await expect(window.locator('#dedup-fullscreen-toggle .fullscreen-icon-expand')).toBeVisible();
+    const dedupToggleBox = await window.locator('#dedup-fullscreen-toggle').boundingBox();
+    expect(dedupToggleBox.width).toBeCloseTo(28, 0);
+    expect(dedupToggleBox.height).toBeCloseTo(28, 0);
+    await window.locator('#dedup-fullscreen-toggle').click();
+    await expect(window.locator('#dedup-dialog')).toHaveClass(/modal-fullscreen/);
+    await expect(window.locator('#dedup-fullscreen-toggle')).not.toHaveText(/Full Screen|Exit Full Screen/);
+    await expect(window.locator('#dedup-fullscreen-toggle .fullscreen-icon-shrink')).toBeVisible();
+    await window.locator('#dedup-fullscreen-toggle').click();
+    await expect(window.locator('#dedup-dialog')).not.toHaveClass(/modal-fullscreen/);
     await closeDialog('dedup-dialog', 'button#close-dedup');
   });
 

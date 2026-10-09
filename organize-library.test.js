@@ -10,6 +10,7 @@ const {
   SPACE_MARGIN_BYTES,
   SKIP,
   directoriesOverlap,
+  listChildDirectories,
   planOrganize,
   withFreeSpace,
   relocatePlannedFile
@@ -392,6 +393,26 @@ test('removes a verified copy when the library update fails', async () => {
   assert.strictEqual(result.status, 'failed');
   assert.strictEqual(fs.existsSync(from), true);
   assert.strictEqual(fs.existsSync(plan.moves[0].to), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('listChildDirectories returns sorted folders and a parent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'organize-list-'));
+  fs.mkdirSync(path.join(root, 'beta'));
+  fs.mkdirSync(path.join(root, 'Alpha'));
+  fs.writeFileSync(path.join(root, 'notes.txt'), 'x');
+  const listed = listChildDirectories(root);
+  assert.strictEqual(listed.ok, true);
+  assert.strictEqual(listed.path, root);
+  assert.strictEqual(listed.parent, path.dirname(root));
+  assert.deepStrictEqual(listed.dirs.map((dir) => dir.name), ['Alpha', 'beta']);
+  assert.strictEqual(listed.truncated, false);
+  const missing = listChildDirectories(path.join(root, 'missing'));
+  assert.strictEqual(missing.ok, false);
+  assert.strictEqual(listChildDirectories('').ok, false);
+  const top = listChildDirectories(path.parse(root).root);
+  assert.strictEqual(top.ok, true);
+  assert.strictEqual(top.parent, null);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

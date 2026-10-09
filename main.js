@@ -48,7 +48,8 @@ const {
   withFreeSpace,
   readFreeBytes,
   runOrganizePlan,
-  pathsAreSame
+  pathsAreSame,
+  listChildDirectories
 } = require('./organize-library');
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
@@ -368,6 +369,14 @@ function debugLog(...args) {
 
 // Server mode detection
 const isServerMode = process.argv.includes('--server');
+// The hidden server window is the only WebGL thumbnail renderer. Chromium
+// otherwise freezes it after the first frame, so each Generate Missing run
+// saves one thumbnail and leaves the rest untouched.
+if (isServerMode) {
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+}
 const isScheduledBackupRun = process.argv.includes('--scheduled-backup');
 let httpServer = null;
 let httpServerEpoch = 0;
@@ -444,9 +453,10 @@ function validateUncPath(path, operation = 'operation') {
 function createHiddenWindow() {
   return new Promise((resolve) => {
     const hiddenWindow = new BrowserWindow({
-      width: 1,
-      height: 1,
+      width: 800,
+      height: 600,
       show: false,
+      skipTaskbar: true,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
@@ -454,12 +464,28 @@ function createHiddenWindow() {
         spellcheck: false,
         sandbox: false,
         enableWebSQL: false,
-        webSecurity: true
+        webSecurity: true,
+        backgroundThrottling: false
       }
     });
 
     // Store reference to hidden window
     mainWindow = hiddenWindow;
+    hiddenWindow.webContents.setBackgroundThrottling(false);
+    hiddenWindow.webContents.on('render-process-gone', (_event, details) => {
+      console.error('[Server thumbnails] Worker renderer gone:', details && details.reason);
+      if (serverThumbnailJob.status === 'running') {
+        serverThumbnailJob = { status: 'idle', mode: null, cancelRequested: false };
+        broadcastThumbnailJobEvent('thumbnail-job-error', {
+          error: 'Thumbnail generation stopped because the server window closed. Run it again to continue with the ones still missing.'
+        });
+      }
+      if (!hiddenWindow.isDestroyed()) {
+        hiddenWindow.loadFile('index.html').catch((err) => {
+          console.error('[Server thumbnails] Could not reload worker window:', err);
+        });
+      }
+    });
     
     // Wait for window to be ready before resolving
     hiddenWindow.webContents.once('did-finish-load', () => {
@@ -13254,8 +13280,14 @@ ipcMain.handle('open-update-page', async (event, isBeta) => {
   await shell.openExternal(url);
 });
 
-// Add new IPC handler for opening folder dialog
+// Add new IPC handler for opening folder dialog.
+// Browser clients have no desktop to show a native picker. dialog.showOpenDialog
+// on the headless server window never returns, and the bridge reports
+// "IPC call timeout: open-folder-dialog" after 30s.
 ipcMain.handle('open-folder-dialog', async (event, titleOrOptions) => {
+  if (isServerMode) {
+    return { canceled: true, serverMode: true };
+  }
   const options = titleOrOptions && typeof titleOrOptions === 'object' ? titleOrOptions : { title: titleOrOptions };
   let win = null;
   try {
@@ -13275,6 +13307,18 @@ ipcMain.handle('open-folder-dialog', async (event, titleOrOptions) => {
     ? await dialog.showOpenDialog(win, dialogOptions)
     : await dialog.showOpenDialog(dialogOptions);
   return result;
+});
+
+ipcMain.handle('list-directories', async (event, dirPath) => {
+  const target = String(dirPath || '').trim();
+  if (target) {
+    try {
+      validateUncPath(target, 'list-directories');
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+  return listChildDirectories(target);
 });
 
 // Add new IPC handler for moving multiple files
@@ -14695,8 +14739,9 @@ async function updateModelsBatch(modelDataBatch) {
         );
         console.log(`[Batch ${i}] Update result:`, updateResult);
 
-        // Handle tags if provided
-        if (tags && Array.isArray(tags) && tags.length > 0) {
+        // Handle tags when the caller sent an array, including an empty array
+        // (that clears every tag). Undefined means this update is not about tags.
+        if (Array.isArray(tags)) {
           const modelId = existingModel.id;
           
           // Delete existing tags

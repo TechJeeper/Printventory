@@ -1119,6 +1119,7 @@ body.mobile-ui #stl-home-dialog .stl-home-exclude-add-row button {
 /* Docker/Server mode: ensure ALL modal dialog buttons and fullscreen toggles are clickable */
 .modal .dialog-buttons,
 .modal .modal-fullscreen-toggle,
+.modal .modal-fullscreen-icon-btn,
 .modal .dialog-buttons button {
   position: relative;
   z-index: 1;
@@ -1311,6 +1312,7 @@ main {
   flex-direction: row !important;
   align-items: center !important;
   justify-content: flex-start;
+  gap: 12px;
   padding: 8px 16px !important;
   height: 56px !important;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -1334,9 +1336,7 @@ main {
   flex-shrink: 0 !important;
   width: 60px !important;
   height: 48px !important;
-  margin-right: 12px !important;
-  margin-top: 0 !important;
-  margin-bottom: 0 !important;
+  margin: 0 !important;
   border-radius: 4px;
   overflow: hidden;
   position: relative;
@@ -1422,12 +1422,20 @@ main {
 .parent-model-group-list .file-name {
   display: flex;
   align-items: center;
+  gap: 8px;
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   color: #fff;
   white-space: nowrap;
   margin: 0;
+}
+
+.file-item-list .file-name-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-item-list .file-name.zip-file {
@@ -1548,7 +1556,7 @@ main {
 /* Sortable header styles */
 .list-view-header .sortable-header {
   transition: color 0.2s ease, background-color 0.2s ease;
-  padding: 2px 4px;
+  padding: 2px 0;
   border-radius: 4px;
 }
 
@@ -4165,6 +4173,21 @@ dialog:not([open]) {
   min-width: 800px;
   max-width: 90vw;
   max-height: 80vh;
+}
+
+#dedup-dialog .modal-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 0.35rem;
+  flex-shrink: 0;
+}
+
+#dedup-dialog .modal-header-row h3 {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
 }
 
 .dedup-scope {
@@ -8427,16 +8450,30 @@ dialog:not([open]) {
   box-sizing: border-box;
 }
 
-/* List: tiny thumb — tuck bottom-left (Printed/archive live in row columns; GROUPED is TR on thumb). */
+/* List thumbs are 60×48. Keep the badge beside the filename so it does not cover the icon. */
 .file-item-list .thumbnail-container > .new-status {
+  display: none;
+}
+
+.file-item-list .file-name > .new-status {
+  position: static;
   top: auto;
-  bottom: 2px;
-  left: 2px;
   right: auto;
+  bottom: auto;
+  left: auto;
   transform: none;
-  padding: 2px 5px;
-  font-size: 9px;
-  max-width: calc(100% - 6px);
+  flex: 0 0 auto;
+  margin: 0;
+  background: rgba(52, 152, 219, 0.88);
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.2;
+  max-width: none;
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .file-item-detailed .thumbnail-container > .new-status,

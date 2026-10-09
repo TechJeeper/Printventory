@@ -1156,6 +1156,7 @@ body.mobile-ui #filament-manager-dialog .modal-fullscreen-icon-btn,
 body.mobile-ui #printer-management-dialog .modal-fullscreen-icon-btn,
 body.mobile-ui #parts-stock-dialog .modal-fullscreen-icon-btn,
 body.mobile-ui #tag-manager-dialog .modal-fullscreen-icon-btn,
+body.mobile-ui #dedup-dialog .modal-fullscreen-icon-btn,
 body.mobile-ui #preview-dialog .modal-fullscreen-icon-btn:not(#close-preview) {
   display: none !important;
 }

@@ -482,12 +482,19 @@ window.togglePartsStockFullscreen = function togglePartsStockFullscreen() {
   dialog.classList.toggle('modal-fullscreen');
   window.syncPartsStockFullscreenButton(dialog.classList.contains('modal-fullscreen'));
 };
+window.syncDedupFullscreenButton = function syncDedupFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('dedup-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
 window.toggleDedupFullscreen = function toggleDedupFullscreen() {
   const dialog = document.getElementById('dedup-dialog');
-  const btn = document.getElementById('dedup-fullscreen-toggle');
-  if (!dialog || !btn) return;
+  if (!dialog) return;
   dialog.classList.toggle('modal-fullscreen');
-  btn.textContent = dialog.classList.contains('modal-fullscreen') ? 'Exit Full Screen' : 'Full Screen';
+  window.syncDedupFullscreenButton(dialog.classList.contains('modal-fullscreen'));
 };
 
 // Purge Models: expose confirm action early so Purge button onclick works in Docker/server mode
@@ -2833,22 +2840,29 @@ function isModelNew(model) {
   return v === 1 || v === true || v === '1';
 }
 
-/** Keep the thumbnail "New" pill in sync with model.isNew (create, update, virtual-grid reuse). */
+/** Keep the "New" pill in sync with model.isNew (create, update, virtual-grid reuse). */
 function syncModelNewBadge(fileItem, model) {
   if (!fileItem) return;
   fileItem.querySelector(':scope > .new-status')?.remove();
+  const isList = fileItem.classList.contains('file-item-list');
   const thumbHost =
     fileItem.querySelector('.thumbnail-wrapper .thumbnail-container') ||
     fileItem.querySelector('.thumbnail-container');
-  if (!thumbHost) return;
-  const existingBadge = thumbHost.querySelector(':scope > .new-status');
+  const host = isList
+    ? (fileItem.querySelector('.file-name') || thumbHost)
+    : thumbHost;
+  if (thumbHost && host !== thumbHost) {
+    thumbHost.querySelector(':scope > .new-status')?.remove();
+  }
+  if (!host) return;
+  const existingBadge = host.querySelector(':scope > .new-status');
   if (isModelNew(model)) {
     if (!existingBadge) {
       const newStatusEl = document.createElement('div');
       newStatusEl.className = 'new-status';
       newStatusEl.textContent = 'New';
       newStatusEl.title = 'New model — clears once you edit it';
-      thumbHost.appendChild(newStatusEl);
+      host.appendChild(newStatusEl);
     }
   } else if (existingBadge) {
     existingBadge.remove();
@@ -3156,11 +3170,17 @@ async function updateModelElement(filePath) {
     }
     const nameElement = existingElement.querySelector('.file-name');
     if (nameElement) {
-      nameElement.textContent = displayFileName;
+      const nameLabel = nameElement.querySelector('.file-name-label');
+      if (nameLabel) nameLabel.textContent = displayFileName;
+      else nameElement.textContent = displayFileName;
+      if (displayFileName) nameElement.title = displayFileName;
     }
     const previewTileNameEl = existingElement.querySelector('.preview-tile-name');
     if (previewTileNameEl) {
       previewTileNameEl.textContent = displayFileName;
+    }
+    if (existingElement.classList.contains('file-item-list')) {
+      syncModelNewBadge(existingElement, model);
     }
 
     // Update print status
@@ -3505,9 +3525,9 @@ async function updateModelElement(filePath) {
         const designerElement = designerColumn.querySelector('.designer-info');
         console.log('updateModelElement: designerElement found?', !!designerElement);
         if (designerElement) {
-          const designerValue = model.designer || '';
+          const designerValue = model.designer || '—';
           designerElement.textContent = designerValue;
-          designerElement.style.color = designerValue ? '#aaa' : '#666';
+          designerElement.style.color = model.designer ? '#aaa' : '#666';
           console.log('updateModelElement: Updated designer in list view to', designerValue);
         } else {
           console.warn('updateModelElement: .designer-info not found inside .designer-info-column');
@@ -3515,9 +3535,9 @@ async function updateModelElement(filePath) {
           const directDesignerElement = fileInfo.querySelector('.designer-info');
           if (directDesignerElement) {
             console.log('updateModelElement: Found .designer-info directly, updating');
-            const designerValue = model.designer || '';
+            const designerValue = model.designer || '—';
             directDesignerElement.textContent = designerValue;
-            directDesignerElement.style.color = designerValue ? '#aaa' : '#666';
+            directDesignerElement.style.color = model.designer ? '#aaa' : '#666';
           }
         }
       } else {
@@ -3526,9 +3546,9 @@ async function updateModelElement(filePath) {
         const directDesignerElement = fileInfo.querySelector('.designer-info');
         if (directDesignerElement) {
           console.log('updateModelElement: Found .designer-info directly (fallback), updating');
-          const designerValue = model.designer || '';
+          const designerValue = model.designer || '—';
           directDesignerElement.textContent = designerValue;
-          directDesignerElement.style.color = designerValue ? '#aaa' : '#666';
+          directDesignerElement.style.color = model.designer ? '#aaa' : '#666';
         } else {
           console.warn('updateModelElement: .designer-info not found anywhere in fileInfo');
           console.log('updateModelElement: fileInfo children:', Array.from(fileInfo.children).map(c => c.className));
@@ -4377,6 +4397,15 @@ function isServerThumbnailWorkerContext() {
   return window.electron.isServerThumbnailWorker().catch(() => false);
 }
 
+function thumbnailJobFinishedMessage(result, fallback) {
+  const saved = Number(result && result.saved);
+  const total = Number(result && (result.total != null ? result.total : result.count));
+  if (!Number.isFinite(saved) || !Number.isFinite(total) || total <= 0) return fallback;
+  if (saved >= total) return fallback;
+  if (saved <= 0) return 'No thumbnails were saved. The ones still missing can be tried again.';
+  return `Saved ${saved} of ${total} thumbnails. Run it again for the ones that are still missing.`;
+}
+
 function showBackgroundThumbnailProgress(text, percent) {
   const progressSection = document.getElementById('progress-section');
   const progressContainer = document.getElementById('progress-container');
@@ -4696,6 +4725,7 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
       // Small chunks keep peak RAM low; concurrency 1 avoids shared-WebGL races + OOM.
       const CHUNK_SIZE = 25;
       let cancelled = false;
+      let saved = 0;
       for (let offset = 0; offset < filePaths.length; offset += CHUNK_SIZE) {
         if (cancelRef.cancelled) {
           cancelled = true;
@@ -4713,6 +4743,7 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
           progressTotal: total,
           title: mode === 'all' ? 'Regenerate Thumbnails' : 'Generate Missing Thumbnails'
         });
+        if (result && typeof result.saved === 'number') saved += result.saved;
         if (result && result.cancelled) {
           cancelled = true;
           break;
@@ -4729,7 +4760,9 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
       await window.electron.reportServerThumbnailComplete({
         cancelled: cancelled || cancelRef.cancelled,
         mode,
-        count: total
+        count: total,
+        total,
+        saved
       });
     } catch (error) {
       console.error('[Server thumbnails] Worker job failed:', error);
@@ -5012,6 +5045,12 @@ function bindDedupPreferredDirectoryControls() {
       e.stopPropagation();
       try {
         const result = await window.electron.invoke('open-folder-dialog', 'Preferred directory');
+        if (result && result.serverMode) {
+          if (window.electron?.showMessage) {
+            await window.electron.showMessage('Preferred directory', 'This browser cannot open a desktop folder picker. Paste the directory path instead.');
+          }
+          return;
+        }
         if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
         await setDedupPreferredDirectory(result.filePaths[0], { applyEasy: true });
       } catch (err) {
@@ -5379,8 +5418,9 @@ function prepareDedupDialog() {
   const dialog = document.getElementById('dedup-dialog');
   if (!dialog) return null;
   dialog.classList.remove('modal-fullscreen');
-  const fullscreenBtn = document.getElementById('dedup-fullscreen-toggle');
-  if (fullscreenBtn) fullscreenBtn.textContent = 'Full Screen';
+  if (typeof window.syncDedupFullscreenButton === 'function') {
+    window.syncDedupFullscreenButton(false);
+  }
   const includeZipCheckbox = dialog.querySelector('#include-zipped-models');
   if (includeZipCheckbox) includeZipCheckbox.checked = false;
   window._dedupScope = null;
@@ -7710,6 +7750,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     MAX_CONCURRENT_RENDERS = 0;
     MAX_CONCURRENT_RENDERS_BACKGROUND = 0;
     window._serverBulkThumbnailJobActive = true;
+    window._isThumbnailWorker = true;
     console.log('[Server thumbnails] Worker window: grid thumbnail renders disabled');
   }
 
@@ -8215,7 +8256,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                   }
                   invalidatePrimaryThumbnailCache();
-                  await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+                  await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail regeneration completed successfully.'));
                   const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
                   await renderFiles(models);
                   return;
@@ -9452,6 +9493,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     event.preventDefault();
     try {
       const result = await window.electron.invoke('open-folder-dialog', 'Select backup folder');
+      if (result && result.serverMode) {
+        if (window.electron?.showMessage) {
+          await window.electron.showMessage('Backup folder', 'This browser cannot open a desktop folder picker. Paste the directory path instead.');
+        }
+        return;
+      }
       if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
       const input = document.getElementById('scheduled-backup-folder');
       if (input) input.value = result.filePaths[0];
@@ -10419,7 +10466,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (serverJob.backgrounded || serverJob.cancelled) {
             return;
           }
-          await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+          await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail regeneration completed successfully.'));
           invalidatePrimaryThumbnailCache();
           const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
           await renderFiles(models);
@@ -10486,7 +10533,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (serverJob.backgrounded || serverJob.cancelled) {
             return;
           }
-          await window.electron.showMessage('Success', 'Thumbnail generation completed successfully.');
+          await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation completed successfully.'));
           invalidatePrimaryThumbnailCache();
           const sortSelect = document.getElementById('sort-select');
           const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
@@ -10934,6 +10981,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (typeof window.performCombinedSearch === 'function') {
       await window.performCombinedSearch({ force: true });
     }
+    if (typeof populateTagFilter === 'function') {
+      try {
+        await populateTagFilter();
+      } catch (err) {
+        console.error('Error refreshing tag filter:', err);
+      }
+    }
+    const detailsPanel = document.getElementById('model-details');
+    if (
+      currentModelDetailsPath &&
+      detailsPanel &&
+      !detailsPanel.classList.contains('hidden') &&
+      typeof showModelDetails === 'function'
+    ) {
+      try {
+        await showModelDetails(currentModelDetailsPath);
+      } catch (err) {
+        console.error('Error refreshing model details after grid refresh:', err);
+      }
+    }
   });
 
   // Add this near other dialog event listeners
@@ -11067,29 +11134,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add this in your DOMContentLoaded event listener
   document.addEventListener('DOMContentLoaded', async () => {
     // ... existing code ...
-
-    // Add click handlers to all tag dropdowns
-    document.querySelectorAll('.tags-input-container select').forEach(dropdown => {
-      dropdown.addEventListener('mousedown', async (event) => {
-        // Prevent the default dropdown from showing immediately
-        event.preventDefault();
-        
-        // Refresh the dropdown content
-        await refreshTagDropdown(dropdown);
-        
-        // Show the dropdown
-        dropdown.click();
-      });
-    });
-
-    // Also add the handler for dynamically created dropdowns
-    document.body.addEventListener('mousedown', async (event) => {
-      if (event.target.matches('.tags-input-container select')) {
-        event.preventDefault();
-        await refreshTagDropdown(event.target);
-        event.target.click();
-      }
-    });
 
     // ... rest of your existing code ...
   });
@@ -14659,6 +14703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     generatedThumbnailsCount = progressOffset;
     let isCancelled = false;
     let processedInBatch = 0;
+    let savedCount = 0;
 
     const reportHeadlessProgress = async (processed, total, phase) => {
       if (!headless || typeof window.electron.reportServerThumbnailProgress !== 'function') return;
@@ -14717,6 +14762,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       const processModel = async (model) => {
         let thumbnail = null;
+        let savedThisModel = false;
         const pathForExt = model.filePath.includes('::') ? (model.filePath.split('::')[1] || '') : model.filePath;
         const fileExt = pathForExt.split('.').pop().toLowerCase();
         
@@ -14725,6 +14771,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!isRenderable3dExtension(fileExt) && fileExt !== 'svg' && fileExt !== 'lys' && !isImageOnlyPreviewExt(fileExt)) {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
+            savedThisModel = true;
             if (!skipHash && (!model.hash || model.hash === '')) {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
@@ -14746,6 +14793,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               thumbnail = generateTypedPlaceholder('svg');
             }
             await window.electron.saveThumbnail(model.filePath, thumbnail);
+            savedThisModel = true;
             if (!skipHash && (!model.hash || model.hash === '')) {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
@@ -14766,6 +14814,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (validImages.length > 0) {
                   thumbnail = validImages[0];
                   await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  savedThisModel = true;
                   console.log(
                     `[DEBUG] generateThumbnailsForModels: SUCCESS - Saved ${validImages.length} embedded image(s) for ${model.filePath}`
                   );
@@ -14810,6 +14859,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (validImages.length > 0) {
                   thumbnail = validImages[0];
                   await window.electron.addMultipleThumbnails(model.filePath, validImages);
+                  savedThisModel = true;
                   console.log(
                     `[DEBUG] generateThumbnailsForModels: SUCCESS - Saved ${validImages.length} embedded image(s) for ${model.filePath}`
                   );
@@ -14848,6 +14898,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                   thumbnail = validImages[0];
                   await window.electron.addMultipleThumbnails(model.filePath, validImages);
                   saved3mfEmbedsViaBatch = true;
+                  savedThisModel = true;
                   console.log(
                     `[DEBUG] generateThumbnailsForModels: SUCCESS - Saved ${validImages.length} embedded image(s) for ${model.filePath}`
                   );
@@ -14866,9 +14917,18 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!thumbnail) {
             console.log(`[DEBUG] generateThumbnailsForModels: Rendering 3D model for ${model.filePath}`);
             try {
-              thumbnail = await generateThumbnail(model.filePath);
+              thumbnail = await generateThumbnail(model.filePath, { skipHash });
             } catch (renderError) {
               console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
+            }
+            const renderFailed = !thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail);
+            if (headless && renderFailed) {
+              resetSharedThumbnailRenderer();
+              try {
+                thumbnail = await generateThumbnail(model.filePath, { skipHash: true });
+              } catch (renderError) {
+                console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
+              }
             }
           }
 
@@ -14880,6 +14940,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           // 4. Save real renders only — never lock in failure placeholders
           if (!saved3mfEmbedsViaBatch && thumbnail !== '3d.png') {
             await window.electron.saveThumbnail(model.filePath, thumbnail);
+            savedThisModel = true;
           } else if (!saved3mfEmbedsViaBatch) {
             await window.electron.saveThumbnail(model.filePath, '3d.png');
           }
@@ -14905,6 +14966,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
           }
         } finally {
+          if (savedThisModel) savedCount++;
           processedInBatch++;
           processedCount = processedInBatch;
           const absoluteProcessed = progressOffset + processedInBatch;
@@ -14957,15 +15019,26 @@ document.addEventListener('DOMContentLoaded', async () => {
           activeProgressText.textContent = `Processing ${done}/${progressTotal} (${activePromises.size} active)`;
         }
         
-        // Wait for at least one promise to complete before continuing
+        // Wait for at least one promise to complete before continuing.
+        // One failed model must not abandon the rest of a server batch.
         if (activePromises.size > 0) {
-          await Promise.race(Array.from(activePromises));
+          try {
+            await Promise.race(Array.from(activePromises));
+          } catch (err) {
+            console.error('Thumbnail task failed:', err);
+            if (!headless) throw err;
+          }
         }
       }
       
       // Wait for any remaining active promises to complete
       if (activePromises.size > 0) {
-        await Promise.all(Array.from(activePromises));
+        try {
+          await Promise.all(Array.from(activePromises));
+        } catch (err) {
+          console.error('Thumbnail task failed:', err);
+          if (!headless) throw err;
+        }
       }
 
       if (cancelRef && cancelRef.cancelled) {
@@ -15000,7 +15073,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    return { cancelled: isCancelled, count: models.length };
+    return { cancelled: isCancelled, count: models.length, saved: savedCount };
   }
 
   window.generateThumbnailsForModels = generateThumbnailsForModels;
@@ -16823,13 +16896,14 @@ function getSharedRenderer() {
     sharedCanvas.width = 250;
     sharedCanvas.height = 250;
     sharedCanvas.setAttribute('aria-hidden', 'true');
+    const onScreenWorker = !!window._isThumbnailWorker;
     Object.assign(sharedCanvas.style, {
       position: 'fixed',
-      left: '-9999px',
+      left: onScreenWorker ? '0' : '-9999px',
       top: '0',
       width: '250px',
       height: '250px',
-      opacity: '0',
+      opacity: onScreenWorker ? '1' : '0',
       pointerEvents: 'none'
     });
     document.body.appendChild(sharedCanvas);
@@ -16867,6 +16941,19 @@ function getSharedRenderer() {
   }
   contextUseCount++;
   return sharedRenderer;
+}
+
+function resetSharedThumbnailRenderer() {
+  try {
+    if (sharedRenderer) sharedRenderer.dispose();
+  } catch (_) { /* ignore */ }
+  sharedRenderer = null;
+  if (sharedCanvas) {
+    try { sharedCanvas.remove(); } catch (_) { /* ignore */ }
+    sharedCanvas = null;
+  }
+  sharedWebGLUnavailable = false;
+  contextUseCount = 0;
 }
 
 async function renderModelToPNG(filePath, container, existingThumbnail, options = {}) {
@@ -18063,8 +18150,12 @@ async function initializeTags() {
 async function populateTagSelect(selectId = 'tag-select', containerId = 'model-tags') {
   const tagSelect = document.getElementById(selectId);
   if (!tagSelect) return;
-  const currentTags = Array.from(document.querySelectorAll(`#${containerId} .tag`))
-    .map(tag => tag.getAttribute('data-tag-name'));
+  // Multi-edit applies a tag onto every selected model. A tag already on one
+  // model must stay selectable so the others can receive it too.
+  const currentTags = containerId === 'multi-tags'
+    ? []
+    : Array.from(document.querySelectorAll(`#${containerId} .tag`))
+      .map(tag => tag.getAttribute('data-tag-name'));
   
   tagSelect.innerHTML = '<option value="">Select a tag...</option>';
 
@@ -18152,18 +18243,8 @@ async function refreshMultiEditTags() {
           <span class="tag-remove">×</span>
         `;
         
-        // Add remove handler with auto-save
         tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-          tag.remove();
-          // Auto-save the updated tags after REMOVAL
-          const currentTags = Array.from(multiTagsContainer.querySelectorAll('.tag'))
-            .map(t => t.getAttribute('data-tag-name'));
-          
-          // Use replaceTags: true to replace tags instead of merging
-          await autoSaveMultipleModels('tags', currentTags, { replaceTags: true });
-          
-          // Refresh the remove tag dropdown after removal
-          await populateRemoveTagSelect();
+          await removeTagFromSelectedModels(tagName);
         });
         
         multiTagsContainer.appendChild(tag);
@@ -18289,8 +18370,10 @@ async function addTagToModel(tagName, containerId, options = {}) {
   // Check if tag already exists visually
   const existingTag = Array.from(tagContainer.children)
     .find(tag => tag.getAttribute('data-tag-name') === tagName);
-  
-  if (existingTag) return; // Don't add visual duplicates
+
+  // Multi-edit still has to write the tag onto every selected model, even when
+  // the chip is already showing because some of the selection already has it.
+  if (existingTag && !(containerId === 'multi-tags' && !skipSave)) return;
 
   // Create new tag element
   const tag = document.createElement('div');
@@ -18304,17 +18387,15 @@ async function addTagToModel(tagName, containerId, options = {}) {
 
   // Add remove handler with auto-save
   tag.querySelector('.tag-remove')?.addEventListener('click', async () => {
-    tag.remove(); 
-    // Auto-save the updated tags after REMOVAL
+    if (containerId === 'multi-tags') {
+      await removeTagFromSelectedModels(tagName);
+      return;
+    }
+    tag.remove();
     const currentTags = Array.from(tagContainer.querySelectorAll('.tag'))
       .map(t => t.getAttribute('data-tag-name'));
-    
-    if (containerId === 'multi-tags') {
-      // When removing, we DO want to save the resulting list for all selected models
-      // Note: This sets all selected models to have exactly the tags remaining in the UI.
-      // Use replaceTags: true to replace tags instead of merging
-      await autoSaveMultipleModels('tags', currentTags, { replaceTags: true }); 
-    } else if (containerId === 'bundle-tags') {
+
+    if (containerId === 'bundle-tags') {
       await applyBundleTagChange({ removeTags: [tagName] });
     } else {
       // Single edit mode save
@@ -18327,7 +18408,9 @@ async function addTagToModel(tagName, containerId, options = {}) {
     }
   });
 
-  tagContainer.appendChild(tag); // Add tag visually
+  if (!existingTag) {
+    tagContainer.appendChild(tag);
+  }
 
   if (skipSave) {
     return;
@@ -18335,9 +18418,11 @@ async function addTagToModel(tagName, containerId, options = {}) {
 
   // Auto-save logic after ADDING a tag
   if (containerId === 'multi-tags') {
-    // For multi-edit ADD, only save the *newly added tag* to append it
     console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-    await autoSaveMultipleModels('tags', [tagName]); // Pass only the new tag
+    await autoSaveMultipleModels('tags', [tagName]);
+    await refreshMultiEditTags();
+    await populateRemoveTagSelect();
+    await populateTagSelect('multi-tag-select', 'multi-tags');
   } else if (containerId === 'bundle-tags') {
     await applyBundleTagChange({ addTags: [tagName] });
   } else {
@@ -18470,6 +18555,7 @@ async function populateTagFilter() {
     return;
   }
 
+  const previous = tagSelect.value;
   tagSelect.innerHTML = '<option value="">All Tags</option>';
 
   try {
@@ -18481,6 +18567,9 @@ async function populateTagFilter() {
       option.textContent = `${tag.name} (${tag.model_count})`;
       tagSelect.appendChild(option);
     });
+    if (previous && [...tagSelect.options].some((option) => option.value === previous)) {
+      tagSelect.value = previous;
+    }
   } catch (error) {
     console.error('Error populating tag filter:', error);
   }
@@ -18650,6 +18739,58 @@ document.getElementById('multi-tag-select').addEventListener('change', async () 
   }
 });
 
+function modelPayloadForSave(model) {
+  if (!model || typeof model !== 'object') return model;
+  const payload = { ...model };
+  delete payload.thumbnail;
+  return payload;
+}
+
+// Drop one tag from every selected model and leave each model's other tags in place.
+async function removeTagFromSelectedModels(tagName) {
+  const trimmed = typeof tagName === 'string' ? tagName.trim() : '';
+  if (!trimmed || selectedModels.size === 0) return false;
+
+  const modelUpdates = [];
+  for (const filePath of Array.from(selectedModels)) {
+    try {
+      const model = await window.electron.getModel(filePath);
+      if (!model) continue;
+      const tags = Array.isArray(model.tags) ? model.tags : [];
+      const updatedTags = tags.filter((tag) => tag !== trimmed);
+      if (updatedTags.length === tags.length) continue;
+      model.tags = updatedTags;
+      modelUpdates.push(model);
+    } catch (error) {
+      console.error(`Error loading model ${filePath} for tag removal:`, error);
+    }
+  }
+
+  if (modelUpdates.length === 0) return false;
+
+  const modelDataBatch = modelUpdates.map(modelPayloadForSave);
+  try {
+    const success = await window.electron.updateModelsBatch(modelDataBatch);
+    if (!success) throw new Error('Bulk update returned false');
+  } catch (error) {
+    console.error('Error in batch update for tag removal:', error);
+    for (const model of modelDataBatch) {
+      await window.electron.saveModel(model).catch((err) => {
+        console.error(`Error saving model ${model.filePath}:`, err);
+      });
+    }
+  }
+
+  for (const model of modelUpdates) {
+    mergeModelIntoGridCurrentModels(modelPayloadForSave(model));
+    await updateModelElement(model.filePath);
+  }
+  await refreshMultiEditTags();
+  await populateRemoveTagSelect();
+  await populateTagSelect('multi-tag-select', 'multi-tags');
+  return true;
+}
+
 // Handle remove tag dropdown change event
 async function handleRemoveTagSelect() {
   const removeTagSelect = document.getElementById('multi-tag-remove-select');
@@ -18663,15 +18804,12 @@ async function handleRemoveTagSelect() {
   }
 
   try {
-    // Get all selected file paths
     const filePaths = Array.from(selectedModels);
-    
     if (filePaths.length === 0) {
       console.warn('No models selected for tag removal');
       return;
     }
 
-    // Show confirmation dialog
     const confirmResult = await window.electron.showMessageBox({
       type: 'warning',
       title: 'Remove Tag',
@@ -18681,59 +18819,13 @@ async function handleRemoveTagSelect() {
       cancelId: 1
     });
 
-    // If user clicked "No" (response === 1) or cancelled, reset dropdown and return
     if (confirmResult.response !== 0) {
       removeTagSelect.value = '';
       return;
     }
 
-    // Load all models and remove the tag from each
-    const modelUpdates = [];
-    for (const filePath of filePaths) {
-      try {
-        const model = await window.electron.getModel(filePath);
-        if (model && model.tags) {
-          const tags = Array.isArray(model.tags) ? model.tags : [];
-          // Remove the tag from the array
-          const updatedTags = tags.filter(tag => tag !== tagToRemove);
-          model.tags = updatedTags.sort();
-          modelUpdates.push({ filePath, model });
-        }
-      } catch (error) {
-        console.error(`Error loading model ${filePath} for tag removal:`, error);
-      }
-    }
-
-    // Save all updated models using autoSaveMultipleModels with replaceTags
-    if (modelUpdates.length > 0) {
-      // For each model, we need to save with its updated tags
-      // We'll use the batch update approach
-      const modelDataBatch = modelUpdates.map(({ model }) => model);
-      try {
-        await window.electron.updateModelsBatch(modelDataBatch);
-        console.log(`Successfully removed tag '${tagToRemove}' from ${modelUpdates.length} models`);
-      } catch (error) {
-        console.error('Error in batch update for tag removal:', error);
-        // Fallback to individual saves
-        for (const { model } of modelUpdates) {
-          await window.electron.saveModel(model).catch(err => {
-            console.error(`Error saving model ${model.filePath}:`, err);
-          });
-        }
-      }
-
-      // Update UI elements
-      for (const { filePath } of modelUpdates) {
-        await updateModelElement(filePath);
-      }
-    }
-
-    // Reset dropdown and refresh the remove tag list
+    await removeTagFromSelectedModels(tagToRemove);
     removeTagSelect.value = '';
-    await populateRemoveTagSelect();
-    
-    // Refresh the add tag dropdown to reflect any changes
-    await populateTagSelect('multi-tag-select', 'multi-tags');
   } catch (error) {
     console.error('Error removing tag:', error);
   }
@@ -18785,16 +18877,29 @@ function createSVGIcon(svgString, size = 16) {
 
 /** List view: column visibility, widths, and order (persisted via listViewColumnLayout) */
 const LIST_VIEW_COLUMN_DEFS = [
-  { id: 'name', label: 'Name', defaultWidth: 140, min: 80, max: 800 },
+  { id: 'name', label: 'Name', defaultWidth: 220, min: 80, max: 800 },
   { id: 'size', label: 'Size', defaultWidth: 75, min: 50, max: 200 },
   { id: 'dateadded', label: 'Date Added', defaultWidth: 110, min: 90, max: 240 },
-  { id: 'directory', label: 'Parent Directory', defaultWidth: 150, min: 90, max: 500 },
+  { id: 'directory', label: 'Parent Directory', defaultWidth: 180, min: 90, max: 500 },
   { id: 'designer', label: 'Designer', defaultWidth: 120, min: 60, max: 400 },
-  { id: 'parentmodel', label: 'Parent Model', defaultWidth: 120, min: 60, max: 400 },
-  { id: 'printed', label: 'Print Status', defaultWidth: 140, min: 100, max: 260 },
-  { id: 'tags', label: 'Tags', defaultWidth: 180, min: 80, max: 600 },
+  { id: 'parentmodel', label: 'Parent Model', defaultWidth: 140, min: 60, max: 400 },
+  { id: 'printed', label: 'Print Status', defaultWidth: 120, min: 100, max: 260 },
+  { id: 'tags', label: 'Tags', defaultWidth: 110, min: 80, max: 600 },
   { id: 'archive', label: 'Archive', defaultWidth: 100, min: 70, max: 200 }
 ];
+
+/** Previous shipped defaults. Untouched layouts pick up the wider name/path columns. */
+const LIST_VIEW_COLUMN_OLD_DEFAULTS = {
+  name: 140,
+  size: 75,
+  dateadded: 110,
+  directory: 150,
+  designer: 120,
+  parentmodel: 120,
+  printed: 140,
+  tags: 180,
+  archive: 100
+};
 
 let listViewColumnState = null;
 let listViewColumnsPopoverEl = null;
@@ -18853,6 +18958,14 @@ function mergeListViewColumnState(saved) {
   if (!Array.isArray(saved.order) && saved.widths && saved.widths.printed === 100) {
     base.widths.printed = 130;
   }
+  if (saved.widths && typeof saved.widths === 'object') {
+    const untouched = LIST_VIEW_COLUMN_DEFS.every(col => saved.widths[col.id] === LIST_VIEW_COLUMN_OLD_DEFAULTS[col.id]);
+    if (untouched) {
+      for (const col of LIST_VIEW_COLUMN_DEFS) {
+        base.widths[col.id] = col.defaultWidth;
+      }
+    }
+  }
   return base;
 }
 
@@ -18878,12 +18991,13 @@ function applyListViewColumnToElement(el, colId) {
     el.style.display = 'none';
     return;
   }
+  const grow = colId === 'name';
   el.style.display = listViewColDisplayMode(colId);
-  el.style.flex = `0 0 ${w}px`;
+  el.style.flex = grow ? `1 0 ${w}px` : `0 0 ${w}px`;
   el.style.flexShrink = '0';
-  el.style.width = `${w}px`;
+  el.style.width = grow ? 'auto' : `${w}px`;
   el.style.minWidth = `${w}px`;
-  el.style.maxWidth = `${w}px`;
+  el.style.maxWidth = grow ? 'none' : `${w}px`;
   el.style.overflow = 'hidden';
   el.style.boxSizing = 'border-box';
 }
@@ -19517,29 +19631,15 @@ function createListViewHeader() {
   headerInfo.appendChild(dateAddedWrap);
   
   // Parent Directory column header (sortable - sorts by filePath)
-  const directoryHeaderContainer = document.createElement('div');
-  directoryHeaderContainer.className = 'list-view-col';
-  directoryHeaderContainer.dataset.listCol = 'directory';
-  directoryHeaderContainer.style.position = 'relative';
-  directoryHeaderContainer.style.display = 'flex';
-  directoryHeaderContainer.style.alignItems = 'center';
-  directoryHeaderContainer.style.cursor = 'pointer';
-  directoryHeaderContainer.style.userSelect = 'none';
-  const folderIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/></svg>', 16);
-  directoryHeaderContainer.appendChild(folderIcon);
-  const directoryHeader = createSortableHeader('Parent Directory', 'directory', 'auto');
-  directoryHeader.style.flex = '1';
-  directoryHeader.style.minWidth = '0';
-  // Make the container clickable - forward clicks to the header
-  directoryHeaderContainer.addEventListener('click', (e) => {
-    // If click is on the icon, trigger the header's click handler
-    if (e.target === folderIcon || folderIcon.contains(e.target)) {
-      directoryHeader.click();
-    }
-  });
-  directoryHeaderContainer.appendChild(directoryHeader);
-  attachListViewColumnResizeHandle(directoryHeaderContainer, 'directory');
-  headerInfo.appendChild(directoryHeaderContainer);
+  const directoryWrap = document.createElement('div');
+  directoryWrap.className = 'list-view-col';
+  directoryWrap.dataset.listCol = 'directory';
+  directoryWrap.style.position = 'relative';
+  const directoryHeader = createSortableHeader('Parent Directory', 'directory', '100%');
+  directoryHeader.style.width = '100%';
+  directoryWrap.appendChild(directoryHeader);
+  attachListViewColumnResizeHandle(directoryWrap, 'directory');
+  headerInfo.appendChild(directoryWrap);
   
   // Designer column header (sortable with icon)
   const designerWrap = document.createElement('div');
@@ -19561,10 +19661,7 @@ function createListViewHeader() {
   designerHeader.style.alignItems = 'center';
   designerHeader.style.gap = '6px';
   designerHeader.style.userSelect = 'none';
-  
-  const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#a855f7"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
-  designerHeader.appendChild(designerIcon);
-  
+
   const designerLabel = document.createElement('span');
   designerLabel.textContent = 'Designer';
   designerHeader.appendChild(designerLabel);
@@ -19690,8 +19787,6 @@ function createListViewHeader() {
   tagsHeader.style.position = 'relative';
   tagsHeader.style.display = 'flex';
   tagsHeader.style.alignItems = 'center';
-  const tagsIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M240-120q-33 0-56.5-23.5T160-200v-480q0-33 23.5-56.5T240-760h120l80 80h320q33 0 56.5 23.5T820-600v400q0 33-23.5 56.5T740-120H240Zm0-80h500v-400H447l-80-80H240v480Zm0 0v-480 480Zm280-240q17 0 28.5-11.5T560-480q0-17-11.5-28.5T520-520q-17 0-28.5 11.5T480-480q0 17 11.5 28.5T520-440Zm-160 0q17 0 28.5-11.5T400-480q0-17-11.5-28.5T360-520q-17 0-28.5 11.5T320-480q0 17 11.5 28.5T360-440Zm320 0q17 0 28.5-11.5T720-480q0-17-11.5-28.5T680-520q-17 0-28.5 11.5T640-480q0 17 11.5 28.5T680-440ZM520-280q17 0 28.5-11.5T560-320q0-17-11.5-28.5T520-360q-17 0-28.5 11.5T480-320q0 17 11.5 28.5T520-280Zm-160 0q17 0 28.5-11.5T400-320q0-17-11.5-28.5T360-360q-17 0-28.5 11.5T320-320q0 17 11.5 28.5T360-280Zm320 0q17 0 28.5-11.5T720-320q0-17-11.5-28.5T680-360q-17 0-28.5 11.5T640-320q0 17 11.5 28.5T680-280Z"/></svg>', 16);
-  tagsHeader.appendChild(tagsIcon);
   const tagsText = document.createElement('span');
   tagsText.textContent = 'Tags';
   tagsText.style.fontSize = '12px';
@@ -19699,7 +19794,6 @@ function createListViewHeader() {
   tagsText.style.color = '#aaa';
   tagsText.style.textTransform = 'uppercase';
   tagsText.style.letterSpacing = '0.5px';
-  tagsText.style.marginLeft = '6px';
   tagsHeader.appendChild(tagsText);
   attachListViewColumnResizeHandle(tagsHeader, 'tags');
   headerInfo.appendChild(tagsHeader);
@@ -19714,8 +19808,6 @@ function createListViewHeader() {
   archiveHeader.style.alignItems = 'center';
   archiveHeader.style.justifyContent = 'center';
   archiveHeader.style.width = '100%';
-  const archiveIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#aaa"><path d="M640-480v-80h80v80h-80Zm0 80h-80v-80h80v80Zm0 80v-80h80v80h-80ZM447-640l-80-80H160v480h400v-80h80v80h160v-400H640v80h-80v-80H447ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80v-480 480Z"/></svg>', 16);
-  archiveHeader.appendChild(archiveIcon);
   const archiveText = document.createElement('span');
   archiveText.textContent = 'Archive';
   archiveText.style.fontSize = '12px';
@@ -19723,7 +19815,6 @@ function createListViewHeader() {
   archiveText.style.color = '#aaa';
   archiveText.style.textTransform = 'uppercase';
   archiveText.style.letterSpacing = '0.5px';
-  archiveText.style.marginLeft = '6px';
   archiveHeader.appendChild(archiveText);
   archiveWrap.appendChild(archiveHeader);
   attachListViewColumnResizeHandle(archiveWrap, 'archive');
@@ -20035,11 +20126,21 @@ async function renderFilteredFiles(files) {
 }
 
 // Add a separate function for generating thumbnails
-async function generateThumbnail(file) {
+async function generateThumbnail(file, options = {}) {
+  const skipHash = !!(options && options.skipHash);
   try {
     const filePath = (typeof file === 'string') ? file : file.filePath;
     if (!filePath) {
       throw new Error("generateThumbnail: filePath is undefined");
+    }
+
+    async function maybeHash(target) {
+      if (skipHash) return;
+      try {
+        await window.electron.calculateFileHash(target);
+      } catch (hashError) {
+        console.error(`Error calculating hash for ${target}:`, hashError);
+      }
     }
 
     // 1. Try to get embedded thumbnail for 3MF / LYS / F3D / ChiTuBox / VOXL
@@ -20055,11 +20156,7 @@ async function generateThumbnail(file) {
                 );
                 if (validImages.length > 0) {
                     await window.electron.addMultipleThumbnails(filePath, validImages);
-                    try {
-                      await window.electron.calculateFileHash(filePath);
-                    } catch (hashError) {
-                      console.error(`Error calculating hash for ${filePath}:`, hashError);
-                    }
+                    await maybeHash(filePath);
                     return validImages[0];
                 }
             }
@@ -20080,11 +20177,7 @@ async function generateThumbnail(file) {
                 );
                 if (validImages.length > 0) {
                     await window.electron.addMultipleThumbnails(filePath, validImages);
-                    try {
-                      await window.electron.calculateFileHash(filePath);
-                    } catch (hashError) {
-                      console.error(`Error calculating hash for ${filePath}:`, hashError);
-                    }
+                    await maybeHash(filePath);
                     return validImages[0];
                 }
             }
@@ -20108,11 +20201,7 @@ async function generateThumbnail(file) {
                     );
                     await window.electron.addMultipleThumbnails(filePath, validImages);
 
-                    try {
-                      await window.electron.calculateFileHash(filePath);
-                    } catch (hashError) {
-                      console.error(`Error calculating hash for ${filePath}:`, hashError);
-                    }
+                    await maybeHash(filePath);
 
                     return firstImage;
                 } else {
@@ -20151,14 +20240,7 @@ async function generateThumbnail(file) {
     }
 
     await window.electron.saveThumbnail(filePath, thumbnail);
-    
-    // Calculate and save hash during thumbnail generation (file is already being read)
-    try {
-      await window.electron.calculateFileHash(filePath);
-    } catch (hashError) {
-      console.error(`Error calculating hash for ${filePath}:`, hashError);
-      // Continue even if hash calculation fails
-    }
+    await maybeHash(filePath);
     
     return thumbnail;
   } catch (error) {
@@ -21726,7 +21808,7 @@ async function autoSaveMultipleModels(field, value, options = {}) {
     
     // Save all models in a single bulk update
     if (modelUpdates.length > 0) {
-      const modelDataBatch = modelUpdates.map(({ model }) => model);
+      const modelDataBatch = modelUpdates.map(({ model }) => modelPayloadForSave(model));
       try {
         // Use bulk update for better performance - single transaction
         console.log(`Attempting bulk update for ${modelDataBatch.length} models`);
@@ -21739,8 +21821,8 @@ async function autoSaveMultipleModels(field, value, options = {}) {
         console.error(`Error in bulk update for ${modelUpdates.length} models:`, error);
         console.log('Falling back to individual saves');
         // Fallback to individual saves if bulk update fails
-        const savePromises = modelUpdates.map(({ model }) => 
-          window.electron.saveModel(model).catch(err => {
+        const savePromises = modelUpdates.map(({ model }) =>
+          window.electron.saveModel(modelPayloadForSave(model)).catch(err => {
             console.error(`Error saving model ${model.filePath}:`, err);
             return null;
           })
@@ -21874,13 +21956,10 @@ async function showMultiEditPanel() {
   // populateParentModelDropdown('', 'multi-parent');
   // populateTagSelect('multi-tag-select', 'multi-tags');
   
-  // Always clear the multi-edit tag container to prevent tags from sticking
-  // This ensures that when a new selection is made, old tags don't persist
-  // Note: The container is hidden in multi-edit mode, but we still clear it
+  // Show tags already on the selection, and keep the list visible.
   const multiTagsContainer = document.getElementById('multi-tags');
   if (multiTagsContainer) {
-    multiTagsContainer.innerHTML = '';
-    multiTagsContainer.style.display = 'none'; // Hide the tag list in multi-edit mode
+    multiTagsContainer.style.display = '';
   }
   
   // Reset the multi-tag-select dropdown
@@ -21989,7 +22068,8 @@ async function showMultiEditPanel() {
     });
     console.log('Multi-tag-remove-select event handler attached in showMultiEditPanel');
 
-    // Populate the remove tag dropdown
+    // Populate the remove tag dropdown and show tags already on the selection
+    await refreshMultiEditTags();
     await populateRemoveTagSelect();
   } else {
     console.error('Multi-tag-remove-select element not found in showMultiEditPanel');
@@ -22464,7 +22544,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
   img.src = currentThumbnail || '3d.png';
   thumbnailContainer.appendChild(img);
 
-  if (isModelNew(model)) {
+  if (isModelNew(model) && view !== 'list') {
     const newStatusEl = document.createElement('div');
     newStatusEl.className = 'new-status';
     newStatusEl.textContent = 'New';
@@ -23009,11 +23089,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     item.style.alignItems = 'center';
     item.style.gap = '12px';
     item.style.padding = '6px 12px';
-    item.style.height = '52px';
+    item.style.height = '56px';
     item.style.position = 'relative';
     thumbnailContainer.style.flexShrink = '0';
-    thumbnailContainer.style.width = '48px';
+    thumbnailContainer.style.width = '60px';
     thumbnailContainer.style.height = '48px';
+    thumbnailContainer.style.margin = '0';
     thumbnailContainer.style.position = 'relative';
     fileInfo.style.flex = '1';
     fileInfo.style.display = 'flex';
@@ -23029,6 +23110,11 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     fileName.style.textOverflow = 'ellipsis';
     fileName.style.whiteSpace = 'nowrap';
     fileName.style.fontSize = '13px';
+    const nameLabel = document.createElement('span');
+    nameLabel.className = 'file-name-label';
+    nameLabel.textContent = displayFileName;
+    fileName.textContent = '';
+    fileName.appendChild(nameLabel);
     // Add tooltip for truncated file names
     if (displayFileName) {
       fileName.setAttribute('title', displayFileName);
@@ -23095,7 +23181,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     }
     fileInfo.appendChild(dateAddedColumn);
     
-    // Parent directory column (clickable to filter, with icon)
+    // Parent directory column (clickable to filter)
     const directoryColumn = document.createElement('div');
     directoryColumn.className = 'directory-info-column';
     directoryColumn.setAttribute('data-list-col', 'directory');
@@ -23103,18 +23189,12 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     directoryColumn.style.alignItems = 'center';
     directoryColumn.style.flexShrink = '0';
     directoryColumn.style.overflow = 'hidden';
-    
-    // Add folder icon or archive icon based on whether model is in zip archive
-    const parentIcon = isZipEntry 
-      ? createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#22c55e"><path d="M640-480v-80h80v80h-80Zm0 80h-80v-80h80v80Zm0 80v-80h80v80h-80ZM447-640l-80-80H160v480h400v-80h80v80h160v-400H640v80h-80v-80H447ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80v-480 480Z"/></svg>', 16)
-      : createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#e3e3e3"><path d="M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/></svg>', 16);
-    directoryColumn.appendChild(parentIcon);
-    
+
     const directoryText = document.createElement('span');
     directoryText.className = 'directory-info';
-    directoryText.textContent = parentDir || '';
+    directoryText.textContent = parentDir || '—';
     directoryText.style.fontSize = '12px';
-    directoryText.style.color = parentDir ? '#4a9eff' : '#888';
+    directoryText.style.color = parentDir ? '#4a9eff' : '#666';
     directoryText.style.overflow = 'hidden';
     directoryText.style.textOverflow = 'ellipsis';
     directoryText.style.whiteSpace = 'nowrap';
@@ -23201,7 +23281,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     directoryColumn.appendChild(directoryText);
     fileInfo.appendChild(directoryColumn);
     
-    // Designer column (with icon)
+    // Designer column
     const designerColumn = document.createElement('div');
     designerColumn.className = 'designer-info-column';
     designerColumn.setAttribute('data-list-col', 'designer');
@@ -23209,14 +23289,10 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     designerColumn.style.alignItems = 'center';
     designerColumn.style.flexShrink = '0';
     designerColumn.style.overflow = 'hidden';
-    
-    // Add designer icon
-    const designerIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#a855f7"><path d="m352-522 86-87-56-57-44 44-56-56 43-44-45-45-87 87 159 158Zm328 329 87-87-45-45-44 43-56-56 43-44-57-56-86 86 158 159Zm24-567 57 57-57-57ZM290-120H120v-170l175-175L80-680l200-200 216 216 151-152q12-12 27-18t31-6q16 0 31 6t27 18l53 54q12 12 18 27t6 31q0 16-6 30.5T816-647L665-495l215 215L680-80 465-295 290-120Zm-90-80h56l392-391-57-57-391 392v56Zm420-419-29-29 57 57-28-28Z"/></svg>', 16);
-    designerColumn.appendChild(designerIcon);
-    
+
     const designerText = document.createElement('span');
     designerText.className = 'designer-info';
-    designerText.textContent = model.designer || '';
+    designerText.textContent = model.designer || '—';
     designerText.style.fontSize = '12px';
     designerText.style.color = model.designer ? '#aaa' : '#666';
     designerText.style.overflow = 'hidden';
@@ -23242,7 +23318,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     
     const parentModelText = document.createElement('span');
     parentModelText.className = 'parent-model-info';
-    parentModelText.textContent = model.parentModel || '';
+    parentModelText.textContent = model.parentModel || '—';
     parentModelText.style.fontSize = '12px';
     parentModelText.style.color = model.parentModel ? '#aaa' : '#666';
     parentModelText.style.overflow = 'hidden';
@@ -23345,12 +23421,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     archiveStatusColumn.style.gap = '6px';
     archiveStatusColumn.style.flexShrink = '0';
     
-    // Only show archive icon and status for files in zip/archive
+    // Only show archive status for files in zip/archive
     if (isZipEntry) {
-      // Add archive icon
-      const archiveIcon = createSVGIcon('<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="#e3e3e3"><path d="M640-480v-80h80v80h-80Zm0 80h-80v-80h80v80Zm0 80v-80h80v80h-80ZM447-640l-80-80H160v480h400v-80h80v80h160v-400H640v80h-80v-80H447ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80v-480 480Z"/></svg>', 16);
-      archiveStatusColumn.appendChild(archiveIcon);
-      
       if (archiveStatusElement) {
         // Remove all positioning styles and move to column
         archiveStatusElement.style.position = 'static';
@@ -23381,6 +23453,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     
     applyListViewColumnLayoutToSubtree(fileInfo);
     item.appendChild(fileInfo);
+    syncModelNewBadge(item, model);
     
     // Add click event handler for model selection
     item.addEventListener('click', (e) => {
@@ -24066,7 +24139,7 @@ function getModelRenderKey(model) {
 }
 
 function getParentModelGroupHeight(view) {
-  if (view === 'list') return mobileListMetrics()?.height || 52;
+  if (view === 'list') return mobileListMetrics()?.height || 56;
   if (view === 'preview') return getPreviewTileSizePx();
   return 450;
 }
@@ -25536,7 +25609,7 @@ function renderVirtualGrid(models) {
   let verticalGap, horizontalGap;
   const mobileList = currentGridView === 'list' ? mobileListMetrics() : null;
   if (currentGridView === 'list') {
-    verticalGap = mobileList ? mobileList.gap : 4;
+    verticalGap = mobileList ? mobileList.gap : 6;
     horizontalGap = 0;
   } else if (currentGridView === 'preview') {
     verticalGap = 2;
@@ -25567,7 +25640,7 @@ function renderVirtualGrid(models) {
 
   // Define item dimensions based on view mode
   const viewDimensions = {
-    'list': { width: '100%', height: mobileList?.height || 52, itemWidth: '100%' },
+    'list': { width: '100%', height: mobileList?.height || 56, itemWidth: '100%' },
     'preview':
       currentGridView === 'preview' && previewTilePx != null
         ? { width: previewTilePx, height: previewTilePx, itemWidth: previewTilePx }

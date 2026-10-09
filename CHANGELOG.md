@@ -4,6 +4,13 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.22] - 2026-10-08
+
+- List view lines the header, groups, and files up in the same columns. The New badge sits beside the filename, and the name column uses leftover width
+- Organize Library can browse folders in server mode and inside the scanned directory
+- Server mode keeps generating missing thumbnails instead of stopping after the first frame
+- De-Dup can open full screen
+
 ## [2.2.21] - 2026-10-06
 
 - Send Logs works in server mode. The browser console is included, and the uploaded zip stays redacted

@@ -8,6 +8,7 @@ const NO_PARENT_FOLDER = 'No Parent Model';
 const SPACE_MARGIN_BYTES = 64 * 1024 * 1024;
 const PREVIEW_SAMPLE_LIMIT = 20;
 const MAX_STRUCTURE_LAYERS = 4;
+const LIST_DIR_LIMIT = 2000;
 
 const STRUCTURE_FIELDS = {
   designer: { id: 'designer', label: 'Designer', empty: 'No Designer', column: 'designer' },
@@ -74,6 +75,73 @@ function pathsAreSame(a, b) {
   const left = compareKey(a);
   const right = compareKey(b);
   return !!left && left === right;
+}
+
+function directoryParent(dirPath) {
+  const resolved = path.resolve(dirPath);
+  const parent = path.dirname(resolved);
+  if (compareKey(parent) === compareKey(resolved)) return null;
+  return parent;
+}
+
+function entryIsDirectory(parent, entry) {
+  try {
+    if (entry.isDirectory()) return true;
+  } catch (_) {
+    return false;
+  }
+  if (!entry.isSymbolicLink || !entry.isSymbolicLink()) return false;
+  try {
+    return fs.statSync(path.join(parent, entry.name)).isDirectory();
+  } catch (_) {
+    return false;
+  }
+}
+
+function listChildDirectories(dirPath) {
+  const raw = String(dirPath || '').trim();
+  if (!raw) return { ok: false, error: 'Enter a folder path to browse.' };
+  let target;
+  try {
+    target = path.resolve(raw);
+  } catch (err) {
+    return { ok: false, error: err.message || 'That path could not be read.' };
+  }
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { ok: false, error: 'Folder not found: ' + target };
+    return { ok: false, error: (err && err.message) || 'Could not read that folder.' };
+  }
+  if (!st.isDirectory()) return { ok: false, error: '"' + target + '" is not a folder.' };
+  let entries;
+  try {
+    entries = fs.readdirSync(target, { withFileTypes: true });
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || 'Could not read that folder.' };
+  }
+  const dirs = [];
+  let truncated = false;
+  for (const entry of entries) {
+    if (!entry || !entryIsDirectory(target, entry)) continue;
+    if (dirs.length >= LIST_DIR_LIMIT) {
+      truncated = true;
+      break;
+    }
+    dirs.push({
+      name: entry.name,
+      path: path.join(target, entry.name)
+    });
+  }
+  dirs.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  return {
+    ok: true,
+    path: target,
+    parent: directoryParent(target),
+    dirs,
+    truncated
+  };
 }
 
 function sourceIsScanned(sourceDir, roots) {
@@ -631,6 +699,7 @@ module.exports = {
   directoriesOverlap,
   fileIsInsideDirectory,
   pathsAreSame,
+  listChildDirectories,
   sourceIsScanned,
   planOrganize,
   withFreeSpace,

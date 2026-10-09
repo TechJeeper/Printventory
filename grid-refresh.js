@@ -105,8 +105,8 @@
     const tile = previewTilePx(gridWidth, previewColumns, previewGap);
     const detailedColumns = detailedColumnCount(contentWidth, spec.itemWidth || 300);
     const columns = view === 'list' ? 1 : (view === 'preview' ? previewColumns : detailedColumns);
-    const rowHeight = view === 'preview' ? tile : (view === 'list' ? 52 : (Number(spec.itemHeight) || 490));
-    const verticalGap = view === 'preview' ? previewGap : (view === 'list' ? 4 : 20);
+    const rowHeight = view === 'preview' ? tile : (view === 'list' ? 56 : (Number(spec.itemHeight) || 490));
+    const verticalGap = view === 'preview' ? previewGap : (view === 'list' ? 6 : 20);
     const next = {
       width: gridWidth,
       columns: columns,

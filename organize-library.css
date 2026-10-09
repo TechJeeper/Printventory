@@ -247,3 +247,53 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.organize-folder-browser-dialog {
+  max-width: 640px;
+}
+
+#organize-folder-browser-dialog .organize-path-row input,
+#organize-folder-browser-dialog .organize-path-row input:hover,
+#organize-folder-browser-dialog .organize-path-row input:focus {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  margin: 0;
+  background-image: none !important;
+  padding-right: 16px !important;
+}
+
+#organize-folder-browser-dialog .organize-path-row button,
+#organize-folder-browser-dialog .dialog-buttons button {
+  width: auto;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.organize-folder-browser-list {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0.75rem 0 0.35rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+
+#organize-folder-browser-dialog .organize-folder-browser-list button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  text-align: left;
+  justify-content: flex-start;
+  background: transparent;
+  color: inherit;
+  border: none;
+  border-radius: 0;
+  font-weight: 400;
+}
+
+#organize-folder-browser-dialog .organize-folder-browser-list button:hover,
+#organize-folder-browser-dialog .organize-folder-browser-list button:focus {
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+}

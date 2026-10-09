@@ -434,6 +434,117 @@
     if (confirmBtn) confirmBtn.disabled = !canConfirm(preview);
   }
 
+  let folderBrowserResolve = null;
+  let folderBrowserToken = 0;
+  let folderBrowserState = { constrain: '', parent: null };
+
+  function folderBrowserError(message) {
+    const errorEl = document.getElementById('organize-folder-browser-error');
+    if (!errorEl) return;
+    errorEl.hidden = !message;
+    errorEl.textContent = message || '';
+  }
+
+  function closeFolderBrowser(value) {
+    const resolve = folderBrowserResolve;
+    folderBrowserResolve = null;
+    const browser = document.getElementById('organize-folder-browser-dialog');
+    if (browser && browser.open && typeof browser.close === 'function') browser.close();
+    if (resolve) resolve(value || null);
+  }
+
+  async function loadFolderBrowser(dirPath) {
+    const token = ++folderBrowserToken;
+    const pathInput = document.getElementById('organize-folder-browser-path');
+    const list = document.getElementById('organize-folder-browser-list');
+    const status = document.getElementById('organize-folder-browser-status');
+    const upBtn = document.getElementById('organize-folder-browser-up');
+    const requested = String(dirPath || '').trim();
+    if (pathInput) pathInput.value = requested;
+    if (list) list.replaceChildren();
+    if (status) status.textContent = '';
+    folderBrowserError('');
+    folderBrowserState.parent = null;
+    if (upBtn) upBtn.disabled = true;
+    if (!requested) {
+      folderBrowserError('Enter a folder path to browse.');
+      return;
+    }
+    if (
+      folderBrowserState.constrain &&
+      folderKey(requested) !== folderKey(folderBrowserState.constrain) &&
+      !folderIsInside(requested, folderBrowserState.constrain)
+    ) {
+      folderBrowserError('That folder is outside the scanned directory.');
+      return;
+    }
+    try {
+      const listing = await window.electron.invoke('list-directories', requested);
+      if (token !== folderBrowserToken) return;
+      if (!listing || !listing.ok) {
+        folderBrowserError((listing && listing.error) || 'Could not read that folder.');
+        return;
+      }
+      if (pathInput) pathInput.value = listing.path || requested;
+      const parent = listing.parent || null;
+      const parentOutside = !!(
+        folderBrowserState.constrain &&
+        parent &&
+        folderKey(parent) !== folderKey(folderBrowserState.constrain) &&
+        !folderIsInside(parent, folderBrowserState.constrain)
+      );
+      folderBrowserState.parent = parentOutside ? null : parent;
+      if (upBtn) upBtn.disabled = !folderBrowserState.parent;
+      (listing.dirs || []).forEach((dir) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = dir.name;
+        button.addEventListener('click', (event) => {
+          event.preventDefault();
+          loadFolderBrowser(dir.path);
+        });
+        list?.appendChild(button);
+      });
+      if (status) {
+        if (!listing.dirs || listing.dirs.length === 0) status.textContent = 'No folders in here.';
+        else if (listing.truncated) status.textContent = 'Showing the first 2000 folders.';
+      }
+    } catch (err) {
+      if (token !== folderBrowserToken) return;
+      folderBrowserError(err.message || 'Could not read that folder.');
+    }
+  }
+
+  function showFolderBrowser(options) {
+    const browser = document.getElementById('organize-folder-browser-dialog');
+    if (!browser) return Promise.resolve(null);
+    if (folderBrowserResolve) folderBrowserResolve(null);
+    return new Promise((resolve) => {
+      folderBrowserResolve = resolve;
+      folderBrowserState = { constrain: (options && options.constrainTo) || '', parent: null };
+      const title = document.getElementById('organize-folder-browser-title');
+      if (title) title.textContent = (options && options.title) || 'Select folder';
+      if (typeof browser.showModal === 'function' && !browser.open) browser.showModal();
+      loadFolderBrowser((options && options.start) || '/');
+    });
+  }
+
+  async function usingServerFolderBrowser() {
+    if (!window.electron || typeof window.electron.isServerMode !== 'function') return false;
+    return !!(await window.electron.isServerMode().catch(() => false));
+  }
+
+  function pickerFailure(err) {
+    showPreview({
+      ok: false,
+      error: err && err.message ? err.message : 'Could not open the folder picker.',
+      enoughSpace: false,
+      sample: [],
+      copyCount: 0,
+      resumeCount: 0
+    });
+  }
+
   async function browseSubfolder() {
     const root = (document.getElementById('organize-source-input')?.value || '').trim();
     if (!root) return;
@@ -442,12 +553,22 @@
       ? resolveSource(root, current)
       : root;
     try {
-      const result = await window.electron.invoke('open-folder-dialog', {
-        title: 'Folder inside the scanned directory',
-        defaultPath: start
-      });
-      if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
-      const chosen = result.filePaths[0];
+      let chosen = null;
+      if (await usingServerFolderBrowser()) {
+        chosen = await showFolderBrowser({
+          title: 'Folder inside the scanned directory',
+          start,
+          constrainTo: root
+        });
+      } else {
+        const result = await window.electron.invoke('open-folder-dialog', {
+          title: 'Folder inside the scanned directory',
+          defaultPath: start
+        });
+        if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
+        chosen = result.filePaths[0];
+      }
+      if (!chosen) return;
       if (!folderIsInside(chosen, root)) {
         showPreview({
           ok: false,
@@ -463,34 +584,32 @@
       if (input) input.value = folderKey(chosen) === folderKey(root) ? '' : chosen;
       invalidatePreview();
     } catch (err) {
-      showPreview({
-        ok: false,
-        error: err.message || 'Could not open the folder picker.',
-        enoughSpace: false,
-        sample: [],
-        copyCount: 0,
-        resumeCount: 0
-      });
+      pickerFailure(err);
     }
   }
 
   async function browseInto(inputId, title) {
     try {
-      const result = await window.electron.invoke('open-folder-dialog', title);
-      if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
+      let chosen = null;
+      if (await usingServerFolderBrowser()) {
+        const current = (document.getElementById(inputId)?.value || '').trim();
+        const source = (document.getElementById('organize-source-input')?.value || '').trim();
+        chosen = await showFolderBrowser({
+          title,
+          start: current || source || '/'
+        });
+      } else {
+        const result = await window.electron.invoke('open-folder-dialog', title);
+        if (!result || result.canceled || !result.filePaths || !result.filePaths[0]) return;
+        chosen = result.filePaths[0];
+      }
+      if (!chosen) return;
       const input = document.getElementById(inputId);
       if (!input) return;
-      input.value = result.filePaths[0];
+      input.value = chosen;
       invalidatePreview();
     } catch (err) {
-      showPreview({
-        ok: false,
-        error: err.message || 'Could not open the folder picker.',
-        enoughSpace: false,
-        sample: [],
-        copyCount: 0,
-        resumeCount: 0
-      });
+      pickerFailure(err);
     }
   }
 
@@ -638,6 +757,40 @@
       invalidatePreview();
     });
     loadStructure().then(renderStructure);
+    const browserPath = document.getElementById('organize-folder-browser-path');
+    browserPath?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      loadFolderBrowser(browserPath.value);
+    });
+    document.getElementById('organize-folder-browser-go')?.addEventListener('click', (event) => {
+      event.preventDefault();
+      loadFolderBrowser(document.getElementById('organize-folder-browser-path')?.value || '');
+    });
+    document.getElementById('organize-folder-browser-up')?.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (folderBrowserState.parent) loadFolderBrowser(folderBrowserState.parent);
+    });
+    document.getElementById('organize-folder-browser-use')?.addEventListener('click', (event) => {
+      event.preventDefault();
+      const chosen = (document.getElementById('organize-folder-browser-path')?.value || '').trim();
+      if (!chosen) {
+        folderBrowserError('Enter a folder path to browse.');
+        return;
+      }
+      if (folderBrowserState.constrain && !folderIsInside(chosen, folderBrowserState.constrain)) {
+        folderBrowserError('That folder is outside the scanned directory.');
+        return;
+      }
+      closeFolderBrowser(chosen);
+    });
+    document.getElementById('organize-folder-browser-cancel')?.addEventListener('click', (event) => {
+      event.preventDefault();
+      closeFolderBrowser(null);
+    });
+    document.getElementById('organize-folder-browser-dialog')?.addEventListener('close', () => {
+      closeFolderBrowser(null);
+    });
     document.getElementById('organize-source-sub-browse')?.addEventListener('click', (event) => {
       event.preventDefault();
       browseSubfolder();
@@ -659,7 +812,10 @@
       closeSourceMenu();
       dialogEl()?.close();
     });
-    dialogEl()?.addEventListener('close', closeSourceMenu);
+    dialogEl()?.addEventListener('close', () => {
+      closeSourceMenu();
+      closeFolderBrowser(null);
+    });
 
     window._electronRealEventHandlers = window._electronRealEventHandlers || {};
     window._electronRealEventHandlers['open-organize-library'] = openOrganizeLibrary;

@@ -770,7 +770,7 @@
             <button type="button" class="list-button icon-button" data-field="tag" data-target="multi-tag-select" data-mode="multi" data-container="multi-tags" title="Search existing tags">☰</button>
             <button type="button" class="icon-button add-tag-button">+</button>
           </div>
-          <div id="multi-tags" class="tags-list" style="display: none;"></div>
+          <div id="multi-tags" class="tags-list"></div>
           <div style="margin-top: 8px;">
             <label for="multi-tag-remove-select" style="display: block; margin-bottom: 4px;">Remove from selected:</label>
             <div class="tags-input-container">
@@ -847,7 +847,17 @@
     <dialog id="dedup-dialog" class="modal dedup-dialog">
       <form method="dialog">
         <div class="dedup-header" style="position: sticky; top: 0; background: inherit; z-index: 1; padding: 0.5rem;">
-          <h3>Duplicate Files</h3>
+          <div class="modal-header-row">
+            <h3>Duplicate Files</h3>
+            <button type="button" id="dedup-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleDedupFullscreen==='function')window.toggleDedupFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
           <p style="font-size: 0.9rem; margin: 0.2rem 0; color: #555;">
             De-duplication is performed using the file hash to ensure that only identical files are considered duplicates.
             Limit the scan to your current library filters so a large collection does not have to be processed all at once.
@@ -888,7 +898,6 @@
             <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group. Keeps a copy in the preferred directory when one exists, otherwise an archived/ZIP copy." onclick="if(typeof window.dedupEasyFromDialog==='function')window.dedupEasyFromDialog()">Easy</button>
             <button type="button" id="dedup-clear-button" class="modal-fullscreen-toggle" title="Clear all selections" onclick="if(typeof window.dedupClearFromDialog==='function')window.dedupClearFromDialog()">Clear</button>
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
-            <button type="button" id="dedup-fullscreen-toggle" class="modal-fullscreen-toggle" title="Toggle full screen" onclick="if(typeof window.toggleDedupFullscreen==='function')window.toggleDedupFullscreen()">Full Screen</button>
             <button type="button" id="close-dedup" onclick="document.getElementById('dedup-dialog')?.close()">Close</button>
           </div>
         </div>
@@ -956,6 +965,22 @@
           <button type="button" id="organize-close-button">Close</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="organize-folder-browser-dialog" class="modal organize-folder-browser-dialog">
+      <h3 id="organize-folder-browser-title">Select folder</h3>
+      <p class="setting-description">Choose a folder on the computer running Printventory.</p>
+      <div class="organize-path-row">
+        <input type="text" id="organize-folder-browser-path" autocomplete="off" spellcheck="false" aria-label="Folder path">
+        <button type="button" id="organize-folder-browser-up">Up</button>
+        <button type="button" id="organize-folder-browser-go">Open</button>
+      </div>
+      <div id="organize-folder-browser-list" class="organize-folder-browser-list"></div>
+      <p id="organize-folder-browser-status" class="setting-description"></p>
+      <p id="organize-folder-browser-error" class="organize-preview-error" hidden></p>
+      <div class="dialog-buttons">
+        <button type="button" id="organize-folder-browser-use">Use this folder</button>
+        <button type="button" id="organize-folder-browser-cancel">Cancel</button>
+      </div>
     </dialog>
     <dialog id="purge-models-dialog" class="modal">
       <form method="dialog">
