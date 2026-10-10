@@ -1,6 +1,6 @@
 {
   "name": "printventory",
-  "version": "2.2.22",
+  "version": "2.2.23",
   "description": "Printventory",
   "main": "main.js",
   "scripts": {
@@ -36,7 +36,7 @@
     "test:inbox": "node extension-inbox.test.js",
     "test:extractors": "node chrome-extension/extractors.test.js",
     "test:mcp": "node mcp-server.test.js",
-    "test:thumb-worker": "node missing-thumbnails-query.test.js && node primary-thumbnails-query.test.js && node flatten-3mf-stl.test.js && node thumbnail-worker.test.js",
+    "test:thumb-worker": "node missing-thumbnails-query.test.js && node primary-thumbnails-query.test.js && node flatten-3mf-stl.test.js && node thumbnail-worker.test.js && node thumbnail-skip.test.js",
     "test:slicer-detect": "node slicer-detect.test.js",
     "test:slicer-launch": "node slicer-launch.test.js",
     "test:slicer-protocol": "node slicer-protocol.test.js",
@@ -237,6 +237,7 @@
       "helper/install-bundle.js",
       "library-context.js",
       "stl-sanity.js",
+      "thumbnail-skip.js",
       "ai-rate-limit.js",
       "support-logs.js",
       "support-webhook.json",

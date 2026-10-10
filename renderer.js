@@ -1353,6 +1353,19 @@ function isThumbnailLoadTimeout(error) {
   return !!(error && (error.thumbnailLoadTimeout || error.thumbnailLoadAborted));
 }
 
+/** Why the last render of a path failed. Consumed by the bulk job so a timeout is not parsed twice. */
+const thumbFailureReasons = new Map();
+
+function noteThumbFailure(filePath, reason) {
+  if (filePath && reason) thumbFailureReasons.set(filePath, reason);
+}
+
+function takeThumbFailure(filePath) {
+  const reason = filePath ? (thumbFailureReasons.get(filePath) || '') : '';
+  if (filePath) thumbFailureReasons.delete(filePath);
+  return reason;
+}
+
 function thumbnailQueueShouldWait(filePath) {
   return !!(filePath && (deferredSlowThumbnails.has(filePath) || slowThumbnailExhausted.has(filePath)));
 }
@@ -1772,6 +1785,37 @@ const EXTENSION_TO_PLACEHOLDER_LABEL = {
   'fbx': 'FBX', 'f3d': 'F3D', 'f3z': 'F3Z', 'chitubox': 'ChiTuBox', 'gcode': 'G-code', 'igs': 'IGES', 'iges': 'IGES',
   'lys': 'LYS', 'lyt': 'LYT', 'obj': 'OBJ', 'ply': 'PLY', 'step': 'STEP', 'stp': 'STEP', 'svg': 'SVG', 'voxl': 'VOXL', 'x3d': 'X3D'
 };
+
+const skippedPreviewCache = new Map();
+
+/** Distinct from failure art so the grid keeps it and Generate Missing does not pick it up again. */
+function generateSkippedPreviewPlaceholder(label) {
+  const text = label || 'No preview';
+  if (skippedPreviewCache.has(text)) return skippedPreviewCache.get(text);
+  const size = 250;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '3d.png';
+  ctx.fillStyle = '#243044';
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.strokeRect(18, 18, size - 36, size - 36);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, size / 2, size / 2);
+  let url = '3d.png';
+  try {
+    url = canvas.toDataURL('image/png');
+  } catch (e) {
+    url = '3d.png';
+  }
+  skippedPreviewCache.set(text, url);
+  return url;
+}
 
 function generateTypedPlaceholder(extension) {
   const ext = (extension || '').toLowerCase().replace(/^\./, '');
@@ -4397,14 +4441,6 @@ function isServerThumbnailWorkerContext() {
   return window.electron.isServerThumbnailWorker().catch(() => false);
 }
 
-function thumbnailJobFinishedMessage(result, fallback) {
-  const saved = Number(result && result.saved);
-  const total = Number(result && (result.total != null ? result.total : result.count));
-  if (!Number.isFinite(saved) || !Number.isFinite(total) || total <= 0) return fallback;
-  if (saved >= total) return fallback;
-  if (saved <= 0) return 'No thumbnails were saved. The ones still missing can be tried again.';
-  return `Saved ${saved} of ${total} thumbnails. Run it again for the ones that are still missing.`;
-}
 
 function showBackgroundThumbnailProgress(text, percent) {
   const progressSection = document.getElementById('progress-section');
@@ -4599,10 +4635,10 @@ window._electronRealEventHandlers['thumbnail-job-complete'] = function(result) {
   if (wasBackgrounded) {
     const cancelled = !!(result && result.cancelled);
     refreshGridAfterBackgroundThumbnailJob();
-    window.electron.showMessage(
-      waiter.title || 'Thumbnails',
-      cancelled ? 'Thumbnail generation stopped.' : 'Thumbnail generation finished.'
-    ).catch(() => {});
+    const finished = (typeof thumbnailJobFinishedMessage === 'function')
+      ? thumbnailJobFinishedMessage(result, 'Thumbnail generation finished.')
+      : (cancelled ? 'Thumbnail generation stopped.' : 'Thumbnail generation finished.');
+    window.electron.showMessage(waiter.title || 'Thumbnails', finished).catch(() => {});
     return;
   }
 
@@ -4726,6 +4762,7 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
       const CHUNK_SIZE = 25;
       let cancelled = false;
       let saved = 0;
+      let skipped = 0;
       for (let offset = 0; offset < filePaths.length; offset += CHUNK_SIZE) {
         if (cancelRef.cancelled) {
           cancelled = true;
@@ -4744,6 +4781,7 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
           title: mode === 'all' ? 'Regenerate Thumbnails' : 'Generate Missing Thumbnails'
         });
         if (result && typeof result.saved === 'number') saved += result.saved;
+        if (result && typeof result.skipped === 'number') skipped += result.skipped;
         if (result && result.cancelled) {
           cancelled = true;
           break;
@@ -4762,7 +4800,8 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
         mode,
         count: total,
         total,
-        saved
+        saved,
+        skipped
       });
     } catch (error) {
       console.error('[Server thumbnails] Worker job failed:', error);
@@ -8252,7 +8291,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (allModels.length > 0) {
                 const serverJob = await startAndWatchServerThumbnailJob('all', 'Regenerate Thumbnails');
                 if (serverJob) {
-                  if (serverJob.backgrounded || serverJob.cancelled) {
+                  if (serverJob.backgrounded) return;
+                  if (serverJob.cancelled) {
+                    await window.electron.showMessage('Regenerate Thumbnails', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation stopped.'));
                     return;
                   }
                   invalidatePrimaryThumbnailCache();
@@ -10463,7 +10504,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const serverJob = await startAndWatchServerThumbnailJob('all', 'Regenerate Thumbnails');
         if (serverJob) {
           isRegeneratingThumbnails = false;
-          if (serverJob.backgrounded || serverJob.cancelled) {
+          if (serverJob.backgrounded) return;
+          if (serverJob.cancelled) {
+            await window.electron.showMessage('Regenerate Thumbnails', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation stopped.'));
             return;
           }
           await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail regeneration completed successfully.'));
@@ -10530,7 +10573,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const serverJob = await startAndWatchServerThumbnailJob('missing', 'Generate Missing Thumbnails');
         if (serverJob) {
           isThumbnailDialogShowing = false;
-          if (serverJob.backgrounded || serverJob.cancelled) {
+          if (serverJob.backgrounded) return;
+          if (serverJob.cancelled) {
+            await window.electron.showMessage('Generate Missing Thumbnails', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation stopped.'));
             return;
           }
           await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation completed successfully.'));
@@ -10620,6 +10665,31 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Sort-select handler is now managed by search.js via initializeCombinedSearch()
   // which properly calls performCombinedSearch() to re-render with filters preserved
 
+  // Keep the object the virtual grid already laid out, and paint the live image.
+  // Replacing the array slot and deleting the card rebuilt from the stale layout.
+  function paintGridModelThumbnail(filePath, updatedModel) {
+    if (!filePath || !updatedModel) return false;
+    const container = document.querySelector('.file-grid');
+    const normalizedPath = normalizePathForComparison(filePath);
+    const patched = !!(container && window.gridRefresh.patchLoadedModel(
+      container.currentModels,
+      normalizedPath,
+      updatedModel,
+      normalizePathForComparison
+    ));
+    const primary = getPrimaryThumbnailFromString(updatedModel.thumbnail);
+    let painted = false;
+    document.querySelectorAll('.file-item').forEach((fileItem) => {
+      const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
+      if (normalizePathForComparison(itemPath) !== normalizedPath) return;
+      const img = fileItem.querySelector('.thumbnail-container img');
+      if (!img) return;
+      img.src = primary || updatedModel.thumbnail || '3d.png';
+      painted = true;
+    });
+    return patched || painted;
+  }
+
   const scheduleThumbnailGridRefresh = window.gridRefresh.createCoalescedRefresh(
     window.gridRefresh.THUMBNAIL_REFRESH_COALESCE_MS,
     async () => {
@@ -10684,49 +10754,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Restore the filter
             window.dateAddedFilter = preservedDateAddedFilter;
             window._lastDateAddedFilter = preservedDateAddedFilter;
-            
-            // Try to find and update the specific DOM element only
-            const allFileItems = document.querySelectorAll('.file-item');
-            const normalizedPath = normalizePathForComparison(data.filePath);
-            
-            for (const fileItem of allFileItems) {
-              const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
-              const normalizedItemPath = normalizePathForComparison(itemPath);
-              if (normalizedItemPath === normalizedPath) {
-                // Update the model in currentModels array
-                const container = document.querySelector('.file-grid');
-                if (container && container.currentModels) {
-                  const modelIndex = container.currentModels.findIndex(m => 
-                    normalizePathForComparison(m.filePath) === normalizedPath
-                  );
-                  if (modelIndex >= 0) {
-                    // Update the model with fresh data from database
-                    container.currentModels[modelIndex] = { ...updatedModel };
-                  }
-                }
-                
-                // Remove the item so it gets recreated with updated thumbnail
-                fileItem.remove();
-                
-                // Trigger re-render of visible items only (preserves filter)
-                if (container && container.renderVisibleItemsFn) {
-                  container.renderVisibleItemsFn();
-                }
-                
-                // Don't call performCombinedSearch - just update the single item
-                return;
-              }
-            }
 
-            const offscreenContainer = document.querySelector('.file-grid');
-            if (offscreenContainer && window.gridRefresh.patchLoadedModel(
-              offscreenContainer.currentModels,
-              normalizedPath,
-              updatedModel,
-              normalizePathForComparison
-            )) {
-              return;
-            }
+            if (paintGridModelThumbnail(data.filePath, updatedModel)) return;
 
             // If item wasn't found in current view, it might be filtered out or not visible
             // Don't refresh the whole grid - just return
@@ -10740,55 +10769,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!updatedModel || !updatedModel.thumbnail) {
             return;
           }
-          
-          // Try to find and update the specific DOM element first
-          const allFileItems = document.querySelectorAll('.file-item');
-          const normalizedPath = normalizePathForComparison(data.filePath);
-          let itemFound = false;
-          
-          for (const fileItem of allFileItems) {
-            const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
-            const normalizedItemPath = normalizePathForComparison(itemPath);
-            if (normalizedItemPath === normalizedPath) {
-              itemFound = true;
-              
-              // Update the model in currentModels array
-              const container = document.querySelector('.file-grid');
-              if (container && container.currentModels) {
-                const modelIndex = container.currentModels.findIndex(m => 
-                  normalizePathForComparison(m.filePath) === normalizedPath
-                );
-                if (modelIndex >= 0) {
-                  // Update the model with fresh data from database
-                  container.currentModels[modelIndex] = { ...updatedModel };
-                }
-              }
-              
-              // Remove the item so it gets recreated with updated thumbnail
-              fileItem.remove();
-              break;
-            }
-          }
-          
-          const container = document.querySelector('.file-grid');
 
-          // Off-screen in the virtual grid: patch the loaded model in place.
-          if (!itemFound && container && window.gridRefresh.patchLoadedModel(
-            container.currentModels,
-            normalizedPath,
-            updatedModel,
-            normalizePathForComparison
-          )) {
-            return;
-          }
-
-          // Trigger re-render of visible items
-          if (container && container.renderVisibleItemsFn) {
-            container.renderVisibleItemsFn();
-          }
-
-          // Model is not in the loaded grid at all (or the grid has no renderer): reload, coalesced
-          if (!itemFound || !container || !container.renderVisibleItemsFn) {
+          if (!paintGridModelThumbnail(data.filePath, updatedModel)) {
             scheduleThumbnailGridRefresh();
           }
         } catch (updateError) {
@@ -10806,6 +10788,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const updatedModel = await window.electron.getModel(data.filePath);
       if (updatedModel?.thumbnail) {
         syncPrimaryThumbnailCacheFromThumbnailString(data.filePath, updatedModel.thumbnail);
+        paintGridModelThumbnail(data.filePath, updatedModel);
       } else {
         invalidatePrimaryThumbnailCache(data.filePath);
       }
@@ -10848,39 +10831,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Restore the filter
             window.dateAddedFilter = preservedDateAddedFilter;
             window._lastDateAddedFilter = preservedDateAddedFilter;
-            
-            // Try to find and update the specific DOM element only
-            const allFileItems = document.querySelectorAll('.file-item');
-            const normalizedPath = normalizePathForComparison(data.filePath);
-            
-            for (const fileItem of allFileItems) {
-              const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
-              const normalizedItemPath = normalizePathForComparison(itemPath);
-              if (normalizedItemPath === normalizedPath) {
-                // Update the model in currentModels array
-                const container = document.querySelector('.file-grid');
-                if (container && container.currentModels) {
-                  const modelIndex = container.currentModels.findIndex(m => 
-                    normalizePathForComparison(m.filePath) === normalizedPath
-                  );
-                  if (modelIndex >= 0) {
-                    // Update the model with fresh data from database
-                    container.currentModels[modelIndex] = { ...updatedModel };
-                  }
-                }
-                
-                // Remove the item so it gets recreated with updated thumbnail
-                fileItem.remove();
-                
-                // Trigger re-render of visible items only (preserves filter)
-                if (container && container.renderVisibleItemsFn) {
-                  container.renderVisibleItemsFn();
-                }
-                
-                return;
-              }
-            }
-            
+
+            paintGridModelThumbnail(data.filePath, updatedModel);
             return;
           }
           
@@ -10889,43 +10841,8 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!updatedModel) {
             return;
           }
-          
-          // Try to find and update the specific DOM element first
-          const allFileItems = document.querySelectorAll('.file-item');
-          const normalizedPath = normalizePathForComparison(data.filePath);
-          let itemFound = false;
-          
-          for (const fileItem of allFileItems) {
-            const itemPath = fileItem.getAttribute('data-filepath') || fileItem.dataset.filepath;
-            const normalizedItemPath = normalizePathForComparison(itemPath);
-            if (normalizedItemPath === normalizedPath) {
-              itemFound = true;
-              
-              // Update the model in currentModels array
-              const container = document.querySelector('.file-grid');
-              if (container && container.currentModels) {
-                const modelIndex = container.currentModels.findIndex(m => 
-                  normalizePathForComparison(m.filePath) === normalizedPath
-                );
-                if (modelIndex >= 0) {
-                  container.currentModels[modelIndex] = { ...updatedModel };
-                }
-              }
-              
-              // Remove the item so it gets recreated with updated thumbnail
-              fileItem.remove();
-              
-              // Trigger re-render of visible items
-              if (container && container.renderVisibleItemsFn) {
-                container.renderVisibleItemsFn();
-              }
-              
-              return;
-            }
-          }
-          
-          // If item wasn't found, do a full refresh
-          if (!itemFound) {
+
+          if (!paintGridModelThumbnail(data.filePath, updatedModel)) {
             if (typeof window.performCombinedSearch === 'function') {
               await window.performCombinedSearch();
             } else {
@@ -14704,6 +14621,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let isCancelled = false;
     let processedInBatch = 0;
     let savedCount = 0;
+    let skippedCount = 0;
 
     const reportHeadlessProgress = async (processed, total, phase) => {
       if (!headless || typeof window.electron.reportServerThumbnailProgress !== 'function') return;
@@ -14763,6 +14681,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const processModel = async (model) => {
         let thumbnail = null;
         let savedThisModel = false;
+        let skippedThisModel = false;
         const pathForExt = model.filePath.includes('::') ? (model.filePath.split('::')[1] || '') : model.filePath;
         const fileExt = pathForExt.split('.').pop().toLowerCase();
         
@@ -14917,31 +14836,62 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!thumbnail) {
             console.log(`[DEBUG] generateThumbnailsForModels: Rendering 3D model for ${model.filePath}`);
             try {
-              thumbnail = await generateThumbnail(model.filePath, { skipHash });
+              thumbnail = await generateThumbnail(model.filePath, { skipHash, reportSkips: headless });
             } catch (renderError) {
               console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
+              if (headless && typeof isPermanentThumbnailSkipError === 'function' && isPermanentThumbnailSkipError(renderError)) {
+                thumbnail = (typeof THUMB_SKIP_MESH !== 'undefined') ? THUMB_SKIP_MESH : 'skip:mesh';
+              }
             }
-            const renderFailed = !thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail);
+            const skipToken = typeof isThumbSkipToken === 'function' && isThumbSkipToken(thumbnail);
+            const renderFailed = !skipToken && (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail));
+            // A timeout is not a WebGL glitch. Retrying it spends another 30s on the same STEP file
+            // and is why Docker jobs sit at 362/365. Permanent mesh errors are not retried either.
             if (headless && renderFailed) {
-              resetSharedThumbnailRenderer();
-              try {
-                thumbnail = await generateThumbnail(model.filePath, { skipHash: true });
-              } catch (renderError) {
-                console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
+              const reason = takeThumbFailure(model.filePath);
+              if (reason === 'timeout') {
+                thumbnail = (typeof THUMB_SKIP_TIMEOUT !== 'undefined') ? THUMB_SKIP_TIMEOUT : 'skip:timeout';
+              } else if (reason !== 'mesh') {
+                resetSharedThumbnailRenderer();
+                try {
+                  thumbnail = await generateThumbnail(model.filePath, { skipHash: true, reportSkips: true });
+                } catch (renderError) {
+                  console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
+                  if (typeof isPermanentThumbnailSkipError === 'function' && isPermanentThumbnailSkipError(renderError)) {
+                    thumbnail = (typeof THUMB_SKIP_MESH !== 'undefined') ? THUMB_SKIP_MESH : 'skip:mesh';
+                  } else if (isThumbnailLoadTimeout(renderError)) {
+                    thumbnail = (typeof THUMB_SKIP_TIMEOUT !== 'undefined') ? THUMB_SKIP_TIMEOUT : 'skip:timeout';
+                  }
+                }
+              } else {
+                thumbnail = (typeof THUMB_SKIP_MESH !== 'undefined') ? THUMB_SKIP_MESH : 'skip:mesh';
               }
             }
           }
 
+          if (headless && typeof isThumbSkipToken === 'function' && isThumbSkipToken(thumbnail)) {
+            const label = thumbnail === 'skip:size' ? 'Too large' : 'No preview';
+            const placeholder = generateSkippedPreviewPlaceholder(label);
+            if (placeholder && placeholder.startsWith('data:image')) {
+              await window.electron.saveThumbnail(model.filePath, placeholder);
+              skippedThisModel = true;
+            } else {
+              await window.electron.saveThumbnail(model.filePath, '3d.png');
+            }
+            thumbnail = null;
+          }
+
           // 3. Validate and fallback to default if necessary (STL/3MF only reach here)
-          if (!thumbnail || typeof thumbnail !== 'string' || !thumbnail.startsWith('data:image') || isFailurePlaceholderThumbnail(thumbnail)) {
+          if (!skippedThisModel && (!thumbnail || typeof thumbnail !== 'string' || !thumbnail.startsWith('data:image') || isFailurePlaceholderThumbnail(thumbnail))) {
             thumbnail = '3d.png';
           }
 
-          // 4. Save real renders only — never lock in failure placeholders
-          if (!saved3mfEmbedsViaBatch && thumbnail !== '3d.png') {
+          // 4. Save real renders only — never lock in failure placeholders.
+          // Skipped files already have a durable "Too large" / "No preview" image.
+          if (!skippedThisModel && !saved3mfEmbedsViaBatch && thumbnail !== '3d.png') {
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             savedThisModel = true;
-          } else if (!saved3mfEmbedsViaBatch) {
+          } else if (!skippedThisModel && !saved3mfEmbedsViaBatch) {
             await window.electron.saveThumbnail(model.filePath, '3d.png');
           }
           
@@ -14959,14 +14909,17 @@ document.addEventListener('DOMContentLoaded', async () => {
           
         } catch (error) {
           console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
-          // Do not persist typed STL/3MF placeholders — that blocks retries (common on Docker timeouts).
-          try {
-            await window.electron.saveThumbnail(model.filePath, '3d.png');
-          } catch (saveError) {
-            console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
+          // A skip image is already stored. Writing 3d.png here would put the file back in the missing set.
+          if (!skippedThisModel) {
+            try {
+              await window.electron.saveThumbnail(model.filePath, '3d.png');
+            } catch (saveError) {
+              console.error(`Failed to save default thumbnail for ${model.filePath}:`, saveError);
+            }
           }
         } finally {
           if (savedThisModel) savedCount++;
+          else if (skippedThisModel) skippedCount++;
           processedInBatch++;
           processedCount = processedInBatch;
           const absoluteProcessed = progressOffset + processedInBatch;
@@ -15073,7 +15026,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    return { cancelled: isCancelled, count: models.length, saved: savedCount };
+    return { cancelled: isCancelled, count: models.length, saved: savedCount, skipped: skippedCount };
   }
 
   window.generateThumbnailsForModels = generateThumbnailsForModels;
@@ -17283,6 +17236,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
 
   } catch (error) {
     if (isThumbnailLoadTimeout(error)) {
+      noteThumbFailure(filePath, 'timeout');
       if (options.slowPass) {
         slowThumbnailExhausted.add(filePath);
         deferredSlowThumbnails.delete(filePath);
@@ -17294,6 +17248,9 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
       return null;
     }
     console.error('Error rendering model:', error);
+    if (typeof isPermanentThumbnailSkipError === 'function' && isPermanentThumbnailSkipError(error)) {
+      noteThumbFailure(filePath, 'mesh');
+    }
     const corruptedDataUrl = generateCorruptedPlaceholder();
     const img = document.createElement('img');
     img.src = corruptedDataUrl;
@@ -18176,6 +18133,17 @@ async function populateTagSelect(selectId = 'tag-select', containerId = 'model-t
   }
 }
 
+// Union of tag names on the current selection. One query — Ctrl+A can be the whole library.
+async function fetchTagsOnSelectedModels() {
+  const filePaths = Array.from(selectedModels);
+  if (filePaths.length === 0) return [];
+  if (typeof window.electron.getTagsForPaths === 'function') {
+    const names = await window.electron.getTagsForPaths(filePaths);
+    return Array.isArray(names) ? names.filter((name) => typeof name === 'string' && name.trim()) : [];
+  }
+  return [];
+}
+
 // Refresh the tags displayed in the multi-tags container
 async function refreshMultiEditTags() {
   const multiTagsContainer = document.getElementById('multi-tags');
@@ -18192,39 +18160,7 @@ async function refreshMultiEditTags() {
   }
 
   try {
-    // Get all selected file paths
-    const filePaths = Array.from(selectedModels);
-    
-    // Load tags for each model in parallel
-    const tagPromises = filePaths.map(async (filePath) => {
-      try {
-        const model = await window.electron.getModel(filePath);
-        return model && model.tags ? (Array.isArray(model.tags) ? model.tags : []) : [];
-      } catch (error) {
-        console.error(`Error loading tags for ${filePath}:`, error);
-        return [];
-      }
-    });
-
-    const allTagsArrays = await Promise.all(tagPromises);
-    
-    // Collect unique tags across all selected files
-    const uniqueTags = new Set();
-    allTagsArrays.forEach(tags => {
-      if (Array.isArray(tags)) {
-        tags.forEach(tag => {
-          if (tag && typeof tag === 'string') {
-            const normalizedTag = tag.trim();
-            if (normalizedTag) {
-              uniqueTags.add(normalizedTag);
-            }
-          }
-        });
-      }
-    });
-
-    // Sort tags alphabetically
-    const sortedTags = Array.from(uniqueTags).sort((a, b) => a.localeCompare(b));
+    const sortedTags = await fetchTagsOnSelectedModels();
 
     // Display tags in the container with remove functionality
     sortedTags.forEach(tagName => {
@@ -18277,46 +18213,7 @@ async function populateRemoveTagSelect() {
   }
 
   try {
-    // Get all selected file paths
-    const filePaths = Array.from(selectedModels);
-    
-    // Load tags for each model in parallel
-    const tagPromises = filePaths.map(async (filePath) => {
-      try {
-        const model = await window.electron.getModel(filePath);
-        return model && model.tags ? (Array.isArray(model.tags) ? model.tags : []) : [];
-      } catch (error) {
-        console.error(`Error loading tags for ${filePath}:`, error);
-        return [];
-      }
-    });
-
-    const allTagsArrays = await Promise.all(tagPromises);
-    
-    // Collect unique tags across all selected files
-    // Use Set to automatically ensure uniqueness
-    const uniqueTags = new Set();
-    allTagsArrays.forEach(tags => {
-      if (Array.isArray(tags)) {
-        // First deduplicate tags within each model (in case a model has duplicate tags)
-        const modelUniqueTags = new Set();
-        tags.forEach(tag => {
-          // Normalize tag: trim whitespace and ensure it's a non-empty string
-          if (tag && typeof tag === 'string') {
-            const normalizedTag = tag.trim();
-            if (normalizedTag) {
-              modelUniqueTags.add(normalizedTag);
-            }
-          }
-        });
-        // Add all unique tags from this model to the overall set
-        modelUniqueTags.forEach(tag => uniqueTags.add(tag));
-      }
-    });
-
-    // Convert Set to array and sort alphabetically
-    // Set already ensures uniqueness, so no need for additional deduplication
-    const sortedTags = Array.from(uniqueTags).sort((a, b) => a.localeCompare(b));
+    const sortedTags = await fetchTagsOnSelectedModels();
     
     // Double-check for duplicates (defensive programming)
     const finalUniqueTags = [];
@@ -18419,7 +18316,10 @@ async function addTagToModel(tagName, containerId, options = {}) {
   // Auto-save logic after ADDING a tag
   if (containerId === 'multi-tags') {
     console.log(`Multi-edit: Appending tag '${tagName}' to selected models.`);
-    await autoSaveMultipleModels('tags', [tagName]);
+    const saved = await autoSaveMultipleModels('tags', [tagName]);
+    if (!saved) {
+      await window.electron.showMessage('Error', 'The tag could not be applied to the selected models.');
+    }
     await refreshMultiEditTags();
     await populateRemoveTagSelect();
     await populateTagSelect('multi-tag-select', 'multi-tags');
@@ -18750,41 +18650,12 @@ function modelPayloadForSave(model) {
 async function removeTagFromSelectedModels(tagName) {
   const trimmed = typeof tagName === 'string' ? tagName.trim() : '';
   if (!trimmed || selectedModels.size === 0) return false;
+  if (typeof window.electron.applyTagsToModels !== 'function') return false;
 
-  const modelUpdates = [];
-  for (const filePath of Array.from(selectedModels)) {
-    try {
-      const model = await window.electron.getModel(filePath);
-      if (!model) continue;
-      const tags = Array.isArray(model.tags) ? model.tags : [];
-      const updatedTags = tags.filter((tag) => tag !== trimmed);
-      if (updatedTags.length === tags.length) continue;
-      model.tags = updatedTags;
-      modelUpdates.push(model);
-    } catch (error) {
-      console.error(`Error loading model ${filePath} for tag removal:`, error);
-    }
-  }
+  const result = await window.electron.applyTagsToModels(Array.from(selectedModels), { removeTags: [trimmed] });
+  console.log('applyTagsToModels remove:', result);
+  if (!result || result.missing >= result.requested) return false;
 
-  if (modelUpdates.length === 0) return false;
-
-  const modelDataBatch = modelUpdates.map(modelPayloadForSave);
-  try {
-    const success = await window.electron.updateModelsBatch(modelDataBatch);
-    if (!success) throw new Error('Bulk update returned false');
-  } catch (error) {
-    console.error('Error in batch update for tag removal:', error);
-    for (const model of modelDataBatch) {
-      await window.electron.saveModel(model).catch((err) => {
-        console.error(`Error saving model ${model.filePath}:`, err);
-      });
-    }
-  }
-
-  for (const model of modelUpdates) {
-    mergeModelIntoGridCurrentModels(modelPayloadForSave(model));
-    await updateModelElement(model.filePath);
-  }
   await refreshMultiEditTags();
   await populateRemoveTagSelect();
   await populateTagSelect('multi-tag-select', 'multi-tags');
@@ -20222,6 +20093,9 @@ async function generateThumbnail(file, options = {}) {
     if (fileSizeInMB > MAX_FILE_SIZE_MB) {
       debugLog(`Skipping thumbnail generation for ${filePath} (${fileSizeInMB.toFixed(2)}MB > ${MAX_FILE_SIZE_MB}MB)`);
       console.warn(`Skipping thumbnail generation for ${filePath} (${fileSizeInMB.toFixed(2)}MB > ${MAX_FILE_SIZE_MB}MB)`);
+      if (options.reportSkips) {
+        return (typeof THUMB_SKIP_SIZE !== 'undefined') ? THUMB_SKIP_SIZE : 'skip:size';
+      }
       await window.electron.saveThumbnail(filePath, '3d.png');
       return '3d.png';
     }
@@ -20235,7 +20109,14 @@ async function generateThumbnail(file, options = {}) {
     });
 
     if (!thumbnail || isFailurePlaceholderThumbnail(thumbnail)) {
-      // Leave as default so hasThumbnail stays false and Docker can retry later.
+      const reason = takeThumbFailure(filePath);
+      if (options.reportSkips && reason === 'timeout') {
+        return (typeof THUMB_SKIP_TIMEOUT !== 'undefined') ? THUMB_SKIP_TIMEOUT : 'skip:timeout';
+      }
+      if (options.reportSkips && reason === 'mesh') {
+        return (typeof THUMB_SKIP_MESH !== 'undefined') ? THUMB_SKIP_MESH : 'skip:mesh';
+      }
+      // Leave as default so hasThumbnail stays false and a later run can retry transient failures.
       return '3d.png';
     }
 
@@ -21048,37 +20929,7 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
         break;
       case 'tag':
         if (isRemove && targetSelectId === 'multi-tag-remove-select') {
-          // For remove tags, get tags from selected files only
-          if (selectedModels.size === 0) {
-            items = [];
-          } else {
-            const filePaths = Array.from(selectedModels);
-            const tagPromises = filePaths.map(async (filePath) => {
-              try {
-                const model = await window.electron.getModel(filePath);
-                return model && model.tags ? (Array.isArray(model.tags) ? model.tags : []) : [];
-              } catch (error) {
-                console.error(`Error loading tags for ${filePath}:`, error);
-                return [];
-              }
-            });
-            const allTagsArrays = await Promise.all(tagPromises);
-            // Collect unique tags
-            const uniqueTags = new Set();
-            allTagsArrays.forEach(tags => {
-              if (Array.isArray(tags)) {
-                tags.forEach(tag => {
-                  if (tag && typeof tag === 'string') {
-                    const normalizedTag = tag.trim();
-                    if (normalizedTag) {
-                      uniqueTags.add(normalizedTag);
-                    }
-                  }
-                });
-              }
-            });
-            items = Array.from(uniqueTags);
-          }
+          items = selectedModels.size === 0 ? [] : await fetchTagsOnSelectedModels();
         } else {
           // For add tags, get all tags
           const tags = await window.electron.getAllTags();
@@ -21729,6 +21580,20 @@ async function autoSaveMultipleModels(field, value, options = {}) {
     if (selectedModels.size === 0) {
       console.warn('No models selected for autoSaveMultipleModels');
       return false; // Indicate failure/no-op
+    }
+
+    // Tags on a multi-selection (including Ctrl+A) must not load each model.
+    // getModel includes the thumbnail, and a full-library selection drops the Docker socket.
+    if (field === 'tags' && !options.replaceTags && typeof window.electron.applyTagsToModels === 'function') {
+      const newTags = Array.isArray(value)
+        ? value.map((tag) => String(tag).trim()).filter(Boolean)
+        : (typeof value === 'string' && value.trim() ? [value.trim()] : []);
+      if (newTags.length === 0) return false;
+      const modelsToUpdate = Array.from(selectedModels);
+      const result = await window.electron.applyTagsToModels(modelsToUpdate, { addTags: newTags });
+      console.log(`applyTagsToModels add:`, result);
+      if (!result || result.missing >= result.requested) return false;
+      return true;
     }
     
     // Handle designer field default value (will be reapplied next)
@@ -25934,10 +25799,28 @@ function renderVirtualGrid(models) {
           }
           return true;
         };
-        // Mounted cards still sit at the previous column positions after a resize.
-        // Short filtered lists (New, no designer) keep every key mounted, so the
-        // scroll fast-path would otherwise skip the move.
-        const bufferCovered = !geometryChanged
+        // Mounted cards still sit at the previous column positions after a resize
+        // or after one filtered model is removed. Short lists keep every key
+        // mounted, so the scroll fast-path would otherwise leave a hole.
+        const stayPut = window.gridRefresh?.mountedCardsStayPut
+          ? window.gridRefresh.mountedCardsStayPut(cache, {
+            width: currentContainerWidth,
+            columns: currentColumns,
+            view: currentGridView,
+            rowHeight: layoutRowHeight,
+            verticalGap: currentVerticalGap,
+            modelsRef: currentModels,
+            modelsLen: currentModels.length,
+            expandGen: virtualGridGroupLayoutGen
+          })
+          : (
+            !geometryChanged
+            && !!cache
+            && cache.modelsRef === currentModels
+            && cache.modelsLen === currentModels.length
+            && cache.expandGen === virtualGridGroupLayoutGen
+          );
+        const bufferCovered = stayPut
           && visibleRows.length > 0
           && visibleRows.every(rowIsMounted);
 

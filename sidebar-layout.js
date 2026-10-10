@@ -181,6 +181,22 @@
     observe();
     bindResizeHandles();
     await loadSavedWidths();
+    if (!window._sidebarDetailsResizeBound) {
+      window._sidebarDetailsResizeBound = true;
+      window.addEventListener('resize', () => {
+        const root = sidebar();
+        if (!root || !detailsAreOpen()) return;
+        const panel = DETAIL_IDS
+          .map((id) => document.getElementById(id))
+          .find((el) => el && !el.classList.contains('hidden'));
+        if (!panel) return;
+        const sidebarBox = root.getBoundingClientRect();
+        const panelBox = panel.getBoundingClientRect();
+        if (panelBox.top >= sidebarBox.bottom - 24) {
+          panel.scrollIntoView({ block: 'nearest' });
+        }
+      });
+    }
   }
 
   window.SidebarLayout = {

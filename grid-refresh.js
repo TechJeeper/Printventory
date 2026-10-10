@@ -142,6 +142,16 @@
       || cache.verticalGap !== next.verticalGap;
   }
 
+  // A filter that drops one model does not change the window size. Mounted
+  // cards still have to slide into the hole; geometry alone is not enough.
+  function mountedCardsStayPut(cache, next) {
+    if (!cache || !next) return false;
+    if (virtualGridGeometryChanged(cache, next)) return false;
+    return cache.modelsRef === next.modelsRef
+      && cache.modelsLen === next.modelsLen
+      && cache.expandGen === next.expandGen;
+  }
+
   // Center the selected model after a view switch. Prefer the model tile over a group card.
   function scrollTopForSelectedLayout(layout, viewportHeight, isSelectedPath) {
     if (!layout || typeof isSelectedPath !== 'function') return null;
@@ -204,6 +214,7 @@
     listViewScrollWidth: listViewScrollWidth,
     windowScaleFrame: windowScaleFrame,
     virtualGridGeometryChanged: virtualGridGeometryChanged,
+    mountedCardsStayPut: mountedCardsStayPut,
     scrollTopForSelectedLayout: scrollTopForSelectedLayout,
     patchLoadedModel: patchLoadedModel,
     createCoalescedRefresh: createCoalescedRefresh

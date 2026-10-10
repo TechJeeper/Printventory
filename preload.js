@@ -132,6 +132,8 @@ contextBridge.exposeInMainWorld('electron', {
   onOpenMetadataEditor: (callback) => ipcRenderer.on('open-metadata-editor', callback),
   getModelTags: (modelId) => ipcRenderer.invoke('get-model-tags', modelId),
   getGroupTags: (modelIds) => ipcRenderer.invoke('get-group-tags', modelIds),
+  getTagsForPaths: (filePaths) => ipcRenderer.invoke('get-tags-for-paths', filePaths),
+  applyTagsToModels: (filePaths, change) => ipcRenderer.invoke('apply-tags-to-models', filePaths, change),
   saveModelTags: (modelId, tagIds) => ipcRenderer.invoke('save-model-tags', modelId, tagIds),
   getAdditionalFileTypesCatalog: () => ipcRenderer.invoke('get-additional-file-types-catalog'),
   getModelCountByFileTypeIds: (catalogIds) => ipcRenderer.invoke('get-model-count-by-file-type-ids', catalogIds),

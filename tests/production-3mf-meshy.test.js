@@ -148,6 +148,51 @@ describe('3MF Production Extension (MeshyAI / Bambu)', () => {
     assert.ok(contours[0].length > 4);
   });
 
+  test('a large multi-part plate is placed without a per-triangle DOM', () => {
+    const support = cubeModelXml('2').replace(
+      'type="model"',
+      'type="solidsupport"'
+    ).replace(
+      '<vertex x="0" y="0" z="0"/>',
+      '<vertex x="5000" y="0" z="0"/>'
+    );
+    const assembly = `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+ <resources>
+  ${cubeModelXml('1').match(/<object[\s\S]*<\/object>/)[0]}
+  ${support.match(/<object[\s\S]*<\/object>/)[0]}
+  <object id="3" type="model" name="Body">
+   <components>
+    <component objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
+   </components>
+  </object>
+ </resources>
+ <build>
+  <item objectid="3" transform="1 0 0 0 1 0 0 0 1 40 0 0" printable="1"/>
+  <item objectid="2" printable="1"/>
+ </build>
+</model>`;
+    const padded = assembly.replace('</model>', `<!-- ${'x'.repeat((2 * 1024 * 1024) + 64)} --></model>`);
+    assert.equal(modelHasPlacementTransforms([padded]), true);
+    assert.equal(shouldUseFastPath([padded]), true);
+
+    const enc = new TextEncoder();
+    const zipped = fflate.zipSync({ '3D/3dmodel.model': enc.encode(padded) });
+    const loader = new Simple3MFLoader({ targetTriangles: 100000 });
+    const json = loader.parse(zipped.buffer);
+    const geometries = json.geometries || [];
+    assert.equal(geometries.length, 1);
+    const pos = geometries[0].data.attributes.position.array;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let i = 0; i < pos.length; i += 3) {
+      if (pos[i] < minX) minX = pos[i];
+      if (pos[i] > maxX) maxX = pos[i];
+    }
+    assert.ok(minX >= 39.9, `expected the placed cube to move by 40mm, minX=${minX}`);
+    assert.ok(maxX <= 50.1, `support mesh should be omitted, maxX=${maxX}`);
+  });
+
   test('Simple3MFLoader parses a Meshy-style split 3MF', () => {
     const loader = new Simple3MFLoader({ targetTriangles: 100000 });
     const json = loader.parse(makeProduction3mfBuffer());

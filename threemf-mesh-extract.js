@@ -498,6 +498,82 @@ function modelHasPlacementTransforms(modelXmlParts) {
   return false;
 }
 
+function parseXmlAttrs(attrText) {
+  const attrs = {};
+  if (!attrText) return attrs;
+  const re = /([\w:.-]+)\s*=\s*"([^"]*)"/g;
+  let match;
+  while ((match = re.exec(attrText)) !== null) {
+    attrs[match[1].toLowerCase()] = match[2];
+  }
+  return attrs;
+}
+
+/**
+ * Index objects and build items without a DOM. Large multi-part plates
+ * (a swapper, a full bed of objects) blow the preview worker heap when
+ * every triangle becomes an XML node.
+ */
+function indexModelXml(xml, modelPath) {
+  const objects = [];
+  const objectRe = /<(?:\w+:)?object\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?object>/gi;
+  let match;
+  while ((match = objectRe.exec(xml)) !== null) {
+    const attrs = parseXmlAttrs(match[1]);
+    const body = match[2];
+    const id = attrs.id || '';
+    if (!id) continue;
+    const hasMesh = /<(?:\w+:)?mesh\b/i.test(body);
+    let positions = null;
+    let indices = null;
+    const components = [];
+    if (hasMesh) {
+      const mesh = extractMeshFromXml(body);
+      if (mesh.keptTriangles > 0) {
+        positions = mesh.positions;
+        indices = mesh.indices;
+      }
+    } else {
+      const compRe = /<(?:\w+:)?component\b([^>]*)\/?>/gi;
+      let comp;
+      while ((comp = compRe.exec(body)) !== null) {
+        const ca = parseXmlAttrs(comp[1]);
+        components.push({
+          objectId: ca.objectid || ca['p:objectid'] || ca.object || '',
+          path: ca.path || ca['p:path'] || '',
+          pid: ca.pid || ca['p:pid'] || ca.rid || ca['p:rid'] || '',
+          transform: ca.transform || ''
+        });
+      }
+    }
+    objects.push({
+      id,
+      type: (attrs.type || 'model').toLowerCase(),
+      name: attrs.name || attrs.partnumber || '',
+      positions,
+      indices,
+      components
+    });
+  }
+
+  const items = [];
+  const itemRe = /<(?:\w+:)?item\b([^>]*)\/?>/gi;
+  let item;
+  while ((item = itemRe.exec(xml)) !== null) {
+    const ia = parseXmlAttrs(item[1]);
+    items.push({
+      objectId: ia.objectid || ia['p:objectid'] || ia.object || ia.pid || ia['p:pid'] || '',
+      path: ia.path || ia['p:path'] || '',
+      pid: ia.pid || ia['p:pid'] || '',
+      transform: ia.transform || '',
+      printable: ia.printable,
+      name: ia.partnumber || ia.name || ''
+    });
+  }
+
+  return { path: modelPath || '', objects, items };
+}
+
 /** Bambu / Orca / MeshyAI: mesh lives in 3D/Objects/*.model (Production Extension). */
 function zipHasSplitModelParts(zipKeys) {
   if (!zipKeys || !zipKeys.length) return false;
@@ -518,6 +594,7 @@ return {
   simplifyForPreview,
   shouldUseFastPath,
   modelHasPlacementTransforms,
+  indexModelXml,
   zipHasSplitModelParts
 };
 

@@ -132,6 +132,17 @@ select option:not(:checked):not([selected]):not(:hover) {
   box-sizing: border-box;
 }
 
+/* A shorter window used to push Model Details below the sidebar fold. */
+.sidebar.details-open > #model-details:not(.hidden),
+.sidebar.details-open > #bundle-details:not(.hidden),
+.sidebar.details-open > #multi-edit-panel:not(.hidden) {
+  flex: 1 1 auto;
+  min-height: 180px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  width: 100%;
+}
+
 .sidebar > #current-filter {
   flex-shrink: 0;
 }
@@ -2340,9 +2351,9 @@ body.list-view-col-reorder-active * {
 }
 
 .file-item-detailed .file-details {
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 48px;
+  overflow: auto;
 }
 
 .model-engagement-bar {
@@ -2484,7 +2495,7 @@ body.list-view-col-reorder-active * {
 /* Keep engagement bar visible; metadata can use natural height now that cards are taller */
 .file-item-detailed .file-info {
   flex: 1 1 auto !important;
-  min-height: 0 !important;
+  min-height: 48px !important;
   overflow: visible;
 }
 
@@ -2492,9 +2503,9 @@ body.list-view-col-reorder-active * {
   margin: 0;
   padding: 0;
   border-top: none;
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 48px;
+  overflow: auto;
 }
 
 .file-item-detailed .metadata-container {
@@ -2507,7 +2518,7 @@ body.list-view-col-reorder-active * {
   backdrop-filter: none;
   border-radius: 0;
   border: none;
-  overflow: hidden;
+  overflow: auto;
   box-sizing: border-box;
 }
 

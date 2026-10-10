@@ -72,6 +72,7 @@ const filesToCopy = [
   'library-context.js',
   'folder-tags.js',
   'stl-sanity.js',
+  'thumbnail-skip.js',
   'ai-rate-limit.js',
   'support-logs.js',
   'support-webhook.json',

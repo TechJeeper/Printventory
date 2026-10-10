@@ -260,6 +260,7 @@ async function performCombinedSearch(options) {
         return !!(keep && !pageComplete && modelsLength < shown);
       };
   const renderPage = async (models, done) => {
+    if (myGeneration && searchGeneration !== myGeneration) return;
     if (holdProgressivePage(preserveScroll, models.length, shownCount, done)) return;
     await window.renderFiles(models);
     renderedCount = models.length;
@@ -271,8 +272,7 @@ async function performCombinedSearch(options) {
   let myGeneration = 0;
   try {
     if (isFilteringInProgress && !force) {
-      console.log("Filtering operation already in progress, ignoring new request");
-      return;
+      console.log("Filtering operation already in progress, replacing it with the latest request");
     }
 
     myGeneration = ++searchGeneration;

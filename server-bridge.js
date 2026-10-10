@@ -470,6 +470,8 @@
       'generateMissingHashes': 600000,
       'calculate-missing-hashes': 600000,
       'scan-directory': 600000,
+      'apply-tags-to-models': 120000,
+      'get-tags-for-paths': 120000,
       'run-scheduled-backup': 600000,
       'test-ai-config': 60000
     };
@@ -588,6 +590,8 @@
     'deleteMetadata': 'delete-metadata',
     'getModelTags': 'get-model-tags',
     'getGroupTags': 'get-group-tags',
+    'getTagsForPaths': 'get-tags-for-paths',
+    'applyTagsToModels': 'apply-tags-to-models',
     'saveModelTags': 'save-model-tags',
     'getSetting': 'get-setting',
     'saveSetting': 'save-setting',

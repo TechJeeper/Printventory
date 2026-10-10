@@ -10,7 +10,8 @@ const {
   countMeshesInXmlParts,
   simplifyForPreview,
   shouldUseFastPath,
-  modelHasPlacementTransforms
+  modelHasPlacementTransforms,
+  indexModelXml
 } = require('./threemf-mesh-extract.js');
 
 const SKIP_PART_SUBTYPES = new Set([
@@ -133,6 +134,17 @@ function mat4Multiply(a, b) {
   return out;
 }
 
+function transformPositions(positions, matrix) {
+  const out = new Float32Array(positions.length);
+  for (let i = 0; i < positions.length; i += 3) {
+    const p = mat4ApplyPoint(matrix, positions[i], positions[i + 1], positions[i + 2]);
+    out[i] = p.x;
+    out[i + 1] = p.y;
+    out[i + 2] = p.z;
+  }
+  return out;
+}
+
 function mat4ApplyPoint(m, x, y, z) {
   return {
     x: m[0] * x + m[4] * y + m[8] * z + m[12],
@@ -222,13 +234,21 @@ class Simple3MFLoader {
 
       const textDecoder = new TextDecoder();
       const modelXmlParts = modelEntries.map(path => textDecoder.decode(unzipped[path]));
+      // Thumbnails and embedded textures are not needed once the model XML is decoded.
+      for (let i = 0; i < zipKeys.length; i++) {
+        if (/\.(model|rels|config)$/i.test(zipKeys[i])) continue;
+        delete unzipped[zipKeys[i]];
+      }
 
       // Fast path skips build/item transforms and object types — only safe for a
       // single dense mesh (HueForge). Multi-part plates and negative volumes
       // must go through the DOM path so helpers are dropped and parts are placed.
+      // A large multi-part plate still cannot use the DOM: one XML node per
+      // triangle exhausts the preview worker (seen on multi-object 3MF plates).
       const hasPlacement = modelHasPlacementTransforms(modelXmlParts);
       const meshCount = countMeshesInXmlParts(modelXmlParts);
-      if (shouldUseFastPath(modelXmlParts) && !hasPlacement && meshCount <= 1) {
+      const largeModel = shouldUseFastPath(modelXmlParts);
+      if (largeModel && !hasPlacement && meshCount <= 1) {
         this.postStatus('Large model detected — building simplified preview...');
         const fast = extractAllMeshesFast(modelXmlParts, this.targetTriangles);
         if (fast.simplified) {
@@ -244,8 +264,9 @@ class Simple3MFLoader {
         });
       }
 
-      if (hasPlacement && shouldUseFastPath(modelXmlParts)) {
+      if (hasPlacement && largeModel) {
         this.postStatus('Multi-part model — placing parts for preview...');
+        return this.parsePlacedWithoutDom(modelXmlParts, modelEntries, unzipped);
       }
 
       return this.parseWithDom(modelXmlParts, modelEntries, unzipped);
@@ -259,6 +280,230 @@ class Simple3MFLoader {
       }
       throw new Error(`Failed to parse 3MF: ${error.message}`);
     }
+  }
+
+  parseRelsMap(unzipped) {
+    const map = new Map();
+    const rels = unzipped && unzipped['3D/_rels/3dmodel.model.rels'];
+    if (!rels) return map;
+    let xml = '';
+    try {
+      xml = new TextDecoder().decode(rels);
+    } catch (_) {
+      return map;
+    }
+    const re = /<(?:\w+:)?Relationship\b([^>]*)\/?>/gi;
+    let match;
+    while ((match = re.exec(xml)) !== null) {
+      const attrs = {};
+      const attrRe = /([\w:.-]+)\s*=\s*"([^"]*)"/g;
+      let attr;
+      while ((attr = attrRe.exec(match[1])) !== null) {
+        attrs[attr[1].toLowerCase()] = attr[2];
+      }
+      if (attrs.id && attrs.target) {
+        map.set(attrs.id, String(attrs.target).replace(/^\//, ''));
+      }
+    }
+    return map;
+  }
+
+  resolvePlacedPath(rawPath, pid, fallbackPath, relsMap) {
+    let target = rawPath ? normalizeModelPath(rawPath) : '';
+    if (!target && pid && relsMap && relsMap.has(pid)) {
+      target = normalizeModelPath(relsMap.get(pid));
+    }
+    return target || normalizeModelPath(fallbackPath);
+  }
+
+  /**
+   * Place a large multi-part plate without building a DOM node per triangle.
+   */
+  parsePlacedWithoutDom(modelXmlParts, modelEntries, unzipped) {
+    const relsMap = this.parseRelsMap(unzipped);
+    const skipIds = collectSlicerSkipIds(unzipped);
+    const objectMap = new Map();
+    const buildItems = [];
+
+    for (let i = 0; i < modelEntries.length; i++) {
+      const modelPath = normalizeModelPath(modelEntries[i]);
+      const indexed = indexModelXml(modelXmlParts[i], modelPath);
+      modelXmlParts[i] = '';
+      for (let o = 0; o < indexed.objects.length; o++) {
+        const obj = indexed.objects[o];
+        objectMap.set(`${modelPath}::${obj.id}`, { ...obj, path: modelPath });
+      }
+      for (let n = 0; n < indexed.items.length; n++) {
+        buildItems.push({ ...indexed.items[n], modelPath });
+      }
+    }
+
+    const resolveObject = (objId, modelPath) => {
+      const wantedId = String(objId || '');
+      if (!wantedId) return null;
+      const exact = objectMap.get(`${normalizeModelPath(modelPath)}::${wantedId}`);
+      if (exact) return exact;
+      const wantedPath = normalizeModelPath(modelPath).toLowerCase();
+      const wantedBase = wantedPath.split('/').pop();
+      let idOnly = null;
+      let idOnlyCount = 0;
+      for (const [key, entry] of objectMap.entries()) {
+        const sep = key.lastIndexOf('::');
+        const entryPath = sep >= 0 ? key.slice(0, sep) : key;
+        const id = sep >= 0 ? key.slice(sep + 2) : '';
+        if (id !== wantedId) continue;
+        const normalized = normalizeModelPath(entryPath).toLowerCase();
+        if (normalized === wantedPath || normalized.endsWith(`/${wantedBase}`) || normalized === wantedBase) {
+          return entry;
+        }
+        idOnly = entry;
+        idOnlyCount += 1;
+      }
+      return idOnlyCount === 1 ? idOnly : null;
+    };
+
+    const shouldSkip = (objId, entry) => {
+      if (skipIds.has(String(objId))) return true;
+      if (SKIP_OBJECT_TYPES.has(String(entry.type || '').toLowerCase())) return true;
+      return isNegativeObjectName(entry.name);
+    };
+
+    const instances = [];
+    const collect = (objId, modelPath, parentMatrix, visited, partInfo) => {
+      if (!objId || !modelPath) return;
+      const entry = resolveObject(objId, modelPath);
+      if (!entry) return;
+      const key = `${entry.path}::${entry.id}`;
+      if (visited.has(key)) return;
+      visited.add(key);
+      if (shouldSkip(entry.id, entry)) return;
+
+      if (entry.positions && entry.indices && entry.indices.length >= 3) {
+        instances.push({
+          positions: entry.positions,
+          indices: entry.indices,
+          matrix: parentMatrix,
+          partId: partInfo && partInfo.partId,
+          name: (partInfo && partInfo.name) || entry.name || ''
+        });
+        return;
+      }
+
+      const components = entry.components || [];
+      for (let c = 0; c < components.length; c++) {
+        const comp = components[c];
+        const targetPath = this.resolvePlacedPath(comp.path, comp.pid, entry.path, relsMap);
+        const compTransform = parseTransformAttr(comp.transform);
+        const childMatrix = compTransform ? mat4Multiply(parentMatrix, compTransform) : parentMatrix;
+        if (comp.objectId) {
+          collect(comp.objectId, targetPath, childMatrix, new Set(visited), partInfo);
+        }
+      }
+    };
+
+    for (let itemIndex = 0; itemIndex < buildItems.length; itemIndex++) {
+      const item = buildItems[itemIndex];
+      if (item.printable === '0') continue;
+      const targetPath = this.resolvePlacedPath(item.path, item.pid, item.modelPath, relsMap);
+      const itemMatrix = parseTransformAttr(item.transform) || mat4Identity();
+      collect(item.objectId, targetPath, itemMatrix, new Set(), {
+        partId: `item-${itemIndex}`,
+        name: item.name
+      });
+    }
+
+    if (instances.length === 0 && objectMap.size > 0) {
+      let objectIndex = 0;
+      for (const entry of objectMap.values()) {
+        if (!entry.positions) continue;
+        collect(entry.id, entry.path, mat4Identity(), new Set(), {
+          partId: `object-${objectIndex++}`,
+          name: entry.name
+        });
+      }
+    }
+
+    if (instances.length === 0) {
+      throw new Error('No mesh found in 3MF model');
+    }
+
+    const partBuffers = new Map();
+    for (let m = 0; m < instances.length; m++) {
+      const instance = instances[m];
+      const positions = isIdentityMatrix(instance.matrix)
+        ? instance.positions
+        : transformPositions(instance.positions, instance.matrix);
+      const partId = instance.partId || `mesh-${m}`;
+      if (!partBuffers.has(partId)) {
+        partBuffers.set(partId, {
+          id: partId,
+          name: instance.name || '',
+          positions: new GrowableFloat32Array(),
+          indices: new GrowableUint32Array(),
+          vertices: 0
+        });
+      }
+      const part = partBuffers.get(partId);
+      if (!part.name && instance.name) part.name = instance.name;
+      const offset = part.vertices;
+      for (let i = 0; i < positions.length; i += 3) {
+        part.positions.push3(positions[i], positions[i + 1], positions[i + 2]);
+      }
+      for (let i = 0; i < instance.indices.length; i += 3) {
+        part.indices.push3(
+          instance.indices[i] + offset,
+          instance.indices[i + 1] + offset,
+          instance.indices[i + 2] + offset
+        );
+      }
+      part.vertices += positions.length / 3;
+    }
+
+    const parts = [];
+    const usedNames = new Map();
+    let partIndex = 0;
+    for (const part of partBuffers.values()) {
+      if (part.positions.length === 0 || part.indices.length === 0) continue;
+      partIndex += 1;
+      const simplified = simplifyForPreview(
+        part.positions.toArray(),
+        part.indices.toArray(),
+        this.targetTriangles
+      );
+      let name = part.name || `Part ${partIndex}`;
+      const seen = (usedNames.get(name) || 0) + 1;
+      usedNames.set(name, seen);
+      if (seen > 1) name = `${name} ${seen}`;
+      parts.push({
+        id: part.id,
+        name,
+        positions: simplified.positions,
+        indices: simplified.indices,
+        simplified: simplified.simplified,
+        sourceTriangles: simplified.sourceTriangles,
+        keptTriangles: simplified.keptTriangles
+      });
+    }
+
+    if (!parts.length) {
+      throw new Error('No geometry data found in 3MF model');
+    }
+
+    const sourceTriangles = parts.reduce((sum, part) => sum + (part.sourceTriangles || 0), 0);
+    const keptTriangles = parts.reduce((sum, part) => sum + (part.keptTriangles || 0), 0);
+    const simplified = parts.some((part) => part.simplified);
+    if (simplified) {
+      this.postStatus(
+        `Simplified preview: ${keptTriangles.toLocaleString('en-US')} of ` +
+        `${sourceTriangles.toLocaleString('en-US')} triangles`
+      );
+    }
+
+    return this.buildFromParts(parts, {
+      simplified,
+      sourceTriangles,
+      keptTriangles
+    });
   }
 
   parseWithDom(modelXmlParts, modelEntries, unzipped) {

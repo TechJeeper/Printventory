@@ -4,6 +4,15 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.23] - 2026-10-10
+
+- Detailed view closes the gap when a filtered model leaves the grid, and a new thumbnail shows up on the card
+- Model details stay in the sidebar when the window is resized
+- A new search replaces one that is still running, instead of leaving the old results on screen
+- Large multi-part 3MF previews, such as a full plate of objects, no longer run out of memory
+- Tagging a large selection no longer loads every model's thumbnail
+- Thumbnail jobs mark files that are too large, have no mesh, or time out, and they are not parsed twice in the same run
+
 ## [2.2.22] - 2026-10-08
 
 - List view lines the header, groups, and files up in the same columns. The New badge sits beside the filename, and the name column uses leftover width

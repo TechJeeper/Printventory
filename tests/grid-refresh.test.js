@@ -77,6 +77,44 @@ test('preview width follows the window when the grid box lags', () => {
   assert.strictEqual(gridRefresh.libraryGridWidth(0, 1400, 350, 0), 1010);
 });
 
+test('removing one filtered model still repositions the cards around the hole', () => {
+  const models = [{ filePath: 'a.stl' }, { filePath: 'b.stl' }, { filePath: 'c.stl' }];
+  const cache = {
+    width: 1200,
+    columns: 3,
+    view: 'detailed',
+    rowHeight: 490,
+    verticalGap: 20,
+    modelsRef: models,
+    modelsLen: 3,
+    expandGen: 1
+  };
+  const same = {
+    width: 1200,
+    columns: 3,
+    view: 'detailed',
+    rowHeight: 490,
+    verticalGap: 20,
+    modelsRef: models,
+    modelsLen: 3,
+    expandGen: 1
+  };
+  assert.strictEqual(gridRefresh.mountedCardsStayPut(cache, same), true);
+  models.splice(1, 1);
+  assert.strictEqual(
+    gridRefresh.mountedCardsStayPut(cache, Object.assign({}, same, { modelsLen: models.length })),
+    false
+  );
+  assert.strictEqual(
+    gridRefresh.mountedCardsStayPut(cache, Object.assign({}, same, { modelsRef: models.slice() })),
+    false
+  );
+  assert.strictEqual(
+    gridRefresh.mountedCardsStayPut(cache, Object.assign({}, same, { width: 900, columns: 2 })),
+    false
+  );
+});
+
 test('a resize still repositions a fully mounted filtered grid', () => {
   const same = {
     width: 1200,

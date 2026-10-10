@@ -10676,6 +10676,118 @@ async function getGroupTagsHandler(event, modelIds) {
 ipcMain.handle('get-group-tags', getGroupTagsHandler);
 ipcHandlerRegistry.set('get-group-tags', getGroupTagsHandler);
 
+const TAG_PATH_BIND_CHUNK = 400;
+
+function uniqueTagStrings(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of values || []) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function getTagNamesForFilePaths(filePaths) {
+  const paths = uniqueTagStrings(filePaths);
+  const names = new Set();
+  for (let i = 0; i < paths.length; i += TAG_PATH_BIND_CHUNK) {
+    const chunk = paths.slice(i, i + TAG_PATH_BIND_CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT DISTINCT t.name AS name
+      FROM models m
+      JOIN model_tags mt ON mt.model_id = m.id
+      JOIN tags t ON t.id = mt.tag_id
+      WHERE m.filePath IN (${placeholders})
+    `).all(...chunk);
+    for (const row of rows) {
+      if (row.name) names.add(row.name);
+    }
+  }
+  return Array.from(names).sort((a, b) => a.localeCompare(b));
+}
+
+// Add or remove tags for many models in one transaction.
+// Callers pass file paths only — do not load thumbnails for a Ctrl+A selection.
+function applyTagsToModelPaths(filePaths, change) {
+  if (!db) return { requested: 0, updated: 0, missing: 0 };
+  const paths = uniqueTagStrings(filePaths);
+  const addNames = uniqueTagStrings(change && change.addTags);
+  const removeNames = uniqueTagStrings(change && change.removeTags);
+  if (!paths.length || (!addNames.length && !removeNames.length)) {
+    return { requested: paths.length, updated: 0, missing: 0 };
+  }
+
+  const insertTag = db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)');
+  const getTagId = db.prepare('SELECT id FROM tags WHERE name = ?');
+  const insertLink = db.prepare('INSERT OR IGNORE INTO model_tags (model_id, tag_id) VALUES (?, ?)');
+  const deleteLink = db.prepare('DELETE FROM model_tags WHERE model_id = ? AND tag_id = ?');
+  const clearNew = db.prepare('UPDATE models SET isNew = 0 WHERE id = ? AND isNew != 0');
+
+  let updated = 0;
+  let missing = 0;
+  const run = db.transaction(() => {
+    const addIds = [];
+    for (const name of addNames) {
+      insertTag.run(name);
+      const row = getTagId.get(name);
+      if (row) addIds.push(row.id);
+    }
+    const removeIds = [];
+    for (const name of removeNames) {
+      const row = getTagId.get(name);
+      if (row) removeIds.push(row.id);
+    }
+
+    for (let i = 0; i < paths.length; i += TAG_PATH_BIND_CHUNK) {
+      const chunk = paths.slice(i, i + TAG_PATH_BIND_CHUNK);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db.prepare(`SELECT id, filePath FROM models WHERE filePath IN (${placeholders})`).all(...chunk);
+      const found = new Set(rows.map((row) => row.filePath));
+      for (const filePath of chunk) {
+        if (!found.has(filePath)) missing++;
+      }
+      for (const row of rows) {
+        let changed = false;
+        for (const tagId of addIds) {
+          if (insertLink.run(row.id, tagId).changes > 0) changed = true;
+        }
+        for (const tagId of removeIds) {
+          if (deleteLink.run(row.id, tagId).changes > 0) changed = true;
+        }
+        if (changed) {
+          clearNew.run(row.id);
+          updated++;
+        }
+      }
+    }
+  });
+  run();
+  return { requested: paths.length, updated, missing };
+}
+
+ipcMain.handle('get-tags-for-paths', async (event, filePaths) => {
+  try {
+    return getTagNamesForFilePaths(filePaths);
+  } catch (error) {
+    console.error('Error getting tags for paths:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('apply-tags-to-models', async (event, filePaths, change) => {
+  try {
+    return applyTagsToModelPaths(filePaths, change || {});
+  } catch (error) {
+    console.error('Error applying tags to models:', error);
+    throw error;
+  }
+});
+
 // Add these handlers
 ipcMain.handle('quitApp', () => {
   app.quit();
