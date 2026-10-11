@@ -132,15 +132,53 @@ select option:not(:checked):not([selected]):not(:hover) {
   box-sizing: border-box;
 }
 
-/* A shorter window used to push Model Details below the sidebar fold. */
+/* Details stay in the sidebar flow and never become their own scroll box. */
 .sidebar.details-open > #model-details:not(.hidden),
 .sidebar.details-open > #bundle-details:not(.hidden),
 .sidebar.details-open > #multi-edit-panel:not(.hidden) {
-  flex: 1 1 auto;
-  min-height: 180px;
-  overflow-x: hidden;
-  overflow-y: auto;
+  flex: 0 0 auto;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  margin-top: 8px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  overflow: visible;
   width: 100%;
+}
+
+/* A full-size logo plus the scroll-end spacer is what painted a sidebar
+   scrollbar for a short details panel. Keep the tools; just stop overflowing. */
+.sidebar.details-open {
+  padding-top: 8px;
+}
+.sidebar.details-open #logo,
+.sidebar.details-open .model-stats {
+  display: none;
+}
+.sidebar.details-open .icon-buttons-container {
+  margin: 0 0 4px;
+  padding: 4px;
+}
+.sidebar.details-open #scan-directory-button,
+.sidebar.details-open #view-library-button {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+}
+.sidebar.details-open .filter-section {
+  padding: 4px 0;
+  margin-top: 0;
+}
+.sidebar.details-open .filter-section .form-group {
+  margin-bottom: 4px;
+}
+.sidebar.details-open .filter-section .form-group label {
+  margin-bottom: 4px;
+}
+.sidebar.details-open::after {
+  flex-basis: 0;
+  height: 0;
 }
 
 .sidebar > #current-filter {
@@ -1808,6 +1846,7 @@ body.list-view-col-reorder-active * {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
   color: #fff;
   cursor: pointer;
+  z-index: 1;
   transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
 }
 
@@ -1825,7 +1864,7 @@ body.list-view-col-reorder-active * {
 .parent-model-group.file-item-detailed {
   flex-direction: column;
   width: 300px;
-  height: 490px !important;
+  height: 520px !important;
   padding: 12px 12px 0;
 }
 
@@ -1870,7 +1909,7 @@ body.list-view-col-reorder-active * {
 }
 
 .parent-model-group-detailed .parent-model-group-thumbnail {
-  width: 276px;
+  width: 100%;
   height: 276px;
   border-radius: 6px;
 }
@@ -2123,6 +2162,7 @@ body.list-view-col-reorder-active * {
 
 .file-item.parent-model-group-child {
   position: relative;
+  z-index: 3;
   border: 2px solid rgba(0, 212, 255, 0.62);
   box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.22), 0 10px 28px rgba(0, 0, 0, 0.3);
   background: linear-gradient(165deg, rgba(0, 212, 255, 0.12), rgba(0, 212, 255, 0.04));
@@ -2271,9 +2311,9 @@ body.list-view-col-reorder-active * {
 /* Detailed view - large thumbnail with full metadata - Optimized */
 .file-item-detailed {
   width: 300px;
-  height: 490px !important;
-  min-height: 490px !important;
-  max-height: 490px !important;
+  height: 520px !important;
+  min-height: 520px !important;
+  max-height: 520px !important;
   display: flex;
   flex-direction: column;
   padding: 16px 16px 0;
@@ -2310,7 +2350,8 @@ body.list-view-col-reorder-active * {
 }
 
 .file-item-detailed .thumbnail-container {
-  width: 276px !important;
+  width: 100% !important;
+  max-width: 100%;
   height: 276px !important;
   flex-shrink: 0;
   border-radius: 6px;
@@ -2345,27 +2386,32 @@ body.list-view-col-reorder-active * {
   flex-direction: column;
   justify-content: flex-start;
   gap: 2px;
-  overflow: visible;
+  overflow: hidden;
+  min-width: 0;
   padding: 0 !important; /* Override all padding from other rules */
   margin: 0;
 }
 
 .file-item-detailed .file-details {
   flex: 1 1 auto;
-  min-height: 48px;
-  overflow: auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .model-engagement-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  align-self: stretch;
   gap: 6px;
   margin-top: auto;
   margin-left: -16px;
   margin-right: -16px;
   margin-bottom: 0;
-  width: calc(100% + 32px);
+  width: auto;
+  max-width: none;
+  min-width: 0;
   flex: 0 0 auto;
   flex-shrink: 0;
   min-height: 44px;
@@ -2379,7 +2425,7 @@ body.list-view-col-reorder-active * {
     rgba(0, 0, 0, 0.32) 100%
   );
   border-radius: 0 0 16px 16px;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .model-engagement-bar.is-group {
@@ -2479,7 +2525,7 @@ body.list-view-col-reorder-active * {
   margin-left: -12px;
   margin-right: -12px;
   margin-bottom: 0;
-  width: calc(100% + 24px);
+  width: auto;
   border-radius: 0 0 16px 16px;
   padding-bottom: 14px;
 }
@@ -2488,15 +2534,16 @@ body.list-view-col-reorder-active * {
   margin-left: -16px;
   margin-right: -16px;
   margin-bottom: 0;
-  width: calc(100% + 32px);
+  width: auto;
   padding-bottom: 16px;
 }
 
 /* Keep engagement bar visible; metadata can use natural height now that cards are taller */
 .file-item-detailed .file-info {
   flex: 1 1 auto !important;
-  min-height: 48px !important;
-  overflow: visible;
+  min-height: 0 !important;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .file-item-detailed .file-details {
@@ -2504,21 +2551,23 @@ body.list-view-col-reorder-active * {
   padding: 0;
   border-top: none;
   flex: 1 1 auto;
-  min-height: 48px;
-  overflow: auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .file-item-detailed .metadata-container {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px 8px;
   padding: 0;
   width: 100%;
+  min-width: 0;
   background: transparent;
   backdrop-filter: none;
   border-radius: 0;
   border: none;
-  overflow: auto;
+  overflow: hidden;
   box-sizing: border-box;
 }
 
@@ -2534,7 +2583,8 @@ body.list-view-col-reorder-active * {
   overflow: hidden;
   min-width: 0;
   max-width: 100%;
-  width: 100%;
+  width: auto;
+  box-sizing: border-box;
   text-align: left;
   background: transparent;
   border: none;
@@ -2556,11 +2606,12 @@ body.list-view-col-reorder-active * {
 }
 
 .file-item-detailed .metadata-value.file-size {
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 0;
-  min-width: fit-content;
+  min-width: 0;
+  max-width: 46%;
 }
 
 .file-item-detailed .metadata-item.directory-item {
@@ -2599,12 +2650,12 @@ body.list-view-col-reorder-active * {
 }
 
 .file-item-detailed .metadata-value.file-size {
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 0;
-  min-width: fit-content;
-  max-width: none;
+  min-width: 0;
+  max-width: 46%;
 }
 
 .file-item-detailed .metadata-value.directory-link {
@@ -2627,10 +2678,10 @@ body.list-view-col-reorder-active * {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  max-width: calc(100% - 80px); /* Reserve space for size */
+  max-width: 100%;
 }
 
 .file-item-detailed .metadata-item.dir-size-row .directory-part .metadata-value.directory-link {
@@ -2664,10 +2715,10 @@ body.list-view-col-reorder-active * {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  max-width: calc(100% - 80px); /* Reserve space for size */
+  max-width: 100%;
 }
 
 .file-grid .metadata-item.dir-size-row .directory-part .metadata-value.directory-link {
@@ -7540,7 +7591,6 @@ dialog:not([open]) {
   gap: 6px;
 }
 
-/* Cap height when details are open, but never crush the pill list. */
 .sidebar.details-open #current-filter.visible {
   max-height: 40vh;
   overflow-x: hidden;
@@ -8343,6 +8393,15 @@ dialog:not([open]) {
   border-radius: 0;
 }
 
+/* Detailed cards are a fixed tile. Rows fill their grid cell and ellipsize. */
+.file-grid .file-item-detailed .metadata-item {
+  overflow: hidden;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 .file-grid .metadata-item.directory-item {
   cursor: pointer;
   border-radius: 4px;
@@ -8384,6 +8443,13 @@ dialog:not([open]) {
   white-space: nowrap;
   flex-shrink: 0;
   min-width: fit-content;
+}
+
+.file-grid .file-item-detailed .metadata-value.file-size {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 46%;
 }
 
 .file-grid .metadata-value.directory-link {

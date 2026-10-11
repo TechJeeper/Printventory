@@ -368,6 +368,7 @@ contextBridge.exposeInMainWorld('electron', {
   generateTags: (filePath) => ipcRenderer.invoke('generate-tags', filePath),
   puterAIChat: (prompt, imageUrl, model) => ipcRenderer.invoke('puter-ai-chat', prompt, imageUrl, model),
   getModelsWithoutThumbnails: () => ipcRenderer.invoke('get-models-without-thumbnails'),
+  getModelsNeedingForcedThumbnails: (skipDataUrls) => ipcRenderer.invoke('get-models-needing-forced-thumbnails', skipDataUrls || []),
   getModelsWithDefaultThumbnails: () => ipcRenderer.invoke('get-models-with-default-thumbnails'),
   pong: () => ipcRenderer.send('pong'),
   fetchMakerWorldPage: (url) => ipcRenderer.invoke('fetch-makerworld-page', url),

@@ -4,6 +4,14 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.24] - 2026-10-10
+
+- Setting a tag on a Ctrl+A selection updates the grid without a refresh
+- Clicking a collapsed group or ZIP opens its details and expands the models. Clicking a model opens that model's details. Clicking an expanded group collapses it, and Select All expands groups
+- Skipped thumbnails are tagged when a file is too large, times out, or has no preview. Force Missing Thumbnails retries them
+- An STL whose header triangle count does not match the file can still get a thumbnail
+- System Report shows the container memory limit and CPU count
+
 ## [2.2.23] - 2026-10-10
 
 - Detailed view closes the gap when a filtered model leaves the grid, and a new thumbnail shows up on the card

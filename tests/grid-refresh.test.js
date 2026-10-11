@@ -236,6 +236,27 @@ test('user search still renders the first page immediately', async () => {
   assert.ok(renders.includes(500));
 });
 
+test('tag refresh rebuilds only groups that contain a changed model', () => {
+  const records = [
+    {
+      type: 'group',
+      groupKey: 'parent:benchy',
+      children: [{ filePath: 'C:/lib/a.stl' }, { filePath: 'C:/lib/b.stl' }]
+    },
+    {
+      type: 'group',
+      groupKey: 'parent:other',
+      children: [{ filePath: 'C:/lib/c.stl' }]
+    },
+    { type: 'model', model: { filePath: 'C:/lib/d.stl' } }
+  ];
+  assert.deepStrictEqual(
+    gridRefresh.groupKeysForTagRefresh(['C:\\lib\\b.stl'], records, normalize),
+    ['parent:benchy']
+  );
+  assert.deepStrictEqual(gridRefresh.groupKeysForTagRefresh([], records, normalize), []);
+});
+
 test('renderer wires off-screen patches to a coalesced scroll-preserving refresh', () => {
   const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
   assert.ok(renderer.includes('window.gridRefresh.patchLoadedModel'));
@@ -243,6 +264,8 @@ test('renderer wires off-screen patches to a coalesced scroll-preserving refresh
   assert.ok(renderer.includes('performCombinedSearch({ preserveScroll: true })'));
   assert.ok(renderer.includes('shouldFocusSelectionOnViewSwitch'));
   assert.ok(renderer.includes('scrollTopForSelectedLayout'));
+  assert.ok(renderer.includes('refreshVisibleGridAfterBulkTagChange(modelsToUpdate)'));
+  assert.ok(renderer.includes('window.gridRefresh?.groupKeysForTagRefresh'));
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const gridAt = html.indexOf('src="grid-refresh.js"');
   const searchAt = html.indexOf('src="search.js"');

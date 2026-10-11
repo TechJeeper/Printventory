@@ -30,7 +30,8 @@
 
   function setCancelVisible(ui, visible) {
     if (!ui.cancel) return;
-    ui.cancel.style.display = visible ? '' : 'none';
+    ui.cancel.hidden = !visible;
+    ui.cancel.style.display = visible ? 'inline-flex' : 'none';
     ui.cancel.disabled = false;
     ui.cancel.textContent = 'Stop';
   }

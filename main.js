@@ -6986,7 +6986,7 @@ async function startServerThumbnailJobInternal(mode) {
     return { success: false, error: 'Server thumbnail worker window is not ready' };
   }
 
-  const jobMode = mode === 'all' ? 'all' : 'missing';
+  const jobMode = mode === 'all' ? 'all' : (mode === 'force-missing' ? 'force-missing' : 'missing');
   serverThumbnailJob = { status: 'running', mode: jobMode, cancelRequested: false };
 
   try {
@@ -7009,7 +7009,8 @@ async function startServerThumbnailJobInternal(mode) {
 }
 
 ipcMain.handle('start-server-thumbnail-job', async (_event, options) => {
-  const mode = options && options.mode === 'all' ? 'all' : 'missing';
+  const requested = options && options.mode;
+  const mode = requested === 'all' || requested === 'force-missing' ? requested : 'missing';
   return startServerThumbnailJobInternal(mode);
 });
 
@@ -8567,6 +8568,28 @@ ipcMain.handle('get-stats', async () => {
   }
 });
 
+function readPositiveCgroupBytes(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw || raw === 'max') return 0;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n > 1e15) return 0;
+    return n;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/** Container cgroup limit when Docker set one; otherwise the host total. */
+function containerMemoryBytes() {
+  const constrained = typeof process.constrainedMemory === 'function' ? process.constrainedMemory() : 0;
+  const cgroup = readPositiveCgroupBytes('/sys/fs/cgroup/memory.max')
+    || readPositiveCgroupBytes('/sys/fs/cgroup/memory/memory.limit_in_bytes');
+  const limits = [constrained, cgroup].filter((n) => n > 0);
+  if (limits.length) return Math.min(...limits);
+  return os.totalmem();
+}
+
 // System Report: server / Electron-process GPU (client WebGL is detected in the browser)
 async function collectServerGpuInfo() {
   const { execFile } = require('child_process');
@@ -8581,6 +8604,10 @@ async function collectServerGpuInfo() {
     available: false,
     serverMode: isServerMode,
     glBackend,
+    memoryBytes: containerMemoryBytes(),
+    cpuCount: typeof os.availableParallelism === 'function'
+      ? os.availableParallelism()
+      : ((os.cpus() && os.cpus().length) || 1),
     nvidiaVisibleDevices: process.env.NVIDIA_VISIBLE_DEVICES || null,
     nvidiaDriverCapabilities: process.env.NVIDIA_DRIVER_CAPABILITIES || null,
     nvidia: null,
@@ -14122,10 +14149,26 @@ function getSettings() {
 }
 
 // Add or update this function to get models without thumbnails
+ipcMain.handle('get-models-needing-forced-thumbnails', async (_event, skipDataUrls) => {
+  try {
+    const urls = (Array.isArray(skipDataUrls) ? skipDataUrls : [])
+      .map((url) => (typeof url === 'string' ? url : ''))
+      .filter((url) => url.startsWith('data:image'));
+    const extra = urls.length ? ` OR thumbnail IN (${urls.map(() => '?').join(',')})` : '';
+    return db.prepare(`
+      SELECT filePath, size FROM models
+      WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'${extra}
+    `).all(...urls);
+  } catch (error) {
+    console.error('Error fetching models for forced thumbnails:', error);
+    return [];
+  }
+});
+
 ipcMain.handle('get-models-without-thumbnails', async () => {
   try {
     const modelsWithoutThumbnails = db.prepare(`
-      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
+      SELECT filePath, size FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
     `).all();
     return modelsWithoutThumbnails;
   } catch (error) {
@@ -14137,7 +14180,7 @@ ipcMain.handle('get-models-without-thumbnails', async () => {
 ipcMain.handle('get-models-with-default-thumbnails', async () => {
   try {
     const modelsWithDefaultThumbnails = db.prepare(`
-      SELECT filePath FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
+      SELECT filePath, size FROM models WHERE thumbnail IS NULL OR thumbnail = '' OR thumbnail = '3d.png'
     `).all();
     return modelsWithDefaultThumbnails;
   } catch (error) {
@@ -14596,7 +14639,7 @@ ipcHandlerRegistry.set('execute-client-command', executeClientCommandHandler);
 ipcMain.handle('get-all-model-references', async () => {
   try {
     // Use the global db variable directly instead of calling getDb()
-    const modelRefs = db.prepare('SELECT id, filePath FROM models').all();
+    const modelRefs = db.prepare('SELECT id, filePath, size FROM models').all();
     return modelRefs;
   } catch (error) {
     console.error('Error getting model references:', error);

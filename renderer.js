@@ -1036,6 +1036,159 @@ const THUMBNAIL_BATCH_SIZE = 10; // Default batch size for thumbnails
 // Docker file system operations (especially on network shares) can be 10-100ms per operation
 // vs <1ms for local file systems, so we need more parallel operations to maintain throughput
 let MAX_CONCURRENT_RENDERS = 5; // Default value, will be adjusted based on mode
+/** Docker/server parallelism chosen from container memory, CPU, and GPU. Desktop stays at 5. */
+let serverThumbnailSlots = 2;
+
+function thumbnailSlotsForServer(gpuInfo) {
+  const memoryBytes = Number(gpuInfo && gpuInfo.memoryBytes) || (2 * 1024 * 1024 * 1024);
+  const cpuCount = Math.max(1, Number(gpuInfo && gpuInfo.cpuCount) || 1);
+  const nvidia = !!(gpuInfo && gpuInfo.glBackend === 'nvidia');
+  const memMb = memoryBytes / (1024 * 1024);
+  const perSlotMb = nvidia ? 400 : 700;
+  const reservedMb = 1200;
+  const fromMem = Math.max(1, Math.floor((memMb - reservedMb) / perSlotMb));
+  const fromCpu = Math.max(1, Math.floor(cpuCount / (nvidia ? 1 : 2)));
+  // Ceiling for small files. The watcher drops this when a large file is in flight.
+  const cap = nvidia ? 4 : 2;
+  return Math.max(1, Math.min(fromMem, fromCpu, cap));
+}
+
+function desktopThumbnailCeiling() {
+  const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+  const mem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 8;
+  let cap = 4;
+  if (mem <= 4) cap = 2;
+  else if (mem >= 16 && cores >= 8) cap = 5;
+  return Math.max(1, Math.min(cap, Math.max(1, cores - 1)));
+}
+
+/** Live parallelism for grid, scan, and regenerate. Shrinks on large files and timeouts. */
+const thumbLoadWatcher = {
+  ceiling: 4,
+  slots: 4,
+  nvidia: false,
+  serverMode: false,
+  inFlight: new Map(),
+  badPaths: new Set(),
+  smallSuccesses: 0,
+  loggedSlots: 0
+};
+
+function configureThumbLoadWatcher(options) {
+  const ceiling = Math.max(1, Number(options && options.ceiling) || desktopThumbnailCeiling());
+  thumbLoadWatcher.ceiling = ceiling;
+  thumbLoadWatcher.slots = ceiling;
+  thumbLoadWatcher.nvidia = !!(options && options.nvidia);
+  thumbLoadWatcher.serverMode = !!(options && options.serverMode);
+  thumbLoadWatcher.smallSuccesses = 0;
+  thumbLoadWatcher.loggedSlots = 0;
+  console.log(
+    '[thumb] Adaptive ceiling',
+    ceiling,
+    thumbLoadWatcher.serverMode
+      ? `(server, gpu=${thumbLoadWatcher.nvidia ? 'nvidia' : 'software'})`
+      : '(desktop)'
+  );
+}
+
+configureThumbLoadWatcher({ ceiling: desktopThumbnailCeiling() });
+
+function thumbBytesForPath(filePath, explicitBytes) {
+  const n = Number(explicitBytes);
+  if (Number.isFinite(n) && n > 0) return n;
+  return knownModelSizeBytes(filePath);
+}
+
+function slotsForFileBytes(bytes) {
+  const mb = (Number(bytes) || 0) / (1024 * 1024);
+  if (mb >= 25) return 1;
+  if (mb >= 8) {
+    // Docker software rendering cannot overlap medium meshes. Desktop and NVIDIA can keep two.
+    if (thumbLoadWatcher.serverMode && !thumbLoadWatcher.nvidia) return 1;
+    return Math.min(2, thumbLoadWatcher.ceiling);
+  }
+  return thumbLoadWatcher.slots;
+}
+
+function logThumbSlots(reason) {
+  const slots = currentThumbnailSlots();
+  if (slots === thumbLoadWatcher.loggedSlots) return;
+  thumbLoadWatcher.loggedSlots = slots;
+  console.log(`[thumb] Concurrency ${slots} of ${thumbLoadWatcher.ceiling} (${reason})`);
+}
+
+function noteThumbnailStart(filePath, explicitBytes) {
+  const bytes = thumbBytesForPath(filePath, explicitBytes);
+  if (filePath) thumbLoadWatcher.inFlight.set(filePath, bytes);
+  const allowed = slotsForFileBytes(bytes);
+  if (allowed < thumbLoadWatcher.slots) {
+    thumbLoadWatcher.slots = allowed;
+    thumbLoadWatcher.smallSuccesses = 0;
+    const mb = bytes / (1024 * 1024);
+    logThumbSlots(mb >= 25 ? 'large file' : 'medium file');
+  }
+}
+
+function noteThumbnailPressure(filePath, reason) {
+  if (filePath) thumbLoadWatcher.badPaths.add(filePath);
+  thumbLoadWatcher.slots = 1;
+  thumbLoadWatcher.smallSuccesses = 0;
+  logThumbSlots(reason || 'pressure');
+}
+
+function noteThumbnailFinish(filePath, outcome) {
+  if (!filePath || !thumbLoadWatcher.inFlight.has(filePath)) return;
+  const bytes = thumbLoadWatcher.inFlight.get(filePath) || 0;
+  thumbLoadWatcher.inFlight.delete(filePath);
+  if (thumbLoadWatcher.badPaths.has(filePath)) {
+    thumbLoadWatcher.badPaths.delete(filePath);
+    outcome = 'timeout';
+  }
+  if (outcome === 'timeout' || outcome === 'error') {
+    thumbLoadWatcher.slots = 1;
+    thumbLoadWatcher.smallSuccesses = 0;
+    logThumbSlots(outcome);
+    return;
+  }
+  const mb = bytes / (1024 * 1024);
+  if (outcome === 'ok' && (bytes === 0 || mb < 8) && thumbLoadWatcher.inFlight.size === 0) {
+    thumbLoadWatcher.smallSuccesses += 1;
+    if (thumbLoadWatcher.smallSuccesses >= 4 && thumbLoadWatcher.slots < thumbLoadWatcher.ceiling) {
+      thumbLoadWatcher.slots += 1;
+      thumbLoadWatcher.smallSuccesses = 0;
+      logThumbSlots('recovered');
+    }
+  } else if (mb >= 8) {
+    thumbLoadWatcher.smallSuccesses = 0;
+  }
+}
+
+function currentThumbnailSlots() {
+  let slots = Math.max(1, Math.min(thumbLoadWatcher.ceiling, thumbLoadWatcher.slots));
+  let inFlightBytes = 0;
+  thumbLoadWatcher.inFlight.forEach((bytes) => {
+    inFlightBytes += bytes || 0;
+    slots = Math.min(slots, slotsForFileBytes(bytes));
+  });
+  const budget = thumbLoadWatcher.nvidia
+    ? 100 * 1024 * 1024
+    : (thumbLoadWatcher.serverMode ? 36 * 1024 * 1024 : 80 * 1024 * 1024);
+  if (thumbLoadWatcher.inFlight.size > 0 && inFlightBytes >= budget) {
+    slots = Math.min(slots, thumbLoadWatcher.inFlight.size);
+  }
+  return Math.max(1, slots);
+}
+
+/** How many renders may run once this file is included. Large files force the count down first. */
+function upcomingThumbnailSlots(filePath, explicitBytes) {
+  const bytes = thumbBytesForPath(filePath, explicitBytes);
+  return Math.max(1, Math.min(currentThumbnailSlots(), slotsForFileBytes(bytes)));
+}
+
+/** Scan and regenerate/generate-missing follow the same live limit as the grid. */
+function bulkThumbnailConcurrency() {
+  return currentThumbnailSlots();
+}
 
 const MAX_MODELS_IN_MEMORY = 500;
 const PAGE_SIZE = 100; // Number of models to keep in memory
@@ -1355,9 +1508,11 @@ function isThumbnailLoadTimeout(error) {
 
 /** Why the last render of a path failed. Consumed by the bulk job so a timeout is not parsed twice. */
 const thumbFailureReasons = new Map();
+const thumbFailureDetails = new Map();
 
-function noteThumbFailure(filePath, reason) {
+function noteThumbFailure(filePath, reason, detail) {
   if (filePath && reason) thumbFailureReasons.set(filePath, reason);
+  if (filePath && detail) thumbFailureDetails.set(filePath, String(detail));
 }
 
 function takeThumbFailure(filePath) {
@@ -1366,8 +1521,63 @@ function takeThumbFailure(filePath) {
   return reason;
 }
 
+function takeThumbFailureDetail(filePath) {
+  const detail = filePath ? (thumbFailureDetails.get(filePath) || '') : '';
+  if (filePath) thumbFailureDetails.delete(filePath);
+  return detail;
+}
+
 function thumbnailQueueShouldWait(filePath) {
   return !!(filePath && (deferredSlowThumbnails.has(filePath) || slowThumbnailExhausted.has(filePath)));
+}
+
+function thumbnailSizeLimitBytes() {
+  const mb = Number(MAX_FILE_SIZE_MB);
+  return (Number.isFinite(mb) && mb > 0 ? mb : 50) * 1024 * 1024;
+}
+
+function knownModelSizeBytes(filePath) {
+  if (!filePath || typeof normalizePathForComparison !== 'function') return 0;
+  const norm = normalizePathForComparison(filePath);
+  const pools = [];
+  const grid = document.querySelector('.file-grid');
+  if (grid && Array.isArray(grid.currentModels)) pools.push(grid.currentModels);
+  if (Array.isArray(allFilteredModels)) pools.push(allFilteredModels);
+  for (let p = 0; p < pools.length; p++) {
+    const list = pools[p];
+    for (let i = 0; i < list.length; i++) {
+      const model = list[i];
+      if (!model || !model.filePath) continue;
+      if (normalizePathForComparison(model.filePath) !== norm) continue;
+      const size = Number(model.size);
+      if (Number.isFinite(size) && size > 0) return size;
+    }
+  }
+  return 0;
+}
+
+function modelTooLargeForThumbnail(filePath, model) {
+  const fromModel = model && Number(model.size);
+  const size = Number.isFinite(fromModel) && fromModel > 0 ? fromModel : knownModelSizeBytes(filePath);
+  return size > thumbnailSizeLimitBytes();
+}
+
+function giveUpOnOversizedThumbnail(filePath, container) {
+  if (filePath) {
+    slowThumbnailExhausted.add(filePath);
+    deferredSlowThumbnails.delete(filePath);
+    pendingThumbnails.delete(filePath);
+  }
+  if (container && typeof generateSkippedPreviewPlaceholder === 'function') {
+    const url = generateSkippedPreviewPlaceholder('Too large');
+    let img = container.querySelector && container.querySelector('img');
+    if (!img && container.appendChild) {
+      img = document.createElement('img');
+      img.alt = 'Too large';
+      container.appendChild(img);
+    }
+    if (img) img.src = url;
+  }
 }
 
 function rememberDeferredThumbnail(filePath, container) {
@@ -1419,6 +1629,11 @@ function scheduleDeferredThumbnailPass() {
   if (room === 0) return;
   const batch = [];
   for (const [path, item] of deferredSlowThumbnails) {
+    if (modelTooLargeForThumbnail(path)) {
+      deferredSlowThumbnails.delete(path);
+      slowThumbnailExhausted.add(path);
+      continue;
+    }
     if (batch.length >= room) break;
     batch.push(item);
     deferredSlowThumbnails.delete(path);
@@ -1518,6 +1733,10 @@ function findQueuedThumbnailTask(filePath) {
 function ensureVisibleThumbnailQueued(itemEl, model, thumbPriority) {
   if (window._serverBulkThumbnailJobActive) return false;
   if (!itemEl || !model || !model.filePath) return false;
+  if (modelTooLargeForThumbnail(model.filePath, model)) {
+    giveUpOnOversizedThumbnail(model.filePath, itemEl.querySelector('.thumbnail-container'));
+    return false;
+  }
   if (thumbnailQueueShouldWait(model.filePath)) return false;
   if (model.hasThumbnail) return false;
   if (hasImageOnlyPreviewMiss(model.filePath)) return false;
@@ -1644,9 +1863,14 @@ function effectiveMaxConcurrentRenders() {
   if (window._serverBulkThumbnailJobActive) {
     return 0;
   }
-  return renderQueueHasOnlyLowPriorityWork()
+  const base = renderQueueHasOnlyLowPriorityWork()
     ? Math.min(MAX_CONCURRENT_RENDERS, MAX_CONCURRENT_RENDERS_BACKGROUND)
     : MAX_CONCURRENT_RENDERS;
+  const next = renderQueue.length ? renderQueue[0] : null;
+  const adaptive = next
+    ? upcomingThumbnailSlots(next.filePath, next.sizeBytes)
+    : currentThumbnailSlots();
+  return Math.max(0, Math.min(base, adaptive));
 }
 
 function computeThumbPriorityForScroll(scrollTop, clientHeight, itemContentY, itemHeight, col = 0) {
@@ -1815,6 +2039,48 @@ function generateSkippedPreviewPlaceholder(label) {
   }
   skippedPreviewCache.set(text, url);
   return url;
+}
+
+function thumbnailSkipErrorTag(token) {
+  if (typeof thumbSkipErrorTag === 'function') return thumbSkipErrorTag(token) || '';
+  if (token === 'skip:size') return 'err:too_large';
+  if (token === 'skip:timeout') return 'err:timeout';
+  if (token === 'skip:mesh') return 'err:no_preview';
+  return '';
+}
+
+async function applyThumbnailSkipTags(skipTagPaths, savedPaths) {
+  const applied = [];
+  if (!window.electron || typeof window.electron.applyTagsToModels !== 'function') return applied;
+  const allTags = (typeof thumbnailErrorTags === 'function')
+    ? thumbnailErrorTags()
+    : ['err:too_large', 'err:timeout', 'err:no_preview'];
+  const byTag = new Map();
+  for (const [filePath, tag] of skipTagPaths || []) {
+    if (!filePath || !tag) continue;
+    if (!byTag.has(tag)) byTag.set(tag, []);
+    byTag.get(tag).push(filePath);
+  }
+  for (const [tag, paths] of byTag) {
+    try {
+      await window.electron.applyTagsToModels(paths, {
+        addTags: [tag],
+        removeTags: allTags.filter((name) => name !== tag)
+      });
+      applied.push(tag);
+    } catch (err) {
+      console.error('Failed to apply thumbnail error tag', tag, err);
+    }
+  }
+  const clearPaths = (savedPaths || []).filter(Boolean);
+  if (clearPaths.length) {
+    try {
+      await window.electron.applyTagsToModels(clearPaths, { removeTags: allTags });
+    } catch (err) {
+      console.error('Failed to clear thumbnail error tags', err);
+    }
+  }
+  return applied.sort();
 }
 
 function generateTypedPlaceholder(extension) {
@@ -2577,7 +2843,8 @@ async function loadModel(filePath, options = {}) {
         fileExtension,
         url: encodedFilePath,
         arrayBuffer: modelArrayBuffer || undefined,
-        extraBuffers: stepExtraBuffers.length ? stepExtraBuffers : undefined
+        extraBuffers: stepExtraBuffers.length ? stepExtraBuffers : undefined,
+        ignoreStlHeader: !!(options && options.ignoreStlHeader)
       };
       const transfer = [];
       if (modelArrayBuffer && modelArrayBuffer instanceof ArrayBuffer) transfer.push(modelArrayBuffer);
@@ -4503,6 +4770,76 @@ async function refreshGridAfterBackgroundThumbnailJob() {
   }
 }
 
+function thumbnailJobNeedsForce(result) {
+  if (!result || result.cancelled || result.backgrounded) return false;
+  const saved = Number(result.saved);
+  const skipped = Number(result.skipped) || 0;
+  const total = Number(result.total != null ? result.total : result.count);
+  const savedN = Number.isFinite(saved) ? saved : 0;
+  const totalN = Number.isFinite(total) ? total : 0;
+  if (totalN <= 0) return false;
+  const still = Math.max(0, totalN - savedN - skipped);
+  return skipped > 0 || still > 0;
+}
+
+async function refreshGridAfterThumbnailJob() {
+  try {
+    if (typeof invalidatePrimaryThumbnailCache === 'function') invalidatePrimaryThumbnailCache();
+    const sortSelect = document.getElementById('sort-select');
+    const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
+    if (typeof renderFiles === 'function') await renderFiles(models);
+  } catch (err) {
+    console.warn('Failed to refresh grid after thumbnail job:', err);
+  }
+}
+
+async function startForceMissingThumbnails() {
+  const serverJob = await startAndWatchServerThumbnailJob('force-missing', 'Force Missing Thumbnails');
+  if (serverJob) {
+    if (serverJob.backgrounded) return;
+    await offerForceMissingThumbnails(
+      'Force Missing Thumbnails',
+      serverJob,
+      serverJob.cancelled ? 'Thumbnail generation stopped.' : 'Forced thumbnail generation finished.'
+    );
+    await refreshGridAfterThumbnailJob();
+    return;
+  }
+
+  const skipUrls = [
+    generateSkippedPreviewPlaceholder('Too large'),
+    generateSkippedPreviewPlaceholder('No preview')
+  ].filter((url) => url && url !== '3d.png');
+  const rows = typeof window.electron.getModelsNeedingForcedThumbnails === 'function'
+    ? await window.electron.getModelsNeedingForcedThumbnails(skipUrls)
+    : await window.electron.getModelsWithoutThumbnails();
+  const models = (rows || []).map((row) => ({ filePath: row.filePath, hash: '' })).filter((row) => row.filePath);
+  if (!models.length) {
+    await window.electron.showMessage('Force Missing', 'No skipped or missing thumbnails to force.');
+    return;
+  }
+  const result = await generateThumbnailsForModels(models, {
+    force: true,
+    title: 'Force Missing Thumbnails'
+  });
+  await showForceJobResult(result);
+  await refreshGridAfterThumbnailJob();
+}
+
+async function offerForceMissingThumbnails(title, result, fallback) {
+  const message = (typeof thumbnailJobFinishedMessage === 'function')
+    ? thumbnailJobFinishedMessage(result, fallback)
+    : fallback;
+  if (!thumbnailJobNeedsForce(result)) {
+    await window.electron.showMessage(title, message);
+    return;
+  }
+  const choice = await window.electron.showMessage(title, message, ['Force Missing', 'OK']);
+  if (choice === 'Force Missing') {
+    await startForceMissingThumbnails();
+  }
+}
+
 /**
  * Browser clients in server mode: start a server-side job and mirror progress locally.
  * Desktop / non-server: returns null so callers fall back to local generation.
@@ -4519,9 +4856,13 @@ async function startAndWatchServerThumbnailJob(mode, title) {
     throw new Error('A thumbnail job is already running');
   }
 
-  const jobMode = mode === 'all' ? 'all' : 'missing';
+  const jobMode = mode === 'all' ? 'all' : (mode === 'force-missing' ? 'force-missing' : 'missing');
   const overlay = window.ThumbnailProgress;
-  const jobTitle = title || (jobMode === 'all' ? 'Regenerate Thumbnails' : 'Generate Missing Thumbnails');
+  const jobTitle = title || (
+    jobMode === 'all'
+      ? 'Regenerate Thumbnails'
+      : (jobMode === 'force-missing' ? 'Force Missing Thumbnails' : 'Generate Missing Thumbnails')
+  );
 
   return new Promise(async (resolve, reject) => {
     const waiter = {
@@ -4539,7 +4880,9 @@ async function startAndWatchServerThumbnailJob(mode, title) {
 
     overlay?.show({
       title: jobTitle,
-      phase: 'Starting on server...',
+      phase: jobMode === 'force-missing'
+        ? 'Starting on server. Stop ends the job, including the file in progress.'
+        : 'Starting on server...',
       cancellable: true,
       allowBackground: true
     });
@@ -4635,10 +4978,14 @@ window._electronRealEventHandlers['thumbnail-job-complete'] = function(result) {
   if (wasBackgrounded) {
     const cancelled = !!(result && result.cancelled);
     refreshGridAfterBackgroundThumbnailJob();
-    const finished = (typeof thumbnailJobFinishedMessage === 'function')
-      ? thumbnailJobFinishedMessage(result, 'Thumbnail generation finished.')
-      : (cancelled ? 'Thumbnail generation stopped.' : 'Thumbnail generation finished.');
-    window.electron.showMessage(waiter.title || 'Thumbnails', finished).catch(() => {});
+    const finished = (result && result.mode === 'force-missing')
+      ? showForceJobResult(result)
+      : offerForceMissingThumbnails(
+        waiter.title || 'Thumbnails',
+        result,
+        cancelled ? 'Thumbnail generation stopped.' : 'Thumbnail generation finished.'
+      );
+    finished.catch(() => {});
     return;
   }
 
@@ -4703,6 +5050,9 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
 
   window._electronRealEventHandlers['cancel-server-thumbnail-job'] = function() {
     cancelRef.cancelled = true;
+    if (cancelRef.controller) {
+      try { cancelRef.controller.abort(); } catch (_) { /* ignore */ }
+    }
   };
   if (window._electronPendingEvents['cancel-server-thumbnail-job']) {
     window._electronPendingEvents['cancel-server-thumbnail-job'].forEach((args) => {
@@ -4719,7 +5069,9 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
       return;
     }
 
-    const mode = payload && payload.mode === 'all' ? 'all' : 'missing';
+    const mode = payload && payload.mode === 'all'
+      ? 'all'
+      : (payload && payload.mode === 'force-missing' ? 'force-missing' : 'missing');
     workerBusy = true;
     cancelRef.cancelled = false;
     window._serverBulkThumbnailJobActive = true;
@@ -4728,19 +5080,29 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
       const generateThumbnailsForModels = await waitForGenerateThumbnailsForModels();
 
       // Path-only worklist — never preload thousands of full model rows (OOM on large libs).
-      let filePaths = [];
-      if (mode === 'missing') {
+      let work = [];
+      const force = mode === 'force-missing';
+      if (force) {
+        const skipUrls = [
+          generateSkippedPreviewPlaceholder('Too large'),
+          generateSkippedPreviewPlaceholder('No preview')
+        ].filter((url) => url && url !== '3d.png');
+        const forced = typeof window.electron.getModelsNeedingForcedThumbnails === 'function'
+          ? await window.electron.getModelsNeedingForcedThumbnails(skipUrls)
+          : await window.electron.getModelsWithoutThumbnails();
+        work = (forced || []).filter((m) => m && m.filePath);
+      } else if (mode === 'missing') {
         const without = await window.electron.getModelsWithoutThumbnails();
-        filePaths = (without || []).map((m) => m.filePath).filter(Boolean);
+        work = (without || []).filter((m) => m && m.filePath);
       } else if (typeof window.electron.getAllModelReferences === 'function') {
         const refs = await window.electron.getAllModelReferences();
-        filePaths = (refs || []).map((m) => m.filePath).filter(Boolean);
+        work = (refs || []).filter((m) => m && m.filePath);
       } else {
         const all = await window.electron.getAllModels('date-desc', 0);
-        filePaths = (all || []).map((m) => m.filePath).filter(Boolean);
+        work = (all || []).filter((m) => m && m.filePath);
       }
 
-      const total = filePaths.length;
+      const total = work.length;
       await window.electron.reportServerThumbnailProgress({
         phase: total ? `Generating thumbnails for ${total} models...` : 'Nothing to generate',
         processed: 0,
@@ -4758,37 +5120,53 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
         return;
       }
 
-      // Small chunks keep peak RAM low; concurrency 1 avoids shared-WebGL races + OOM.
+      // Small chunks keep peak RAM low. Parallelism matches a directory scan.
       const CHUNK_SIZE = 25;
       let cancelled = false;
       let saved = 0;
       let skipped = 0;
-      for (let offset = 0; offset < filePaths.length; offset += CHUNK_SIZE) {
+      let failures = [];
+      const errorTags = new Set();
+      for (let offset = 0; offset < work.length; offset += CHUNK_SIZE) {
         if (cancelRef.cancelled) {
           cancelled = true;
           break;
         }
-        const chunkPaths = filePaths.slice(offset, offset + CHUNK_SIZE);
-        const chunkModels = chunkPaths.map((filePath) => ({ filePath, hash: '' }));
+        const chunk = work.slice(offset, offset + CHUNK_SIZE);
+        const chunkModels = chunk.map((row) => ({
+          filePath: row.filePath,
+          hash: row.hash || '',
+          size: Number(row.size) || 0
+        }));
         const result = await generateThumbnailsForModels(chunkModels, {
           headless: true,
-          maxConcurrent: 1,
           cancelRef,
           mode,
+          force,
           skipHash: true,
           progressOffset: offset,
           progressTotal: total,
-          title: mode === 'all' ? 'Regenerate Thumbnails' : 'Generate Missing Thumbnails'
+          title: mode === 'all'
+            ? 'Regenerate Thumbnails'
+            : (force ? 'Force Missing Thumbnails' : 'Generate Missing Thumbnails')
         });
         if (result && typeof result.saved === 'number') saved += result.saved;
         if (result && typeof result.skipped === 'number') skipped += result.skipped;
+        if (result && Array.isArray(result.failures) && result.failures.length) {
+          failures = failures.concat(result.failures);
+        }
+        if (result && Array.isArray(result.errorTags)) {
+          result.errorTags.forEach((tag) => {
+            if (tag) errorTags.add(tag);
+          });
+        }
         if (result && result.cancelled) {
           cancelled = true;
           break;
         }
         // Drop chunk references before next batch; yield so V8 can GC.
         chunkModels.length = 0;
-        chunkPaths.length = 0;
+        chunk.length = 0;
         await new Promise((r) => setTimeout(r, 50));
         if (typeof gc === 'function') {
           try { gc(); } catch (_) { /* ignore */ }
@@ -4801,7 +5179,9 @@ if (window._electronPendingEvents['thumbnail-job-error']) {
         count: total,
         total,
         saved,
-        skipped
+        skipped,
+        failures,
+        errorTags: Array.from(errorTags)
       });
     } catch (error) {
       console.error('[Server thumbnails] Worker job failed:', error);
@@ -7758,30 +8138,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.updateScanStlHomeButtonVisibility().catch(() => {});
   }
 
-  // Docker/server: keep concurrency low — high parallelism + 30s IPC timeouts caused mass
-  // "corrupted"/STL placeholders that then got persisted as permanent thumbs.
-  // NVIDIA+ANGLE: parallel WebGL + compositor SharedImages tend to Skia-OOM the GPU process.
+  // Scale library and bulk thumbnail jobs from container memory, CPU, and GPU.
+  // A fixed high count stalled the WebSocket and the details panel stopped loading.
   if (serverMode) {
-    let glBackend = 'unknown';
+    let gpuInfo = null;
     try {
-      const gpuInfo = typeof window.electron.getGpuInfo === 'function'
+      gpuInfo = typeof window.electron.getGpuInfo === 'function'
         ? await window.electron.getGpuInfo()
         : null;
-      glBackend = (gpuInfo && gpuInfo.glBackend) || 'unknown';
     } catch (_) { /* ignore */ }
-    if (glBackend === 'nvidia') {
-      MAX_CONCURRENT_RENDERS = 1;
-      MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
-      maxContextReuseCount = 25;
-    } else {
-      MAX_CONCURRENT_RENDERS = 3;
-      MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
-      maxContextReuseCount = 40;
-    }
+    const glBackend = (gpuInfo && gpuInfo.glBackend) || 'unknown';
+    serverThumbnailSlots = thumbnailSlotsForServer(gpuInfo);
+    configureThumbLoadWatcher({
+      ceiling: serverThumbnailSlots,
+      nvidia: glBackend === 'nvidia',
+      serverMode: true
+    });
+    MAX_CONCURRENT_RENDERS = serverThumbnailSlots;
+    MAX_CONCURRENT_RENDERS_BACKGROUND = 1;
+    maxContextReuseCount = glBackend === 'nvidia' ? 60 : 40;
+    const memMb = gpuInfo && gpuInfo.memoryBytes
+      ? Math.round(gpuInfo.memoryBytes / (1024 * 1024))
+      : 0;
     console.log(
-      'Server mode detected: Capped MAX_CONCURRENT_RENDERS to',
-      MAX_CONCURRENT_RENDERS,
-      `(glBackend=${glBackend}, contextReuse=${maxContextReuseCount})`
+      'Server mode detected: thumbnail slots',
+      serverThumbnailSlots,
+      `(glBackend=${glBackend}, memoryMB=${memMb}, cpus=${gpuInfo && gpuInfo.cpuCount}, contextReuse=${maxContextReuseCount})`
     );
   }
   // Hidden worker window must not run grid WebGL at all (bulk job owns the GPU/CPU).
@@ -8297,7 +8679,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                   }
                   invalidatePrimaryThumbnailCache();
-                  await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail regeneration completed successfully.'));
+                  await offerForceMissingThumbnails('Success', serverJob, 'Thumbnail regeneration completed successfully.');
                   const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
                   await renderFiles(models);
                   return;
@@ -8313,9 +8695,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 invalidatePrimaryThumbnailCache();
                 
                 // Regenerate thumbnails for all models
-                await generateThumbnailsForModels(allModels);
+                const regenResult = await generateThumbnailsForModels(allModels);
                 
-                await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+                await offerForceMissingThumbnails('Success', regenResult, 'Thumbnail regeneration completed successfully.');
                 
                 // Refresh the grid to show the new thumbnails
                 const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
@@ -10509,7 +10891,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             await window.electron.showMessage('Regenerate Thumbnails', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation stopped.'));
             return;
           }
-          await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail regeneration completed successfully.'));
+          await offerForceMissingThumbnails('Success', serverJob, 'Thumbnail regeneration completed successfully.');
           invalidatePrimaryThumbnailCache();
           const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
           await renderFiles(models);
@@ -10523,9 +10905,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         await window.electron.purgeThumbnails();
         invalidatePrimaryThumbnailCache();
-        await generateThumbnailsForModels(allModels);
+        const regenResult = await generateThumbnailsForModels(allModels);
         isRegeneratingThumbnails = false;
-        await window.electron.showMessage('Success', 'Thumbnail regeneration completed successfully.');
+        await offerForceMissingThumbnails('Success', regenResult, 'Thumbnail regeneration completed successfully.');
         const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
         await renderFiles(models);
       } else {
@@ -10578,7 +10960,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             await window.electron.showMessage('Generate Missing Thumbnails', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation stopped.'));
             return;
           }
-          await window.electron.showMessage('Success', thumbnailJobFinishedMessage(serverJob, 'Thumbnail generation completed successfully.'));
+          await offerForceMissingThumbnails('Success', serverJob, 'Thumbnail generation completed successfully.');
           invalidatePrimaryThumbnailCache();
           const sortSelect = document.getElementById('sort-select');
           const models = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
@@ -10607,10 +10989,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         
         // Generate thumbnails for models without them
-        await generateThumbnailsForModels(fullModels);
+        const missingResult = await generateThumbnailsForModels(fullModels);
         
         isThumbnailDialogShowing = false; // Reset flag after generation completes
-        await window.electron.showMessage('Success', 'Thumbnail generation completed successfully.');
+        await offerForceMissingThumbnails('Success', missingResult, 'Thumbnail generation completed successfully.');
         
         // Refresh the grid to show the new thumbnails
         const sortSelect = document.getElementById('sort-select');
@@ -14589,13 +14971,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progressTotal = typeof options.progressTotal === 'number' ? options.progressTotal : models.length;
     console.log(`[DEBUG] generateThumbnailsForModels: Starting thumbnail generation for ${models.length} models.`);
     
-    // Check if we're in server mode (Docker typically runs in server mode)
-    // Hidden worker must stay at concurrency 1 (shared WebGL + SwiftShader RAM).
     const serverMode = await window.electron.isServerMode().catch(() => false);
-    const isWorker = await isServerThumbnailWorkerContext();
-    const maxConcurrentThumbnails = typeof options.maxConcurrent === 'number'
-      ? options.maxConcurrent
-      : (isWorker || headless ? 1 : (serverMode ? 3 : 3));
+    if (serverMode) {
+      configureThumbLoadWatcher({
+        ceiling: serverThumbnailSlots,
+        nvidia: thumbLoadWatcher.nvidia,
+        serverMode: true
+      });
+    }
     
     // New progress UI elements (Sidebar)
     const progressSection = document.getElementById('progress-section');
@@ -14622,6 +15005,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     let processedInBatch = 0;
     let savedCount = 0;
     let skippedCount = 0;
+    let errorTagsApplied = [];
+    const forceFailures = [];
+    const skipTagPaths = new Map();
+    const savedTagPaths = [];
+    const forceAbort = options.force && typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (cancelRef && forceAbort) cancelRef.controller = forceAbort;
 
     const reportHeadlessProgress = async (processed, total, phase) => {
       if (!headless || typeof window.electron.reportServerThumbnailProgress !== 'function') return;
@@ -14641,6 +15030,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const handleStopClick = () => {
         isCancelled = true;
         if (cancelRef) cancelRef.cancelled = true;
+        if (forceAbort) forceAbort.abort();
         if (activeProgressText) activeProgressText.textContent = 'Stopping...';
     };
     if (stopButton && !headless) {
@@ -14664,8 +15054,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       if (overlay) {
-        overlay.show({ title: options.title || 'Generating Thumbnails', total: progressTotal });
-        overlay.update(progressOffset, progressTotal, `Generating thumbnails for ${progressTotal} model${progressTotal === 1 ? '' : 's'}...`);
+        overlay.show({
+          title: options.title || 'Generating Thumbnails',
+          total: progressTotal,
+          cancellable: true,
+          phase: options.force ? 'Forcing thumbnails. Stop ends the job, including the file in progress.' : undefined
+        });
+        overlay.update(progressOffset, progressTotal, options.force
+          ? 'Forcing thumbnails. Stop ends the job, including the file in progress.'
+          : `Generating thumbnails for ${progressTotal} model${progressTotal === 1 ? '' : 's'}...`);
         overlay.onCancel(handleStopClick);
       }
 
@@ -14682,8 +15079,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         let thumbnail = null;
         let savedThisModel = false;
         let skippedThisModel = false;
+        let skipErrorTag = '';
+        let failureReason = '';
         const pathForExt = model.filePath.includes('::') ? (model.filePath.split('::')[1] || '') : model.filePath;
         const fileExt = pathForExt.split('.').pop().toLowerCase();
+
+        if (isCancelled || (cancelRef && cancelRef.cancelled)) return;
         
         try {
           // 0. Non-previewable types: use typed placeholder (file type label)
@@ -14757,7 +15158,10 @@ document.addEventListener('DOMContentLoaded', async () => {
               );
             }
             // Leave retryable — typed placeholders used to stick forever on Docker grids.
-            await window.electron.saveThumbnail(model.filePath, '3d.png');
+            failureReason = 'No embedded preview image';
+            if (!options.force) {
+              await window.electron.saveThumbnail(model.filePath, '3d.png');
+            }
             if (!skipHash && (!model.hash || model.hash === '')) {
               try { await window.electron.calculateFileHash(model.filePath); } catch (e) { /* ignore */ }
             }
@@ -14836,18 +15240,38 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!thumbnail) {
             console.log(`[DEBUG] generateThumbnailsForModels: Rendering 3D model for ${model.filePath}`);
             try {
-              thumbnail = await generateThumbnail(model.filePath, { skipHash, reportSkips: headless });
+              thumbnail = await generateThumbnail(model.filePath, {
+                skipHash,
+                reportSkips: headless && !options.force,
+                force: !!options.force,
+                signal: forceAbort ? forceAbort.signal : undefined
+              });
             } catch (renderError) {
               console.error(`Error generating 3D thumbnail for ${model.filePath}:`, renderError);
-              if (headless && typeof isPermanentThumbnailSkipError === 'function' && isPermanentThumbnailSkipError(renderError)) {
+              if (renderError && renderError.thumbnailLoadAborted) {
+                failureReason = '';
+              } else if (options.force) {
+                failureReason = typeof describeThumbnailFailure === 'function'
+                  ? describeThumbnailFailure(renderError, '', renderError && renderError.message)
+                  : ((renderError && renderError.message) || 'Could not render a thumbnail');
+              } else if (headless && typeof isPermanentThumbnailSkipError === 'function' && isPermanentThumbnailSkipError(renderError)) {
                 thumbnail = (typeof THUMB_SKIP_MESH !== 'undefined') ? THUMB_SKIP_MESH : 'skip:mesh';
+              }
+            }
+            if (options.force && !failureReason && !thumbnail) {
+              const noted = takeThumbFailure(model.filePath);
+              const detail = takeThumbFailureDetail(model.filePath);
+              if (!(isCancelled || (cancelRef && cancelRef.cancelled))) {
+                failureReason = typeof describeThumbnailFailure === 'function'
+                  ? describeThumbnailFailure(null, noted, detail)
+                  : (detail || 'Could not render a thumbnail');
               }
             }
             const skipToken = typeof isThumbSkipToken === 'function' && isThumbSkipToken(thumbnail);
             const renderFailed = !skipToken && (!thumbnail || thumbnail === '3d.png' || isFailurePlaceholderThumbnail(thumbnail));
             // A timeout is not a WebGL glitch. Retrying it spends another 30s on the same STEP file
             // and is why Docker jobs sit at 362/365. Permanent mesh errors are not retried either.
-            if (headless && renderFailed) {
+            if (!options.force && headless && renderFailed) {
               const reason = takeThumbFailure(model.filePath);
               if (reason === 'timeout') {
                 thumbnail = (typeof THUMB_SKIP_TIMEOUT !== 'undefined') ? THUMB_SKIP_TIMEOUT : 'skip:timeout';
@@ -14869,15 +15293,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           }
 
-          if (headless && typeof isThumbSkipToken === 'function' && isThumbSkipToken(thumbnail)) {
+          skipErrorTag = thumbnailSkipErrorTag(thumbnail);
+          if (!options.force && headless && skipErrorTag) {
             const label = thumbnail === 'skip:size' ? 'Too large' : 'No preview';
             const placeholder = generateSkippedPreviewPlaceholder(label);
             if (placeholder && placeholder.startsWith('data:image')) {
               await window.electron.saveThumbnail(model.filePath, placeholder);
-              skippedThisModel = true;
             } else {
               await window.electron.saveThumbnail(model.filePath, '3d.png');
             }
+            skippedThisModel = true;
             thumbnail = null;
           }
 
@@ -14891,7 +15316,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!skippedThisModel && !saved3mfEmbedsViaBatch && thumbnail !== '3d.png') {
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             savedThisModel = true;
-          } else if (!skippedThisModel && !saved3mfEmbedsViaBatch) {
+          } else if (!options.force && !skippedThisModel && !saved3mfEmbedsViaBatch) {
             await window.electron.saveThumbnail(model.filePath, '3d.png');
           }
           
@@ -14909,8 +15334,13 @@ document.addEventListener('DOMContentLoaded', async () => {
           
         } catch (error) {
           console.error(`Failed to generate thumbnail for ${model.filePath}:`, error);
+          if (options.force && !failureReason && !(error && error.thumbnailLoadAborted)) {
+            failureReason = typeof describeThumbnailFailure === 'function'
+              ? describeThumbnailFailure(error, '', error && error.message)
+              : ((error && error.message) || 'Could not render a thumbnail');
+          }
           // A skip image is already stored. Writing 3d.png here would put the file back in the missing set.
-          if (!skippedThisModel) {
+          if (!options.force && !skippedThisModel) {
             try {
               await window.electron.saveThumbnail(model.filePath, '3d.png');
             } catch (saveError) {
@@ -14918,6 +15348,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           }
         } finally {
+          const stopped = isCancelled || (cancelRef && cancelRef.cancelled);
+          if (options.force && !savedThisModel && !skippedThisModel && !stopped) {
+            forceFailures.push({
+              filePath: model.filePath,
+              reason: failureReason || 'Could not render a thumbnail'
+            });
+          }
+          if (skippedThisModel && skipErrorTag) skipTagPaths.set(model.filePath, skipErrorTag);
+          else if (savedThisModel) savedTagPaths.push(model.filePath);
           if (savedThisModel) savedCount++;
           else if (skippedThisModel) skippedCount++;
           processedInBatch++;
@@ -14938,16 +15377,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             await reportHeadlessProgress(absoluteProcessed, progressTotal);
           }
 
-          // Between models: yield + occasional soft GC. Soft dispose only —
-          // never forceContextLoss (restarts GPU process → Skia OOM log storms).
-          if (maxConcurrentThumbnails === 1) {
-            await new Promise((r) => setTimeout(r, 25));
-            if (processedInBatch % 15 === 0 && typeof deepCleanThreeResources === 'function') {
-              deepCleanThreeResources();
-              await new Promise((r) => setTimeout(r, 50));
-            } else if (typeof gc === 'function' && processedInBatch % 5 === 0) {
-              try { gc(); } catch (_) { /* ignore */ }
-            }
+          // Occasional soft GC. Soft dispose only — never forceContextLoss
+          // (restarts GPU process → Skia OOM log storms).
+          if (processedInBatch % 15 === 0 && typeof deepCleanThreeResources === 'function') {
+            deepCleanThreeResources();
+          } else if (typeof gc === 'function' && processedInBatch % 5 === 0) {
+            try { gc(); } catch (_) { /* ignore */ }
           }
         }
       };
@@ -14958,10 +15393,23 @@ document.addEventListener('DOMContentLoaded', async () => {
           isCancelled = true;
           break;
         }
-        // Fill up to max concurrent thumbnails
-        while (activePromises.size < maxConcurrentThumbnails && modelQueue.length > 0) {
+        const nextModel = modelQueue[0];
+        const slotLimit = upcomingThumbnailSlots(
+          nextModel && nextModel.filePath,
+          nextModel && nextModel.size
+        );
+        const hardCap = typeof options.maxConcurrent === 'number' ? options.maxConcurrent : slotLimit;
+        while (activePromises.size < Math.min(slotLimit, hardCap) && modelQueue.length > 0) {
+          const peek = modelQueue[0];
+          const peekLimit = Math.min(
+            hardCap,
+            upcomingThumbnailSlots(peek && peek.filePath, peek && peek.size)
+          );
+          if (activePromises.size >= peekLimit) break;
           const model = modelQueue.shift();
+          noteThumbnailStart(model && model.filePath, model && model.size);
           const promise = processModel(model).finally(() => {
+            noteThumbnailFinish(model && model.filePath, 'ok');
             activePromises.delete(promise);
           });
           activePromises.add(promise);
@@ -15024,9 +15472,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (overlay) {
         overlay.complete(isCancelled ? 'Stopped.' : 'Finished.');
       }
+      try {
+        errorTagsApplied = await applyThumbnailSkipTags(skipTagPaths, savedTagPaths);
+      } catch (tagErr) {
+        console.error('Failed to apply thumbnail error tags:', tagErr);
+      }
     }
 
-    return { cancelled: isCancelled, count: models.length, saved: savedCount, skipped: skippedCount };
+    return {
+      cancelled: isCancelled,
+      count: models.length,
+      saved: savedCount,
+      skipped: skippedCount,
+      failures: forceFailures,
+      errorTags: errorTagsApplied
+    };
   }
 
   window.generateThumbnailsForModels = generateThumbnailsForModels;
@@ -15363,6 +15823,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
       
+      expandAllLibraryGroups(filteredModels);
+
       // Update UI for all items with matching file paths that are rendered
       // Use helper function to ensure normalized path comparison
       filteredModels.forEach(model => {
@@ -15610,6 +16072,29 @@ function openModelDetailsFromTile(fileElement, filePath) {
   }
   selectSingleModel(fileElement, filePath);
   showModelDetails(filePath);
+}
+
+/** Grid model click. Group children always open that model's details. */
+function handleGridModelClick(event, fileElement, filePath, options = {}) {
+  if (wasTileTapSuppressed(fileElement, event)) return;
+  if (options.ignorePreviewButton && event.target?.closest?.('.preview-tile-open-btn')) return;
+  if (event.ctrlKey || event.metaKey) {
+    handleFileClick(event, filePath);
+    return;
+  }
+  const groupedChild = fileElement?.classList?.contains('parent-model-group-child');
+  if (groupedChild) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!isMultiSelectMode) {
+      openModelDetailsFromTile(fileElement, filePath);
+      return;
+    }
+  } else if (options.mobileDetails && isMobileUiActive() && !isMultiSelectMode) {
+    openModelDetailsFromTile(fileElement, filePath);
+    return;
+  }
+  toggleModelSelection(fileElement, filePath);
 }
 
 function openModelPreviewFromTile(filePath) {
@@ -16011,14 +16496,18 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
       // Improved thumbnail generation with concurrency control and cancellation
       // Higher concurrency in Server/Docker mode to compensate for slower file system operations
       const serverMode = await window.electron.isServerMode().catch(() => false);
-      const maxConcurrentThumbnails = serverMode ? 10 : 5; // Higher concurrency in server/Docker mode
       const thumbnailQueue = [...filesNeedingThumbnails];
       const activePromises = new Set();
       
       while (thumbnailQueue.length > 0 && !isCancelled) {
-        // Fill up to max concurrent thumbnails
-        while (activePromises.size < maxConcurrentThumbnails && thumbnailQueue.length > 0) {
+        const nextFile = thumbnailQueue[0];
+        const slotLimit = upcomingThumbnailSlots(nextFile && nextFile.filePath, nextFile && (nextFile.size || nextFile.fileSize));
+        while (activePromises.size < slotLimit && thumbnailQueue.length > 0) {
+          const peek = thumbnailQueue[0];
+          const peekLimit = upcomingThumbnailSlots(peek && peek.filePath, peek && (peek.size || peek.fileSize));
+          if (activePromises.size >= peekLimit) break;
           const file = thumbnailQueue.shift();
+          noteThumbnailStart(file && file.filePath, file && (file.size || file.fileSize));
           
           const promise = (async () => {
             try {
@@ -16124,6 +16613,7 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
             } catch (error) {
               console.error('Error caching thumbnail:', error);
             } finally {
+              noteThumbnailFinish(file && file.filePath, 'ok');
               if (!window._scanThumbnailProgress) {
                 completedThumbnails++;
                 thumbnailProgressUpdate(completedThumbnails);
@@ -16742,7 +17232,10 @@ async function processRenderQueue() {
       if (!task) break;
       activeRenders++;
 
-      if (task.filePath) activeThumbnailRenders.add(task.filePath);
+      if (task.filePath) {
+        activeThumbnailRenders.add(task.filePath);
+        noteThumbnailStart(task.filePath, task.sizeBytes);
+      }
       if (task.slowPass) activeSlowThumbRenders++;
 
       (async () => {
@@ -16775,7 +17268,10 @@ async function processRenderQueue() {
             setTimeout(() => enqueueRenderTask(task), 2000);
           }
         } finally {
-          if (task.filePath) activeThumbnailRenders.delete(task.filePath);
+          if (task.filePath) {
+            noteThumbnailFinish(task.filePath, 'ok');
+            activeThumbnailRenders.delete(task.filePath);
+          }
           if (task.slowPass) activeSlowThumbRenders = Math.max(0, activeSlowThumbRenders - 1);
           activeRenders--;
           const pauseMs = isLowPriorityThumbnailTask(task) ? RENDER_DELAY_BACKGROUND : RENDER_DELAY;
@@ -17112,6 +17608,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     renderer = getSharedRenderer();
   } catch (webglError) {
     console.error('WebGL unavailable, using placeholder:', webglError && webglError.message ? webglError.message : webglError);
+    noteThumbFailure(filePath, 'error', 'WebGL unavailable');
     const corruptedDataUrl = generateCorruptedPlaceholder();
     const img = document.createElement('img');
     img.src = corruptedDataUrl;
@@ -17161,12 +17658,32 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
 
     // Fast pass stays short so one huge mesh cannot block the rest of the grid.
     // Timed-out models are rendered later, one at a time, with SLOW_THUMB_TIMEOUT_MS.
-    const timeoutMs = options.slowPass
-      ? SLOW_THUMB_TIMEOUT_MS
-      : (fileExtension === '3mf' ? 120000 : 30000);
-    const abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    // Force Missing waits for the file: no size cap, no header reject, no timeout.
+    // Stop still aborts the file that is loading.
+    const noTimeout = !!(options && options.noTimeout);
+    const externalSignal = options && options.signal;
+
+    // Files over the max size must not be extracted or parsed for a grid thumb.
+    // A 90MB zip entry blocks get-model for the whole details panel.
+    if (!noTimeout && modelTooLargeForThumbnail(filePath)) {
+      giveUpOnOversizedThumbnail(filePath, container);
+      return '3d.png';
+    }
+
+    const timeoutMs = noTimeout
+      ? 0
+      : (options.slowPass
+        ? SLOW_THUMB_TIMEOUT_MS
+        : (fileExtension === '3mf' ? 120000 : 30000));
+    const abortController = ((!noTimeout || externalSignal) && typeof AbortController !== 'undefined')
+      ? new AbortController()
+      : null;
+    if (abortController && externalSignal) {
+      if (externalSignal.aborted) abortController.abort();
+      else externalSignal.addEventListener('abort', () => abortController.abort(), { once: true });
+    }
     let timeoutId;
-    const timeoutPromise = new Promise((_, reject) => {
+    const timeoutPromise = noTimeout ? null : new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
         if (abortController) abortController.abort();
         const err = new Error(`Loading model timed out after ${timeoutMs}ms`);
@@ -17174,16 +17691,31 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
         reject(err);
       }, timeoutMs);
     });
+    const abortPromise = (noTimeout && abortController) ? new Promise((_, reject) => {
+      const onAbort = () => {
+        const err = new Error('Load aborted');
+        err.thumbnailLoadAborted = true;
+        reject(err);
+      };
+      if (abortController.signal.aborted) onAbort();
+      else abortController.signal.addEventListener('abort', onAbort, { once: true });
+    }) : null;
 
     try {
-      const loadPromise = loadModelFunc(filePath, abortController ? { signal: abortController.signal } : {});
+      const loadPromise = loadModelFunc(filePath, {
+        signal: abortController ? abortController.signal : undefined,
+        ignoreStlHeader: !!(options && options.ignoreStlHeader)
+      });
       // The timeout can win the race while loadModel rejects later. Observe that
       // rejection so an aborted download does not surface as an unhandled error.
       loadPromise.catch(() => {});
-      model = await Promise.race([
-        loadPromise,
-        timeoutPromise
-      ]);
+      if (timeoutPromise) {
+        model = await Promise.race([loadPromise, timeoutPromise]);
+      } else if (abortPromise) {
+        model = await Promise.race([loadPromise, abortPromise]);
+      } else {
+        model = await loadPromise;
+      }
     } finally {
       clearTimeout(timeoutId);
     }
@@ -17194,6 +17726,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     }
 
     if (!model) {
+      noteThumbFailure(filePath, 'error', 'Could not load a 3D mesh');
       console.log(`[DEBUG] renderModelToPNG: loadModel returned null (embedded image, zip container, or url), using placeholder`);
       const img = document.createElement('img');
       img.src = '3d.png';
@@ -17235,8 +17768,16 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     return imgData;
 
   } catch (error) {
-    if (isThumbnailLoadTimeout(error)) {
-      noteThumbFailure(filePath, 'timeout');
+    if (error && error.thumbnailLoadAborted) {
+      throw error;
+    }
+      if (isThumbnailLoadTimeout(error)) {
+      noteThumbnailPressure(filePath, 'timeout');
+      if (!(options && options.force) && modelTooLargeForThumbnail(filePath)) {
+        giveUpOnOversizedThumbnail(filePath, container);
+        return '3d.png';
+      }
+      noteThumbFailure(filePath, 'timeout', error && error.message);
       if (options.slowPass) {
         slowThumbnailExhausted.add(filePath);
         deferredSlowThumbnails.delete(filePath);
@@ -17248,8 +17789,11 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
       return null;
     }
     console.error('Error rendering model:', error);
+    const renderDetail = (error && error.message) || 'Could not render a thumbnail';
     if (typeof isPermanentThumbnailSkipError === 'function' && isPermanentThumbnailSkipError(error)) {
-      noteThumbFailure(filePath, 'mesh');
+      noteThumbFailure(filePath, 'mesh', renderDetail);
+    } else {
+      noteThumbFailure(filePath, 'error', renderDetail);
     }
     const corruptedDataUrl = generateCorruptedPlaceholder();
     const img = document.createElement('img');
@@ -17259,6 +17803,7 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     img.alt = 'Model may be corrupted';
     container.innerHTML = '';
     container.appendChild(img);
+    noteThumbnailPressure(filePath, 'error');
     // Return null so callers do not persist failure art as a "real" thumbnail.
     return null;
   } finally {
@@ -17807,6 +18352,8 @@ document.addEventListener('keydown', async (event) => {
           addToSelectedModels(model.filePath);
         }
       });
+
+      expandAllLibraryGroups(filteredModels);
       
       // Update UI for all items with matching file paths that are rendered
       // Use helper function to ensure normalized path comparison
@@ -18652,10 +19199,12 @@ async function removeTagFromSelectedModels(tagName) {
   if (!trimmed || selectedModels.size === 0) return false;
   if (typeof window.electron.applyTagsToModels !== 'function') return false;
 
-  const result = await window.electron.applyTagsToModels(Array.from(selectedModels), { removeTags: [trimmed] });
+  const paths = Array.from(selectedModels);
+  const result = await window.electron.applyTagsToModels(paths, { removeTags: [trimmed] });
   console.log('applyTagsToModels remove:', result);
   if (!result || result.missing >= result.requested) return false;
 
+  refreshVisibleGridAfterBulkTagChange(paths);
   await refreshMultiEditTags();
   await populateRemoveTagSelect();
   await populateTagSelect('multi-tag-select', 'multi-tags');
@@ -20090,7 +20639,7 @@ async function generateThumbnail(file, options = {}) {
     const stats = await window.electron.getFileStats(filePath);
     const fileSizeInMB = stats.size / (1024 * 1024);
     
-    if (fileSizeInMB > MAX_FILE_SIZE_MB) {
+    if (!options.force && fileSizeInMB > MAX_FILE_SIZE_MB) {
       debugLog(`Skipping thumbnail generation for ${filePath} (${fileSizeInMB.toFixed(2)}MB > ${MAX_FILE_SIZE_MB}MB)`);
       console.warn(`Skipping thumbnail generation for ${filePath} (${fileSizeInMB.toFixed(2)}MB > ${MAX_FILE_SIZE_MB}MB)`);
       if (options.reportSkips) {
@@ -20105,11 +20654,22 @@ async function generateThumbnail(file, options = {}) {
     
     // Call renderModelToPNG directly instead of renderThumbnail
     const thumbnail = await renderModelToPNG(filePath, tempContainer, null, {
-      retainDetached: true
+      retainDetached: true,
+      noTimeout: !!options.force,
+      ignoreStlHeader: !!options.force,
+      signal: options.signal
     });
 
     if (!thumbnail || isFailurePlaceholderThumbnail(thumbnail)) {
       const reason = takeThumbFailure(filePath);
+      const detail = takeThumbFailureDetail(filePath);
+      if (options.force) {
+        const err = new Error(typeof describeThumbnailFailure === 'function'
+          ? describeThumbnailFailure(null, reason, detail)
+          : (detail || reason || 'Could not render a thumbnail'));
+        err.forceThumbFailed = true;
+        throw err;
+      }
       if (options.reportSkips && reason === 'timeout') {
         return (typeof THUMB_SKIP_TIMEOUT !== 'undefined') ? THUMB_SKIP_TIMEOUT : 'skip:timeout';
       }
@@ -20126,6 +20686,15 @@ async function generateThumbnail(file, options = {}) {
     return thumbnail;
   } catch (error) {
     console.error(`Error generating thumbnail for ${file.filePath || file}:`, error);
+    if (error && error.thumbnailLoadAborted) throw error;
+    if (options && options.force) {
+      if (error && error.forceThumbFailed) throw error;
+      const wrapped = new Error(typeof describeThumbnailFailure === 'function'
+        ? describeThumbnailFailure(error, '', error && error.message)
+        : ((error && error.message) || 'Could not render a thumbnail'));
+      wrapped.forceThumbFailed = true;
+      throw wrapped;
+    }
     return '3d.png';
   }
 }
@@ -21573,6 +22142,67 @@ async function autoSaveModel(field, value, filePath) {
 
 window.autoSaveModel = autoSaveModel;
 
+// Drop a cached tag list so the next card paint loads the full set from the database.
+function forgetCachedModelTags(model) {
+  if (model && Object.prototype.hasOwnProperty.call(model, 'tags')) delete model.tags;
+}
+
+// List queries omit tags. A visible card loads them once, then virtual-grid reuse
+// keeps that DOM. Ctrl+A tagging has to drop those cards or the grid stays stale.
+function refreshVisibleGridAfterBulkTagChange(filePaths) {
+  const gridContainer = document.querySelector('.file-grid');
+  if (!gridContainer) return;
+  const updatedNorm = new Set();
+  for (const filePath of filePaths || []) {
+    const key = normalizePathForComparison(filePath);
+    if (key) updatedNorm.add(key);
+  }
+  if (updatedNorm.size === 0) return;
+
+  const pathMatches = (filePath) => updatedNorm.has(normalizePathForComparison(filePath));
+  if (Array.isArray(gridContainer.currentModels)) {
+    for (const model of gridContainer.currentModels) {
+      if (model && pathMatches(model.filePath)) forgetCachedModelTags(model);
+    }
+  }
+
+  const records = gridContainer.currentDisplayRecords
+    || gridContainer._virtualLayoutCache?.displayRecords
+    || [];
+  for (const record of records) {
+    if (record?.type === 'model' && record.model && pathMatches(record.model.filePath)) {
+      forgetCachedModelTags(record.model);
+    } else if (record?.type === 'group') {
+      for (const child of record.children || []) {
+        if (child && pathMatches(child.filePath)) forgetCachedModelTags(child);
+      }
+    }
+  }
+
+  const virtualContent = gridContainer.querySelector('.virtual-content');
+  if (virtualContent) {
+    virtualContent.querySelectorAll('.file-item').forEach((el) => {
+      const filePath = el.getAttribute('data-filepath') || el.dataset.filepath;
+      if (filePath && pathMatches(filePath)) el.remove();
+    });
+    const groupKeys = window.gridRefresh?.groupKeysForTagRefresh
+      ? window.gridRefresh.groupKeysForTagRefresh(filePaths, records, normalizePathForComparison)
+      : [];
+    if (groupKeys.length) {
+      const staleGroups = new Set(groupKeys);
+      virtualContent.querySelectorAll('.parent-model-group').forEach((el) => {
+        if (staleGroups.has(el.dataset.groupKey)) el.remove();
+      });
+    }
+  }
+
+  if (typeof gridContainer.renderVisibleItemsFn === 'function') {
+    requestAnimationFrame(() => {
+      gridContainer.renderVisibleItemsFn();
+    });
+  }
+}
+
 // Add implementation of autoSaveMultipleModels function
 async function autoSaveMultipleModels(field, value, options = {}) {
   try {
@@ -21593,6 +22223,8 @@ async function autoSaveMultipleModels(field, value, options = {}) {
       const result = await window.electron.applyTagsToModels(modelsToUpdate, { addTags: newTags });
       console.log(`applyTagsToModels add:`, result);
       if (!result || result.missing >= result.requested) return false;
+      // applyTagsToModels does not load models, so the grid still has the old tag row.
+      refreshVisibleGridAfterBulkTagChange(modelsToUpdate);
       return true;
     }
     
@@ -22721,6 +23353,8 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       // keep placeholder; job will fill thumbs server-side
     } else if (hasImageOnlyPreviewMiss(model.filePath)) {
       img.src = generateTypedPlaceholder(extensionFromModelPath(model.filePath));
+    } else if (modelTooLargeForThumbnail(model.filePath, model)) {
+      giveUpOnOversizedThumbnail(model.filePath, thumbnailContainer);
     } else if (thumbnailQueueShouldWait(model.filePath)) {
       // Fast pass deferred this file, or the long pass already gave up.
     } else if (!pendingThumbnails.has(model.filePath)) {
@@ -23322,13 +23956,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     
     // Add click event handler for model selection
     item.addEventListener('click', (e) => {
-      if (wasTileTapSuppressed(item, e)) return;
-      // Check if ctrl or cmd key is pressed for multi-select
-      if (e.ctrlKey || e.metaKey) {
-        handleFileClick(e, model.filePath);
-      } else {
-        toggleModelSelection(item, model.filePath);
-      }
+      handleGridModelClick(e, item, model.filePath);
     });
     
     // Add context menu handler for list view - works on entire element
@@ -23409,17 +24037,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
     });
 
     item.addEventListener('click', (e) => {
-      if (wasTileTapSuppressed(item, e)) return;
-      if (e.target.closest('.preview-tile-open-btn')) return;
-      if (e.ctrlKey || e.metaKey) {
-        handleFileClick(e, model.filePath);
-        return;
-      }
-      if (isMobileUiActive() && !isMultiSelectMode) {
-        openModelDetailsFromTile(item, model.filePath);
-        return;
-      }
-      toggleModelSelection(item, model.filePath);
+      handleGridModelClick(e, item, model.filePath, { ignorePreviewButton: true, mobileDetails: true });
     });
 
     addContextMenuHandler(item, model.filePath);
@@ -23446,11 +24064,11 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
       thumbnailContainer.style.flexShrink = '0';
     } else {
       item.style.width = '300px';
-      item.style.height = '490px';
-      item.style.minHeight = '490px';
-      item.style.maxHeight = '490px';
+      item.style.height = '520px';
+      item.style.minHeight = '520px';
+      item.style.maxHeight = '520px';
       item.style.padding = '16px 16px 0';
-      thumbnailContainer.style.width = '276px';
+      thumbnailContainer.style.width = '100%';
       thumbnailContainer.style.height = '276px';
       thumbnailContainer.style.flexShrink = '0';
     }
@@ -23830,13 +24448,7 @@ function createModelItem(model, viewMode = null, thumbPriority = THUMB_PRIORITY_
 
   // Add click event handler for model selection
   item.addEventListener('click', (e) => {
-    if (wasTileTapSuppressed(item, e)) return;
-    // Check if ctrl or cmd key is pressed for multi-select
-    if (e.ctrlKey || e.metaKey) {
-      handleFileClick(e, model.filePath);
-    } else {
-      toggleModelSelection(item, model.filePath);
-    }
+    handleGridModelClick(e, item, model.filePath);
   });
 
   // Add context menu
@@ -23911,6 +24523,67 @@ const parentModelExpandedGroups = new Set();
 const zipArchiveExpandedGroups = new Set();
 const bundleExpandedGroups = new Set();
 let virtualGridGroupLayoutGen = 0;
+/** groupKey -> timestamp. Blocks the click that collapsed a group from expanding it again. */
+const suppressGroupExpandUntil = new Map();
+
+function rememberCollapsedGroup(groupKey) {
+  if (!groupKey) return;
+  bundleExpandedGroups.delete(groupKey);
+  parentModelExpandedGroups.delete(groupKey);
+  zipArchiveExpandedGroups.delete(groupKey);
+  suppressGroupExpandUntil.set(groupKey, performance.now() + 400);
+}
+
+function groupExpandSuppressed(groupKey) {
+  const until = suppressGroupExpandUntil.get(groupKey) || 0;
+  if (performance.now() < until) return true;
+  if (until) suppressGroupExpandUntil.delete(groupKey);
+  return false;
+}
+
+/** Expand every parent, ZIP, and bundle group in the current library list. */
+function expandAllLibraryGroups(models) {
+  const bundleCounts = new Map();
+  const parentCounts = new Map();
+  const zipCounts = new Map();
+  for (const model of models || []) {
+    if (!model) continue;
+    const bundleKey = getBundleGroupKey(model);
+    if (bundleKey) {
+      const key = `bundle:${bundleKey}`;
+      bundleCounts.set(key, (bundleCounts.get(key) || 0) + 1);
+    }
+    const zipKey = getZipArchiveGroupKey(model);
+    if (zipKey) {
+      const key = `zip:${zipKey}`;
+      zipCounts.set(key, (zipCounts.get(key) || 0) + 1);
+    }
+    const label = getParentModelGroupLabel(model);
+    if (label) {
+      const key = `parent:${getParentModelGroupKey(label)}`;
+      parentCounts.set(key, (parentCounts.get(key) || 0) + 1);
+    }
+  }
+  const addGroups = (set, counts) => {
+    let changed = false;
+    for (const [key, count] of counts) {
+      if (count < 2 || set.has(key)) continue;
+      set.add(key);
+      changed = true;
+    }
+    return changed;
+  };
+  const changedBundle = addGroups(bundleExpandedGroups, bundleCounts);
+  const changedParent = addGroups(parentModelExpandedGroups, parentCounts);
+  const changedZip = addGroups(zipArchiveExpandedGroups, zipCounts);
+  const changed = changedBundle || changedParent || changedZip;
+  if (!changed) return false;
+  const container = document.querySelector('.file-grid');
+  invalidateVirtualGridLayoutCache(container);
+  if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
+  else if (container?.currentModels) renderVirtualGrid(container.currentModels);
+  return true;
+}
 
 function invalidateVirtualGridLayoutCache(container = document.querySelector('.file-grid')) {
   virtualGridGroupLayoutGen += 1;
@@ -24274,7 +24947,6 @@ function updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, th
   if (!leftNav) {
     leftNav = document.createElement('div');
     leftNav.className = 'thumbnail-nav-left';
-    leftNav.style.cssText = 'position:absolute;left:0;top:0;width:50%;height:100%;cursor:pointer;z-index:10;';
     leftNav.title = 'Previous group thumbnail';
     thumbnailWrap.appendChild(leftNav);
   }
@@ -24282,7 +24954,6 @@ function updateParentModelGroupThumbnailCarousel(thumbnailWrap, imageElement, th
   if (!rightNav) {
     rightNav = document.createElement('div');
     rightNav.className = 'thumbnail-nav-right';
-    rightNav.style.cssText = 'position:absolute;right:0;top:0;width:50%;height:100%;cursor:pointer;z-index:10;';
     rightNav.title = 'Next group thumbnail';
     thumbnailWrap.appendChild(rightNav);
   }
@@ -24375,14 +25046,10 @@ async function hydrateParentModelGroupThumbnails(thumbnailWrap, imageElement, ch
       if (typeof fetchPrimaryThumbnailForGrid === 'function') {
         const single = await fetchPrimaryThumbnailForGrid(child.filePath);
         if (single) return single;
-      } else if (window.electron.getThumbnail) {
+      } else       if (window.electron.getThumbnail) {
         const single = await window.electron.getThumbnail(child.filePath);
         const primary = await tryThumb(single);
         if (primary) return primary;
-      }
-      if (window.electron.getModel) {
-        const fullModel = await window.electron.getModel(child.filePath);
-        return tryThumb(fullModel?.thumbnail);
       }
     } catch (error) {
       // Best-effort
@@ -24509,8 +25176,10 @@ function getBundleContainerPath(groupRecord) {
 
 let currentBundleDetailsGroupKey = null;
 let currentBundleDetailsRecord = null;
+let bundleDetailsRequest = 0;
 
 function hideBundleDetailsPanel() {
+  bundleDetailsRequest += 1;
   const panel = document.getElementById('bundle-details');
   if (panel) panel.classList.add('hidden');
   currentBundleDetailsGroupKey = null;
@@ -24518,12 +25187,14 @@ function hideBundleDetailsPanel() {
   const tagsContainer = document.getElementById('bundle-tags');
   if (tagsContainer) tagsContainer.innerHTML = '';
   const container = document.querySelector('.file-grid');
+  invalidateVirtualGridLayoutCache(container);
   if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
 }
 
 async function showBundleDetails(groupRecord) {
   if (!groupRecord?.children?.length) return;
 
+  const request = ++bundleDetailsRequest;
   currentBundleDetailsGroupKey = groupRecord.groupKey;
   currentBundleDetailsRecord = groupRecord;
 
@@ -24552,7 +25223,9 @@ async function showBundleDetails(groupRecord) {
   const statsEl = document.getElementById('bundle-details-stats');
   const listEl = document.getElementById('bundle-contents-list');
 
-  const kindLabel = bundleKind === 'zip' ? 'ZIP archive' : 'Folder bundle';
+  const kindLabel = groupRecord.groupKind === 'parentModel'
+    ? 'Parent model'
+    : (groupRecord.groupKind === 'zip' || bundleKind === 'zip' ? 'ZIP archive' : 'Folder bundle');
   if (titleEl) titleEl.textContent = groupLabel;
   if (subtitleEl) subtitleEl.textContent = `${kindLabel} • ${children.length} file${children.length === 1 ? '' : 's'}`;
 
@@ -24610,6 +25283,7 @@ async function showBundleDetails(groupRecord) {
   }
 
   await loadBundleDetailsTags(groupRecord);
+  if (request !== bundleDetailsRequest) return;
 
   panel.classList.remove('hidden');
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -24877,7 +25551,6 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
       : groupRecord?.groupKind === 'zip'
         ? zipArchiveExpandedGroups
         : parentModelExpandedGroups;
-  const isParentModelGroup = groupRecord?.groupKind === 'parentModel';
   const bundleKind = groupRecord?.groupKind === 'bundle'
     ? (groupRecord.children?.[0]?.bundleKind || 'folder')
     : '';
@@ -24944,23 +25617,9 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   chevron.textContent = groupRecord.expanded ? '▾' : '▸';
 
   const title = document.createElement('span');
-  title.className = 'parent-model-group-title parent-model-filter-link';
+  title.className = 'parent-model-group-title';
   title.textContent = groupLabel;
   title.title = groupLabel;
-  if (isParentModelGroup) {
-    title.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const parentSelect = document.getElementById('parent-select');
-      if (!parentSelect) return;
-      parentSelect.value = groupLabel;
-      if (typeof window.performCombinedSearch === 'function') {
-        await window.performCombinedSearch();
-      }
-    });
-  } else {
-    title.classList.remove('parent-model-filter-link');
-  }
 
   titleRow.appendChild(chevron);
   titleRow.appendChild(title);
@@ -25117,48 +25776,66 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     }
   };
 
-  const isBundleGroupKind = () =>
-    groupRecord.groupKind === 'bundle' || groupRecord.groupKind === 'zip';
+  const groupIsExpanded = () =>
+    item.dataset.expanded === '1'
+    || item.classList.contains('expanded')
+    || item.getAttribute('aria-expanded') === 'true'
+    || expandedSet.has(groupRecord.groupKey);
 
-  const toggleGroup = () => {
-    if (expandedSet.has(groupRecord.groupKey)) {
-      expandedSet.delete(groupRecord.groupKey);
-      if (isBundleGroupKind() && currentBundleDetailsGroupKey === groupRecord.groupKey) {
-        hideBundleDetailsPanel();
-        return;
-      }
-    } else {
-      expandedSet.add(groupRecord.groupKey);
+  const collapseThisGroup = () => {
+    rememberCollapsedGroup(groupRecord.groupKey);
+    item.dataset.expanded = '0';
+    item.classList.remove('expanded');
+    item.setAttribute('aria-expanded', 'false');
+    const chev = item.querySelector('.parent-model-group-chevron');
+    if (chev) chev.textContent = '▸';
+    document.querySelectorAll('.parent-model-group-child').forEach((child) => {
+      if (child.dataset.parentGroupKey === groupRecord.groupKey) child.remove();
+    });
+    if (currentBundleDetailsGroupKey === groupRecord.groupKey) {
+      hideBundleDetailsPanel();
+      return;
     }
     refreshGroupGrid();
   };
 
+  const toggleGroup = () => {
+    if (groupIsExpanded()) {
+      collapseThisGroup();
+      return;
+    }
+    if (groupExpandSuppressed(groupRecord.groupKey)) return;
+    expandedSet.add(groupRecord.groupKey);
+    refreshGroupGrid();
+  };
+
   const expandGroupAndShowDetails = () => {
+    if (groupExpandSuppressed(groupRecord.groupKey)) return;
     if (!expandedSet.has(groupRecord.groupKey)) {
       expandedSet.add(groupRecord.groupKey);
       refreshGroupGrid();
     }
-    if (isBundleGroupKind()) {
-      showBundleDetails(groupRecord);
-    }
+    showBundleDetails(groupRecord);
   };
 
-  const toggleGroupFromCard = () => {
-    if (expandedSet.has(groupRecord.groupKey)) {
-      toggleGroup();
+  const handleGroupCardActivate = () => {
+    if (groupIsExpanded()) {
+      collapseThisGroup();
       return;
     }
+    if (groupExpandSuppressed(groupRecord.groupKey)) return;
     expandGroupAndShowDetails();
   };
 
   chevron.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    toggleGroup();
+    handleGroupCardActivate();
   });
 
   item.addEventListener('click', (event) => {
     if (wasTileTapSuppressed(item, event)) return;
+    if (event.target.closest('.file-item:not(.parent-model-group)')) return;
     if (event.target.closest('.parent-model-group-chevron')) return;
     if (event.target.closest('.model-engagement-bar')) return;
     if (event.target.closest('.tag-filter-link')) return;
@@ -25166,16 +25843,13 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (event.target.closest('.thumbnail-nav-left, .thumbnail-nav-right, .thumbnail-menu-button')) return;
     event.preventDefault();
     event.stopPropagation();
-    if (isMobileUiActive() && view === 'preview') {
-      expandGroupAndShowDetails();
-      return;
-    }
-    toggleGroupFromCard();
+    // Collapsed group: open parent details and expand. Expanded group: collapse.
+    handleGroupCardActivate();
   });
   item.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      toggleGroupFromCard();
+      handleGroupCardActivate();
     }
   });
   item.addEventListener('contextmenu', async (event) => {
@@ -25272,9 +25946,7 @@ function createVirtualGridShell(model, view, rowHeight) {
   }
 
   item.addEventListener('click', (e) => {
-    if (wasTileTapSuppressed(item, e)) return;
-    if (e.ctrlKey || e.metaKey) handleFileClick(e, filePath);
-    else toggleModelSelection(item, filePath);
+    handleGridModelClick(e, item, filePath);
   });
   addContextMenuHandler(item, filePath);
   return item;
@@ -25512,7 +26184,7 @@ function renderVirtualGrid(models) {
         : getPreviewTileDims(),
     'detailed': mobileDetailed && mobileLibraryColumns()
       ? { width: mobileDetailed.width, height: mobileDetailed.height, itemWidth: mobileDetailed.width }
-      : { width: 300, height: 490, itemWidth: 300 }
+      : { width: 300, height: 520, itemWidth: 300 }
   };
 
   const dimensions = viewDimensions[currentGridView] || viewDimensions['detailed'];
@@ -25879,6 +26551,7 @@ function renderVirtualGrid(models) {
             item.style.width = `calc(100% - ${paddingHorizontal * 2}px)`;
           }
           item.style.height = row.height + 'px';
+          item.style.zIndex = '1';
         };
 
         const applyParentGroupHighlightClasses = (item, record, recordIndex) => {
@@ -25892,6 +26565,7 @@ function renderVirtualGrid(models) {
           delete item.dataset.parentGroupKey;
 
           const parentGroupKey = record.parentGroupKey;
+          item.style.zIndex = parentGroupKey ? '3' : '2';
           if (!parentGroupKey) return;
 
           item.classList.add('parent-model-group-child');
@@ -25924,10 +26598,13 @@ function renderVirtualGrid(models) {
         for (const row of rowQueue) {
           if (row.type === 'group') {
             const existingGroup = findExistingLayoutItem(row.key);
+            const groupViewMatches = !!existingGroup && (gridViewForThisRender === 'list'
+              ? existingGroup.classList.contains('parent-model-group-list')
+              : existingGroup.classList.contains(`file-item-${gridViewForThisRender}`));
             if (existingGroup &&
                 existingGroup.dataset.childCount === String(row.record.children.length) &&
                 existingGroup.dataset.expanded === (row.record.expanded ? '1' : '0') &&
-                existingGroup.classList.contains(`file-item-${gridViewForThisRender}`)) {
+                groupViewMatches) {
               positionGroupItem(existingGroup, row);
               continue;
             }
@@ -25955,11 +26632,15 @@ function renderVirtualGrid(models) {
             const existingItem = findExistingLayoutItem(record.key);
 
             if (record.type === 'group') {
+              const groupViewMatches = !!existingItem && (gridViewForThisRender === 'list'
+                ? existingItem.classList.contains('parent-model-group-list')
+                : existingItem.classList.contains(`file-item-${gridViewForThisRender}`));
               if (existingItem &&
                   existingItem.dataset.childCount === String(record.children.length) &&
                   existingItem.dataset.expanded === (record.expanded ? '1' : '0') &&
-                  existingItem.classList.contains(`file-item-${gridViewForThisRender}`)) {
+                  groupViewMatches) {
                 positionModelItem(existingItem, row, col);
+                existingItem.style.zIndex = '1';
                 continue;
               }
               if (existingItem) {
@@ -25973,6 +26654,7 @@ function renderVirtualGrid(models) {
               registerLayoutItem(record.key, item);
               item.style.position = 'absolute';
               positionModelItem(item, row, col);
+              item.style.zIndex = '1';
               item.style.pointerEvents = 'auto';
               virtualContent.appendChild(item);
               continue;
@@ -26066,8 +26748,9 @@ function renderVirtualGrid(models) {
           for (let i = 0; i < stale.length; i++) {
             const node = stale[i];
             const layoutKey = node.dataset.layoutKey;
-            if (!layoutKey || !visibleKeys.has(layoutKey)) {
-              if (layoutKey && layoutItemsByKey.get(layoutKey) === node) layoutItemsByKey.delete(layoutKey);
+            const registered = layoutKey ? layoutItemsByKey.get(layoutKey) : null;
+            if (!layoutKey || !visibleKeys.has(layoutKey) || registered !== node) {
+              if (layoutKey && registered === node) layoutItemsByKey.delete(layoutKey);
               node.remove();
             }
           }

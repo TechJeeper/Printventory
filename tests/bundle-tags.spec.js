@@ -107,6 +107,7 @@ test.describe('Archive tagging', () => {
     await expect(group).toBeVisible({ timeout: 15000 });
     if ((await group.getAttribute('aria-expanded')) !== 'true') {
       await group.click();
+      await expect(window.locator('#bundle-details')).not.toHaveClass(/hidden/);
     }
     await expect(group).toHaveAttribute('aria-expanded', 'true');
     await expect(window.locator('#bundle-details')).not.toHaveClass(/hidden/);

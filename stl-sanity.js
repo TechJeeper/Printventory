@@ -60,6 +60,37 @@ function classifyStlBuffer(buffer) {
 }
 
 /**
+ * Force path: a lying triangle count must not allocate a huge mesh.
+ * When the byte length is an exact binary STL, rewrite the count to match the file.
+ * Otherwise return the original buffer so the loader can try ASCII.
+ */
+function stlBufferIgnoringHeaderMismatch(buffer) {
+  const bytes = stlBytes(buffer);
+  if (!bytes) return buffer;
+  try {
+    if (classifyStlBuffer(bytes) === 'binary') {
+      const triangleCount = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(80, true);
+      const expected = 84 + triangleCount * 50;
+      if (bytes.byteLength === expected) return buffer;
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + expected);
+    }
+    return buffer;
+  } catch (err) {
+    if (!/does not match the file size/i.test(err && err.message)) throw err;
+    const body = bytes.byteLength - 84;
+    if (bytes.byteLength >= 84 && body > 0 && body % 50 === 0) {
+      const faces = body / 50;
+      if (faces > 0 && faces <= MAX_STL_TRIANGLES) {
+        const copy = new Uint8Array(bytes);
+        new DataView(copy.buffer).setUint32(80, faces, true);
+        return copy.buffer;
+      }
+    }
+    return buffer;
+  }
+}
+
+/**
  * True when every sampled vertex normal is missing or zero.
  * Lit materials then shade the whole mesh as one flat color (a silhouette).
  */
@@ -125,6 +156,7 @@ if (typeof module !== 'undefined' && module.exports) {
     MAX_STL_TRIANGLES,
     looksLikeAsciiStl,
     classifyStlBuffer,
+    stlBufferIgnoringHeaderMismatch,
     normalsAreMissing,
     repairZeroFaceNormals
   };

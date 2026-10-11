@@ -651,6 +651,7 @@
     'generateTags': 'generate-tags',
     'puterAIChat': 'puter-ai-chat',
     'getModelsWithoutThumbnails': 'get-models-without-thumbnails',
+    'getModelsNeedingForcedThumbnails': 'get-models-needing-forced-thumbnails',
     'getModelsWithDefaultThumbnails': 'get-models-with-default-thumbnails',
     'fetchMakerWorldPage': 'fetch-makerworld-page',
     'getSlicers': 'get-slicers',

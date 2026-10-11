@@ -7,7 +7,11 @@ const {
   THUMB_SKIP_MESH,
   THUMB_SKIP_TIMEOUT,
   isThumbSkipToken,
+  thumbSkipErrorTag,
+  thumbnailErrorTagSentence,
   isPermanentThumbnailSkipError,
+  describeThumbnailFailure,
+  groupForceFailures,
   thumbnailJobFinishedMessage
 } = require('./thumbnail-skip');
 
@@ -75,4 +79,59 @@ test('a partial save still names the remainder', () => {
     total: 365
   }, 'done');
   assert.match(message, /Saved 10 of 365/);
+  assert.match(message, /355 are still missing/);
+});
+
+test('skipped files are not described as still missing', () => {
+  const message = thumbnailJobFinishedMessage({
+    saved: 1,
+    skipped: 364,
+    total: 366
+  }, 'done');
+  assert.match(message, /Saved 1 of 366/);
+  assert.match(message, /Marked 364 as skipped/);
+  assert.match(message, /1 is still missing/);
+  assert.doesNotMatch(message, /ones that are still missing/);
+});
+
+test('skip reasons map to err tags', () => {
+  assert.strictEqual(thumbSkipErrorTag(THUMB_SKIP_SIZE), 'err:too_large');
+  assert.strictEqual(thumbSkipErrorTag(THUMB_SKIP_TIMEOUT), 'err:timeout');
+  assert.strictEqual(thumbSkipErrorTag(THUMB_SKIP_MESH), 'err:no_preview');
+  assert.strictEqual(thumbSkipErrorTag('3d.png'), '');
+});
+
+test('the finished message names the err tags that were applied', () => {
+  const message = thumbnailJobFinishedMessage({
+    saved: 1,
+    skipped: 2,
+    total: 3,
+    errorTags: ['err:timeout', 'err:too_large']
+  }, 'done');
+  assert.match(message, /Skipped files were tagged err:timeout and err:too_large/);
+  assert.strictEqual(
+    thumbnailErrorTagSentence(['err:no_preview', 'err:timeout', 'err:too_large']),
+    'Skipped files were tagged err:no_preview, err:timeout, and err:too_large.'
+  );
+});
+
+test('force failures keep the parse reason and group by it', () => {
+  assert.strictEqual(
+    describeThumbnailFailure(new Error('STL header does not match the file size')),
+    'STL header does not match the file size'
+  );
+  assert.strictEqual(
+    describeThumbnailFailure(null, 'timeout', 'Loading model timed out after 30000ms'),
+    'Loading model timed out after 30000ms'
+  );
+  assert.strictEqual(describeThumbnailFailure(new Error('Failed to fetch')), 'Could not read the file');
+  const groups = groupForceFailures([
+    { filePath: '/a.stl', reason: 'STL header does not match the file size' },
+    { filePath: '/b.step', reason: 'Timed out' },
+    { filePath: '/c.stl', reason: 'STL header does not match the file size' }
+  ]);
+  assert.strictEqual(groups.length, 2);
+  assert.strictEqual(groups[0].reason, 'STL header does not match the file size');
+  assert.deepStrictEqual(groups[0].filePaths, ['/a.stl', '/c.stl']);
+  assert.deepStrictEqual(groups[1].filePaths, ['/b.step']);
 });

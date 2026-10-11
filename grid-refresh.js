@@ -105,7 +105,7 @@
     const tile = previewTilePx(gridWidth, previewColumns, previewGap);
     const detailedColumns = detailedColumnCount(contentWidth, spec.itemWidth || 300);
     const columns = view === 'list' ? 1 : (view === 'preview' ? previewColumns : detailedColumns);
-    const rowHeight = view === 'preview' ? tile : (view === 'list' ? 56 : (Number(spec.itemHeight) || 490));
+    const rowHeight = view === 'preview' ? tile : (view === 'list' ? 56 : (Number(spec.itemHeight) || 520));
     const verticalGap = view === 'preview' ? previewGap : (view === 'list' ? 6 : 20);
     const next = {
       width: gridWidth,
@@ -188,6 +188,34 @@
     return Math.max(0, Math.min(centered, maxScroll));
   }
 
+  // Group cards paint their tag row once. Return keys whose children were just tagged
+  // so those cards can be rebuilt. Model tiles are matched separately by file path.
+  function groupKeysForTagRefresh(filePaths, displayRecords, normalizePath) {
+    if (typeof normalizePath !== 'function') return [];
+    const updated = new Set();
+    (filePaths || []).forEach(function (filePath) {
+      const key = normalizePath(filePath);
+      if (key) updated.add(key);
+    });
+    if (!updated.size) return [];
+    const groupKeys = [];
+    const seen = new Set();
+    (displayRecords || []).forEach(function (record) {
+      if (!record || record.type !== 'group' || !record.groupKey || seen.has(record.groupKey)) return;
+      const children = record.children || [];
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        const key = normalizePath(child && child.filePath);
+        if (key && updated.has(key)) {
+          seen.add(record.groupKey);
+          groupKeys.push(record.groupKey);
+          break;
+        }
+      }
+    });
+    return groupKeys;
+  }
+
   // One trailing refresh per delay window. Extra calls while a timer is pending are ignored.
   function createCoalescedRefresh(delayMs, refreshFn) {
     let timer = null;
@@ -217,6 +245,7 @@
     mountedCardsStayPut: mountedCardsStayPut,
     scrollTopForSelectedLayout: scrollTopForSelectedLayout,
     patchLoadedModel: patchLoadedModel,
+    groupKeysForTagRefresh: groupKeysForTagRefresh,
     createCoalescedRefresh: createCoalescedRefresh
   };
 });

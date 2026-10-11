@@ -2,7 +2,7 @@
 'use strict';
 
 const assert = require('assert');
-const { classifyStlBuffer, normalsAreMissing, repairZeroFaceNormals } = require('./stl-sanity');
+const { classifyStlBuffer, stlBufferIgnoringHeaderMismatch, normalsAreMissing, repairZeroFaceNormals } = require('./stl-sanity');
 
 function test(name, fn) {
   try {
@@ -22,6 +22,15 @@ test('a PNG renamed to stl is rejected before a huge allocation', () => {
   buf[3] = 0x47;
   buf.writeUInt32LE(909454897, 80);
   assert.throws(() => classifyStlBuffer(buf), /does not match the file size/);
+});
+
+test('force rewrite uses the bytes on disk instead of a lying triangle count', () => {
+  const buf = Buffer.alloc(84 + 50);
+  buf.writeUInt32LE(900000, 80);
+  assert.throws(() => classifyStlBuffer(buf), /does not match the file size/);
+  const fixed = Buffer.from(stlBufferIgnoringHeaderMismatch(buf));
+  assert.strictEqual(fixed.readUInt32LE(80), 1);
+  assert.strictEqual(classifyStlBuffer(fixed), 'binary');
 });
 
 test('a one-triangle binary stl is accepted', () => {

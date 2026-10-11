@@ -71,17 +71,26 @@ async function handleParseMessage(e) {
       const loader = new THREE.STLLoader();
 
       const buffer = tightArrayBuffer(modelBuffer) || await fetchArrayBuffer(url);
-      const kind = classifyStlBuffer(buffer);
-      if (kind === 'binary') {
-        const triangleCount = new DataView(buffer).getUint32(80, true);
-        const expectedBinarySize = 84 + triangleCount * 50;
-        const exact = buffer.byteLength === expectedBinarySize ? buffer : buffer.slice(0, expectedBinarySize);
-        const object = loader.parse(exact);
-        processObject(object, id);
-        return;
+      const parseStl = (stlBuffer) => {
+        const kind = classifyStlBuffer(stlBuffer);
+        if (kind === 'binary') {
+          const triangleCount = new DataView(stlBuffer).getUint32(80, true);
+          const expectedBinarySize = 84 + triangleCount * 50;
+          const exact = stlBuffer.byteLength === expectedBinarySize ? stlBuffer : stlBuffer.slice(0, expectedBinarySize);
+          return loader.parse(exact);
+        }
+        return loader.parse(stlBuffer);
+      };
+      let object;
+      if (e.data.ignoreStlHeader) {
+        try {
+          object = parseStl(stlBufferIgnoringHeaderMismatch(buffer));
+        } catch (_) {
+          object = loader.parse(buffer);
+        }
+      } else {
+        object = parseStl(buffer);
       }
-
-      const object = loader.parse(buffer);
       processObject(object, id);
     } else if (fileExtension === '3mf') {
       THREE.ThreeMFLoader.fflate = fflate;
