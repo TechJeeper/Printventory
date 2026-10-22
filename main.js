@@ -421,11 +421,12 @@ function isUncPath(path) {
 
 // Check if running in Docker container
 function isDockerContainer() {
-  // Check for Docker environment indicators
+  // Check for Docker environment indicators (Podman creates /run/.containerenv instead of /.dockerenv)
   const hasDockerenv = fs.existsSync('/.dockerenv');
+  const hasContainerenv = fs.existsSync('/run/.containerenv');
   const hasCgroup = fs.existsSync('/proc/self/cgroup');
   const cgroupContainsDocker = hasCgroup && fs.readFileSync('/proc/self/cgroup', 'utf8').includes('docker');
-  const result = hasDockerenv || cgroupContainsDocker;
+  const result = hasDockerenv || hasContainerenv || cgroupContainsDocker;
   return result;
 }
 
@@ -1148,7 +1149,9 @@ ${bridgeCode}
             console.warn('[TLS] Port 80 listener:', err.message);
           });
         }
-        console.log(`Server mode requires UNC paths for all file operations`);
+        if (isServerMode && !isDockerContainer()) {
+          console.log(`Server mode requires UNC paths for all file operations`);
+        }
       }
       resolve();
     };
