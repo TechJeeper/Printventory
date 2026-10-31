@@ -1,0 +1,63 @@
+# Build the Windows NSIS installer on GitLab.com and sign it via SignPath Foundation.
+# GitLab.com is the trusted build system linked to the SignPath "printventory" project.
+#
+# Required GitLab CI/CD variables (Settings > CI/CD > Variables, masked):
+#   SIGNPATH_API_TOKEN            - SignPath CI user API token (submitter on the policy)
+#   SIGNPATH_GITLAB_ACCESS_TOKEN  - GitLab project access token with read_api scope
+#
+# Runs on tags and on manual "Run pipeline" from the GitLab UI.
+# Switch signing_policy_slug to release-signing once the Foundation issues the
+# release certificate (its CSR is still pending in SignPath).
+
+include:
+  - component: gitlab.com/signpath/components/submit-signing-request@1.0.0
+    inputs:
+      organization_id: d9682375-60dd-428d-925a-0b0ecd8ff852
+      project_slug: printventory
+      signing_policy_slug: test-signing
+      artifact_configuration_slug: initial
+      gitlab_artifact_job_name: build-windows
+      gitlab_artifact_path: output/Printventory-windows.zip
+      output_artifact_path: output/Printventory-windows-signed.zip
+      wait_for_completion_timeout_in_seconds: 1800
+
+stages:
+  - build
+  - sign
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+variables:
+  NODE_VERSION: '20.20.2'
+
+build-windows:
+  stage: build
+  tags:
+    - saas-windows-medium-amd64
+  timeout: 90m
+  variables:
+    CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+  script:
+    - $ErrorActionPreference = 'Stop'
+    - $nodeZip = "node-v$env:NODE_VERSION-win-x64.zip"
+    - Invoke-WebRequest -UseBasicParsing -Uri "https://nodejs.org/dist/v$env:NODE_VERSION/$nodeZip" -OutFile $nodeZip
+    - Expand-Archive $nodeZip -DestinationPath "$env:CI_PROJECT_DIR\.node"
+    - $env:Path = "$env:CI_PROJECT_DIR\.node\node-v$env:NODE_VERSION-win-x64;$env:Path"
+    - node --version
+    # Electron 43 has no better-sqlite3 prebuilds; electron-builder rebuilds
+    # natives during packaging, so skip lifecycle scripts here.
+    - npm ci --ignore-scripts
+    - npm run build:win
+    - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - $exe = Get-ChildItem -Path dist -Filter 'Printventory-Setup-*.exe' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    - if (-not $exe) { throw 'No Printventory-Setup-*.exe found in dist/' }
+    # Artifact configuration "initial" expects a zip with Printventory-Setup-*.exe at its root.
+    - New-Item -ItemType Directory -Force output | Out-Null
+    - Compress-Archive -Path $exe.FullName -DestinationPath output\Printventory-windows.zip
+  artifacts:
+    paths:
+      - output/Printventory-windows.zip
+    expire_in: 7 days

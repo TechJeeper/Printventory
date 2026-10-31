@@ -41,7 +41,9 @@ env:
 jobs:
   sign-windows:
     if: ${{ github.event_name == 'release' || inputs.skip_windows != true }}
-    runs-on: windows-latest
+    # windows-latest ships VS 2026 (v18), which node-gyp 11 cannot detect, so the
+    # better-sqlite3 rebuild for Electron fails. windows-2022 has VS 2022.
+    runs-on: windows-2022
     env:
       SIGNING_POLICY_SLUG: ${{ inputs.signing_policy || vars.SIGNPATH_SIGNING_POLICY_SLUG || 'test-signing' }}
     steps:
@@ -56,8 +58,8 @@ jobs:
 
       - name: Install dependencies
         # Electron 43 has no better-sqlite3 prebuilds yet; skip lifecycle rebuild
-        # during npm ci (VS lookup fails on GH windows-latest). electron-builder
-        # rebuilds natives during the Windows packaging step.
+        # during npm ci; electron-builder rebuilds natives during the Windows
+        # packaging step.
         run: npm ci --ignore-scripts
 
       - name: Build unsigned Windows NSIS installer
