@@ -6,6 +6,33 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [3.0.3] - 2026-10-30
 
+### Collections & saved searches
+- Manual collections/projects: name groups, add models from the grid or multi-edit, filter by collection, and manage covers.
+- Saved searches (smart collections): store the current filter/query-builder state, reopen from the sidebar, and use richer numeric/date operators.
+
+### Discovery & library hygiene
+- Optional semantic / find-similar search via AI descriptions and locally stored embeddings.
+- Geometry near-duplicate fingerprints for De-Dup similarity review (beyond exact hash matches).
+- Mark intentional duplicates as “not a duplicate,” and treat same-hash path changes as moves so metadata follows the file.
+- Safer parent-model assignment (cycle/child warnings, flatten group).
+- Soft-delete / Recently removed with restore and timed purge; undo stack for destructive library edits.
+- Path display modes and per-root path aliases (helpful for Docker/NAS mapped drives).
+
+### Print workflow
+- Print statistics dashboard: prints over time, outcomes, printers, filament usage, and related rollups.
+- Print queue board: Want → Queued → Printing → Printed/Failed with drag between columns.
+- G-code / sliced-file index next to models (`.gcode`, `.bgcode`, plate `.3mf`) with header metadata and send-to-printer for G-code.
+- Filament cost / remaining-weight tracking and cost-aware print logging.
+- Maintenance reminders that surface in the UI (and can notify in Docker/server mode).
+
+### UI / UX
+- Non-blocking toasts and a unified Jobs panel for scans, thumbnails, hashes, backups, and related background work.
+- Light theme, system theme follow, and custom accent color.
+- Ctrl/Cmd+K command palette, grid keyboard navigation, and rebindable shortcuts.
+- First-run empty state with a clear Scan action (and related empty-library guidance).
+- Server/Docker web upload / drop-in inbox that lands under STL Home and triggers an incremental scan.
+
+### Fixes
 - Multi-edit + zip/parent/bundle groups: clicking a group selects or deselects all children and keeps the multi-edit panel open (opening bundle details no longer hides multi-edit while leaving multi-select stuck so you cannot edit or go back). Chevron expands/collapses only during multi-edit.
 - Enter Multi-Edit Mode now keeps the current model selected (path was read after details were hidden, so parent-model and other bulk edits silently did nothing). Removed duplicate Multi-Edit toggle handlers that fought each other.
 - Multi-edit no longer leaves the sidebar stuck on filters: entering multi-edit collapses the filter stack and scrolls the edit panel into view, and exiting/deselecting no longer leaves an empty dead details panel (Docker/browser and mobile sheets).
