@@ -46,6 +46,44 @@ async function attemptUnlink(fsPromises, target) {
 }
 
 /**
+ * Prefer OS recycle bin (Electron shell.trashItem) when available.
+ * Falls back to unlinkLibraryFile when trash is unavailable.
+ *
+ * @param {string} filePath
+ * @param {{shellTrash?: Function, trashFn?: Function, fsPromises?: object}} [options]
+ */
+async function trashLibraryFile(filePath, options = {}) {
+  if (!filePath || typeof filePath !== 'string') {
+    return { ok: false, code: 'EINVAL', message: 'Missing file path' };
+  }
+  if (filePath.startsWith('url::')) {
+    return { ok: true, missing: false, skippedDisk: true, trashed: false };
+  }
+  if (filePath.includes('::')) {
+    return { ok: false, code: 'ZIP', message: shortDeleteError('ZIP') };
+  }
+
+  const trashFn = options.trashFn || options.shellTrash || null;
+  if (typeof trashFn === 'function') {
+    try {
+      let target = filePath;
+      try { target = path.normalize(filePath); } catch (_) { /* keep */ }
+      await trashFn(target);
+      return { ok: true, missing: false, trashed: true };
+    } catch (err) {
+      if (err && err.code === 'ENOENT') {
+        return { ok: true, missing: true, trashed: false };
+      }
+      // Fall through to unlink when trash fails for non-missing reasons
+    }
+  }
+
+  const fsPromises = options.fsPromises || fs.promises;
+  const result = await unlinkLibraryFile(filePath, fsPromises);
+  return { ...result, trashed: false };
+}
+
+/**
  * Remove one library file from disk.
  * ENOENT is success with missing:true so the caller can drop the library row.
  * Windows read-only / in-use files are retried once after clearing the read-only bit.
@@ -123,6 +161,7 @@ function buildDeleteSummary({ deleted = 0, alreadyMissing = 0, failed = [], tota
 
 module.exports = {
   unlinkLibraryFile,
+  trashLibraryFile,
   buildDeleteSummary,
   shortDeleteError
 };

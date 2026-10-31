@@ -381,6 +381,60 @@ const TOOL_DEFINITIONS = [
     }
   },
   {
+    name: 'list_collections',
+    description: 'List curated model collections with model counts.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'create_collection',
+    description: 'Create a named collection. Name must be unique.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Collection name' },
+        coverPath: { type: 'string', description: 'Optional cover image path' }
+      },
+      required: ['name']
+    }
+  },
+  {
+    name: 'add_models_to_collection',
+    description: 'Add models to a collection by collection id and model ids.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        collectionId: { type: 'integer' },
+        modelIds: { type: 'array', items: { type: 'integer' } }
+      },
+      required: ['collectionId', 'modelIds']
+    }
+  },
+  {
+    name: 'remove_models_from_collection',
+    description: 'Remove models from a collection by collection id and model ids.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        collectionId: { type: 'integer' },
+        modelIds: { type: 'array', items: { type: 'integer' } }
+      },
+      required: ['collectionId', 'modelIds']
+    }
+  },
+  {
+    name: 'find_similar',
+    description:
+      'Find models with similar AI embeddings to a given model. Requires embeddings to have been stored. Foundation for semantic search.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'integer' },
+        filePath: { type: 'string' },
+        limit: { type: 'integer', description: 'Max results (default 10, max 100)' }
+      }
+    }
+  },
+  {
     name: 'find_duplicates',
     description:
       'Find duplicate models grouped by file hash (DeDup). Returns hash groups with file paths, names, and sizes. Read-only.',
@@ -800,6 +854,20 @@ async function callTool(name, args, ctx) {
       return ctx.setDefaultThumbnail({ id: a.id, filePath: a.filePath, index: a.index });
     case 'delete_thumbnail':
       return ctx.deleteThumbnail({ id: a.id, filePath: a.filePath, index: a.index });
+    case 'list_collections':
+      return ctx.listCollections();
+    case 'create_collection':
+      return ctx.createCollection({ name: a.name, coverPath: a.coverPath });
+    case 'add_models_to_collection':
+      return ctx.addModelsToCollection({ collectionId: a.collectionId, modelIds: a.modelIds });
+    case 'remove_models_from_collection':
+      return ctx.removeModelsFromCollection({ collectionId: a.collectionId, modelIds: a.modelIds });
+    case 'find_similar':
+      return ctx.findSimilar({
+        id: a.id,
+        filePath: a.filePath,
+        limit: clampLimit(a.limit, 10, 100)
+      });
     case 'find_duplicates':
       return ctx.findDuplicates({
         includeZip: !!a.includeZip,

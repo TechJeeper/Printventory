@@ -266,17 +266,34 @@
       const diameterRaw = document.getElementById('new-filament-diameter')?.value;
       const diameter = diameterRaw === '' || diameterRaw == null ? 1.75 : Number(diameterRaw);
       try {
+        const priceRaw = document.getElementById('new-filament-price')?.value;
+        const spoolRaw = document.getElementById('new-filament-spool-weight')?.value;
+        const remainingRaw = document.getElementById('new-filament-remaining')?.value;
+        const lowRaw = document.getElementById('new-filament-low-stock')?.value;
+        const numOrNull = (v) => {
+          if (v === '' || v == null) return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
         await window.electron.saveFilament({
           name,
           vendor,
           material,
           color_hex: color,
           diameter: Number.isFinite(diameter) ? diameter : 1.75,
+          price_per_kg: numOrNull(priceRaw),
+          spool_weight_g: numOrNull(spoolRaw),
+          remaining_weight_g: numOrNull(remainingRaw),
+          low_stock_g: numOrNull(lowRaw),
           source: 'manual'
         });
         document.getElementById('new-filament-name').value = '';
         document.getElementById('new-filament-vendor').value = '';
         document.getElementById('new-filament-material').value = '';
+        ['new-filament-price', 'new-filament-spool-weight', 'new-filament-remaining', 'new-filament-low-stock'].forEach((id) => {
+          const el = document.getElementById(id);
+          if (el) el.value = '';
+        });
         setStatus(`Added ${name}`, false);
         setFilamentAddOpen(false);
         await refreshFilamentManagerList(document.getElementById('filament-manager-search')?.value || '');

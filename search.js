@@ -75,7 +75,39 @@ function getCurrentLibraryFilters() {
     filters.search = resolvedSearchTerm;
   }
   filters.searchIncludeNotes = searchIncludeNotesChecked();
+  const collectionFilter = document.getElementById('collection-filter')?.value || '';
+  if (collectionFilter) filters.collectionId = Number(collectionFilter);
+  else if (window.activeCollectionId) filters.collectionId = Number(window.activeCollectionId);
+
+  const numeric = {
+    sizeGt: numFilterVal('filter-size-gt'),
+    dateAddedWithinDays: numFilterVal('filter-date-within-days'),
+    printCountGt: numFilterVal('filter-print-count-gt'),
+    ratingGte: numFilterVal('filter-rating-gte'),
+    lastPrintedBefore: document.getElementById('filter-last-printed-before')?.value || null
+  };
+  if (window._savedSearchNumeric && typeof window._savedSearchNumeric === 'object') {
+    Object.assign(numeric, window._savedSearchNumeric);
+  }
+  Object.keys(numeric).forEach((k) => {
+    if (numeric[k] == null || numeric[k] === '') delete numeric[k];
+  });
+  if (Object.keys(numeric).length) {
+    filters.sizeGt = numeric.sizeGt;
+    filters.dateAddedWithinDays = numeric.dateAddedWithinDays;
+    filters.printCountGt = numeric.printCountGt;
+    filters.ratingGte = numeric.ratingGte;
+    filters.lastPrintedBefore = numeric.lastPrintedBefore;
+    filters.numeric = numeric;
+  }
   return filters;
+}
+
+function numFilterVal(id) {
+  const el = document.getElementById(id);
+  if (!el || el.value === '' || el.value == null) return null;
+  const n = Number(el.value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function libraryFiltersAreActive(filters) {
@@ -97,6 +129,8 @@ function libraryFiltersAreActive(filters) {
   if (Array.isArray(f.searchTokens) && f.searchTokens.length) return true;
   if (Array.isArray(f.searchClauses) && f.searchClauses.length) return true;
   if (f.search && String(f.search).trim()) return true;
+  if (f.collectionId) return true;
+  if (f.sizeGt != null || f.dateAddedWithinDays != null || f.printCountGt != null || f.ratingGte != null || f.lastPrintedBefore) return true;
   return false;
 }
 
@@ -132,6 +166,12 @@ function describeLibraryFilters(filters) {
     const bits = String(f.directory).split(/[/\\]/).filter(Boolean);
     parts.push(`Folder: ${bits[bits.length - 1] || f.directory}`);
   }
+  if (f.collectionId) parts.push(`Collection #${f.collectionId}`);
+  if (f.sizeGt != null) parts.push(`Size > ${f.sizeGt}`);
+  if (f.dateAddedWithinDays != null) parts.push(`Added ≤ ${f.dateAddedWithinDays}d`);
+  if (f.printCountGt != null) parts.push(`Prints > ${f.printCountGt}`);
+  if (f.ratingGte != null) parts.push(`Rating ≥ ${f.ratingGte}`);
+  if (f.lastPrintedBefore) parts.push(`Last printed before ${f.lastPrintedBefore}`);
   if (f.dateAdded) parts.push("Date added");
   const notesOffLabel = searchSummaryOmitsNotes(f) ? " · notes off" : "";
   if (Array.isArray(f.searchTokens) && f.searchTokens.length) parts.push(`Query${notesOffLabel}`);
@@ -314,9 +354,18 @@ async function performCombinedSearch(options) {
       if (emptyMsg) emptyMsg.style.display = "none";
       window._progressiveLibraryLoadActive = false;
       updateFilterIndicator(0);
+      if (typeof window.showLibraryEmptyState === "function") {
+        const filtersOn = typeof filtersActive === "boolean"
+          ? filtersActive
+          : !!(window.multiFilterChips && Object.values(window.multiFilterChips).some((a) => a && a.length));
+        window.showLibraryEmptyState(!filtersOn);
+      }
       await renderPage(filteredModels, true);
       if (filtersActive) syncSelectionAfterFilteredLoad(filteredModels);
       return;
+    }
+    if (typeof window.showLibraryEmptyState === "function") {
+      window.showLibraryEmptyState(false);
     }
 
     updateFilterIndicator(filteredModels.length);

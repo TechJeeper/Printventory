@@ -1,0 +1,55 @@
+.jobs-panel-button {
+  margin-left: 8px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  background: var(--surface-raised, #2a2a3c);
+  color: var(--text, #fff);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.jobs-panel-popover {
+  position: fixed;
+  top: 48px;
+  right: 16px;
+  width: min(320px, calc(100vw - 24px));
+  max-height: 50vh;
+  overflow: auto;
+  z-index: 100010;
+  background: var(--surface, #1e1e2e);
+  border: 1px solid var(--border-strong, rgba(255,255,255,0.16));
+  border-radius: var(--radius-sm, 8px);
+  box-shadow: var(--shadow-md);
+  padding: 10px;
+}
+
+.jobs-panel-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.jobs-panel-label { grid-column: 1 / -1; }
+.jobs-panel-bar {
+  grid-column: 1 / 2;
+  height: 6px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  align-self: center;
+}
+.jobs-panel-bar-fill {
+  height: 100%;
+  background: var(--primary-accent, #00d4ff);
+}
+.jobs-panel-cancel {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}

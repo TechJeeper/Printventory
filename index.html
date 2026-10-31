@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -21,6 +21,14 @@
   <link rel="stylesheet" href="thumbnail-progress.css">
   <link rel="stylesheet" href="mobile-ui.css">
   <link rel="stylesheet" href="organize-library.css">
+  <link rel="stylesheet" href="toast.css">
+  <link rel="stylesheet" href="jobs-panel.css">
+  <link rel="stylesheet" href="command-palette.css">
+  <link rel="stylesheet" href="empty-state.css">
+  <link rel="stylesheet" href="inbox-upload.css">
+  <link rel="stylesheet" href="collections-ui.css">
+  <link rel="stylesheet" href="print-queue-ui.css">
+  <link rel="stylesheet" href="feature-panels-ui.css">
   <script src="vendor/three.min.js"></script>
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
@@ -129,14 +137,21 @@
   </section>
   <div class="sidebar">
     <div class="sidebar-chrome">
-    <img src="logo.png" alt="Printventory Logo" id="logo">
+    <div id="logo-wrap">
+      <img src="logo.png" alt="Printventory Logo" id="logo">
+      <span id="maintenance-badge" hidden title="Maintenance reminders due">0</span>
+    </div>
     <div class="model-stats">
       <div id="view-count" class="model-count">0 models in view</div>
       <div id="total-count" class="model-count">0 models total</div>
     </div>
+    <div id="maintenance-banner" hidden></div>
     <div class="icon-buttons-container">
       <button id="dup-button" class="icon-button" title="De-Dup">
         <img src="dup.png" alt="De-Dup">
+      </button>
+      <button id="collections-button" class="icon-button" title="Collections">
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/><rect x="3" y="4" width="18" height="16" rx="2"/></svg>
       </button>
       <button id="tag-button" class="icon-button" title="Tag - Tag Manager">
         <img src="tag.png" alt="Tag Manager">
@@ -196,6 +211,13 @@
           <input type="checkbox" id="search-include-notes" checked>
           <span>Include Notes</span>
         </label>
+        <div class="saved-searches-under-search" id="saved-searches-under-search">
+          <div class="saved-searches-under-search-row">
+            <span class="saved-searches-under-search-label">Saved searches</span>
+            <button type="button" id="save-search-button" class="saved-search-link-btn" title="Save current filters">Save current</button>
+          </div>
+          <div id="saved-searches-sidebar-list" class="saved-searches-chip-list"></div>
+        </div>
       </div>
       <div class="form-group">
         <label for="sort-select">Sort By:</label>
@@ -235,12 +257,43 @@
           <button type="button" id="folder-tree-button" class="list-button icon-button folder-tree-button" title="Browse folder tree">☰</button>
         </div>
       </div>
+      <div class="form-group">
+        <label for="collection-filter">Collection:</label>
+        <select id="collection-filter">
+          <option value="">All collections</option>
+        </select>
+      </div>
       </div>
       <button type="button" id="filter-stack-toggle" class="filter-stack-toggle" aria-expanded="false" aria-controls="filter-stack">
         <span class="filter-stack-toggle-label">More filters</span>
         <span class="filter-stack-toggle-chevron" aria-hidden="true">▸</span>
       </button>
       <div id="filter-stack" class="filter-stack">
+      <div class="form-group">
+        <label>Numeric filters</label>
+        <div class="numeric-filters-grid">
+          <div class="form-group">
+            <label for="filter-size-gt">Size &gt; (bytes)</label>
+            <input type="number" id="filter-size-gt" min="0" step="1" placeholder="e.g. 1000000">
+          </div>
+          <div class="form-group">
+            <label for="filter-date-within-days">Added within days</label>
+            <input type="number" id="filter-date-within-days" min="0" step="1" placeholder="e.g. 7">
+          </div>
+          <div class="form-group">
+            <label for="filter-print-count-gt">Print count &gt;</label>
+            <input type="number" id="filter-print-count-gt" min="0" step="1" placeholder="e.g. 0">
+          </div>
+          <div class="form-group">
+            <label for="filter-rating-gte">Rating ≥</label>
+            <input type="number" id="filter-rating-gte" min="0" max="5" step="1" placeholder="e.g. 4">
+          </div>
+          <div class="form-group filament-span">
+            <label for="filter-last-printed-before">Last printed before</label>
+            <input type="date" id="filter-last-printed-before">
+          </div>
+        </div>
+      </div>
       <div class="form-group">
         <label for="designer-select">Select Designer:</label>
         <div class="dropdown-with-list">
@@ -455,7 +508,18 @@
           </select>
           <button type="button" class="list-button icon-button" data-field="parent" data-target="model-parent" data-mode="edit" title="Search existing parent models">☰</button>
           <button type="button" id="add-new-parent-button" class="icon-button">+</button>
+          <button type="button" id="flatten-parent-button" class="icon-button" title="Clear parent on all children of this group">Flatten</button>
         </div>
+      </div>
+
+      <div class="form-group mobile-detail-extra">
+        <label>Collections</label>
+        <div id="model-collections-list" class="tags-list"></div>
+      </div>
+      <div class="form-group mobile-detail-extra">
+        <label>Sliced versions</label>
+        <p class="setting-description sliced-gcode-hint">Attach a <code>.gcode</code> / <code>.bgcode</code> via right-click, or keep it beside the model with a matching name. Send to printer is G-code only.</p>
+        <div id="sliced-files-list"></div>
       </div>
 
       <div class="form-group mobile-detail-extra">
@@ -896,11 +960,20 @@
           </div>
           <div class="dialog-buttons" style="display: flex; justify-content: flex-end; gap: 0.5rem;">
             <button type="button" id="dedup-easy-button" class="easy-button" title="Select all but one per group. Keeps a copy in the preferred directory when one exists, otherwise an archived/ZIP copy." onclick="if(typeof window.dedupEasyFromDialog==='function')window.dedupEasyFromDialog()">Easy</button>
+            <button type="button" id="dedup-not-duplicate" title="Mark selected group as intentional (not a duplicate)">Not a duplicate</button>
+            <button type="button" id="dedup-undo-not-duplicate" title="Clear not-a-duplicate mark on selected group" hidden>Undo mark</button>
+            <label for="near-dup-threshold" style="margin-left:8px;font-size:12px;">Near-dup <span id="near-dup-threshold-label">92%</span></label>
+            <input type="range" id="near-dup-threshold" min="70" max="99" value="92" style="width:90px">
+            <button type="button" id="near-dup-run">Find near</button>
+            <label class="dedup-show-ignored-label" title="Show groups marked as not a duplicate">
+              <input type="checkbox" id="dedup-show-ignored"> Show ignored
+            </label>
             <button type="button" id="dedup-clear-button" class="modal-fullscreen-toggle" title="Clear all selections" onclick="if(typeof window.dedupClearFromDialog==='function')window.dedupClearFromDialog()">Clear</button>
             <button type="button" id="delete-selected" class="danger-button">Delete Selected</button>
             <button type="button" id="close-dedup" onclick="document.getElementById('dedup-dialog')?.close()">Close</button>
           </div>
         </div>
+        <div id="near-dup-results" class="feature-muted" style="margin: 8px 0;"></div>
         <div class="duplicate-groups" style="max-height: 300px; overflow-y: auto; margin-top: 0.5rem;">
           <!-- Duplicate groups will be added here dynamically -->
         </div>
@@ -1568,7 +1641,7 @@
         <h3 id="progress-title">Processing...</h3>
         <p id="progress-message">Please wait...</p>
         <div class="progress-bar-container">
-          <div id="progress-bar" class="progress-bar"></div>
+          <div id="progress-bar-dialog" class="progress-bar"></div>
         </div>
         <p id="progress-status">0 / 0</p>
       </div>
@@ -1865,26 +1938,67 @@
         <form method="dialog">
           <h3>Theme Settings</h3>
           <div class="form-group">
-            <label for="ui-theme">UI Theme:</label>
-            <select id="ui-theme">
-              <option value="modern-cyan">Modern Cyan (Default)</option>
-              <option value="modern-purple">Modern Purple</option>
-              <option value="modern-green">Modern Green</option>
-              <option value="modern-orange">Modern Orange</option>
-              <option value="modern-pink">Modern Pink</option>
-              <option value="dark-minimal">Dark Minimal</option>
+            <label for="ui-theme">Accent:</label>
+            <div class="setting-color-row">
+              <select id="ui-theme">
+                <option value="modern-cyan">Modern Cyan (Default)</option>
+                <option value="modern-purple">Modern Purple</option>
+                <option value="modern-green">Modern Green</option>
+                <option value="modern-orange">Modern Orange</option>
+                <option value="modern-pink">Modern Pink</option>
+                <option value="dark-minimal">Dark Minimal</option>
+                <option value="custom">Custom…</option>
+              </select>
+              <input type="color" id="accent-color-custom" value="#00d4ff" title="Custom accent color" aria-label="Custom accent color">
+            </div>
+            <div class="setting-description">Accent color for buttons and highlights</div>
+          </div>
+          <div class="form-group">
+            <label for="path-display-mode">Path on cards</label>
+            <select id="path-display-mode">
+              <option value="full">Full path</option>
+              <option value="parent">Parent folder</option>
+              <option value="filename">Filename only</option>
             </select>
-            <div class="setting-description">Change the overall color scheme of the application</div>
+            <div class="setting-description">How file paths appear on cards and in list view</div>
+          </div>
+          <div class="form-group">
+            <label for="path-aliases-json">Path aliases (JSON)</label>
+            <textarea id="path-aliases-json" rows="3" placeholder='[{"from":"/mnt/share","to":"X:\\\\cases"}]'></textarea>
+            <div class="setting-description">Map Docker/NAS paths to local display paths for copy and the slicer helper</div>
+          </div>
+          <div class="form-group checkbox-container" style="align-items: flex-start; margin-top: 8px;">
+            <input type="checkbox" id="hide-print-status-badge">
+            <div>
+              <label for="hide-print-status-badge" style="font-weight: bold; margin-bottom: 4px; display: block;">Hide print-status badges</label>
+              <div class="setting-description" style="margin-top: 0;">Hide Printed / Not Printed badges on grid cards</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="inbox-folder-name">Inbox folder name:</label>
+            <input type="text" id="inbox-folder-name" value="Inbox" placeholder="Inbox">
+            <div class="setting-description">Dropped uploads are saved under STL Home / this folder (default: Inbox)</div>
           </div>
           <div class="form-group">
             <label for="model-background-color">Model Background Color:</label>
-            <select id="model-background-color">
-              <option value="#070147">Dark Blue</option>
-              <option value="#1a1a1a">Dark Gray</option>
-              <option value="#000000">Black</option>
-              <option value="#1a0f3c">Navy Purple</option>
-              <option value="#0a0a23">Midnight Blue</option>
-            </select>
+            <div class="setting-color-row">
+              <select id="model-background-color">
+                <option value="#070147">Dark Blue</option>
+                <option value="#1a1a1a">Dark Gray</option>
+                <option value="#000000">Black</option>
+                <option value="#1a0f3c">Navy Purple</option>
+                <option value="#0a0a23">Midnight Blue</option>
+                <option value="#3a3d46">Charcoal</option>
+                <option value="#f4f5f7">White</option>
+                <option value="#c8d0d5">Cool Gray</option>
+                <option value="#5aa9e6">Sky Blue</option>
+                <option value="#e88aa3">Blush Pink</option>
+                <option value="#4fc9a4">Mint</option>
+                <option value="#e2c08a">Warm Sand</option>
+                <option value="custom">Custom…</option>
+              </select>
+              <input type="color" id="model-background-color-custom" value="#f4f5f7" title="Custom background color" aria-label="Custom model background color">
+            </div>
             <div class="setting-description">Background color for 3D model thumbnails</div>
           </div>
           <p class="setting-description" style="margin-top: 15px; margin-bottom: 5px; font-style: italic; color: #888;">
@@ -1892,20 +2006,29 @@
           </p>
           <div class="form-group">
             <label for="render-color">Model Color:</label>
-            <select id="render-color">
-              <option value="#cccccc">Default (Light Gray)</option>
-              <option value="#333333">Dark Gray</option>
-              <option value="#000000">Black</option>
-              <option value="#ffffff">White</option>
-              <option value="#ff0000">Red</option>
-              <option value="#00ff00">Green</option>
-              <option value="#0000ff">Blue</option>
-              <option value="#ffff00">Yellow</option>
-              <option value="#ff00ff">Magenta</option>
-              <option value="#00ffff">Cyan</option>
-              <option value="rainbow">Rainbow</option>
-              <option value="pastel-rainbow">Pastel Rainbow</option>
-            </select>
+            <div class="setting-color-row">
+              <select id="render-color">
+                <option value="#cccccc">Default (Light Gray)</option>
+                <option value="#333333">Dark Gray</option>
+                <option value="#2f2f2f">Charcoal</option>
+                <option value="#4a5568">Slate</option>
+                <option value="#0a1628">Dark Navy</option>
+                <option value="#5c4033">Bronze</option>
+                <option value="#1b4332">Dark Green</option>
+                <option value="#000000">Black</option>
+                <option value="#ffffff">White</option>
+                <option value="#ff0000">Red</option>
+                <option value="#00ff00">Green</option>
+                <option value="#0000ff">Blue</option>
+                <option value="#ffff00">Yellow</option>
+                <option value="#ff00ff">Magenta</option>
+                <option value="#00ffff">Cyan</option>
+                <option value="rainbow">Rainbow</option>
+                <option value="pastel-rainbow">Pastel Rainbow</option>
+                <option value="custom">Custom…</option>
+              </select>
+              <input type="color" id="render-color-custom" value="#cccccc" title="Custom model color" aria-label="Custom model color">
+            </div>
             <div class="setting-description">Color of the 3D model in thumbnails</div>
           </div>
           <div class="form-group checkbox-container" style="align-items: flex-start; margin-top: 15px;">
@@ -2021,20 +2144,9 @@
       <dialog id="keyboard-shortcuts-dialog" class="modal" aria-labelledby="keyboard-shortcuts-title">
         <form method="dialog">
           <h2 id="keyboard-shortcuts-title">Keyboard Shortcuts</h2>
-          <p class="keyboard-shortcuts-intro">Power-user and accessibility shortcuts. Use <kbd>Ctrl</kbd> on Windows/Linux and <kbd>⌘</kbd> on Mac unless noted.</p>
+          <p class="keyboard-shortcuts-intro">Power-user and accessibility shortcuts. Use <kbd>Ctrl</kbd> on Windows/Linux and <kbd>⌘</kbd> on Mac unless noted. Bindings are stored in settings key <code>keybindings</code>.</p>
           <div class="keyboard-shortcuts-list">
-            <div class="shortcut-row"><span class="shortcut-action">Focus search</span><kbd>Ctrl</kbd>+<kbd>/</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Scan directory</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Clear all filters</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Print Roulette</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Toggle Multi-Edit mode</span><kbd>Ctrl</kbd>+<kbd>E</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Select all (filtered) models</span><kbd>Ctrl</kbd>+<kbd>A</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Next model (detail view)</span><kbd>↓</kbd> or <kbd>J</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Previous model (detail view)</span><kbd>↑</kbd> or <kbd>K</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Exit Multi-Edit mode</span><kbd>Escape</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Bold in notes</span><kbd>Ctrl</kbd>+<kbd>B</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Italic in notes</span><kbd>Ctrl</kbd>+<kbd>I</kbd></div>
-            <div class="shortcut-row"><span class="shortcut-action">Show this shortcuts dialog</span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>?</kbd></div>
+            <!-- Populated by shortcuts.js from SHORTCUTS / keybindings -->
           </div>
           <button type="button" onclick="document.getElementById('keyboard-shortcuts-dialog')?.close()">Close</button>
         </form>
@@ -2126,7 +2238,11 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       <dialog id="stats-dialog" class="modal">
         <form method="dialog">
           <h2>Library Statistics</h2>
-          <div class="stats-content">
+          <div class="stats-tabs" role="tablist">
+            <button type="button" class="stats-tab active" data-stats-tab="library">Library</button>
+            <button type="button" class="stats-tab" data-stats-tab="prints">Prints</button>
+          </div>
+          <div id="stats-library-panel" class="stats-content">
             <div class="stats-grid">
               <div class="stats-section stats-summary">
                 <h3>Total Models</h3>
@@ -2210,8 +2326,191 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
               </div>
             </div>
           </div>
+          <div id="stats-print-panel" class="stats-content" hidden>
+            <div class="stats-grid">
+              <div class="stats-section">
+                <h3>Outcomes</h3>
+                <div class="stats-row-compact"><span class="stats-label-small">Printed:</span><span class="stats-value-small" id="stats-prints-ok">0</span></div>
+                <div class="stats-row-compact"><span class="stats-label-small">Failed:</span><span class="stats-value-small" id="stats-prints-failed">0</span></div>
+                <div class="stats-row-compact"><span class="stats-label-small">Cancelled:</span><span class="stats-value-small" id="stats-prints-cancelled">0</span></div>
+                <div class="stats-row-compact"><span class="stats-label-small">Want, never printed:</span><span class="stats-value-small" id="stats-prints-want-never">0</span></div>
+                <div class="stats-row-compact"><span class="stats-label-small">Filament spend:</span><span class="stats-value-small" id="stats-prints-spend">—</span></div>
+              </div>
+              <div class="stats-section stats-chart-section">
+                <h3>Prints per month</h3>
+                <div class="chart-container-print"><canvas id="prints-per-month-chart"></canvas></div>
+              </div>
+              <div class="stats-section">
+                <h3>Most printed</h3>
+                <ul id="stats-most-printed"></ul>
+              </div>
+              <div class="stats-section">
+                <h3>Per printer</h3>
+                <ul id="stats-prints-per-printer"></ul>
+              </div>
+              <div class="stats-section">
+                <h3>Filament usage</h3>
+                <ul id="stats-filament-usage"></ul>
+              </div>
+            </div>
+          </div>
           <div class="dialog-buttons">
+            <button type="button" id="print-queue-button">Print Queue</button>
             <button type="button" onclick="document.getElementById('stats-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="print-queue-dialog" class="modal">
+        <form method="dialog" class="print-queue-form">
+          <div class="modal-header-row">
+            <h3>Print Queue</h3>
+            <button type="button" id="print-queue-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.togglePrintQueueFullscreen==='function')window.togglePrintQueueFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
+          <p class="setting-description">Drag models between columns to update print status.</p>
+          <div class="print-queue-toolbar">
+            <button type="button" id="print-queue-refresh">Refresh</button>
+            <button type="button" id="print-queue-export">Export CSV</button>
+          </div>
+          <div id="print-queue-board"></div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('print-queue-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="collections-manager-dialog" class="modal">
+        <form method="dialog" class="collections-manager-form">
+          <div class="modal-header-row">
+            <h3>Collections</h3>
+            <button type="button" id="collections-manager-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleCollectionsManagerFullscreen==='function')window.toggleCollectionsManagerFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
+          <div class="form-group">
+            <label for="new-collection-name">Create collection</label>
+            <div class="input-with-icon">
+              <input type="text" id="new-collection-name" placeholder="e.g. Halloween 2026, Kids' toys…">
+              <button type="button" id="add-collection-manager-button" class="icon-button" title="Create">+</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="collections-add-selected-select">Add selected models to</label>
+            <div class="input-with-icon">
+              <select id="collections-add-selected-select">
+                <option value="">Select collection…</option>
+              </select>
+              <button type="button" id="collections-add-selected-button" class="icon-button" title="Add selection">+</button>
+            </div>
+          </div>
+          <div class="form-group collections-manager-list-group">
+            <label for="collections-manager-search">Your collections</label>
+            <div class="input-with-icon">
+              <input type="text" id="collections-manager-search" placeholder="Search collections…">
+            </div>
+            <div id="collections-manager-list" class="collections-manager-list"></div>
+          </div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('collections-manager-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="collections-picker-dialog" class="modal">
+        <form method="dialog">
+          <h3>Add to collection</h3>
+          <p class="setting-description" id="collections-picker-summary"></p>
+          <div id="collections-picker-list" class="collections-picker-list"></div>
+          <div class="dialog-buttons">
+            <button type="button" id="collections-picker-new">New collection…</button>
+            <button type="button" onclick="document.getElementById('collections-picker-dialog')?.close()">Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="find-similar-dialog" class="modal find-similar-dialog">
+        <form method="dialog">
+          <h3>Find similar</h3>
+          <p class="setting-description" id="find-similar-summary">Models with similar geometry or metadata.</p>
+          <div id="find-similar-modal-list" class="find-similar-modal-list"></div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('find-similar-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="send-to-printer-dialog" class="modal">
+        <form method="dialog" id="send-to-printer-form">
+          <h3>Send to printer</h3>
+          <p class="setting-description" id="send-to-printer-file-label"></p>
+          <div class="form-group">
+            <label for="send-to-printer-select">Printer</label>
+            <select id="send-to-printer-select"></select>
+          </div>
+          <p class="setting-description">Uploads the G-code to Moonraker (<code>gcodes</code> folder). Only <code>.gcode</code> / <code>.bgcode</code> files can be sent.</p>
+          <div class="dialog-buttons">
+            <button type="button" id="send-to-printer-confirm">Upload</button>
+            <button type="button" onclick="document.getElementById('send-to-printer-dialog')?.close()">Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="jobs-manager-dialog" class="modal">
+        <form method="dialog" class="jobs-manager-form">
+          <div class="modal-header-row">
+            <h3>Jobs Manager</h3>
+            <button type="button" id="jobs-manager-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleJobsManagerFullscreen==='function')window.toggleJobsManagerFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
+          <p class="setting-description">Background scans, hash generation, and thumbnail jobs.</p>
+          <div class="jobs-manager-toolbar">
+            <button type="button" id="jobs-manager-refresh">Refresh</button>
+          </div>
+          <div id="jobs-manager-list" class="jobs-manager-list"></div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('jobs-manager-dialog')?.close()">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="recently-removed-dialog" class="modal">
+        <form method="dialog" class="recently-removed-form">
+          <div class="modal-header-row">
+            <h3>Recently Removed</h3>
+            <button type="button" id="recently-removed-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleRecentlyRemovedFullscreen==='function')window.toggleRecentlyRemovedFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
+          <p class="setting-description">Soft-deleted library entries. Restore anytime before purge.</p>
+          <div class="recently-removed-toolbar">
+            <button type="button" id="purge-trash-button">Purge older than 30 days</button>
+          </div>
+          <div id="recently-removed-list" class="recently-removed-list"></div>
+          <div class="dialog-buttons">
+            <button type="button" onclick="document.getElementById('recently-removed-dialog')?.close()">Close</button>
           </div>
         </form>
       </dialog>
@@ -2354,6 +2653,22 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
                 <div class="filament-field">
                   <label class="filament-field-label" for="new-filament-diameter">Diameter (mm)</label>
                   <input type="number" id="new-filament-diameter" placeholder="1.75" value="1.75" step="0.05" min="0">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-price">Price per kg</label>
+                  <input type="number" id="new-filament-price" placeholder="e.g. 25" step="0.01" min="0">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-spool-weight">Spool weight (g)</label>
+                  <input type="number" id="new-filament-spool-weight" placeholder="e.g. 1000" step="1" min="0">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-remaining">Remaining (g)</label>
+                  <input type="number" id="new-filament-remaining" placeholder="e.g. 850" step="1" min="0">
+                </div>
+                <div class="filament-field">
+                  <label class="filament-field-label" for="new-filament-low-stock">Low stock at (g)</label>
+                  <input type="number" id="new-filament-low-stock" placeholder="e.g. 100" step="1" min="0">
                 </div>
               </div>
               <div class="filament-form-actions">
@@ -2808,14 +3123,24 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
       </dialog>
 
       <dialog id="metadata-editor-dialog" class="modal">
-        <form method="dialog">
-          <h3>Metadata Editor</h3>
+        <form method="dialog" class="metadata-editor-form">
+          <div class="modal-header-row">
+            <h3>Metadata Manager</h3>
+            <button type="button" id="metadata-editor-fullscreen-toggle" class="icon-button modal-fullscreen-icon-btn" title="Full Screen" aria-label="Full Screen" aria-pressed="false" onclick="if(typeof window.toggleMetadataEditorFullscreen==='function')window.toggleMetadataEditorFullscreen()">
+              <svg class="fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>
+              </svg>
+              <svg class="fullscreen-icon-shrink" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>
+              </svg>
+            </button>
+          </div>
           <div class="metadata-tabs">
             <button type="button" class="metadata-tab active" data-type="designer">Designer</button>
             <button type="button" class="metadata-tab" data-type="parentModel">Parent Model</button>
             <button type="button" class="metadata-tab" data-type="license">License</button>
           </div>
-          <div class="form-group">
+          <div class="form-group metadata-editor-list-group">
             <label id="metadata-type-label">Designers</label>
             <div class="input-with-icon">
               <input type="text" id="metadata-editor-search" placeholder="Search...">
@@ -2980,6 +3305,19 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
     });
   </script>
   <script src="thumbnail-progress.js"></script>
+  <script src="toast.js"></script>
+  <script src="jobs-panel.js"></script>
+  <script src="theme-mode.js"></script>
+  <script src="shortcuts.js"></script>
+  <script src="command-palette.js"></script>
+  <script src="grid-keyboard.js"></script>
+  <script src="empty-state.js"></script>
+  <script src="inbox-upload.js"></script>
+  <script src="collections-ui.js"></script>
+  <script src="saved-searches-ui.js"></script>
+  <script src="print-queue-ui.js"></script>
+  <script src="print-stats-ui.js"></script>
+  <script src="feature-panels-ui.js"></script>
   <script src="slicer-protocol.js"></script>
   <script src="preview.js"></script>
   <script src="query-builder.js"></script>

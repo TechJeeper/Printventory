@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Printventory Watcher",
-  "version": "3.0.1",
+  "version": "3.0.3",
   "description": "Queue model pages and downloads to Downloads/PrintventoryInbox. Printventory imports them; no database access needed.",
   "permissions": ["storage", "activeTab", "downloads", "notifications", "tabs", "offscreen"],
   "icons": {

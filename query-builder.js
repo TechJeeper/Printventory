@@ -1,7 +1,9 @@
 /**
  * Multi-value filters (AND/OR) and search query clauses for getModelsFiltered.
+ * Numeric/date SQL helpers live in query-builder-filters.js (Node-safe).
  */
 (function () {
+  // collections filter uses filters.collectionId via main.js; chips UI is follow-up
   const MULTI_KEYS = ["designer", "license", "parentModel", "tags", "filaments"];
 
   function initState() {

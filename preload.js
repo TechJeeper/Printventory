@@ -75,6 +75,7 @@ contextBridge.exposeInMainWorld('electron', {
   getFolderTree: () => ipcRenderer.invoke('get-folder-tree'),
   saveModel: (modelData) => ipcRenderer.invoke('save-model', modelData),
   saveModelFromUpload: (payload) => ipcRenderer.invoke('save-model-from-upload', payload),
+  uploadToInbox: (payload) => ipcRenderer.invoke('upload-to-inbox', payload || {}),
   saveModelBatch: (modelDataBatch) => ipcRenderer.invoke('save-model-batch', modelDataBatch),
   updateModelsBatch: (modelDataBatch) => ipcRenderer.invoke('update-models-batch', modelDataBatch),
   saveThumbnail: (filePath, thumbnail) => ipcRenderer.invoke('save-thumbnail', filePath, thumbnail),
@@ -94,6 +95,9 @@ contextBridge.exposeInMainWorld('electron', {
   deleteTag: (tagId) => ipcRenderer.invoke('delete-tag', tagId),
   getTagModelCount: (tagId) => ipcRenderer.invoke('get-tag-model-count', tagId),
   onOpenTagManager: (callback) => ipcRenderer.on('open-tag-manager', callback),
+  onOpenCollections: (callback) => ipcRenderer.on('open-collections', callback),
+  onOpenPrintQueue: (callback) => ipcRenderer.on('open-print-queue', callback),
+  onOpenRecentlyRemoved: (callback) => ipcRenderer.on('open-recently-removed', callback),
   getAllFilaments: () => ipcRenderer.invoke('get-all-filaments'),
   saveFilament: (filament) => ipcRenderer.invoke('save-filament', filament),
   deleteFilament: (filamentId) => ipcRenderer.invoke('delete-filament', filamentId),
@@ -101,6 +105,74 @@ contextBridge.exposeInMainWorld('electron', {
   getAllParts: () => ipcRenderer.invoke('get-all-parts'),
   savePart: (part) => ipcRenderer.invoke('save-part', part),
   deletePart: (partId) => ipcRenderer.invoke('delete-part', partId),
+  // Collections
+  listCollections: () => ipcRenderer.invoke('collections-list'),
+  createCollection: (name, coverPath) => ipcRenderer.invoke('collections-create', name, coverPath),
+  renameCollection: (id, name) => ipcRenderer.invoke('collections-rename', id, name),
+  deleteCollection: (id) => ipcRenderer.invoke('collections-delete', id),
+  addModelsToCollection: (collectionId, modelIds) => ipcRenderer.invoke('collections-add-models', collectionId, modelIds),
+  removeModelsFromCollection: (collectionId, modelIds) => ipcRenderer.invoke('collections-remove-models', collectionId, modelIds),
+  getCollectionsForModel: (modelId) => ipcRenderer.invoke('collections-for-model', modelId),
+  getModelsInCollection: (collectionId) => ipcRenderer.invoke('collections-get-models', collectionId),
+  // Saved searches
+  listSavedSearches: () => ipcRenderer.invoke('saved-searches-list'),
+  saveSavedSearch: (payload) => ipcRenderer.invoke('saved-searches-save', payload),
+  updateSavedSearch: (id, payload) => ipcRenderer.invoke('saved-searches-update', id, payload),
+  deleteSavedSearch: (id) => ipcRenderer.invoke('saved-searches-delete', id),
+  // Parent safety / path display / semantic / geometry
+  validateParentAssignment: (modelId, newParent, options) => ipcRenderer.invoke('parent-safety-validate', modelId, newParent, options || {}),
+  flattenParentGroup: (parentModelName) => ipcRenderer.invoke('parent-safety-flatten', parentModelName),
+  formatPathDisplay: (fullPath, mode, aliases) => ipcRenderer.invoke('format-path-display', fullPath, mode, aliases),
+  findSimilarModels: (modelId, limit) => ipcRenderer.invoke('find-similar-models', modelId, limit),
+  ensureModelEmbedding: (modelId) => ipcRenderer.invoke('ensure-model-embedding', modelId),
+  bootstrapModelEmbeddings: (limit) => ipcRenderer.invoke('bootstrap-model-embeddings', limit),
+  findNearDuplicates: (threshold) => ipcRenderer.invoke('find-near-duplicates', threshold),
+  storeModelGeometry: (modelId, stats) => ipcRenderer.invoke('store-model-geometry', modelId, stats || {}),
+  computeStlGeometry: (modelId, filePath) => ipcRenderer.invoke('compute-stl-geometry', modelId, filePath),
+  resolveModelIdsByPaths: (filePaths) => ipcRenderer.invoke('resolve-model-ids-by-paths', filePaths || []),
+  dedupIgnoreHash: (hash, reason) => ipcRenderer.invoke('dedup-ignore-hash', hash, reason),
+  dedupUnignoreHash: (hash) => ipcRenderer.invoke('dedup-unignore-hash', hash),
+  dedupListIgnores: () => ipcRenderer.invoke('dedup-list-ignores'),
+  onContextAddToCollection: (callback) => {
+    ipcRenderer.removeAllListeners('context-add-to-collection');
+    ipcRenderer.on('context-add-to-collection', (_, payload) => callback(payload || {}));
+  },
+  onContextFindSimilar: (callback) => {
+    ipcRenderer.removeAllListeners('context-find-similar');
+    ipcRenderer.on('context-find-similar', (_, payload) => callback(payload || {}));
+  },
+  onOpenJobsManager: (callback) => {
+    ipcRenderer.removeAllListeners('open-jobs-manager');
+    ipcRenderer.on('open-jobs-manager', () => callback());
+  },
+  softDeleteModel: (modelId) => ipcRenderer.invoke('soft-delete-model', modelId),
+  restoreModel: (modelId) => ipcRenderer.invoke('restore-model', modelId),
+  listRecentlyRemoved: (limit) => ipcRenderer.invoke('list-recently-removed', limit),
+  purgeTrash: (days) => ipcRenderer.invoke('purge-trash', days),
+  undoLastEdit: () => ipcRenderer.invoke('undo-last-edit'),
+  getPrintStats: (range) => ipcRenderer.invoke('get-print-stats', range || {}),
+  getPrintQueue: () => ipcRenderer.invoke('get-print-queue'),
+  startPrintFromQueue: (modelId, options) => ipcRenderer.invoke('start-print-from-queue', modelId, options || {}),
+  movePrintQueueStatus: (modelId, status) => ipcRenderer.invoke('move-print-queue-status', modelId, status),
+  listSlicedFiles: (modelId) => ipcRenderer.invoke('list-sliced-files', modelId),
+  indexSlicedFiles: (modelId, modelPath) => ipcRenderer.invoke('index-sliced-files', modelId, modelPath),
+  parseSlicedFile: (filePath) => ipcRenderer.invoke('parse-sliced-file', filePath),
+  attachGcodeToModel: (payload) => ipcRenderer.invoke('attach-gcode-to-model', payload || {}),
+  detachGcodeFromModel: (payload) => ipcRenderer.invoke('detach-gcode-from-model', payload || {}),
+  sendSlicedToPrinter: (payload) => ipcRenderer.invoke('send-sliced-to-printer', payload || {}),
+  onGcodeAttached: (callback) => {
+    ipcRenderer.removeAllListeners('gcode-attached');
+    ipcRenderer.on('gcode-attached', (_, payload) => callback(payload || {}));
+  },
+  onContextAttachGcode: (callback) => {
+    ipcRenderer.removeAllListeners('context-attach-gcode');
+    ipcRenderer.on('context-attach-gcode', (_, payload) => callback(payload || {}));
+  },
+  getFilamentLowStock: () => ipcRenderer.invoke('get-filament-low-stock'),
+  getFilamentLibrarySpend: () => ipcRenderer.invoke('get-filament-library-spend'),
+  getDueMaintenanceReminders: () => ipcRenderer.invoke('get-due-maintenance-reminders'),
+  dismissMaintenanceReminder: (id) => ipcRenderer.invoke('dismiss-maintenance-reminder', id),
+  checkMaintenanceOnLaunch: () => ipcRenderer.invoke('check-maintenance-on-launch'),
   getAllPrinters: () => ipcRenderer.invoke('get-all-printers'),
   discoverPrinters: (range) => ipcRenderer.invoke('discover-printers', range),
   getLocalScanNetworks: () => ipcRenderer.invoke('get-local-scan-networks'),
@@ -204,6 +276,10 @@ contextBridge.exposeInMainWorld('electron', {
   showContextMenu: (filePath) => ipcRenderer.invoke('show-context-menu', filePath),
   executeContextMenuAction: (requestId, itemIndex, subIndex) => ipcRenderer.invoke('execute-context-menu-action', requestId, itemIndex, subIndex),
   onRefreshGrid: (callback) => ipcRenderer.on('refresh-grid', callback),
+  onLibrarySoftRemoved: (callback) => {
+    ipcRenderer.removeAllListeners('library-soft-removed');
+    ipcRenderer.on('library-soft-removed', (_, payload) => callback(payload || {}));
+  },
   onThumbnailAdded: (callback) => ipcRenderer.on('thumbnail-added', (event, data) => callback(data)),
   onOpenThemeSettings: (callback) => ipcRenderer.on('open-theme-settings', callback),
   quitApp: () => ipcRenderer.invoke('quitApp'),

@@ -173,6 +173,46 @@ const MAX_CONCURRENT_OPS = isDockerContainer() ? 100 : 50; // Higher concurrency
 const BASE_SCAN_EXTENSIONS = ['.stl', '.3mf'];
 
 /**
+ * Root scan path must exist and be a directory. Nested folder errors are still skipped
+ * during walk; failing silently on the root made Docker/TrueNAS host-path misconfigs
+ * look like an empty library ("No files found").
+ */
+function formatScanRootError(directoryPath, err) {
+  const code = err && err.code;
+  const pathLabel = directoryPath || '(empty path)';
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    let msg = `Directory not found: ${pathLabel}`;
+    if (isDockerContainer()) {
+      msg += '. In Docker/TrueNAS, mount your models folder into the container and set STL Home / Scan Directory to that container path (not the host path). Example: mount /mnt/tank/.../models as /mnt/models, then use /mnt/models.';
+    } else {
+      msg += '. Check that the folder exists and is reachable from this machine.';
+    }
+    return msg;
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return `Permission denied reading directory: ${pathLabel}`;
+  }
+  const detail = err && err.message ? err.message : String(err || 'unknown error');
+  return `Cannot scan directory ${pathLabel}: ${detail}`;
+}
+
+async function assertScanRootReadable(directoryPath) {
+  let stats;
+  try {
+    stats = await fs.promises.stat(directoryPath);
+  } catch (err) {
+    const error = new Error(formatScanRootError(directoryPath, err));
+    error.code = err && err.code ? err.code : 'ENOENT';
+    throw error;
+  }
+  if (!stats.isDirectory()) {
+    const error = new Error(formatScanRootError(directoryPath, { code: 'ENOTDIR', message: 'not a directory' }));
+    error.code = 'ENOTDIR';
+    throw error;
+  }
+}
+
+/**
  * Normalize extension list from main (includes ADDITIONAL_FILE_TYPES_CATALOG selections: .obj, .step, .stp, …).
  * Used for both directory-queue filtering and processFile / ZIP entry matching so behavior stays consistent.
  */
@@ -225,6 +265,8 @@ async function calculateFileHash(filePath) {
 }
 
 async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = false, scanExtensions = null, excludeDirectories = null) {
+  await assertScanRootReadable(directoryPath);
+
   const files = [];
   /** Model files (and zip entries) left out because they are larger than maxFileSize. */
   let skippedDueToSize = 0;
@@ -334,6 +376,7 @@ async function scanDirectory(directoryPath, maxFileSize, enableZipArchives = fal
         }
       }
     } catch (err) {
+      // Root path is validated before the walk starts; nested failures stay soft-skip.
       console.error(`Skipping directory ${dirPath} due to error: ${err.message}`);
     }
   };

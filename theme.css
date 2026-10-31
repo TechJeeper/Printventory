@@ -1,4 +1,4 @@
-/* Surface, type, and accent tokens. applyThemeColors overwrites the accent values. */
+/* Surface, type, and accent tokens. applyThemeColors overwrites the accent values. Dark only. */
 :root {
   --bg: #16161e;
   --surface: #1e1e2e;
@@ -21,6 +21,11 @@
   --primary-shadow-hover: rgba(0, 0, 0, 0.35);
   --accent-color: var(--primary-accent);
   --dialog-background: var(--surface);
+  color-scheme: dark;
+}
+
+body.hide-print-status-badge .print-status {
+  display: none !important;
 }
 
 /* Server-mode menu bar. Display toggling stays inline in renderer.js. */

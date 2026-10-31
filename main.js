@@ -27,6 +27,7 @@ const {
 } = require('./primary-thumbnails-query');
 const serverTls = require('./server-tls');
 const extensionInbox = require('./extension-inbox');
+const inboxUploadLib = require('./inbox-upload-lib');
 const { detectInstalledSlicers } = require('./slicer-detect');
 const { buildSlicerSpawnSpec, launchSlicerProcess, invalidSlicerPathError } = require('./slicer-launch');
 const { registerHelperBundleRoute } = require('./helper/install-bundle');
@@ -41,7 +42,7 @@ const {
 const { clampFolderLevels } = require('./library-context');
 const { applyFolderTagsToModels: applyFolderTagsInDb, shouldAutoTagNewScanFiles } = require('./folder-tags');
 const { repairModelTags } = require('./db-repair');
-const { unlinkLibraryFile, buildDeleteSummary } = require('./delete-model-file');
+const { unlinkLibraryFile, trashLibraryFile, buildDeleteSummary } = require('./delete-model-file');
 const scheduledBackup = require('./scheduled-backup');
 const {
   planOrganize,
@@ -51,6 +52,23 @@ const {
   pathsAreSame,
   listChildDirectories
 } = require('./organize-library');
+const collections = require('./collections');
+const savedSearches = require('./saved-searches');
+const parentSafety = require('./parent-safety');
+const pathDisplay = require('./path-display');
+const semanticSearch = require('./semantic-search');
+const geometryFingerprint = require('./geometry-fingerprint');
+const { applyNumericFilters } = require('./query-builder-filters');
+const dedupIgnores = require('./dedup-ignores');
+const moveDetect = require('./move-detect');
+const softDelete = require('./soft-delete');
+const { createUndoStack } = require('./undo-stack');
+const printStats = require('./print-stats');
+const printQueue = require('./print-queue');
+const gcodeIndex = require('./gcode-index');
+const filamentCost = require('./filament-cost');
+const maintenanceNotify = require('./maintenance-notify');
+const metadataUndoStack = createUndoStack({ max: 40 });
 
 // macOS: Chromium can refuse WebGL for blocklisted GPUs or strict context options.
 // Must be set before app ready so Three.js thumbnail rendering can create a context.
@@ -504,7 +522,12 @@ function getWindowFromEvent(event) {
     return null;
   }
   try {
-    return BrowserWindow.fromWebContents(event.sender);
+    const sender = event && event.sender;
+    // MCP / WebSocket stubs are plain objects with send(); they are not WebContents.
+    if (!sender || typeof sender.getOwnerBrowserWindow !== 'function') {
+      return null;
+    }
+    return BrowserWindow.fromWebContents(sender);
   } catch (error) {
     return null;
   }
@@ -830,6 +853,18 @@ ${bridgeCode}
       if (msg.includes('not configured')) res.status(400).json({ error: msg });
       else if (msg.includes('Invalid') || msg.includes('Empty') || msg.includes('Missing')) res.status(400).json({ error: msg });
       else res.status(500).json({ error: msg });
+    }
+  });
+
+  // Drop-in inbox upload (server/PWA): write under STL Home / Inbox and scan that folder
+  expressApp.post('/api/upload-to-inbox', express.json({ limit: '200mb' }), async (req, res) => {
+    try {
+      const result = await uploadFilesToInbox(req.body || {});
+      res.status(200).json(result || { ok: true });
+    } catch (err) {
+      console.error('Upload to inbox error:', err);
+      const msg = err && err.message ? err.message : 'Upload failed';
+      res.status(msg.includes('STL Home') ? 400 : 500).json({ error: msg, ok: false });
     }
   });
 
@@ -2018,6 +2053,11 @@ function requireMcpConfirm(args, action) {
 }
 
 function mcpIpcEvent() {
+  // Prefer the real main-window WebContents so handlers can resolve a BrowserWindow
+  // and scan/progress events reach the UI. Fall back to a no-op sender stub.
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    return { sender: mainWindow.webContents };
+  }
   return { sender: { send() {} } };
 }
 
@@ -2071,11 +2111,35 @@ function pathExistsOnDisk(filePath) {
   }
 }
 
+function softRemoveModelsByFilePaths(filePaths) {
+  const paths = Array.isArray(filePaths) ? filePaths.filter((p) => typeof p === 'string' && p) : [];
+  const removed = [];
+  const missing = [];
+  if (!paths.length) return { removed, missing };
+  softDelete.ensureSchema(db);
+  const find = cachedPrepare('SELECT id, filePath, fileName FROM models WHERE filePath = ? AND deleted_at IS NULL');
+  for (const filePath of paths) {
+    const row = find.get(filePath);
+    if (!row) {
+      missing.push(filePath);
+      continue;
+    }
+    softDelete.softRemoveFromLibrary(db, row.id);
+    removed.push({ id: row.id, filePath: row.filePath, fileName: row.fileName });
+  }
+  return { removed, missing };
+}
+
 function removeModelsFromLibraryByPaths(filePaths) {
-  const { removed, missing } = deleteModelsByFilePaths(filePaths);
+  const { removed, missing } = softRemoveModelsByFilePaths(filePaths);
   if (removed.length) {
-    if (isServerMode && global.broadcastEvent) global.broadcastEvent('refresh-grid');
-    else if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('refresh-grid');
+    if (isServerMode && global.broadcastEvent) {
+      global.broadcastEvent('refresh-grid');
+      global.broadcastEvent('library-soft-removed', { removed });
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('refresh-grid');
+      mainWindow.webContents.send('library-soft-removed', { removed });
+    }
   }
   return { success: true, removedCount: removed.length, removed, missing };
 }
@@ -2576,7 +2640,24 @@ function getMcpToolContext() {
       }
       return { success: true, filePath: destPath };
     },
-    syncSpoolmanFilaments: async (args) => syncSpoolmanFilamentsHandler(mcpIpcEvent(), args.url, args.token)
+    syncSpoolmanFilaments: async (args) => syncSpoolmanFilamentsHandler(mcpIpcEvent(), args.url, args.token),
+    listCollections: async () => collections.listCollections(db),
+    createCollection: async (args) => collections.createCollection(db, args && args.name, args && args.coverPath),
+    addModelsToCollection: async (args) => {
+      const collectionId = args && (args.collectionId ?? args.id);
+      const modelIds = args && (args.modelIds || args.models);
+      return collections.addModels(db, collectionId, modelIds);
+    },
+    removeModelsFromCollection: async (args) => {
+      const collectionId = args && (args.collectionId ?? args.id);
+      const modelIds = args && (args.modelIds || args.models);
+      return collections.removeModels(db, collectionId, modelIds);
+    },
+    findSimilar: async (args) => {
+      const model = resolveModelForMcp(args || {});
+      const limit = args && args.limit != null ? args.limit : 10;
+      return { modelId: model.id, similar: semanticSearch.findSimilar(db, model.id, limit) };
+    }
   };
 }
 
@@ -2751,6 +2832,9 @@ async function compressExistingThumbnailsInBackground(reason) {
   try {
     purgeCorruptThumbnailsOnly();
 
+    // Cheap SQL prefilter: column bytes over the single-image budget.
+    // Multi-thumb (::) blobs can exceed this while every part is already fine —
+    // those are NOT migration candidates and must not log every startup.
     const rows = cachedPrepare(`
       SELECT filePath, octet_length(thumbnail) AS thumbLen
       FROM models
@@ -2761,37 +2845,44 @@ async function compressExistingThumbnailsInBackground(reason) {
 
     if (rows.length === 0) return;
 
-    const batch = rows.slice(0, THUMBNAIL_MIGRATION_MAX_PER_SESSION);
-    const remaining = rows.length - batch.length;
-    console.log(
-      `Migrating ${batch.length} legacy thumbnail(s) (${reason || 'startup'})` +
-      (remaining > 0 ? `; ${remaining} deferred to a later session` : '') +
-      '...'
-    );
-
-    let updated = 0;
-    for (const row of batch) {
+    const actionable = [];
+    for (const row of rows.slice(0, THUMBNAIL_MIGRATION_MAX_PER_SESSION)) {
       try {
         const allowOversized = row.thumbLen > THUMBNAIL_ABSOLUTE_MAX_LOAD_CHARS;
         const thumbnail = readThumbnailColumn(row.filePath, { allowOversized });
         if (!thumbnail) continue;
-
         const parts = thumbnail.includes('::') ? thumbnail.split('::').filter(Boolean) : [thumbnail];
-        const needsWork = parts.some((part) => needsCompression(part));
-        if (!needsWork) continue;
+        if (!parts.some((part) => needsCompression(part))) continue;
+        actionable.push({ filePath: row.filePath, thumbnail });
+      } catch (rowError) {
+        console.error(`Thumbnail migration probe failed for ${row.filePath}:`, rowError);
+      }
+    }
 
-        const { value, changed } = compressThumbnailBlob(thumbnail);
+    if (actionable.length === 0) return;
+
+    const remaining = Math.max(0, rows.length - THUMBNAIL_MIGRATION_MAX_PER_SESSION);
+    console.log(
+      `Migrating ${actionable.length} legacy thumbnail(s) (${reason || 'startup'})` +
+      (remaining > 0 ? `; ${remaining} oversized column(s) deferred` : '') +
+      '...'
+    );
+
+    let updated = 0;
+    for (const item of actionable) {
+      try {
+        const { value, changed } = compressThumbnailBlob(item.thumbnail);
         if (changed) {
-          cachedPrepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(value, row.filePath);
+          cachedPrepare('UPDATE models SET thumbnail = ? WHERE filePath = ?').run(value, item.filePath);
           updated++;
         }
       } catch (rowError) {
-        console.error(`Thumbnail migration failed for ${row.filePath}:`, rowError);
+        console.error(`Thumbnail migration failed for ${item.filePath}:`, rowError);
       }
       await new Promise((resolve) => setTimeout(resolve, THUMBNAIL_MIGRATION_YIELD_MS));
     }
     if (updated > 0) {
-      console.log(`Thumbnail migration complete: ${updated}/${batch.length} model(s) updated`);
+      console.log(`Thumbnail migration complete: ${updated}/${actionable.length} model(s) updated`);
     }
   } finally {
     isCompressingThumbnailsBackground = false;
@@ -3575,6 +3666,14 @@ function initializeDatabase() {
     ensureSlicersTableExists();
     ensureFilamentsTablesExist();
     ensurePartsTablesExist();
+    collections.ensureSchema(db);
+    savedSearches.ensureSchema(db);
+    semanticSearch.ensureSchema(db);
+    geometryFingerprint.ensureSchema(db);
+    dedupIgnores.ensureSchema(db);
+    softDelete.ensureSchema(db);
+    gcodeIndex.ensureSchema(db);
+    filamentCost.ensureSchema(db);
     
     // Initialize default settings
     initializeDefaultSettings();
@@ -3674,6 +3773,10 @@ function migratePrintLifecycleColumns() {
   try {
     printEvents.migratePrintLifecycle(db);
     printerManager.ensurePrinterSchema(db);
+    dedupIgnores.ensureSchema(db);
+    softDelete.ensureSchema(db);
+    gcodeIndex.ensureSchema(db);
+    filamentCost.ensureSchema(db);
     return true;
   } catch (error) {
     console.error('Error migrating print lifecycle columns:', error);
@@ -3890,10 +3993,22 @@ function initializeDefaultSettings() {
       cachedPrepare('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)').run();
     }
 
+    // Appearance is dark-only; force any prior light/system values back to dark.
+    try {
+      cachedPrepare(
+        `INSERT INTO settings (key, value) VALUES ('theme', 'dark')
+         ON CONFLICT(key) DO UPDATE SET value = 'dark'`
+      ).run();
+    } catch (_) { /* settings table may be empty on first create below */ }
+
     // Define default settings
     const defaultSettings = [
       { key: 'tosAcceptedDate', value: null },
-      { key: 'theme', value: 'light' },
+      { key: 'theme', value: 'dark' },
+      { key: 'accentColor', value: '' },
+      { key: 'inboxFolderName', value: 'Inbox' },
+      { key: 'hidePrintStatusBadge', value: '0' },
+      { key: 'keybindings', value: '{}' },
       { key: 'apiKey', value: null },
       { key: 'aiModel', value: 'gpt-5-nano' },
       { key: 'maxThumbnailSize', value: '300' },
@@ -4122,6 +4237,22 @@ async function createWindow() {
         {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
+        },
+        {
+          label: 'Collections',
+          click: () => mainWindow.webContents.send('open-collections')
+        },
+        {
+          label: 'Print Queue',
+          click: () => mainWindow.webContents.send('open-print-queue')
+        },
+        {
+          label: 'Recently Removed',
+          click: () => mainWindow.webContents.send('open-recently-removed')
+        },
+        {
+          label: 'Jobs Manager',
+          click: () => mainWindow.webContents.send('open-jobs-manager')
         },
         {
           label: 'Metadata Manager',
@@ -4442,6 +4573,22 @@ function createApplicationMenu() {
         {
           label: 'Tag Manager',
           click: () => mainWindow.webContents.send('open-tag-manager')
+        },
+        {
+          label: 'Collections',
+          click: () => mainWindow.webContents.send('open-collections')
+        },
+        {
+          label: 'Print Queue',
+          click: () => mainWindow.webContents.send('open-print-queue')
+        },
+        {
+          label: 'Recently Removed',
+          click: () => mainWindow.webContents.send('open-recently-removed')
+        },
+        {
+          label: 'Jobs Manager',
+          click: () => mainWindow.webContents.send('open-jobs-manager')
         },
         {
           label: 'Metadata Manager',
@@ -4820,7 +4967,7 @@ async function checkZipEntryExists(zipPath, entryPath) {
 }
 
 // Update the removeNonExistentFiles function
-async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeDirectories = null) {
+async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeDirectories = null, options = {}) {
   try {
     const excluded = compileExcludeDirs(excludeDirectories, scanDirectoryPath);
     // OPTIMIZATION: Only query models in the scanned directory using SQL instead of loading all models
@@ -4829,7 +4976,7 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeD
 
     // Query only models under this directory: unify '\' and '/' so LIKE sees the same prefix as scanDirectoryPath.
     const modelsInDirectory = cachedPrepare(`
-      SELECT filePath, id FROM models
+      SELECT filePath, id, hash, size FROM models
       WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
     `).all(prefixParam);
     
@@ -4908,6 +5055,11 @@ async function removeNonExistentFiles(scanDirectoryPath, window = null, excludeD
       
       // Wait for this batch to complete before starting the next batch
       await Promise.all(batchPromises);
+    }
+
+    // collectOnly: return candidates (with hash/size) so scan can apply move detection first
+    if (options && options.collectOnly) {
+      return { collected: filesToDelete, count: 0 };
     }
 
     // If there are files to delete, show confirmation dialog
@@ -5046,15 +5198,14 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
       }
     } catch (e) { /* ignore */ }
     
-    // First, remove any non-existent files from the scanned directory
-    // Pass the window so we can show a confirmation dialog if needed (null in server mode)
-    const window = isServerMode ? null : BrowserWindow.fromWebContents(event.sender);
-    const removedCount = await removeNonExistentFiles(directoryPath, window, excludeDirectories);
-    if (removedCount > 0) {
-      event.sender.send('db-cleanup', {
-        message: `Removed ${removedCount} non-existent files from directory ${directoryPath}`
-      });
-    }
+    // Collect missing/skipped paths first (do not delete yet) so move detection can
+    // UPDATE filePath when the same hash+size reappears at a new location.
+    const window = getWindowFromEvent(event);
+    const missingCollect = await removeNonExistentFiles(directoryPath, window, excludeDirectories, { collectOnly: true });
+    const pendingMissing = Array.isArray(missingCollect?.collected) ? missingCollect.collected : [];
+    const moveMissingCandidates = pendingMissing
+      .filter((f) => f.reason === 'missing' && f.hash)
+      .map((f) => ({ filePath: f.filePath, hash: f.hash, size: f.size, id: f.id }));
 
     return new Promise((resolve, reject) => {
       // Use scan-worker.js for scanning (supports zip files)
@@ -5138,7 +5289,8 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
         files: [],
         existingFilePaths: new Set(),
         newFilesCount: 0,
-        newFilePaths: []
+        newFilePaths: [],
+        movedFromPaths: new Set()
       };
       let ingestChain = Promise.resolve();
       const enqueueIngest = (task) => {
@@ -5184,20 +5336,59 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
                 file.filePath
               );
             } else {
-              insertNew.run(
-                file.filePath,
-                file.fileName,
-                file.hash || '',
-                file.size,
-                modifiedDate,
-                new Date().toISOString(),
-                bundle.bundleKey || null,
-                bundle.bundleLabel || null,
-                bundle.bundleKind || null
-              );
-              ingestState.newFilesCount++;
-              ingestState.newFilePaths.push(file.filePath);
-              ingestState.existingFilePaths.add(file.filePath);
+              // Move-aware: same hash+size as a recently-missing path → UPDATE path
+              let moved = false;
+              if (moveMissingCandidates.length && file.hash) {
+                const pairs = moveDetect.matchMoves(moveMissingCandidates, [{
+                  filePath: file.filePath,
+                  fileName: file.fileName,
+                  hash: file.hash,
+                  size: file.size,
+                  modifiedDate
+                }]);
+                if (pairs.length) {
+                  const pair = pairs[0];
+                  const applied = moveDetect.applyMovePath(db, pair.fromPath, pair.toPath, {
+                    fileName: file.fileName,
+                    hash: file.hash,
+                    size: file.size,
+                    modifiedDate
+                  });
+                  if (applied.updated) {
+                    moved = true;
+                    ingestState.movedFromPaths.add(pair.fromPath);
+                    ingestState.existingFilePaths.add(file.filePath);
+                    // Drop matched candidate so it is not paired again / not deleted as missing
+                    const idx = moveMissingCandidates.findIndex((m) => m.filePath === pair.fromPath);
+                    if (idx >= 0) moveMissingCandidates.splice(idx, 1);
+                    updateExisting.run(
+                      file.hash || '',
+                      file.size,
+                      modifiedDate,
+                      bundle.bundleKey || null,
+                      bundle.bundleLabel || null,
+                      bundle.bundleKind || null,
+                      file.filePath
+                    );
+                  }
+                }
+              }
+              if (!moved) {
+                insertNew.run(
+                  file.filePath,
+                  file.fileName,
+                  file.hash || '',
+                  file.size,
+                  modifiedDate,
+                  new Date().toISOString(),
+                  bundle.bundleKey || null,
+                  bundle.bundleLabel || null,
+                  bundle.bundleKind || null
+                );
+                ingestState.newFilesCount++;
+                ingestState.newFilePaths.push(file.filePath);
+                ingestState.existingFilePaths.add(file.filePath);
+              }
             }
             ingestState.files.push(file);
           }
@@ -5234,6 +5425,29 @@ async function scanDirectoryHandler(event, directoryPath, options = {}) {
             const allFilePaths = files.map(f => f.filePath);
 
             worker.terminate();
+
+            // Remove remaining missing/skipped library rows (moves already consumed)
+            try {
+              const remaining = pendingMissing.filter(
+                (f) => !ingestState.movedFromPaths.has(f.filePath)
+              );
+              if (remaining.length > 0) {
+                const removedCount = await removeNonExistentFiles(
+                  directoryPath,
+                  window,
+                  excludeDirectories
+                );
+                if (removedCount > 0) {
+                  try {
+                    event.sender.send('db-cleanup', {
+                      message: `Removed ${removedCount} non-existent files from directory ${directoryPath}`
+                    });
+                  } catch (_) { /* sender may be gone */ }
+                }
+              }
+            } catch (missErr) {
+              console.error('Post-scan missing-file cleanup:', missErr);
+            }
 
             // STL Home scan with path metadata: set designer/parent from folder segments (from model level up) when enabled
             if (options.isStlHomeScan && Array.isArray(allFilePaths) && allFilePaths.length > 0) {
@@ -5532,13 +5746,20 @@ const getAllModelsHandler = async (event, sortOption, limit = 0) => {
     }
 
 const selectCols = MODEL_LIST_COLUMNS;
+    let deletedFilter = '';
+    try {
+      const cols = db.prepare('PRAGMA table_info(models)').all();
+      if (cols.some((c) => c.name === 'deleted_at')) {
+        deletedFilter = 'WHERE (deleted_at IS NULL)';
+      }
+    } catch (_) { /* ignore */ }
 
     let models;
     if (limit === 0) {
       // When limit is 0, load all models without a limit
-      models = cachedPrepare(`SELECT ${selectCols} FROM models ${orderClause}`).all();
+      models = cachedPrepare(`SELECT ${selectCols} FROM models ${deletedFilter} ${orderClause}`).all();
     } else {
-      models = cachedPrepare(`SELECT ${selectCols} FROM models ${orderClause} LIMIT ?`).all(limit);
+      models = cachedPrepare(`SELECT ${selectCols} FROM models ${deletedFilter} ${orderClause} LIMIT ?`).all(limit);
     }
     return models;
   } catch (error) {
@@ -5992,6 +6213,13 @@ function pushFilamentListSQL(conditions, params, filters) {
 function buildModelFilterConditions(filters) {
   const conditions = [];
   const params = [];
+  // Soft-deleted models stay out of the library grid unless explicitly requested
+  try {
+    const cols = db.prepare('PRAGMA table_info(models)').all();
+    if (cols.some((c) => c.name === 'deleted_at') && !(filters && filters.includeDeleted)) {
+      conditions.push('(models.deleted_at IS NULL)');
+    }
+  } catch (_) { /* ignore */ }
   if (!filters || typeof filters !== 'object') {
     return { conditions, params };
   }
@@ -6186,6 +6414,23 @@ function buildModelFilterConditions(filters) {
       conditions.push("dateAdded >= ?");
       params.push(filters.dateAdded);
     }
+
+    // Collection filter (curated collections)
+    const collectionIdRaw = filters.collectionId != null ? filters.collectionId : filters.collection;
+    if (collectionIdRaw != null && collectionIdRaw !== '' && collectionIdRaw !== 'all') {
+      const bound = collections.collectionFilterSql(collectionIdRaw);
+      if (bound) {
+        conditions.push(bound.sql);
+        params.push(...bound.params);
+      }
+    }
+
+    // Numeric / date operators (saved searches + advanced filters)
+    const numeric = applyNumericFilters(filters);
+    for (let i = 0; i < numeric.sqlFragments.length; i += 1) {
+      conditions.push(numeric.sqlFragments[i]);
+    }
+    if (numeric.params.length) params.push(...numeric.params);
 
   return { conditions, params };
 }
@@ -6505,12 +6750,14 @@ ipcMain.handle('get-all-filaments', getAllFilamentsHandler);
 
 async function saveFilamentHandler(event, filament) {
   try {
+    filamentCost.ensureSchema(db);
     const name = String(filament?.name || '').trim();
     if (!name) throw new Error('Filament name is required');
     const vendor = String(filament?.vendor || '').trim() || null;
     const material = String(filament?.material || '').trim() || null;
     const colorHex = spoolman.normalizeColorHex(filament?.color_hex) || null;
     const diameter = filament?.diameter == null || filament.diameter === '' ? 1.75 : Number(filament.diameter);
+    const cost = filamentCost.normalizeCostFields(filament || {});
     const id = filament?.id != null ? Number(filament.id) : null;
     if (id) {
       const existing = cachedPrepare('SELECT id, source FROM filaments WHERE id = ?').get(id);
@@ -6519,15 +6766,24 @@ async function saveFilamentHandler(event, filament) {
         throw new Error('Synced filaments are edited in Spoolman. Sync again to update them here.');
       }
       cachedPrepare(`
-        UPDATE filaments SET name = ?, vendor = ?, material = ?, color_hex = ?, diameter = ?
+        UPDATE filaments SET name = ?, vendor = ?, material = ?, color_hex = ?, diameter = ?,
+          price_per_kg = ?, spool_weight_g = ?, remaining_weight_g = ?, low_stock_g = ?
         WHERE id = ?
-      `).run(name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : 1.75, id);
+      `).run(
+        name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : 1.75,
+        cost.price_per_kg, cost.spool_weight_g, cost.remaining_weight_g, cost.low_stock_g,
+        id
+      );
       return cachedPrepare('SELECT * FROM filaments WHERE id = ?').get(id);
     }
     const result = cachedPrepare(`
-      INSERT INTO filaments (name, vendor, material, color_hex, diameter, spoolman_id, source)
-      VALUES (?, ?, ?, ?, ?, NULL, 'manual')
-    `).run(name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : 1.75);
+      INSERT INTO filaments (name, vendor, material, color_hex, diameter, spoolman_id, source,
+        price_per_kg, spool_weight_g, remaining_weight_g, low_stock_g)
+      VALUES (?, ?, ?, ?, ?, NULL, 'manual', ?, ?, ?, ?)
+    `).run(
+      name, vendor, material, colorHex, Number.isFinite(diameter) ? diameter : 1.75,
+      cost.price_per_kg, cost.spool_weight_g, cost.remaining_weight_g, cost.low_stock_g
+    );
     return cachedPrepare('SELECT * FROM filaments WHERE id = ?').get(result.lastInsertRowid);
   } catch (error) {
     console.error('Error saving filament:', error);
@@ -6691,6 +6947,260 @@ async function setPrintStatusBatchHandler(event, payload) {
   }
 }
 ipcMain.handle('set-print-status-batch', setPrintStatusBatchHandler);
+
+// --- Collections ---
+function collectionsIpcError(err) {
+  const msg = (err && err.message) ? String(err.message) : 'Collections operation failed';
+  // Always reject with a plain Error so renderer/toasts never see raw SqliteError dumps.
+  const clean = new Error(msg);
+  clean.code = err && err.code;
+  throw clean;
+}
+ipcMain.handle('collections-list', async () => collections.listCollections(db));
+ipcMain.handle('collections-create', async (event, name, coverPath) => {
+  try {
+    return collections.createCollection(db, name, coverPath);
+  } catch (err) {
+    collectionsIpcError(err);
+  }
+});
+ipcMain.handle('collections-rename', async (event, id, name) => {
+  try {
+    return collections.renameCollection(db, id, name);
+  } catch (err) {
+    collectionsIpcError(err);
+  }
+});
+ipcMain.handle('collections-delete', async (event, id) => collections.deleteCollection(db, id));
+ipcMain.handle('collections-add-models', async (event, collectionId, modelIds) => collections.addModels(db, collectionId, modelIds));
+ipcMain.handle('collections-remove-models', async (event, collectionId, modelIds) => collections.removeModels(db, collectionId, modelIds));
+ipcMain.handle('collections-for-model', async (event, modelId) => collections.getCollectionsForModel(db, modelId));
+ipcMain.handle('collections-get-models', async (event, collectionId) => collections.getModelsInCollection(db, collectionId));
+
+// --- Saved searches ---
+ipcMain.handle('saved-searches-list', async () => savedSearches.list(db));
+ipcMain.handle('saved-searches-save', async (event, payload) => savedSearches.save(db, payload || {}));
+ipcMain.handle('saved-searches-update', async (event, id, payload) => savedSearches.update(db, id, payload || {}));
+ipcMain.handle('saved-searches-delete', async (event, id) => savedSearches.delete(db, id));
+
+// --- Parent safety helpers ---
+ipcMain.handle('parent-safety-validate', async (event, modelId, newParent, options) =>
+  parentSafety.validateParentAssignment(db, modelId, newParent, options || {})
+);
+ipcMain.handle('parent-safety-flatten', async (event, parentModelName) =>
+  parentSafety.flattenGroup(db, parentModelName)
+);
+
+// --- Path display ---
+ipcMain.handle('format-path-display', async (event, fullPath, mode, aliases) => {
+  let resolvedAliases = aliases;
+  let resolvedMode = mode;
+  if (resolvedAliases == null) {
+    const row = cachedPrepare('SELECT value FROM settings WHERE key = ?').get(pathDisplay.SETTINGS_KEYS.pathAliases);
+    resolvedAliases = pathDisplay.parsePathAliases(row && row.value);
+  }
+  if (resolvedMode == null) {
+    const row = cachedPrepare('SELECT value FROM settings WHERE key = ?').get(pathDisplay.SETTINGS_KEYS.pathDisplayMode);
+    resolvedMode = pathDisplay.normalizePathDisplayMode(row && row.value);
+  }
+  return pathDisplay.formatPathForDisplay(fullPath, resolvedMode, resolvedAliases);
+});
+
+// --- Semantic search ---
+ipcMain.handle('find-similar-models', async (event, modelId, limit) =>
+  semanticSearch.findSimilarEnsured(db, modelId, limit)
+);
+ipcMain.handle('resolve-model-ids-by-paths', async (event, filePaths) => {
+  const paths = Array.isArray(filePaths) ? filePaths.filter((p) => typeof p === 'string' && p) : [];
+  if (!paths.length) return [];
+  const ids = [];
+  const stmt = cachedPrepare('SELECT id FROM models WHERE filePath = ?');
+  for (const fp of paths) {
+    const row = stmt.get(fp);
+    if (row?.id) ids.push(row.id);
+  }
+  return ids;
+});
+ipcMain.handle('ensure-model-embedding', async (event, modelId) =>
+  semanticSearch.ensureEmbeddingForModel(db, modelId)
+);
+ipcMain.handle('bootstrap-model-embeddings', async (event, limit) =>
+  semanticSearch.bootstrapMissingEmbeddings(db, { limit: limit || 200 })
+);
+
+// --- Geometry near-dupes ---
+ipcMain.handle('find-near-duplicates', async (event, threshold) =>
+  geometryFingerprint.findNearDuplicates(db, threshold == null ? 0.92 : threshold)
+);
+ipcMain.handle('store-model-geometry', async (event, modelId, stats) =>
+  geometryFingerprint.storeGeometry(db, modelId, stats || {})
+);
+ipcMain.handle('compute-stl-geometry', async (event, modelId, filePath) => {
+  const id = Number(modelId);
+  const fp = String(filePath || '');
+  if (!Number.isInteger(id) || id <= 0 || !fp) return { ok: false, reason: 'invalid' };
+  if (!/\.stl$/i.test(fp) || fp.includes('::')) return { ok: false, reason: 'not binary stl' };
+  try {
+    const buf = fs.readFileSync(fp);
+    const stats = geometryFingerprint.fingerprintFromStlBuffer(buf);
+    if (!stats) return { ok: false, reason: 'unsupported stl' };
+    const row = geometryFingerprint.storeGeometry(db, id, stats);
+    return { ok: true, row };
+  } catch (err) {
+    return { ok: false, reason: err.message || 'failed' };
+  }
+});
+
+// --- Dedup ignores + move detection helpers ---
+ipcMain.handle('dedup-ignore-hash', async (event, hash, reason) =>
+  dedupIgnores.markIgnore(db, hash, reason)
+);
+ipcMain.handle('dedup-unignore-hash', async (event, hash) =>
+  dedupIgnores.unmarkIgnore(db, hash)
+);
+ipcMain.handle('dedup-list-ignores', async () => dedupIgnores.listIgnored(db));
+ipcMain.handle('dedup-match-moves', async (event, missingPaths, newFiles) =>
+  moveDetect.buildMovePairs(missingPaths || [], newFiles || [])
+);
+
+// --- Soft delete / trash / undo ---
+ipcMain.handle('soft-delete-model', async (event, modelId) =>
+  softDelete.softRemoveFromLibrary(db, modelId)
+);
+ipcMain.handle('restore-model', async (event, modelId) =>
+  softDelete.restoreModel(db, modelId)
+);
+ipcMain.handle('list-recently-removed', async (event, limit) =>
+  softDelete.listRecentlyRemoved(db, limit || 100)
+);
+ipcMain.handle('purge-trash', async (event, days) =>
+  softDelete.purgeOlderThan(db, days == null ? 30 : days)
+);
+ipcMain.handle('undo-last-edit', async () => metadataUndoStack.undoLast());
+ipcMain.handle('record-undo-edit', async (event, label) => {
+  // Renderer records undo via a follow-up; main stack used for main-side ops
+  return { ok: true, size: metadataUndoStack.size(), label: label || null };
+});
+
+// --- Print stats + queue board ---
+ipcMain.handle('get-print-stats', async (event, range) =>
+  printStats.aggregatePrintStats(db, range || {})
+);
+ipcMain.handle('get-print-queue', async () => ({
+  board: printQueue.getQueueBoard(db),
+  filaments: printQueue.filamentTotalsPerColumn(db)
+}));
+ipcMain.handle('start-print-from-queue', async (event, modelId, options) =>
+  printQueue.startPrint(db, modelId, options || {})
+);
+ipcMain.handle('move-print-queue-status', async (event, modelId, status) =>
+  printQueue.moveToStatus(db, modelId, status)
+);
+
+// --- G-code / sliced files ---
+ipcMain.handle('list-sliced-files', async (event, modelId) =>
+  gcodeIndex.listForModel(db, modelId)
+);
+ipcMain.handle('index-sliced-files', async (event, modelId, modelPath) =>
+  gcodeIndex.indexForModel(db, modelId, modelPath)
+);
+ipcMain.handle('parse-sliced-file', async (event, filePath) => {
+  const fp = String(filePath || '');
+  if (!/\.gcode$/i.test(fp)) return { ok: false, reason: 'Only .gcode headers are parsed' };
+  const text = fs.readFileSync(fp, 'utf8');
+  return { ok: true, meta: gcodeIndex.parseGcodeHeader(text) };
+});
+ipcMain.handle('attach-gcode-to-model', async (event, payload = {}) => {
+  const modelIdRaw = payload.modelId ?? payload.model_id;
+  let modelId = Number(modelIdRaw);
+  const modelPath = payload.modelPath || payload.modelFilePath || null;
+  if ((!Number.isInteger(modelId) || modelId <= 0) && modelPath) {
+    const row = getModelByFilePath(modelPath);
+    modelId = row?.id ? Number(row.id) : 0;
+  }
+  if (!Number.isInteger(modelId) || modelId <= 0) {
+    return { ok: false, reason: 'model not found' };
+  }
+
+  let gcodePath = payload.filePath || payload.gcodePath || null;
+  if (!gcodePath) {
+    if (isServerMode) {
+      return { ok: false, reason: 'filePath required in server mode' };
+    }
+    const win = getWindowFromEvent(event);
+    const result = await dialog.showOpenDialog(win || undefined, {
+      title: 'Attach G-code',
+      properties: ['openFile'],
+      filters: [
+        { name: 'G-code', extensions: ['gcode', 'bgcode'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    if (result.canceled || !result.filePaths?.length) {
+      return { ok: false, reason: 'cancelled' };
+    }
+    gcodePath = result.filePaths[0];
+  }
+
+  try {
+    const attached = gcodeIndex.attachGcode(db, modelId, gcodePath);
+    if (event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('gcode-attached', {
+        modelId,
+        filePath: attached.filePath,
+        files: attached.files
+      });
+    }
+    return attached;
+  } catch (err) {
+    return { ok: false, reason: err.message || 'attach failed' };
+  }
+});
+ipcMain.handle('detach-gcode-from-model', async (event, payload = {}) => {
+  const modelId = Number(payload.modelId ?? payload.model_id);
+  const filePath = payload.filePath || payload.gcodePath;
+  if (!Number.isInteger(modelId) || modelId <= 0 || !filePath) {
+    return { ok: false, reason: 'invalid' };
+  }
+  return gcodeIndex.detachGcode(db, modelId, filePath);
+});
+ipcMain.handle('send-sliced-to-printer', async (event, payload = {}) => {
+  const printerId = payload.printerId ?? payload.printer_id;
+  const filePath = payload.filePath || payload.slicedFilePath;
+  let printer = payload.printer || null;
+  if (!printer && printerId) {
+    try { printer = printerManager.getPrinterById(db, printerId); } catch (_) { printer = null; }
+  }
+  return gcodeIndex.sendToPrinter(printer, filePath);
+});
+
+// --- Filament cost ---
+ipcMain.handle('get-filament-low-stock', async () => filamentCost.lowStockFilaments(db));
+ipcMain.handle('get-filament-library-spend', async () => filamentCost.librarySpend(db));
+
+// --- Maintenance notifications ---
+ipcMain.handle('get-due-maintenance-reminders', async () => {
+  const due = maintenanceNotify.getDueReminders(db);
+  const printTriggers = maintenanceNotify.checkPrintCountTriggers(db);
+  return {
+    due,
+    printTriggers,
+    notifications: [...due, ...printTriggers].map(maintenanceNotify.formatNotification)
+  };
+});
+ipcMain.handle('dismiss-maintenance-reminder', async (event, reminderId) =>
+  maintenanceNotify.dismissReminder(db, reminderId)
+);
+ipcMain.handle('check-maintenance-on-launch', async () => {
+  const due = maintenanceNotify.getDueReminders(db);
+  const printTriggers = maintenanceNotify.checkPrintCountTriggers(db);
+  const notifications = [...due, ...printTriggers].map(maintenanceNotify.formatNotification);
+  const webhook = cachedPrepare('SELECT value FROM settings WHERE key = ?').get('maintenanceWebhookUrl');
+  if (webhook && webhook.value && notifications.length) {
+    await maintenanceNotify.emitWebhook(webhook.value, { notifications });
+  }
+  return { count: notifications.length, notifications };
+});
 
 async function getAllPrintersHandler() {
   try {
@@ -7414,10 +7924,11 @@ ipcMain.handle('show-input-dialog', async (event, options) => {
   // Create a simple input dialog window
   const inputWindow = new BrowserWindow({
     width: 400,
-    height: 200,
+    height: 220,
     resizable: false,
     modal: true,
     parent: senderWindow,
+    autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -7429,6 +7940,7 @@ ipcMain.handle('show-input-dialog', async (event, options) => {
     show: false,
     backgroundColor: '#2d2d2d'
   });
+  try { inputWindow.setMenu(null); } catch (_) { /* Linux may not support */ }
 
   await inputWindow.loadFile(path.join(__dirname, 'input-dialog.html'), {
     query: {
@@ -8327,10 +8839,20 @@ ipcMain.handle('get-duplicate-files', async () => {
       });
     }
     
-    // Filter out unique files
-    return Object.fromEntries(
+    // Filter out unique files; annotate intentional "not a duplicate" marks
+    const multi = Object.fromEntries(
       Object.entries(duplicates).filter(([_, files]) => files.length > 1)
     );
+    const ignored = new Set(dedupIgnores.listIgnored(db).map((r) => r.hash));
+    const annotated = {};
+    for (const [hash, files] of Object.entries(multi)) {
+      annotated[hash] = {
+        files,
+        ignored: ignored.has(hash),
+        hash
+      };
+    }
+    return annotated;
   } catch (error) {
     console.error('Error getting duplicate files:', error);
     throw error;
@@ -9279,6 +9801,76 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
     });
   }
   
+  // Collections / Find similar (renderer handles UI)
+  menuItems.push({ type: 'separator' });
+  menuItems.push({
+    label: filePaths.length > 1 ? `Add ${filePaths.length} to Collection…` : 'Add to Collection…',
+    click: () => {
+      if (event.sender && !event.sender.isDestroyed()) {
+        event.sender.send('context-add-to-collection', { filePaths });
+      }
+    }
+  });
+  if (filePaths.length === 1) {
+    menuItems.push({
+      label: 'Find Similar…',
+      click: () => {
+        if (event.sender && !event.sender.isDestroyed()) {
+          event.sender.send('context-find-similar', { filePaths });
+        }
+      }
+    });
+    menuItems.push({
+      label: 'Attach G-code…',
+      click: async () => {
+        const modelFilePath = filePaths[0];
+        if (isServerMode) {
+          if (event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('context-attach-gcode', { filePath: modelFilePath });
+          }
+          return;
+        }
+        try {
+          const model = getModelByFilePath(modelFilePath);
+          if (!model?.id) {
+            await dialog.showMessageBox({
+              type: 'warning',
+              title: 'Attach G-code',
+              message: 'Model not found in the library.'
+            });
+            return;
+          }
+          const win = getWindowFromEvent(event);
+          const result = await dialog.showOpenDialog(win || undefined, {
+            title: 'Attach G-code to model',
+            properties: ['openFile'],
+            filters: [
+              { name: 'G-code', extensions: ['gcode', 'bgcode'] },
+              { name: 'All Files', extensions: ['*'] }
+            ]
+          });
+          if (result.canceled || !result.filePaths?.length) return;
+          const attached = gcodeIndex.attachGcode(db, model.id, result.filePaths[0]);
+          if (event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('gcode-attached', {
+              modelId: model.id,
+              modelPath: modelFilePath,
+              filePath: attached.filePath,
+              files: attached.files
+            });
+          }
+        } catch (err) {
+          console.error('Attach G-code failed:', err);
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Attach G-code',
+            message: err.message || 'Could not attach G-code'
+          });
+        }
+      }
+    });
+  }
+
   // Add "Open Directory" only if NOT in server mode
   if (!isServerMode) {
     menuItems.push({
@@ -10298,11 +10890,13 @@ ipcMain.handle('show-context-menu', async (event, fileIdentifier) => {
         }
         if (confirmed) {
           try {
-            deleteModelsByFilePaths(filePaths);
+            const result = softRemoveModelsByFilePaths(filePaths);
             if (isServerMode && global.broadcastEvent) {
               global.broadcastEvent('refresh-grid');
+              global.broadcastEvent('library-soft-removed', { removed: result.removed });
             } else {
               event.sender.send('refresh-grid');
+              event.sender.send('library-soft-removed', { removed: result.removed });
             }
           } catch (error) {
             console.error('Error removing from library:', error);
@@ -10686,7 +11280,10 @@ async function deleteLibraryFiles(filePaths, options = {}) {
     const deletedNow = [];
     await Promise.all(slice.map(async (filePath) => {
       try {
-        const disk = await unlinkLibraryFile(filePath);
+        const trashFn = (shell && typeof shell.trashItem === 'function')
+          ? (p) => shell.trashItem(p)
+          : null;
+        const disk = await trashLibraryFile(filePath, { trashFn });
         if (!disk.ok) {
           failed.push({ filePath, code: disk.code, message: disk.message });
           if (loggedFailures < 3) {
@@ -12826,15 +13423,20 @@ const getDuplicatesHandler = async (event, includeZipOrOptions = false) => {
         });
       }
 
+      const ignored = new Set(dedupIgnores.listIgnored(db).map((r) => r.hash));
       const duplicateGroups = [];
       for (const group of groupsByHash.values()) {
         if (group.files.length > 1) {
-          duplicateGroups.push({ hash: group.hash, files: group.files });
+          duplicateGroups.push({
+            hash: group.hash,
+            files: group.files,
+            ignored: ignored.has(group.hash)
+          });
         }
       }
 
       console.log('Found duplicate groups:', duplicateGroups.length);
-      // Array of { hash, files } — leaner than a hash-keyed object for large result sets
+      // Array of { hash, files, ignored } — leaner than a hash-keyed object for large result sets
       return duplicateGroups;
     } catch (error) {
       lastError = error;
@@ -15192,6 +15794,21 @@ async function saveModel(modelData) {
         const finalPrintCount = printFields.print_count;
         const finalLastPrintedAt = printFields.last_printed_at;
         const finalParentModel = parentModel !== undefined ? (parentModel || null) : existingModelData.parentModel;
+        if (parentModel !== undefined) {
+          const parentCheck = parentSafety.validateParentAssignment(
+            db,
+            existingModel.id,
+            finalParentModel,
+            { force: !!(modelData.forceParent || modelData.force) }
+          );
+          if (!parentCheck.ok) {
+            const err = new Error(parentCheck.error || parentCheck.warn || 'Invalid parent model');
+            err.code = parentCheck.forceRequired ? 'PARENT_FORCE_REQUIRED' : 'PARENT_CYCLE';
+            err.warn = parentCheck.warn || null;
+            err.forceRequired = !!parentCheck.forceRequired;
+            throw err;
+          }
+        }
         const finalLicense = license !== undefined ? (license || null) : existingModelData.license;
         const finalRating = rating !== undefined ? normalizeModelRating(rating) : normalizeModelRating(existingModelData.rating);
         const finalFavorite = favorite !== undefined ? (favorite ? 1 : 0) : (existingModelData.favorite ? 1 : 0);
@@ -15264,6 +15881,15 @@ async function saveModel(modelData) {
       } else {
         // Insert new model
         console.log('Inserting new model');
+
+        if (parentModel) {
+          const childName = fileName || path.basename(filePath || '');
+          if (parentSafety.wouldCreateCycle(db, childName, parentModel)) {
+            const err = new Error(`Assigning parent "${parentModel}" would create a cycle`);
+            err.code = 'PARENT_CYCLE';
+            throw err;
+          }
+        }
         
         const printFields = printEvents.resolvePrintFieldsOnSave(null, { printed, printStatus });
         const dateAdded = new Date().toISOString();
@@ -15463,6 +16089,111 @@ async function saveModelFromUpload(payload) {
   });
 }
 ipcHandlerRegistry.set('save-model-from-upload', async (event, payload) => await saveModelFromUpload(payload));
+
+function getPrimaryStlHomeDirectory() {
+  try {
+    const row = cachedPrepare('SELECT value FROM settings WHERE key = ?').get('stlHomeDirectories');
+    if (row && row.value) {
+      const parsed = JSON.parse(row.value);
+      if (Array.isArray(parsed) && parsed.length && parsed[0]) return String(parsed[0]);
+    }
+  } catch (_) { /* ignore */ }
+  try {
+    const legacy = cachedPrepare('SELECT value FROM settings WHERE key = ?').get('stlHome');
+    if (legacy && legacy.value) return String(legacy.value).trim();
+  } catch (_) { /* ignore */ }
+  return '';
+}
+
+/**
+ * Write dropped/uploaded files into STL Home / Inbox and incrementally scan that folder.
+ * Reuses saveModel for each written file (same outcome as extension inbox import for binaries).
+ */
+async function uploadFilesToInbox(payload) {
+  if (!db) throw new Error('Database not ready');
+  const files = Array.isArray(payload && payload.files) ? payload.files : [];
+  if (!files.length) throw new Error('No files to upload');
+
+  const stlHome = getPrimaryStlHomeDirectory();
+  if (!stlHome) throw new Error('Set STL Home in Settings before uploading to Inbox.');
+
+  const folderName = inboxUploadLib.normalizeInboxFolderName(
+    (payload && payload.inboxFolderName) || getSettingValueOr('inboxFolderName', 'Inbox')
+  );
+  const inboxDir = inboxUploadLib.resolveInboxPath(stlHome, folderName);
+  const resolvedInbox = path.resolve(inboxDir);
+  if (!fs.existsSync(resolvedInbox)) fs.mkdirSync(resolvedInbox, { recursive: true });
+
+  const written = [];
+  const errors = [];
+  for (const file of files) {
+    try {
+      const name = inboxUploadLib.safeUploadBaseName(file && file.fileName);
+      if (!inboxUploadLib.isAllowedUploadName(name)) {
+        errors.push({ fileName: name, error: 'Unsupported file type' });
+        continue;
+      }
+      const b64 = file && file.fileBase64;
+      if (!b64 || typeof b64 !== 'string') {
+        errors.push({ fileName: name, error: 'Missing file data' });
+        continue;
+      }
+      const buffer = Buffer.from(b64, 'base64');
+      if (!buffer.length) {
+        errors.push({ fileName: name, error: 'Empty file' });
+        continue;
+      }
+      let target = path.join(resolvedInbox, name);
+      let targetResolved = path.resolve(target);
+      if (!targetResolved.startsWith(resolvedInbox)) {
+        errors.push({ fileName: name, error: 'Invalid path' });
+        continue;
+      }
+      if (fs.existsSync(targetResolved)) {
+        const ext = path.extname(name);
+        const stem = path.basename(name, ext);
+        target = path.join(resolvedInbox, `${stem}-${Date.now()}${ext}`);
+        targetResolved = path.resolve(target);
+      }
+      fs.writeFileSync(targetResolved, buffer);
+      written.push({ filePath: targetResolved, fileName: path.basename(targetResolved) });
+    } catch (err) {
+      errors.push({ fileName: file && file.fileName, error: err.message || String(err) });
+    }
+  }
+
+  // Incremental scan of the inbox folder only
+  let scanResult = null;
+  try {
+    if (typeof scanDirectoryHandler === 'function') {
+      scanResult = await scanDirectoryHandler(null, resolvedInbox, { isStlHomeScan: false });
+    } else if (ipcHandlerRegistry.has('scan-directory')) {
+      scanResult = await ipcHandlerRegistry.get('scan-directory')(null, resolvedInbox, {});
+    }
+  } catch (scanErr) {
+    console.warn('[Inbox upload] scan failed:', scanErr && scanErr.message ? scanErr.message : scanErr);
+  }
+
+  // Also import any extension inbox sidecars if present alongside
+  try {
+    await runExtensionInboxImport('upload-to-inbox');
+  } catch (_) { /* optional */ }
+
+  return {
+    ok: errors.length === 0,
+    count: written.length,
+    written,
+    errors,
+    inboxDir: resolvedInbox,
+    scanResult,
+    message: written.length
+      ? `Uploaded ${written.length} file(s) to ${folderName}`
+      : (errors[0] && errors[0].error) || 'No files uploaded'
+  };
+}
+
+ipcMain.handle('upload-to-inbox', async (event, payload) => uploadFilesToInbox(payload || {}));
+ipcHandlerRegistry.set('upload-to-inbox', async (event, payload) => uploadFilesToInbox(payload || {}));
 
 // Add this function before saveModel
 function verifyDatabaseIntegrity() {

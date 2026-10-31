@@ -1,0 +1,19 @@
+.inbox-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99990;
+  background: rgba(10, 14, 22, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.inbox-drop-overlay[hidden] { display: none !important; }
+.inbox-drop-message {
+  padding: 24px 32px;
+  border: 2px dashed var(--primary-accent, #00d4ff);
+  border-radius: 16px;
+  color: var(--text, #fff);
+  font-size: 1.25rem;
+  background: var(--surface, #1e1e2e);
+}

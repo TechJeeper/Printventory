@@ -13,6 +13,103 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+/** Normalize #rgb / #rrggbb to lowercase #rrggbb, or null if not a hex color. */
+function parseHexColor(hex) {
+  if (!hex || typeof hex !== 'string') return null;
+  const m = hex.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!m) return null;
+  let h = m[1];
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  return `#${h.toLowerCase()}`;
+}
+
+function isLightHexColor(hex) {
+  const normalized = parseHexColor(hex);
+  if (!normalized) return false;
+  const r = parseInt(normalized.slice(1, 3), 16);
+  const g = parseInt(normalized.slice(3, 5), 16);
+  const b = parseInt(normalized.slice(5, 7), 16);
+  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luminance > 0.55;
+}
+
+/** Apply grid thumbnail background and keep model-details readable on light colors. */
+function applyModelBackgroundColor(color) {
+  const hex = parseHexColor(color) || '#070147';
+  document.documentElement.style.setProperty('--model-background-color', hex);
+  if (isLightHexColor(hex)) {
+    document.documentElement.style.setProperty('--model-details-bg', 'rgba(0, 0, 0, 0.45)');
+  } else {
+    document.documentElement.style.removeProperty('--model-details-bg');
+  }
+  return hex;
+}
+
+function getSettingColorValue(selectId, customInputId) {
+  const select = document.getElementById(selectId);
+  const customInput = document.getElementById(customInputId);
+  if (!select) return null;
+  if (select.value === 'custom') {
+    return parseHexColor(customInput?.value) || '#ffffff';
+  }
+  return select.value;
+}
+
+function syncSettingColorSelect(selectId, customInputId, savedValue, { allowNonHex = false } = {}) {
+  const select = document.getElementById(selectId);
+  const customInput = document.getElementById(customInputId);
+  if (!select) return savedValue;
+
+  const value = savedValue || '';
+  const hex = parseHexColor(value);
+  const optionValues = Array.from(select.options).map((o) => o.value);
+
+  if (value && value !== 'custom' && optionValues.includes(value)) {
+    select.value = value;
+    if (customInput && hex) customInput.value = hex;
+    if (customInput) {
+      customInput.disabled = allowNonHex && (value === 'rainbow' || value === 'pastel-rainbow');
+    }
+  } else if (hex) {
+    select.value = 'custom';
+    if (customInput) {
+      customInput.value = hex;
+      customInput.disabled = false;
+    }
+  } else {
+    select.selectedIndex = 0;
+    const fallbackHex = parseHexColor(select.value);
+    if (customInput && fallbackHex) customInput.value = fallbackHex;
+    if (customInput) customInput.disabled = false;
+  }
+
+  return getSettingColorValue(selectId, customInputId);
+}
+
+function bindSettingColorControls(selectId, customInputId, { allowNonHex = false } = {}) {
+  const select = document.getElementById(selectId);
+  const customInput = document.getElementById(customInputId);
+  if (!select || !customInput || select.dataset.colorBound === '1') return;
+  select.dataset.colorBound = '1';
+
+  const syncDisabled = () => {
+    const v = select.value;
+    const isSpecial = allowNonHex && (v === 'rainbow' || v === 'pastel-rainbow');
+    customInput.disabled = isSpecial;
+    if (!isSpecial && v !== 'custom') {
+      const hex = parseHexColor(v);
+      if (hex) customInput.value = hex;
+    }
+  };
+
+  select.addEventListener('change', syncDisabled);
+  customInput.addEventListener('input', () => {
+    select.value = 'custom';
+    customInput.disabled = false;
+  });
+  syncDisabled();
+}
+
 console.log('[Renderer] script loaded');
 window.addEventListener('DOMContentLoaded', () => {
   console.log('[Renderer] DOMContentLoaded fired');
@@ -501,6 +598,76 @@ window.toggleDedupFullscreen = function toggleDedupFullscreen() {
   dialog.classList.toggle('modal-fullscreen');
   window.syncDedupFullscreenButton(dialog.classList.contains('modal-fullscreen'));
 };
+window.syncPrintQueueFullscreenButton = function syncPrintQueueFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('print-queue-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.togglePrintQueueFullscreen = function togglePrintQueueFullscreen() {
+  const dialog = document.getElementById('print-queue-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncPrintQueueFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncCollectionsManagerFullscreenButton = function syncCollectionsManagerFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('collections-manager-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.toggleCollectionsManagerFullscreen = function toggleCollectionsManagerFullscreen() {
+  const dialog = document.getElementById('collections-manager-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncCollectionsManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncMetadataEditorFullscreenButton = function syncMetadataEditorFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('metadata-editor-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.toggleMetadataEditorFullscreen = function toggleMetadataEditorFullscreen() {
+  const dialog = document.getElementById('metadata-editor-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncMetadataEditorFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncJobsManagerFullscreenButton = function syncJobsManagerFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('jobs-manager-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.toggleJobsManagerFullscreen = function toggleJobsManagerFullscreen() {
+  const dialog = document.getElementById('jobs-manager-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncJobsManagerFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
+window.syncRecentlyRemovedFullscreenButton = function syncRecentlyRemovedFullscreenButton(isFullscreen) {
+  const btn = document.getElementById('recently-removed-fullscreen-toggle');
+  if (!btn) return;
+  const full = !!isFullscreen;
+  btn.title = full ? 'Exit Full Screen' : 'Full Screen';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', full ? 'true' : 'false');
+};
+window.toggleRecentlyRemovedFullscreen = function toggleRecentlyRemovedFullscreen() {
+  const dialog = document.getElementById('recently-removed-dialog');
+  if (!dialog) return;
+  dialog.classList.toggle('modal-fullscreen');
+  window.syncRecentlyRemovedFullscreenButton(dialog.classList.contains('modal-fullscreen'));
+};
 
 // Purge Models: expose confirm action early so Purge button onclick works in Docker/server mode
 window.confirmPurgeModelsFromDialog = async function confirmPurgeModelsFromDialog() {
@@ -631,7 +798,8 @@ window.createBackupFromDialog = async function createBackupFromDialog() {
       return;
     }
     const success = await window.electron.backupDatabase();
-    if (success && window.electron.showMessage) await window.electron.showMessage('Success', 'Database backup created successfully');
+    if (success && typeof window.showToast === 'function') window.showToast('Database backup created successfully', { type: 'success' });
+    else if (success && window.electron.showMessage) await window.electron.showMessage('Success', 'Database backup created successfully');
   } catch (err) {
     console.error('Backup error:', err);
     if (window.electron?.showMessage) await window.electron.showMessage('Error', 'Failed to create database backup');
@@ -799,10 +967,12 @@ window.savePerformanceSettingsFromDialog = async function savePerformanceSetting
     applyMaxFileSizeMB(newMaxFileSize);
     const dialog = document.getElementById('performance-settings-dialog');
     if (dialog && typeof dialog.close === 'function') dialog.close();
-    if (window.electron.showMessage) await window.electron.showMessage('Success', 'Performance settings saved successfully');
+    if (typeof window.showToast === 'function') window.showToast('Performance settings saved successfully', { type: 'success' });
+    else if (window.electron.showMessage) await window.electron.showMessage('Success', 'Performance settings saved successfully');
   } catch (err) {
     console.error('Performance save error:', err);
-    if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to save');
+    if (typeof window.showToast === 'function') window.showToast(err.message || 'Failed to save', { type: 'error' });
+    else if (window.electron?.showMessage) await window.electron.showMessage('Error', err.message || 'Failed to save');
   }
 };
 
@@ -1493,9 +1663,7 @@ function runScanSTLHomeImpl() {
       console.log('[Scan STL Home] scan complete');
     } catch (err) {
       console.error('[Scan STL Home] scan error:', err);
-      if (window.electron && typeof window.electron.showMessage === 'function') {
-        await window.electron.showMessage('Scan STL Home Error', err.message || String(err));
-      }
+      await notifyScanDirectoryFailure(err);
     } finally {
       isScanning = false;
       if (scanButton) { scanButton.disabled = false; scanButton.style.opacity = ''; scanButton.style.cursor = ''; }
@@ -4160,11 +4328,17 @@ function parsePath(filePath) {
   };
 }
 
-// Helper function to get the current model file path
+// Helper function to get the current model file path.
+// Do not require #model-details to be visible — Enter Multi-Edit hides it first.
 function getCurrentModelFilePath() {
   const pathTreeContainer = document.getElementById('path-tree-container');
-  if (pathTreeContainer) {
-    return pathTreeContainer.getAttribute('data-file-path') || '';
+  const fromTree =
+    pathTreeContainer?.getAttribute('data-file-path') ||
+    pathTreeContainer?.dataset?.filePath ||
+    '';
+  if (fromTree) return fromTree;
+  if (typeof currentModelDetailsPath === 'string' && currentModelDetailsPath) {
+    return currentModelDetailsPath;
   }
   return '';
 }
@@ -4361,54 +4535,10 @@ async function showModelDetails(filePath) {
       // Insert after the Model Details header
       modelDetailsHeader.insertAdjacentElement('afterend', enterMultiEditButton);
 
-      // Add click handler
-      enterMultiEditButton.addEventListener('click', async () => { // Made async
-        isMultiSelectMode = true;
-        const multiEditPanel = document.getElementById('multi-edit-panel');
-        detailsPanel.classList.add('hidden');
-        multiEditPanel.classList.remove('hidden');
-        
-        // Update the other toggle button's state and text
-        const toggleButton = document.getElementById('edit-mode-toggle');
-        if (toggleButton) {
-          toggleButton.textContent = 'Exit Multi-Edit Mode';
-          toggleButton.classList.add('active');
-        }
-        
-        // Add the current model to selection when entering multi-edit mode
-        const currentFilePath = getCurrentModelFilePath();
-        if (currentFilePath) {
-          const storedPath = addToSelectedModels(currentFilePath);
-          const normalizedCurrentPath = normalizePathForComparison(currentFilePath);
-          // Mark the corresponding DOM element as selected
-          const fileItems = document.querySelectorAll('.file-item');
-          fileItems.forEach(item => {
-            const itemPath = item.getAttribute('data-filepath') || item.dataset.filepath;
-            if (normalizePathForComparison(itemPath) === normalizedCurrentPath) {
-              item.classList.add('selected');
-            }
-          });
-        }
-        
-        // *** ADDED DROPDOWN POPULATION LOGIC ***
-        try {
-          await populateModelDesignerDropdown(null, 'multi-designer');
-          await populateModelLicenseDropdown(null, 'multi-license');
-          await populateParentModelDropdown(null, 'multi-parent');
-          await populateTagSelect('multi-tag-select', 'multi-tags');
-          await populateRemoveTagSelect();
-        } catch (error) {
-          console.error('Error populating multi-edit dropdowns:', error);
-        }
-        // ****************************************
-
-        await showMultiEditPanel(); // *** ADDED CALL TO ATTACH LISTENERS ***
-        
-        // Update the selected count
-        updateSelectedCount();
-
-        // Scroll the multi-edit panel into view
-        multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Add click handler — capture path before hiding details (details hide clears some path readers)
+      enterMultiEditButton.addEventListener('click', async () => {
+        const seedPath = getCurrentModelFilePath() || currentModelDetailsPath || '';
+        await enterMultiEditMode(seedPath);
       });
     }
 
@@ -4677,10 +4807,43 @@ async function showModelDetails(filePath) {
       detailsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
 
+    // Collections / sliced files / find-similar hooks
+    try {
+      window.currentModelId = model.id || null;
+      window.currentModelPath = model.filePath || filePath || null;
+      detailsPanel.dataset.modelId = model.id != null ? String(model.id) : '';
+      const colHost = document.getElementById('model-collections-list');
+      if (colHost && model.id && window.electron?.getCollectionsForModel) {
+        const cols = await window.electron.getCollectionsForModel(model.id);
+        colHost.innerHTML = (cols || []).map((c) => `<span class="tag">${String(c.name || '').replace(/</g, '&lt;')}</span>`).join('') || '<span class="feature-muted">Not in a collection — right-click to add</span>';
+      } else if (colHost) {
+        colHost.innerHTML = '<span class="feature-muted">Not in a collection — right-click to add</span>';
+      }
+      if (model.id && window.FeaturePanels?.loadSlicedFiles) {
+        window.FeaturePanels.loadSlicedFiles(model.id, model.filePath || filePath);
+      }
+      // Opportunistically index geometry for find-similar / near-dup
+      if (model.id && model.filePath && /\.stl$/i.test(model.filePath) && !String(model.filePath).includes('::')) {
+        window.electron.computeStlGeometry?.(model.id, model.filePath).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Feature panel details hook failed', err);
+    }
+
     // Hide multi-edit panel if it's open and clear its form fields
     const multiEditPanel = document.getElementById('multi-edit-panel');
     multiEditPanel.classList.add('hidden');
     clearMultiEditFormFields(); // Clear form fields when switching to single-edit mode
+
+    // Leave multi-edit mode so later grid clicks open details instead of silent toggles
+    if (isMultiSelectMode) {
+      isMultiSelectMode = false;
+      const editBtn = document.getElementById('edit-mode-toggle');
+      if (editBtn) {
+        editBtn.textContent = 'Multi-Edit Mode';
+        editBtn.classList.remove('active');
+      }
+    }
 
     // Maintain selection state
     document.querySelectorAll('.file-item').forEach(item => {
@@ -5303,15 +5466,25 @@ const DEDUP_PREVIEW_CONCURRENCY = 4;
 const DEDUP_ITEM_HEIGHT = 171;
 const DEDUP_OVERSCAN = 6;
 
-/** Normalize IPC payload: new array form, or legacy hash→files object. */
-function normalizeDuplicateGroups(duplicates) {
+/** Normalize IPC payload: annotated hash map, array form, or legacy hash→files object. */
+function normalizeDuplicateGroups(duplicates, { includeIgnored = false } = {}) {
   if (!duplicates) return [];
   if (Array.isArray(duplicates)) {
-    return duplicates.filter((g) => g && Array.isArray(g.files) && g.files.length > 1);
+    return duplicates
+      .filter((g) => g && Array.isArray(g.files) && g.files.length > 1)
+      .filter((g) => includeIgnored || !g.ignored)
+      .map((g) => ({ hash: g.hash, files: g.files, ignored: !!g.ignored }));
   }
   return Object.entries(duplicates)
-    .filter(([, files]) => Array.isArray(files) && files.length > 1)
-    .map(([hash, files]) => ({ hash, files }));
+    .map(([hash, value]) => {
+      if (Array.isArray(value)) return { hash, files: value, ignored: false };
+      if (value && Array.isArray(value.files)) {
+        return { hash: value.hash || hash, files: value.files, ignored: !!value.ignored };
+      }
+      return null;
+    })
+    .filter((g) => g && g.files.length > 1)
+    .filter((g) => includeIgnored || !g.ignored);
 }
 
 function setDuplicatePreviewPlaceholder(previewEl) {
@@ -5367,8 +5540,17 @@ function loadDuplicatePreviewsInBackground(tasks, generation) {
 
 function createDuplicateGroupElement(group, selectedPaths) {
   const groupEl = document.createElement('div');
-  groupEl.className = 'duplicate-group';
+  groupEl.className = 'duplicate-group' + (group.ignored ? ' ignored-dedup-group' : '');
   groupEl.dataset.hash = group.hash || '';
+  if (group.ignored) groupEl.dataset.ignored = '1';
+  groupEl.addEventListener('click', () => {
+    window._dedupActiveHash = group.hash || '';
+    document.querySelectorAll('.duplicate-group.active-dedup-group').forEach((el) => el.classList.remove('active-dedup-group'));
+    groupEl.classList.add('active-dedup-group');
+    if (typeof window.FeaturePanels?.updateDedupIgnoreButtons === 'function') {
+      window.FeaturePanels.updateDedupIgnoreButtons();
+    }
+  });
 
   const preview = document.createElement('div');
   preview.className = 'duplicate-preview';
@@ -5380,6 +5562,13 @@ function createDuplicateGroupElement(group, selectedPaths) {
   const header = document.createElement('div');
   header.className = 'duplicate-header';
   header.textContent = `${group.files.length} duplicate files found`;
+  if (group.ignored) {
+    const badge = document.createElement('span');
+    badge.className = 'ignored-dedup-badge';
+    badge.textContent = 'Not a duplicate';
+    badge.title = 'Marked intentional — use Undo mark to show in Easy/Delete again';
+    header.appendChild(badge);
+  }
   filesList.appendChild(header);
 
   const preferredDir = getDedupPreferredDirectory();
@@ -6253,7 +6442,8 @@ async function loadDuplicateFiles(skipHashCheck = false, refreshOnly = false) {
       includeZip,
       filters: scopeFilters || undefined
     });
-    const groups = normalizeDuplicateGroups(duplicatesRaw);
+    const showIgnored = !!document.getElementById('dedup-show-ignored')?.checked;
+    const groups = normalizeDuplicateGroups(duplicatesRaw, { includeIgnored: showIgnored });
     const isGeneratingHashes = await window.electron.isGeneratingHashes();
     console.log(`Loaded ${groups.length} duplicate groups (includeZip=${includeZip}, generatingHashes=${isGeneratingHashes})`);
     
@@ -8655,51 +8845,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     ]);
   });
 
-  // Update the edit mode toggle button listener
-  document.getElementById('edit-mode-toggle')?.addEventListener('click', async () => { // Ensure async
-    isMultiSelectMode = !isMultiSelectMode;
-    const button = document.getElementById('edit-mode-toggle');
-    const multiEditPanel = document.getElementById('multi-edit-panel');
-    const detailsPanel = document.getElementById('model-details');
-    
-    if (isMultiSelectMode) {
-      button.textContent = 'Exit Multi-Edit Mode'; // Changed from Single-Edit
-      button.classList.add('active');
-      multiEditPanel.classList.remove('hidden');
-      detailsPanel.classList.add('hidden');
-      
-      // Populate dropdowns
-      try {
-        await populateModelDesignerDropdown(null, 'multi-designer');
-        await populateModelLicenseDropdown(null, 'multi-license');
-        await populateParentModelDropdown(null, 'multi-parent');
-        await populateTagSelect('multi-tag-select', 'multi-tags');
-        await populateRemoveTagSelect();
-      } catch (error) {
-        console.error('Error populating multi-edit dropdowns:', error);
-      }
-      
-      await showMultiEditPanel(); // Call to attach listeners
-      
-      multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } else {
-      // Clear selection when disabling multiselect
-      selectedModels.clear();
-      document.querySelectorAll('.file-item').forEach(item => item.classList.remove('selected'));
-      multiEditPanel.classList.add('hidden');
-      // Make sure details panel is shown if nothing else is selected
-      if (selectedModels.size === 0) {
-         detailsPanel.classList.remove('hidden'); // Remove hidden class if no models selected
-         closeDetailsPanel(); // Or potentially call closeDetailsPanel if preferred
-      }
-      button.textContent = 'Multi-Edit Mode';
-      button.classList.remove('active');
-      // Call exitMultiEditMode if needed for cleanup
-      exitMultiEditMode(); 
-    }
-    updateSelectedCount();
-  });
-
   // Invert Filter button click handler
   document.getElementById('invert-filter-button')?.addEventListener('click', async () => {
     const button = document.getElementById('invert-filter-button');
@@ -8811,23 +8956,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Load background color setting
+  bindSettingColorControls('model-background-color', 'model-background-color-custom');
+  bindSettingColorControls('render-color', 'render-color-custom', { allowNonHex: true });
+
   const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
-  if (backgroundColor) {
-    document.documentElement.style.setProperty('--model-background-color', backgroundColor);
-    document.getElementById('model-background-color').value = backgroundColor;
-  }
+  const resolvedBg = syncSettingColorSelect(
+    'model-background-color',
+    'model-background-color-custom',
+    backgroundColor || '#070147'
+  );
+  applyModelBackgroundColor(resolvedBg);
 
   // Load render color setting
   const renderColor = await window.electron.getSetting('renderColor');
-  if (renderColor) {
-    const renderColorSelect = document.getElementById('render-color');
-    if (renderColorSelect) {
-      renderColorSelect.value = renderColor;
-    }
-    window.currentRenderColor = renderColor;
-  } else {
-    window.currentRenderColor = '#cccccc';
-  }
+  const resolvedRenderColor = syncSettingColorSelect(
+    'render-color',
+    'render-color-custom',
+    renderColor || '#cccccc',
+    { allowNonHex: true }
+  );
+  window.currentRenderColor = resolvedRenderColor || '#cccccc';
 
   // Load lighting setting
   const renderLighting = await window.electron.getSetting('renderLighting');
@@ -8851,10 +8999,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.getElementById('save-settings')?.addEventListener('click', async () => {
-    const color = document.getElementById('model-background-color').value;
-    const renderColor = document.getElementById('render-color').value;
+    const color = getSettingColorValue('model-background-color', 'model-background-color-custom');
+    const renderColor = getSettingColorValue('render-color', 'render-color-custom');
     const renderLighting = document.getElementById('render-lighting').checked;
     const theme = document.getElementById('ui-theme')?.value || 'modern-cyan';
+    const accentCustom = document.getElementById('accent-color-custom')?.value || '#00d4ff';
+    const hidePrintBadge = !!document.getElementById('hide-print-status-badge')?.checked;
+    const inboxFolderName = (document.getElementById('inbox-folder-name')?.value || 'Inbox').trim() || 'Inbox';
     
     // Check if render settings changed
     const oldRenderColor = window.currentRenderColor || '#cccccc';
@@ -8862,26 +9013,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     const renderSettingsChanged = (oldRenderColor !== renderColor) || (oldRenderLighting !== renderLighting);
 
-    // Update CSS variable for model background
-    document.documentElement.style.setProperty('--model-background-color', color);
+    // Update CSS variable for model background (and details overlay contrast)
+    applyModelBackgroundColor(color);
     
-    // Update UI theme
-    document.body.setAttribute('data-theme', theme);
+    document.body.setAttribute('data-ui-theme', theme);
+    if (window.ThemeMode?.forceDark) window.ThemeMode.forceDark();
     
     // Save to settings
     await window.electron.saveSetting('modelBackgroundColor', color);
     await window.electron.saveSetting('renderColor', renderColor);
     await window.electron.saveSetting('renderLighting', renderLighting.toString());
     await window.electron.saveSetting('uiTheme', theme);
+    await window.electron.saveSetting('theme', 'dark');
+    await window.electron.saveSetting('accentColor', theme === 'custom' ? accentCustom : '');
+    await window.electron.saveSetting('hidePrintStatusBadge', hidePrintBadge ? '1' : '0');
+    await window.electron.saveSetting('inboxFolderName', inboxFolderName);
     
     // Update global variable
     window.currentRenderColor = renderColor;
     window.currentRenderLighting = renderLighting;
     
-    // Apply theme colors dynamically
     applyThemeColors(theme);
+    if (theme === 'custom' && window.ThemeMode?.applyCustomAccent) {
+      window.ThemeMode.applyCustomAccent(accentCustom);
+    }
+    document.body.classList.toggle('hide-print-status-badge', hidePrintBadge);
     
     settingsDialog.close();
+    if (typeof window.showToast === 'function') {
+      window.showToast('Theme settings saved', { type: 'success', duration: 2500 });
+    }
 
     // Ask to regenerate thumbnails if color or lighting changed
     if (renderSettingsChanged) {
@@ -8933,9 +9094,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Function to apply theme colors
+  // Function to apply theme colors (accent presets).
   function applyThemeColors(theme) {
     const root = document.documentElement;
+    if (theme === 'custom') {
+      const accentCustom = document.getElementById('accent-color-custom')?.value || '#00d4ff';
+      if (window.ThemeMode?.applyCustomAccent) {
+        window.ThemeMode.applyCustomAccent(accentCustom);
+        return;
+      }
+    }
     switch(theme) {
       case 'modern-purple':
         root.style.setProperty('--primary-accent', '#a855f7');
@@ -8991,15 +9159,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     root.style.setProperty('--primary-gradient', accent);
     root.style.setProperty('--primary-gradient-hover', accentHover);
   }
+  window.applyThemeColors = applyThemeColors;
 
-  // Load theme on startup
+  // Load accent on startup (appearance is dark-only)
   const savedTheme = await window.electron.getSetting('uiTheme') || 'modern-cyan';
-  document.body.setAttribute('data-theme', savedTheme);
+  const savedAccent = await window.electron.getSetting('accentColor');
+  document.body.setAttribute('data-ui-theme', savedTheme);
+  if (window.ThemeMode?.forceDark) window.ThemeMode.forceDark();
+  if ((await window.electron.getSetting('theme')) !== 'dark') {
+    await window.electron.saveSetting('theme', 'dark');
+  }
   const uiThemeSelect = document.getElementById('ui-theme');
   if (uiThemeSelect) {
     uiThemeSelect.value = savedTheme;
   }
+  const accentPicker = document.getElementById('accent-color-custom');
+  if (accentPicker && savedAccent) accentPicker.value = savedAccent;
+  if (uiThemeSelect && accentPicker && uiThemeSelect.dataset.accentBound !== '1') {
+    uiThemeSelect.dataset.accentBound = '1';
+    const syncAccentPicker = () => {
+      accentPicker.disabled = uiThemeSelect.value !== 'custom';
+    };
+    syncAccentPicker();
+    uiThemeSelect.addEventListener('change', syncAccentPicker);
+    accentPicker.addEventListener('input', () => {
+      if (uiThemeSelect.value === 'custom' && window.ThemeMode?.applyCustomAccent) {
+        window.ThemeMode.applyCustomAccent(accentPicker.value);
+      }
+    });
+  }
   applyThemeColors(savedTheme);
+  if (savedTheme === 'custom' && savedAccent && window.ThemeMode?.applyCustomAccent) {
+    window.ThemeMode.applyCustomAccent(savedAccent);
+  }
+  try {
+    const hideBadge = await window.electron.getSetting('hidePrintStatusBadge');
+    document.body.classList.toggle('hide-print-status-badge', hideBadge === '1' || hideBadge === 'true');
+    const hideCb = document.getElementById('hide-print-status-badge');
+    if (hideCb) hideCb.checked = hideBadge === '1' || hideBadge === 'true';
+    const inboxName = await window.electron.getSetting('inboxFolderName');
+    const inboxInput = document.getElementById('inbox-folder-name');
+    if (inboxInput) inboxInput.value = inboxName || 'Inbox';
+  } catch (_) { /* ignore */ }
 
   // Add dismiss button handler
   document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
@@ -9607,7 +9808,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     } catch (error) {
       console.error('Error scanning directory:', error);
-      await window.electron.showMessage('Error', 'Failed to scan directory');
+      await notifyScanDirectoryFailure(error, { path: directoryPath && directoryPath[0] });
     } finally {
       hideProgressBars();
       // Re-enable the button
@@ -9621,6 +9822,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // About dialog handler
   window._electronRealEventHandlers['open-keyboard-shortcuts'] = function() {
+    if (window.Shortcuts?.renderShortcutsDialog) window.Shortcuts.renderShortcutsDialog();
     const dialog = document.getElementById('keyboard-shortcuts-dialog');
     if (dialog) dialog.showModal();
   };
@@ -10705,11 +10907,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   document.getElementById('add-tag-manager-button')?.addEventListener('click', createTagFromManagerInput);
+  // Issue #109: Enter in search must not add a tag. Add is button or Ctrl/Cmd+Enter in the name field only.
   document.getElementById('new-tag-manager-name')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       e.stopPropagation();
       createTagFromManagerInput();
+    } else if (e.key === 'Enter') {
+      // Plain Enter in the name field: do not auto-add (use + button or Ctrl+Enter)
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+  document.getElementById('tag-manager-search')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+  document.getElementById('tag-manager-dialog')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const t = e.target;
+    if (t && (t.id === 'tag-manager-search' || t.id === 'new-tag-manager-name' || t.tagName === 'INPUT')) {
+      if (!(t.id === 'new-tag-manager-name' && (e.ctrlKey || e.metaKey))) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
     }
   });
 
@@ -11111,7 +11334,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const sortSelect = document.getElementById('sort-select');
       const allModels = await window.electron.getAllModels(sortSelect ? sortSelect.value : 'date-desc', 0);
       if (allModels.length === 0) {
-        await window.electron.showMessage('Information', 'No models found in the database.');
+        if (window.EmptyState?.handleNoModelsFound) {
+          await window.EmptyState.handleNoModelsFound();
+        } else if (typeof window.showToast === 'function') {
+          window.showToast('No models in the library yet — scan a folder to begin.', { type: 'info' });
+        } else {
+          await window.electron.showMessage('Information', 'No models found in the database.');
+        }
         return;
       }
       isRegeneratingThumbnails = true;
@@ -11880,12 +12109,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add this function to initialize all settings including performance settings
   async function initializeSettings() {
     try {
-      // Initialize other settings as needed
       const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
-      if (backgroundColor) {
-        document.documentElement.style.setProperty('--model-background-color', backgroundColor);
-        document.getElementById('model-background-color').value = backgroundColor;
-      }
+      const resolvedBg = syncSettingColorSelect(
+        'model-background-color',
+        'model-background-color-custom',
+        backgroundColor || '#070147'
+      );
+      applyModelBackgroundColor(resolvedBg);
     } catch (error) {
       console.error('Error initializing settings:', error);
     }
@@ -12470,6 +12700,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         skippedDueToSize += Number(result && result.skippedDueToSize) || 0;
       } catch (error) {
         console.error('Error during STL Home scan:', dir, error);
+        await notifyScanDirectoryFailure(error, { background: true, path: dir });
       }
     }
     try {
@@ -12619,6 +12850,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             skippedDueToSize += Number(scanInfo && scanInfo.skippedDueToSize) || 0;
           } catch (err) {
             console.error('Background STL Home scan on startup:', stlHomeDir, err);
+            await notifyScanDirectoryFailure(err, { background: true, path: stlHomeDir });
           }
         }
         try {
@@ -14420,7 +14652,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const progressDialog = document.getElementById('progress-dialog');
       const progressTitle = document.getElementById('progress-title');
       const progressMessage = document.getElementById('progress-message');
-      const progressBar = document.getElementById('progress-bar');
+      const progressBar = document.getElementById('progress-bar-dialog') || document.getElementById('progress-bar');
       const progressStatus = document.getElementById('progress-status');
       
       if (progressDialog && progressTitle && progressMessage && progressBar && progressStatus) {
@@ -14541,7 +14773,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progressDialog = document.getElementById('progress-dialog');
     const progressTitle = document.getElementById('progress-title');
     const progressMessage = document.getElementById('progress-message');
-    const progressBar = document.getElementById('progress-bar');
+    const progressBar = document.getElementById('progress-bar-dialog') || document.getElementById('progress-bar');
     const progressStatus = document.getElementById('progress-status');
     
     // Set initial values
@@ -14555,7 +14787,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   
   window.electron.on('update-progress', (data) => {
-    const progressBar = document.getElementById('progress-bar');
+    const progressBar = document.getElementById('progress-bar-dialog') || document.getElementById('progress-bar');
     const progressMessage = document.getElementById('progress-message');
     const progressStatus = document.getElementById('progress-status');
     
@@ -16400,6 +16632,12 @@ async function toggleModelSelection(fileElement, filePath) {
       fileElement.classList.add('selected');
     }
     await updateSelectedCount(); // This will clear form fields if selection is now 0
+    // Re-surface multi-edit if a zip/bundle panel hid it while mode stayed active
+    if (selectedModels.size > 0) {
+      await showMultiEditPanel();
+    } else {
+      exitMultiEditMode();
+    }
   }
 }
 
@@ -16561,6 +16799,37 @@ async function maybeShowSkippedFileSizeNotice(count) {
     await window.electron.saveSetting(HIDE_SKIPPED_FILE_SIZE_NOTICE_KEY, '1');
   }
 }
+
+/** One toast per path for background STL Home / Docker misconfig (avoid interval spam). */
+const _scanFailureNotifyKeys = new Set();
+
+/**
+ * Surface scan root failures (missing mount, host path in Docker, permissions) instead of
+ * treating them as an empty folder. Safe to call from nested catch sites — notifies once.
+ */
+async function notifyScanDirectoryFailure(error, options = {}) {
+  const background = !!(options && options.background);
+  const msg = String((error && error.message) || error || 'Failed to scan directory');
+  if (error && error._scanFailureNotified) return;
+  if (error) error._scanFailureNotified = true;
+
+  const dedupeKey = `${background ? 'bg' : 'fg'}:${options.path || msg}`;
+  if (background) {
+    if (_scanFailureNotifyKeys.has(dedupeKey)) return;
+    _scanFailureNotifyKeys.add(dedupeKey);
+    if (typeof window.showToast === 'function') {
+      window.showToast(msg, { type: 'error', duration: 10000 });
+    }
+    return;
+  }
+
+  if (window.electron && typeof window.electron.showMessage === 'function') {
+    await window.electron.showMessage('Scan Error', msg);
+    return;
+  }
+  alert(msg);
+}
+window.notifyScanDirectoryFailure = notifyScanDirectoryFailure;
 
 async function scanAndRenderDirectory(directoryPath, background = false, isStlHomeScan = false, scanUiOptions = null) {
   const suppressSizeNotice = !!(scanUiOptions && scanUiOptions.suppressSizeNotice);
@@ -17005,13 +17274,11 @@ async function scanAndRenderDirectory(directoryPath, background = false, isStlHo
   } catch (error) {
     console.error('Error scanning directory:', error);
     window._scanThumbnailProgress = null;
-    if (!background) {
+    if (!background && renderProgressText) {
       renderProgressText.textContent = `Error: ${error.message}`;
-      // Show alert for UNC path validation errors
-      if (error.message && error.message.includes('UNC path')) {
-        alert(`Error: ${error.message}\n\nIn server mode, all file paths must be UNC paths (e.g., \\\\server\\share\\path\\to\\file.stl)`);
-      }
     }
+    await notifyScanDirectoryFailure(error, { background, path: directoryPath });
+    throw error;
   } finally {
     window._scanThumbnailProgress = null;
     // Clean up event listener
@@ -17102,6 +17369,13 @@ async function renderFiles(files, skipThumbnail = false, viewEntireLibrary = fal
     console.log('Grid refresh is disabled, skipping renderFiles');
     return;
   }
+  // First-run empty state (Feature 17)
+  try {
+    if (window.EmptyState?.refresh) {
+      // Defer so virtual grid can settle; empty when total library is 0
+      setTimeout(() => { window.EmptyState.refresh().catch(() => {}); }, 0);
+    }
+  } catch (_) { /* ignore */ }
   
   // Defensive: If dateAddedFilter is active and we're being called with many models,
   // filter them to preserve the "new models" view
@@ -17202,6 +17476,7 @@ async function renderFile(file, container, skipThumbnail = false) {
   const fileElement = document.createElement('div');
   fileElement.className = 'file-item';
   fileElement.dataset.filepath = file.filePath; // Use dataset for data attributes
+  if (file.id != null) fileElement.dataset.id = String(file.id);
   registerFileItemElement(fileElement, file.filePath);
 
   if (isInSelectedModels(file.filePath)) {
@@ -18402,17 +18677,10 @@ async function handleFileClick(event, filePath) {
         multiEditPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     } else {
-      // Exiting multi-select mode - update UI
-      isMultiSelectMode = false;
-      if (multiEditPanel) {
-        multiEditPanel.classList.add('hidden');
-      }
+      // Exiting multi-select mode — exitMultiEditMode hides both panels until a model is clicked
       if (button) {
         button.textContent = 'Multi-Edit Mode';
         button.classList.remove('active');
-      }
-      if (detailsPanel && selectedModels.size === 0) {
-        detailsPanel.classList.remove('hidden');
       }
       exitMultiEditMode();
     }
@@ -18513,6 +18781,9 @@ document.addEventListener('keydown', async (event) => {
   // Show keyboard shortcuts dialog: Ctrl+Shift+/ (?) or Cmd+Shift+/
   if (mod && event.shiftKey && event.key === '?') {
     event.preventDefault();
+    if (window.Shortcuts && typeof window.Shortcuts.renderShortcutsDialog === 'function') {
+      window.Shortcuts.renderShortcutsDialog();
+    }
     const dialog = document.getElementById('keyboard-shortcuts-dialog');
     if (dialog) dialog.showModal();
     return;
@@ -18568,10 +18839,9 @@ document.addEventListener('keydown', async (event) => {
   // Toggle Multi-Edit: Ctrl+E / Cmd+E
   if (mod && (event.key === 'e' || event.key === 'E')) {
     event.preventDefault();
-    const toggleBtn = document.getElementById('edit-mode-toggle');
-    const enterMultiBtn = document.getElementById('enter-multi-edit-button');
-    if (enterMultiBtn && detailsVisible) enterMultiBtn.click();
-    else if (toggleBtn) toggleBtn.click();
+    if (typeof toggleMultiEditMode === 'function') {
+      toggleMultiEditMode();
+    }
     return;
   }
   
@@ -21545,6 +21815,59 @@ function attachTileLongPress(fileElement, onLongPress) {
   }, true);
 }
 
+/** Enter multi-edit, optionally seeding selection with the current model path. */
+async function enterMultiEditMode(seedPath = '') {
+  const path =
+    seedPath ||
+    getCurrentModelFilePath() ||
+    (typeof currentModelDetailsPath === 'string' ? currentModelDetailsPath : '') ||
+    '';
+
+  isMultiSelectMode = true;
+  const button = document.getElementById('edit-mode-toggle');
+  const multiEditPanel = document.getElementById('multi-edit-panel');
+  const detailsPanel = document.getElementById('model-details');
+
+  if (button) {
+    button.textContent = 'Exit Multi-Edit Mode';
+    button.classList.add('active');
+  }
+  if (detailsPanel) detailsPanel.classList.add('hidden');
+  if (multiEditPanel) multiEditPanel.classList.remove('hidden');
+
+  if (path) {
+    addToSelectedModels(path);
+    const normalized = normalizePathForComparison(path);
+    document.querySelectorAll('.file-item').forEach((item) => {
+      const itemPath = item.getAttribute('data-filepath') || item.dataset.filepath;
+      if (normalizePathForComparison(itemPath) === normalized) {
+        item.classList.add('selected');
+      }
+    });
+  }
+
+  try {
+    await populateModelDesignerDropdown(null, 'multi-designer');
+    await populateModelLicenseDropdown(null, 'multi-license');
+    await populateParentModelDropdown(null, 'multi-parent');
+    await populateTagSelect('multi-tag-select', 'multi-tags');
+    await populateRemoveTagSelect();
+  } catch (error) {
+    console.error('Error populating multi-edit dropdowns:', error);
+  }
+
+  await showMultiEditPanel();
+  await updateSelectedCount();
+}
+
+async function toggleMultiEditMode() {
+  if (isMultiSelectMode) {
+    exitMultiEditMode();
+    return;
+  }
+  await enterMultiEditMode();
+}
+
 // Update the exit multi-edit mode functionality
 function exitMultiEditMode() {
   // Clear selections
@@ -21556,12 +21879,14 @@ function exitMultiEditMode() {
   // Update the selection count display
   updateSelectedCount();
   
-  // Switch back to single edit mode
+  // Switch back to single edit mode. Keep model-details hidden until the user
+  // selects a model again — showing an empty panel (with listeners stripped below)
+  // blocks the edit area and matches "deselect and still can't edit".
   isMultiSelectMode = false;
   const multiEditPanel = document.getElementById('multi-edit-panel');
   const detailsPanel = document.getElementById('model-details');
   multiEditPanel.classList.add('hidden');
-  detailsPanel.classList.remove('hidden');
+  detailsPanel.classList.add('hidden');
   document.getElementById('edit-mode-toggle').textContent = 'Multi-Edit Mode';
   document.getElementById('edit-mode-toggle').classList.remove('active');
 
@@ -21671,22 +21996,9 @@ function exitMultiEditMode() {
   console.log('Exited multi-edit mode and cleared tags');
 }
 
-// Update the edit mode toggle handler
+// Single listener — earlier copies also toggled isMultiSelectMode and cancelled each other out
 document.getElementById('edit-mode-toggle')?.addEventListener('click', () => {
-  isMultiSelectMode = !isMultiSelectMode;
-  const button = document.getElementById('edit-mode-toggle');
-  const multiEditPanel = document.getElementById('multi-edit-panel');
-  const detailsPanel = document.getElementById('model-details');
-
-  if (isMultiSelectMode) {
-    button.textContent = 'Exit Multi-Edit Mode';
-    button.classList.add('active');
-    multiEditPanel.classList.remove('hidden');
-    detailsPanel.classList.add('hidden');
-    showMultiEditPanel();
-  } else {
-    exitMultiEditMode();
-  }
+  toggleMultiEditMode();
 });
 
 // Update the exit button handler
@@ -21961,18 +22273,6 @@ async function showSearchableListDialog(fieldType, targetSelectId, mode = 'filte
   });
 }
 
-// Helper function to get current model file path
-function getCurrentModelFilePath() {
-  const modelDetails = document.getElementById('model-details');
-  if (modelDetails && !modelDetails.classList.contains('hidden')) {
-    const pathContainer = document.getElementById('path-tree-container');
-    if (pathContainer && pathContainer.dataset.filePath) {
-      return pathContainer.dataset.filePath;
-    }
-  }
-  return null;
-}
-
 // Initialize List button event listeners
 function initializeListButtons() {
   document.querySelectorAll('.list-button').forEach(button => {
@@ -22032,27 +22332,35 @@ async function initializeAppOnce() {
     // Initialize settings inline instead of calling initializeSettings()
     console.log('2. Loading settings...');
     try {
-      // Initialize other settings as needed
       const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
-      if (backgroundColor) {
-        document.documentElement.style.setProperty('--model-background-color', backgroundColor);
-        const colorPicker = document.getElementById('model-background-color');
-        if (colorPicker) {
-          colorPicker.value = backgroundColor;
-        }
-      }
+      const resolvedBg = syncSettingColorSelect(
+        'model-background-color',
+        'model-background-color-custom',
+        backgroundColor || '#070147'
+      );
+      applyModelBackgroundColor(resolvedBg);
       
-      // Load UI theme
+      // Load accent (appearance is dark-only)
       const savedTheme = await window.electron.getSetting('uiTheme') || 'modern-cyan';
-      document.body.setAttribute('data-theme', savedTheme);
+      const savedAccent = await window.electron.getSetting('accentColor');
+      document.body.setAttribute('data-ui-theme', savedTheme);
+      if (window.ThemeMode?.forceDark) window.ThemeMode.forceDark();
+      if ((await window.electron.getSetting('theme')) !== 'dark') {
+        await window.electron.saveSetting('theme', 'dark');
+      }
       const uiThemeSelect = document.getElementById('ui-theme');
       if (uiThemeSelect) {
         uiThemeSelect.value = savedTheme;
       }
+      const accentPicker = document.getElementById('accent-color-custom');
+      if (accentPicker && savedAccent) accentPicker.value = savedAccent;
       
       // Apply theme colors if function exists
       if (typeof applyThemeColors === 'function') {
         applyThemeColors(savedTheme);
+        if (savedTheme === 'custom' && savedAccent && window.ThemeMode?.applyCustomAccent) {
+          window.ThemeMode.applyCustomAccent(savedAccent);
+        }
       } else {
         // Fallback: apply theme colors inline
         const root = document.documentElement;
@@ -22378,9 +22686,14 @@ async function autoSaveModel(field, value, filePath) {
     
     // Save the updated model
     await window.electron.saveModel(model);
-    
-    // If this was called from the details panel, update the displayed file
-    await updateModelElement(filePath);
+
+    // List/grid queries omit tags; drop stale in-memory tag lists so cards re-fetch.
+    if (field === 'tags') {
+      refreshVisibleGridAfterBulkTagChange([filePath]);
+    } else {
+      // If this was called from the details panel, update the displayed file
+      await updateModelElement(filePath);
+    }
     
     // Also update the checkbox in the model details panel if it's showing this model
     if (field === 'printed' || field === 'printStatus') {
@@ -22706,12 +23019,23 @@ function clearMultiEditFormFields() {
 
 // Add this code to set up event handlers for multi-edit mode controls
 async function showMultiEditPanel() {
-  // Populate dropdowns with existing data - REMOVED redundant calls
-  // populateModelDesignerDropdown('', 'multi-designer');
-  // populateModelLicenseDropdown('', 'multi-license');
-  // populateParentModelDropdown('', 'multi-parent');
-  // populateTagSelect('multi-tag-select', 'multi-tags');
-  
+  // Always surface the multi-edit panel and collapse the filter stack.
+  // Entering multi-edit from an already-open model-details leaves detailsAreOpen
+  // true, so SidebarLayout's MutationObserver will not collapse filters — the edit
+  // form stays buried under "More filters". Docker/browser (and mobile sheets)
+  // then look like "only filters" with no reachable edit area.
+  const multiEditPanel = document.getElementById('multi-edit-panel');
+  const detailsPanel = document.getElementById('model-details');
+  if (multiEditPanel) multiEditPanel.classList.remove('hidden');
+  if (detailsPanel) detailsPanel.classList.add('hidden');
+  document.getElementById('bundle-details')?.classList.add('hidden');
+  if (typeof window.SidebarLayout?.collapseFiltersForDetails === 'function') {
+    window.SidebarLayout.collapseFiltersForDetails();
+  }
+  requestAnimationFrame(() => {
+    multiEditPanel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
   // Show tags already on the selection, and keep the list visible.
   const multiTagsContainer = document.getElementById('multi-tags');
   if (multiTagsContainer) {
@@ -22834,24 +23158,6 @@ async function showMultiEditPanel() {
   // Initialize List buttons for multi-edit panel
   initializeListButtons();
 }
-
-// Update the edit mode toggle handler to call showMultiEditPanel when entering multi-edit mode
-document.getElementById('edit-mode-toggle')?.addEventListener('click', () => {
-  isMultiSelectMode = !isMultiSelectMode;
-  const button = document.getElementById('edit-mode-toggle');
-  const multiEditPanel = document.getElementById('multi-edit-panel');
-  const detailsPanel = document.getElementById('model-details');
-
-  if (isMultiSelectMode) {
-    button.textContent = 'Exit Multi-Edit Mode';
-    button.classList.add('active');
-    multiEditPanel.classList.remove('hidden');
-    detailsPanel.classList.add('hidden');
-    showMultiEditPanel();
-  } else {
-    exitMultiEditMode();
-  }
-});
 
 document.addEventListener('DOMContentLoaded', () => {
   // Add event listener for the Clear Selection button
@@ -25452,12 +25758,60 @@ function hideBundleDetailsPanel() {
   if (container?.renderVisibleItemsFn) container.renderVisibleItemsFn();
 }
 
+/**
+ * Multi-edit: toggle every model in a parent/zip/bundle group.
+ * Keeps the multi-edit panel open (unlike showBundleDetails, which hid it and trapped the UI).
+ */
+async function toggleGroupModelsInMultiSelect(groupRecord) {
+  const children = (groupRecord?.children || []).filter((c) => c?.filePath);
+  if (!children.length) return;
+
+  const allSelected = children.every((c) => isInSelectedModels(c.filePath));
+  for (const child of children) {
+    if (allSelected) removeFromSelectedModels(child.filePath);
+    else addToSelectedModels(child.filePath);
+  }
+
+  document.querySelectorAll('.file-item').forEach((item) => {
+    if (item.classList.contains('parent-model-group')) return;
+    const itemPath = item.getAttribute('data-filepath') || item.dataset.filepath;
+    if (!itemPath) return;
+    if (isInSelectedModels(itemPath)) item.classList.add('selected');
+    else item.classList.remove('selected');
+  });
+
+  // Mark the group card selected when every child is in the selection
+  document.querySelectorAll('.parent-model-group').forEach((groupEl) => {
+    if (groupEl.dataset.groupKey !== groupRecord.groupKey) return;
+    groupEl.classList.toggle('selected', !allSelected);
+  });
+
+  await updateSelectedCount();
+  if (selectedModels.size > 0) {
+    await showMultiEditPanel();
+  } else {
+    exitMultiEditMode();
+  }
+}
+
 async function showBundleDetails(groupRecord) {
   if (!groupRecord?.children?.length) return;
 
   const request = ++bundleDetailsRequest;
   currentBundleDetailsGroupKey = groupRecord.groupKey;
   currentBundleDetailsRecord = groupRecord;
+
+  // Opening group details must fully leave multi-edit — hiding the panel alone
+  // left isMultiSelectMode true so clicks could neither edit nor open details.
+  if (isMultiSelectMode) {
+    isMultiSelectMode = false;
+    const editBtn = document.getElementById('edit-mode-toggle');
+    if (editBtn) {
+      editBtn.textContent = 'Multi-Edit Mode';
+      editBtn.classList.remove('active');
+    }
+    clearMultiEditFormFields();
+  }
 
   document.getElementById('model-details')?.classList.add('hidden');
   document.getElementById('multi-edit-panel')?.classList.add('hidden');
@@ -25826,6 +26180,13 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   if (currentBundleDetailsGroupKey && groupRecord.groupKey === currentBundleDetailsGroupKey) {
     item.classList.add('bundle-details-active');
   }
+  const groupChildrenPaths = (groupRecord.children || []).filter((c) => c?.filePath);
+  if (
+    groupChildrenPaths.length > 0
+    && groupChildrenPaths.every((c) => isInSelectedModels(c.filePath))
+  ) {
+    item.classList.add('selected');
+  }
   item.dataset.groupKey = groupRecord.groupKey;
   item.dataset.groupKind = groupRecord.groupKind || 'parentModel';
   item.dataset.childCount = String(groupRecord.children.length);
@@ -26080,6 +26441,16 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   };
 
   const handleGroupCardActivate = () => {
+    // Multi-edit: select/deselect all children — do not open bundle details
+    // (that hid multi-edit and left mode stuck so users could not edit or go back).
+    if (isMultiSelectMode) {
+      if (!groupIsExpanded() && !groupExpandSuppressed(groupRecord.groupKey)) {
+        expandedSet.add(groupRecord.groupKey);
+        refreshGroupGrid();
+      }
+      toggleGroupModelsInMultiSelect(groupRecord);
+      return;
+    }
     if (groupIsExpanded()) {
       collapseThisGroup();
       return;
@@ -26091,6 +26462,11 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
   chevron.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
+    // Chevron always expands/collapses; in multi-edit skip details so the panel stays usable
+    if (isMultiSelectMode) {
+      toggleGroup();
+      return;
+    }
     handleGroupCardActivate();
   });
 
@@ -26104,7 +26480,7 @@ function createParentModelGroupItem(groupRecord, viewMode = null) {
     if (event.target.closest('.thumbnail-nav-left, .thumbnail-nav-right, .thumbnail-menu-button')) return;
     event.preventDefault();
     event.stopPropagation();
-    // Collapsed group: open parent details and expand. Expanded group: collapse.
+    // Multi-edit: toggle all children. Otherwise collapsed → details+expand; expanded → collapse.
     handleGroupCardActivate();
   });
   item.addEventListener('keydown', (event) => {
@@ -27121,6 +27497,8 @@ window.displayModels = displayModels;
 window.syncSelectionWithFilteredModels = syncSelectionWithFilteredModels;
 window.resetFilterSelectionAndDetails = resetFilterSelectionAndDetails;
 window.clearModelDetailsSidebar = clearModelDetailsSidebar;
-ithFilteredModels = syncSelectionWithFilteredModels;
-window.resetFilterSelectionAndDetails = resetFilterSelectionAndDetails;
-window.clearModelDetailsSidebar = clearModelDetailsSidebar;
+window.exitMultiEditMode = exitMultiEditMode;
+window.enterMultiEditMode = enterMultiEditMode;
+window.toggleMultiEditMode = toggleMultiEditMode;
+window.showMultiEditPanel = showMultiEditPanel;
+window.hideBundleDetailsPanel = hideBundleDetailsPanel;

@@ -4,6 +4,17 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-10-30
+
+- Multi-edit + zip/parent/bundle groups: clicking a group selects or deselects all children and keeps the multi-edit panel open (opening bundle details no longer hides multi-edit while leaving multi-select stuck so you cannot edit or go back). Chevron expands/collapses only during multi-edit.
+- Enter Multi-Edit Mode now keeps the current model selected (path was read after details were hidden, so parent-model and other bulk edits silently did nothing). Removed duplicate Multi-Edit toggle handlers that fought each other.
+- Multi-edit no longer leaves the sidebar stuck on filters: entering multi-edit collapses the filter stack and scrolls the edit panel into view, and exiting/deselecting no longer leaves an empty dead details panel (Docker/browser and mobile sheets).
+- Docker image includes modules required by current server code (`inbox-upload-lib` and related UI).
+- Docker/browser bridge exposes sliced-file, collections, and related APIs (fixes `indexSlicedFiles is not a function` in model details). Tag edits refresh grid cards so tags show on models.
+- Scanning a missing STL Home / directory (common Docker/TrueNAS host-path vs container-mount mistake) now shows a clear error instead of "No files found".
+- Thumbnail model background and model color settings include more presets plus a custom color picker.
+- MCP/server scan handlers no longer treat a stub sender as a BrowserWindow (avoids crashes when scanning from MCP).
+
 ## [3.0.1] - 2026-10-18
 
 - Upgrading from 2.x keeps models that were marked Printed. The 3.0.0 migration had filled every row with Unprinted because SQLite applies `DEFAULT` on `ADD COLUMN`, so the backfill never ran. Opening 3.0.1 also repairs databases that already hit that bug (`printed = 1` still in the DB).

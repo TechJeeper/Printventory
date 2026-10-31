@@ -1,0 +1,48 @@
+.command-palette {
+  position: fixed;
+  inset: 0;
+  z-index: 100050;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+.command-palette[hidden] { display: none !important; }
+.command-palette-panel {
+  width: min(560px, calc(100vw - 24px));
+  background: var(--surface, #1e1e2e);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.command-palette-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  outline: none;
+}
+.command-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.command-palette-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 14px;
+}
+.command-palette-item.active,
+.command-palette-item:hover {
+  background: var(--surface-raised);
+}

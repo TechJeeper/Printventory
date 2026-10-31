@@ -56,8 +56,13 @@
   }
 
   function hideDetails() {
+    const bundleWasOpen = !document.getElementById('bundle-details')?.classList.contains('hidden');
     DETAIL_IDS.forEach((id) => document.getElementById(id)?.classList.add('hidden'));
     document.body.classList.remove('mobile-details-open');
+    // Clear bundle selection state (active card highlight) — class-only hide left it stuck
+    if (bundleWasOpen && typeof window.hideBundleDetailsPanel === 'function') {
+      try { window.hideBundleDetailsPanel(); } catch (_) { /* ignore */ }
+    }
   }
 
   function closeFolderRail() {
@@ -108,7 +113,14 @@
   }
 
   function openFilters() {
+    // Closing the details sheet must not leave multi-edit half-alive: selections
+    // stay highlighted but #multi-edit-panel is hidden, so the user only sees
+    // filters and cannot reach Parent Model / other bulk fields.
+    const multiEditOpen = !document.getElementById('multi-edit-panel')?.classList.contains('hidden');
     hideDetails();
+    if (multiEditOpen && typeof window.exitMultiEditMode === 'function') {
+      try { window.exitMultiEditMode(); } catch (_) { /* ignore */ }
+    }
     closeFolderRail();
     document.body.classList.remove('mobile-menu-open');
     document.body.classList.add('mobile-sidebar-open');
@@ -573,7 +585,11 @@
 
     document.querySelectorAll('#model-details > h3, #bundle-details > h3, #multi-edit-panel > h3').forEach((head) => {
       bindSwipeDismiss(head, () => {
+        const wasMulti = head.parentElement?.id === 'multi-edit-panel';
         hideDetails();
+        if (wasMulti && typeof window.exitMultiEditMode === 'function') {
+          try { window.exitMultiEditMode(); } catch (_) { /* ignore */ }
+        }
         syncOverlay();
       });
     });
@@ -631,7 +647,11 @@
     document.querySelectorAll('[data-mobile-close-details]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
+        const wasMulti = !!btn.closest('#multi-edit-panel');
         hideDetails();
+        if (wasMulti && typeof window.exitMultiEditMode === 'function') {
+          try { window.exitMultiEditMode(); } catch (_) { /* ignore */ }
+        }
         syncOverlay();
       });
     });

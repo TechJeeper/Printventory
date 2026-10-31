@@ -437,6 +437,18 @@ function logPrintEvent(db, payload) {
       if (exists) link.run(eventId, filamentId);
     }
     applyPartUsage(db, eventId, partsUsage, quantity);
+
+    // Deduct filament grams when usage is provided (feature 13).
+    const gramsRaw = payload.filamentGrams ?? payload.filament_grams ?? payload.grams;
+    const grams = Number(gramsRaw);
+    if (filamentIds.length && Number.isFinite(grams) && grams > 0) {
+      try {
+        const filamentCost = require('./filament-cost');
+        filamentCost.ensureSchema(db);
+        filamentCost.deductFilamentUsage(db, filamentIds, grams * quantity);
+      } catch (_) { /* filament-cost optional at runtime */ }
+    }
+
     const current = db.prepare('SELECT print_status FROM models WHERE id = ?').get(modelId);
     const nextStatus = statusAfterOutcome(current?.print_status, outcome);
     db.prepare('UPDATE models SET print_status = ? WHERE id = ?').run(nextStatus, modelId);

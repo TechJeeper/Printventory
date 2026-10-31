@@ -82,6 +82,9 @@ test.describe('Scan then menu and button checks', () => {
     await expect(window.locator('#cancel-settings')).toBeVisible();
     await expect(window.locator('#ui-theme')).toBeVisible();
     await expect(window.locator('#model-background-color')).toBeVisible();
+    await expect(window.locator('#model-background-color-custom')).toBeVisible();
+    await expect(window.locator('#render-color')).toBeVisible();
+    await expect(window.locator('#render-color-custom')).toBeVisible();
     await closeDialog('settings-dialog', 'button#cancel-settings');
   });
 

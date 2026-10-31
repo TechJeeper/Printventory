@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { unlinkLibraryFile, buildDeleteSummary } = require('./delete-model-file');
+const { unlinkLibraryFile, trashLibraryFile, buildDeleteSummary } = require('./delete-model-file');
 
 async function test(name, fn) {
   try {
@@ -82,6 +82,29 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pv-delete-'));
 
   await test('omits a dialog summary when every file was deleted', () => {
     assert.strictEqual(buildDeleteSummary({ deleted: 4, alreadyMissing: 0, failed: [], total: 4 }), '');
+  });
+
+  await test('trashLibraryFile prefers shellTrash and skips unlink', async () => {
+    const file = path.join(dir, 'trash-me.stl');
+    fs.writeFileSync(file, 'stl');
+    let trashedPath = null;
+    const result = await trashLibraryFile(file, {
+      shellTrash: async (p) => { trashedPath = p; }
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.trashed, true);
+    assert.ok(trashedPath);
+    assert.strictEqual(fs.existsSync(file), true);
+    fs.unlinkSync(file);
+  });
+
+  await test('trashLibraryFile falls back to unlink without trash fn', async () => {
+    const file = path.join(dir, 'fallback.stl');
+    fs.writeFileSync(file, 'stl');
+    const result = await trashLibraryFile(file);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.trashed, false);
+    assert.strictEqual(fs.existsSync(file), false);
   });
 
   fs.rmSync(dir, { recursive: true, force: true });
