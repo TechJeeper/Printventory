@@ -4,6 +4,16 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+### Refined interface
+- New default **Graphite** theme: ash-gray surfaces with a faint aubergine cast, no decorative borders, and one accent used only for selection, focus, active filter pills and the "new" dot. The other themes in Settings now only change that accent. The styles live in `refined.css`, loaded after the existing sheets.
+- Thumbnails sit on the card surface instead of dark blue. Settings → Model Background Color has a new **Match interface (Default)** option. On first launch, a saved Dark Blue background or Modern Cyan theme, which older versions saved whenever Settings was saved, moves to the new defaults once. A theme picked after that is kept.
+- The search field is the lead control of the sidebar: taller, with a magnifier, a ⌘/ (Ctrl+/) hint, and a submit arrow that lights up once you type.
+- Scan Directory and View Entire Library become one compact row of quiet buttons, **Scan folder** and **Show all**, so they no longer compete with search. Both keep their behavior.
+- Sidebar: one-line brand row with the model count, tool tabs with line icons instead of colored round buttons, 40px controls with matching square helper buttons, and the same inset on both edges.
+- Library: Detailed cards fill the width like the Preview wall, photo thumbnails get a margin and rounded corners, and all three views share one inset. "Not printed" is no longer badged on every card, because it is the default state; other print states show a colored dot.
+- List view is one table: a tinted sticky header, hairline rows edge to edge, centered cells, sizes right-aligned, and group rows in the same type as model rows.
+- Dialogs share one flat style with a single light primary button. The Server/Docker touch layout keeps its own design and was checked for regressions.
+
 ## [3.0.1] - 2026-10-18
 
 - Upgrading from 2.x keeps models that were marked Printed. The 3.0.0 migration had filled every row with Unprinted because SQLite applies `DEFAULT` on `ADD COLUMN`, so the backfill never ran. Opening 3.0.1 also repairs databases that already hit that bug (`printed = 1` still in the DB).

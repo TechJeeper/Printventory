@@ -21,6 +21,7 @@
   <link rel="stylesheet" href="thumbnail-progress.css">
   <link rel="stylesheet" href="mobile-ui.css">
   <link rel="stylesheet" href="organize-library.css">
+<link rel="stylesheet" href="refined.css">
   <script src="vendor/three.min.js"></script>
   <script src="vendor/STLLoader.js"></script>
   <script src="vendor/3MFLoader.js"></script>
@@ -129,31 +130,26 @@
   </section>
   <div class="sidebar">
     <div class="sidebar-chrome">
-    <img src="logo.png" alt="Printventory Logo" id="logo">
-    <div class="model-stats">
-      <div id="view-count" class="model-count">0 models in view</div>
-      <div id="total-count" class="model-count">0 models total</div>
+    <div class="sidebar-brand">
+      <img src="logo-mark.png" alt="Printventory" id="logo">
+      <div class="sidebar-brand-text">
+        <div class="sidebar-brand-name">Printventory</div>
+        <div class="model-stats">
+          <div id="view-count" class="model-count">0 models in view</div>
+          <div id="total-count" class="model-count">0 models total</div>
+        </div>
+      </div>
     </div>
-    <div class="icon-buttons-container">
-      <button id="dup-button" class="icon-button" title="De-Dup">
-        <img src="dup.png" alt="De-Dup">
-      </button>
-      <button id="tag-button" class="icon-button" title="Tag - Tag Manager">
-        <img src="tag.png" alt="Tag Manager">
-      </button>
-      <button id="filament-button" class="icon-button" title="Filament - Filament Manager">
-        <img src="filament.png" alt="Filament Manager">
-      </button>
-      <button id="printer-button" class="icon-button" title="Printer - Printer Manager">
-        <img src="printer.png" alt="Printer Manager">
-      </button>
-      <button id="roulette-button" class="icon-button" title="Roulette - Print Roulette">
-        <img src="roulette.png" alt="Print Roulette">
-      </button>
-    </div>
-    <button id="scan-directory-button">Scan Directory</button>
+    <nav class="icon-buttons-container sidebar-tools" aria-label="Tools">
+      <button id="dup-button" class="icon-button" title="De-Dup"><svg class="tool-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span>Dupes</span></button>
+      <button id="tag-button" class="icon-button" title="Tag Manager"><svg class="tool-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r="1.2"/></svg><span>Tags</span></button>
+      <button id="filament-button" class="icon-button" title="Filament Manager"><svg class="tool-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/><path d="M12 3v5.5"/></svg><span>Filament</span></button>
+      <button id="printer-button" class="icon-button" title="Printer Manager"><svg class="tool-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 8h16"/><path d="M10 12h4l-1 3h-2z"/><path d="M8 18h8"/></svg><span>Printers</span></button>
+      <button id="roulette-button" class="icon-button" title="Print Roulette"><svg class="tool-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="3.5"/><circle cx="8.5" cy="8.5" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1" fill="currentColor"/></svg><span>Roulette</span></button>
+    </nav>
+    <button id="scan-directory-button" title="Scan a folder: add it to the library or pick up new files"><svg class="tool-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg><span>Scan folder</span></button>
     <button id="scan-stl-home-button" class="secondary-button" style="display: none;">Scan STL Home</button>
-    <button id="view-library-button">View Entire Library</button>
+    <button id="view-library-button" title="View the entire library (clears filters)"><svg class="tool-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg><span>Show all</span></button>
     <div id="view-library-message" class="library-view-banner">
       <!-- Updated text will appear here -->
     </div>
@@ -191,6 +187,7 @@
           <input type="search" id="search-filter-input" placeholder="Search models" enterkeyhint="search" autocomplete="off">
           <button id="filter-search-button" class="icon-button" title="Add this text to the active query (all fields)">🔍</button>
           <button id="clear-filter-search-button" class="icon-button" title="Clear search">×</button>
+          <kbd class="search-shortcut-hint" aria-hidden="true">Ctrl /</kbd>
         </div>
         <label class="search-notes-toggle" title="Include notes in all-fields search. Turn off to skip long imported descriptions. A search limited to the Notes field still matches notes.">
           <input type="checkbox" id="search-include-notes" checked>
@@ -1867,7 +1864,8 @@
           <div class="form-group">
             <label for="ui-theme">UI Theme:</label>
             <select id="ui-theme">
-              <option value="modern-cyan">Modern Cyan (Default)</option>
+              <option value="graphite">Graphite (Default)</option>
+              <option value="modern-cyan">Modern Cyan</option>
               <option value="modern-purple">Modern Purple</option>
               <option value="modern-green">Modern Green</option>
               <option value="modern-orange">Modern Orange</option>
@@ -1879,6 +1877,7 @@
           <div class="form-group">
             <label for="model-background-color">Model Background Color:</label>
             <select id="model-background-color">
+              <option value="">Match interface (Default)</option>
               <option value="#070147">Dark Blue</option>
               <option value="#1a1a1a">Dark Gray</option>
               <option value="#000000">Black</option>

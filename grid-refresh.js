@@ -99,8 +99,8 @@
     const view = spec.view || 'detailed';
     const previewColumns = Math.max(1, Math.round(Number(spec.previewColumns) || 6));
     const previewGap = spec.previewGap == null ? 2 : Number(spec.previewGap);
-    // Preview tiles use the full grid box. Detailed and list sit inside 20px of padding.
-    const contentWidth = Math.max(0, gridWidth - 40);
+    // Every view uses the full grid box (no horizontal padding in renderer.js).
+    const contentWidth = Math.max(0, gridWidth);
     const available = view === 'preview' ? gridWidth : contentWidth;
     const tile = previewTilePx(gridWidth, previewColumns, previewGap);
     const detailedColumns = detailedColumnCount(contentWidth, spec.itemWidth || 300);
