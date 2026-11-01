@@ -1786,3 +1786,88 @@ body.mobile-ui .mobile-more-actions button:first-child {
   margin: 0 -8px !important;
   padding: 0 14px !important;
 }
+
+/* ---------- View switcher as one segmented group ----------
+   Folders and Show/Hide columns are buttons too, so first/last-of-type picked the
+   wrong ends. Ends are found among .view-button siblings instead; the track is the
+   buttons' own background, and the active tab is an inset pill of equal height. */
+.grid-view-selector .view-button {
+  height: 36px !important;
+  padding: 0 16px !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  background: var(--ui-surface) !important;
+  box-shadow: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+}
+.grid-view-selector .view-button:not(.view-button ~ .view-button) {
+  border-radius: 10px 0 0 10px !important;
+  padding-left: 4px !important;
+}
+.grid-view-selector .view-button:not(:has(~ .view-button)) {
+  border-radius: 0 10px 10px 0 !important;
+  padding-right: 4px !important;
+}
+.grid-view-selector .view-button {
+  background-clip: padding-box;
+}
+/* Inner pill: drawn with an inset shadow so the tab keeps the track's height. */
+.grid-view-selector .view-button > * { pointer-events: none; }
+.grid-view-selector .view-button {
+  position: relative;
+}
+.grid-view-selector .view-button::before {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border-radius: 7px;
+  background: transparent;
+  z-index: 0;
+  transition: background-color 0.12s ease;
+}
+.grid-view-selector .view-button:not(.view-button ~ .view-button)::before { left: 4px; }
+.grid-view-selector .view-button:not(:has(~ .view-button))::before { right: 4px; }
+.grid-view-selector .view-button:hover::before {
+  background: rgba(255, 255, 255, 0.04);
+}
+.grid-view-selector .view-button.active::before {
+  background: var(--ui-hover);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.grid-view-selector .view-button.active {
+  box-shadow: none !important;
+  background: var(--ui-surface) !important;
+}
+/* Text above the pill; padding keeps label clear of the pill edge. */
+.grid-view-selector .view-button {
+  isolation: isolate;
+}
+.grid-view-selector .view-button:not(.view-button ~ .view-button),
+.grid-view-selector .view-button:not(:has(~ .view-button)) {
+  padding-left: 16px !important;
+  padding-right: 16px !important;
+}
+.grid-view-selector .view-button::before { z-index: -1; }
+
+/* Thumbnail "…" on the preview wall: smaller and lighter than on cards. */
+.file-grid.preview-wall .thumbnail-menu-button {
+  width: 22px !important;
+  height: 22px !important;
+  top: 6px !important;
+  right: 6px !important;
+  font-size: 11px !important;
+  background: rgba(31, 29, 37, 0.55) !important;
+}
+/* "…" as a centred three-dot glyph (text ellipsis sits on the baseline). */
+.file-grid .thumbnail-menu-button {
+  font-size: 0 !important;
+  color: transparent !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23eeecf2'%3E%3Ccircle cx='6' cy='12' r='1.9'/%3E%3Ccircle cx='12' cy='12' r='1.9'/%3E%3Ccircle cx='18' cy='12' r='1.9'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: center !important;
+  background-size: 16px 16px !important;
+}
+.file-grid.preview-wall .thumbnail-menu-button {
+  background-size: 13px 13px !important;
+}
