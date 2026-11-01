@@ -61,6 +61,7 @@ const filesToCopy = [
   'mobile-ui.css',
   'styles.css',
   'theme.css',
+  'refined.css',
   'preview-wall.css',
   'thumbnail-progress.css',
   'thumbnail-progress.js',

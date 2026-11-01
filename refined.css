@@ -1,0 +1,1788 @@
+/* Refined graphite layer. Loaded last: ash surfaces with a faint aubergine cast, no decorative
+   borders, one accent reserved for selection, focus and the primary action. */
+:root {
+  --ui-bg: #25242c;
+  --ui-surface: #2e2c36;
+  --ui-raised: #383641;
+  --ui-hover: #42404c;
+  --ui-line: rgba(255, 255, 255, 0.07);
+  --ui-text: #eeecf2;
+  --ui-text-2: #b5b2c0;
+  --ui-text-3: #8c899a;
+  --ui-accent: #8ab4ff;
+  --ui-radius: 10px;
+  --ui-thumb: #312f39;
+
+  --bg: var(--ui-bg);
+  --surface: var(--ui-surface);
+  --surface-raised: var(--ui-raised);
+  --border: var(--ui-line);
+  --border-strong: rgba(255, 255, 255, 0.1);
+  --text: var(--ui-text);
+  --text-muted: var(--ui-text-2);
+  --model-background-color: var(--ui-thumb);
+}
+
+body {
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  background: var(--ui-bg);
+  border-right: 1px solid var(--ui-line);
+}
+
+/* Compact brand row: mark, name and counts on one line. */
+.sidebar .sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0 20px 14px;
+  box-sizing: border-box;
+}
+.sidebar #logo {
+  width: 26px !important;
+  height: auto !important;
+  max-width: 26px !important;
+  margin: 0 !important;
+  flex: 0 0 auto;
+}
+.sidebar .sidebar-brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.sidebar .sidebar-brand-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ui-text);
+  line-height: 1.2;
+}
+.sidebar .model-stats {
+  display: flex !important;
+  gap: 6px;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
+}
+.sidebar .model-count {
+  color: var(--ui-text-3);
+  font-size: 11.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  white-space: nowrap;
+  margin: 0 !important;
+}
+/* "3348 in view · 3348 total" reads as one line. */
+.sidebar .model-count + .model-count::before {
+  content: '·';
+  margin-right: 6px;
+}
+.sidebar.details-open .sidebar-brand {
+  padding-bottom: 6px;
+}
+
+/* Tools: a tab row of line pictograms with short labels. */
+.sidebar .icon-buttons-container.sidebar-tools {
+  display: grid !important;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 2px;
+  width: calc(100% - 24px);
+  margin: 0 12px 14px !important;
+  padding: 0 0 12px !important;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--ui-line);
+  border-radius: 0;
+  box-shadow: none;
+}
+.sidebar .sidebar-tools .icon-button {
+  width: auto !important;
+  height: auto !important;
+  flex: initial !important;
+  display: flex !important;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 2px 6px !important;
+  margin: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  color: var(--ui-text-2);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.sidebar .sidebar-tools .icon-button .tool-icon {
+  opacity: 0.85;
+}
+.sidebar .sidebar-tools .icon-button:hover {
+  background: var(--ui-surface) !important;
+  color: var(--ui-text);
+}
+.sidebar .sidebar-tools .icon-button:hover .tool-icon {
+  opacity: 1;
+}
+.sidebar .sidebar-tools .icon-button:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: -2px;
+}
+
+/* Primary action: the only filled button in the sidebar. */
+#scan-directory-button {
+  background: var(--ui-text) !important;
+  color: #25262a !important;
+  border: none !important;
+  box-shadow: none !important;
+  font-weight: 600;
+  border-radius: var(--ui-radius) !important;
+}
+#scan-directory-button:hover {
+  background: #ffffff !important;
+}
+#view-library-button {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: var(--ui-radius) !important;
+}
+#view-library-button:hover {
+  background: var(--ui-hover) !important;
+}
+
+.sidebar .filter-section {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+.sidebar .filter-section label,
+.sidebar .form-group > label {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ---------- Inputs ---------- */
+.sidebar input[type="text"],
+.sidebar input[type="search"],
+.sidebar input[type="number"],
+.sidebar select,
+.sidebar textarea,
+.sidebar .input-with-icon,
+.sidebar .tags-input-container {
+  background-color: var(--ui-surface) !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  color: var(--ui-text) !important;
+}
+.sidebar .input-with-icon input {
+  background: transparent !important;
+  border: none !important;
+}
+.sidebar input:focus,
+.sidebar select:focus,
+.sidebar textarea:focus,
+.sidebar .input-with-icon:focus-within {
+  border-color: color-mix(in srgb, var(--ui-accent) 60%, transparent) !important;
+  outline: none;
+}
+.sidebar .input-with-icon button {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  opacity: 0.6;
+}
+.sidebar .input-with-icon button:hover {
+  opacity: 1;
+}
+
+select,
+select option {
+  background-color: var(--ui-surface) !important;
+  color: var(--ui-text) !important;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--ui-accent);
+}
+
+/* ---------- View switcher: segmented control ---------- */
+.grid-view-selector .folder-rail-toggle {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--ui-text-2) !important;
+  margin-right: 8px;
+}
+.grid-view-selector .folder-rail-toggle:hover,
+.grid-view-selector .folder-rail-toggle.active,
+.grid-view-selector .folder-rail-toggle[aria-pressed="true"] {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+.grid-view-selector {
+  gap: 0;
+}
+/* Segmented control: the view buttons sit on one raised track. */
+.grid-view-selector .view-button {
+  background: var(--ui-surface);
+  border: none;
+  border-radius: 0;
+  color: var(--ui-text-2);
+  padding: 7px 16px;
+  margin: 0;
+  font-weight: 500;
+  font-size: 13px;
+}
+.grid-view-selector .view-button:first-of-type {
+  border-radius: 9px 0 0 9px;
+  padding-left: 18px;
+}
+.grid-view-selector .view-button:last-of-type {
+  border-radius: 0 9px 9px 0;
+  padding-right: 18px;
+}
+.grid-view-selector .view-button:hover {
+  background: var(--ui-surface);
+  border-color: transparent;
+  color: var(--ui-text);
+}
+.grid-view-selector .view-button.active {
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  box-shadow: inset 0 0 0 3px var(--ui-surface), inset 0 0 0 100px var(--ui-hover);
+  border-radius: 9px;
+}
+.grid-view-selector .view-button.active:first-of-type { border-radius: 9px 9px 9px 9px; }
+.grid-view-selector .preview-size-switcher {
+  background: transparent !important;
+  border: none !important;
+  margin-left: 8px;
+}
+.grid-view-selector .preview-size-switcher > button {
+  background: transparent !important;
+  color: var(--ui-text-3) !important;
+  border: none !important;
+}
+.grid-view-selector .preview-size-switcher > button.active {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+.grid-view-selector-background {
+  background: var(--ui-bg) !important;
+  border-bottom: 1px solid var(--ui-line) !important;
+  box-shadow: none !important;
+}
+
+/* ---------- Detailed cards ---------- */
+.file-grid,
+.file-grid.preview-wall {
+  background-image: none !important;
+}
+.file-grid .file-item.file-item-detailed {
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+  padding: 8px 8px 0;
+}
+.file-grid .file-item.file-item-detailed:hover {
+  background: var(--ui-surface) !important;
+}
+.file-item-detailed .file-details {
+  border-top: none !important;
+}
+.parent-model-group-thumbnail {
+  border: none !important;
+  background: var(--ui-thumb) !important;
+  border-radius: 8px;
+}
+.parent-model-group-title,
+.parent-model-group-meta {
+  color: var(--ui-text);
+}
+.parent-model-group-meta {
+  color: var(--ui-text-3) !important;
+  font-size: 12px;
+}
+.parent-model-group-chevron {
+  color: var(--ui-text-3) !important;
+}
+.parent-model-group-details {
+  text-align: left !important;
+  align-items: flex-start !important;
+}
+.parent-model-group-title-row {
+  justify-content: flex-start !important;
+}
+.thumbnail-menu-button {
+  background: rgba(31, 29, 37, 0.72) !important;
+  border: none !important;
+  color: var(--ui-text) !important;
+  box-shadow: none !important;
+}
+.file-grid .metadata-value.directory-link,
+.file-item-detailed .metadata-value.directory-link {
+  color: var(--ui-text-2) !important;
+  text-decoration: none !important;
+}
+.file-grid .metadata-value.directory-link:hover {
+  color: var(--ui-text) !important;
+}
+.file-item-detailed .metadata-icon {
+  filter: grayscale(1);
+  opacity: 0.45;
+}
+.file-item-detailed .thumbnail-container {
+  box-shadow: none;
+  border-radius: 8px;
+  background: var(--ui-thumb);
+}
+.file-grid .file-item-detailed .file-name {
+  text-align: left !important;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ui-text);
+  background: transparent !important;
+  padding: 0 2px;
+  margin-top: 10px;
+}
+.file-item-detailed .metadata-item,
+.file-item-detailed .metadata-value {
+  color: var(--ui-text-2);
+  font-size: 12px;
+}
+.file-item-detailed .metadata-item img,
+.file-item-detailed .metadata-item .metadata-icon {
+  filter: grayscale(1);
+  opacity: 0.5;
+}
+.file-item-detailed .clickable-metadata .metadata-value,
+.file-item-detailed .dir-size-row a,
+.file-item-detailed .metadata-item a {
+  color: var(--ui-text-2) !important;
+}
+.file-item-detailed .model-engagement-bar {
+  border-top: none !important;
+  background: transparent !important;
+}
+
+/* Rating and favourite: quiet until used. */
+.model-star,
+.model-favorite-btn {
+  color: var(--ui-text-3) !important;
+  opacity: 0.6;
+}
+.model-star.filled,
+.model-star.active,
+.model-favorite-btn.active,
+.model-favorite-btn.is-favorite {
+  color: var(--ui-text) !important;
+  opacity: 1;
+}
+.file-item:hover .model-star,
+.file-item:hover .model-favorite-btn {
+  opacity: 1;
+}
+
+/* Grouped children: a quiet tint, no glowing accent frame. */
+.file-item-preview.parent-model-group-child,
+.file-item-detailed.parent-model-group-child {
+  background: var(--ui-surface) !important;
+  border-color: transparent !important;
+  box-shadow: inset 2px 0 0 var(--ui-text-3) !important;
+}
+.file-item-preview.parent-model-group-child:hover,
+.file-item-detailed.parent-model-group-child:hover {
+  background: var(--ui-raised) !important;
+  border-color: transparent !important;
+  box-shadow: inset 2px 0 0 var(--ui-text-2) !important;
+}
+
+/* ---------- Preview wall ---------- */
+.file-item.file-item-preview.preview-tile {
+  background: var(--ui-thumb) !important;
+  border-radius: 6px !important;
+}
+.file-item.file-item-preview.preview-tile:hover {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+.file-item.file-item-preview.preview-tile.selected,
+.file-item.selected {
+  outline: 2px solid var(--ui-accent);
+}
+.file-grid.preview-wall .file-item.file-item-preview.preview-tile.parent-model-group-child {
+  border: none !important;
+  background: var(--ui-surface) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12) !important;
+}
+
+/* ---------- Badges ---------- */
+/* "Not printed" is the default state of nearly every model: no badge. */
+.file-grid .print-status-unprinted {
+  display: none !important;
+}
+.print-status,
+.file-grid .print-status {
+  background: rgba(31, 29, 37, 0.72) !important;
+  color: var(--ui-text) !important;
+  border: none !important;
+  box-shadow: none !important;
+  backdrop-filter: blur(6px);
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 6px;
+}
+.print-status::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+  background: var(--ui-text-3);
+}
+.print-status-printed::before { background: #4ade80; }
+.print-status-queued::before { background: #facc15; }
+.print-status-printing::before { background: var(--ui-accent); }
+.print-status-failed::before { background: #f87171; }
+.print-status-mixed::before { background: #fb923c; }
+
+.new-status {
+  background: rgba(31, 29, 37, 0.72) !important;
+  color: var(--ui-text) !important;
+  border: none !important;
+  box-shadow: none !important;
+  backdrop-filter: blur(6px);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 5px !important;
+}
+
+.thumbnail-count-badge,
+.parent-model-group-corner-badge {
+  background: rgba(31, 29, 37, 0.72) !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--ui-text) !important;
+  backdrop-filter: blur(6px);
+}
+
+/* ---------- Scrollbars ---------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  border: 2px solid var(--ui-bg);
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }
+
+/* ---------- Sidebar disclosure ---------- */
+.sidebar .filter-stack-toggle {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--ui-text-2) !important;
+  padding-left: 0 !important;
+}
+.sidebar .filter-stack-toggle:hover {
+  color: var(--ui-text) !important;
+}
+
+/* Detailed card body: title, then metadata directly under it; rating pinned to the bottom. */
+.file-grid .file-item-detailed .file-details {
+  justify-content: flex-start !important;
+}
+.file-grid .file-item-detailed .metadata-container {
+  margin-top: 2px !important;
+  padding: 0 2px !important;
+  row-gap: 4px !important;
+  align-content: start !important;
+}
+.file-grid .file-item-detailed .file-name {
+  margin-bottom: 2px !important;
+}
+
+/* Group tiles: same surface as single models, no navy gradient, no cyan stack. */
+.file-grid.preview-wall .file-item.parent-model-group.parent-model-group-preview {
+  background: var(--ui-surface) !important;
+  border: none !important;
+}
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-details {
+  background: transparent !important;
+  text-align: left !important;
+  align-items: flex-start !important;
+  padding: 8px 10px !important;
+}
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-meta {
+  text-align: left !important;
+}
+.parent-model-group-corner-badge > span {
+  background: rgba(255, 255, 255, 0.14) !important;
+  border-color: rgba(255, 255, 255, 0.3) !important;
+}
+.preview-tile-overlay {
+  background: linear-gradient(to top, rgba(20, 21, 24, 0.82) 0%, rgba(20, 21, 24, 0.35) 60%, transparent 100%) !important;
+}
+
+/* "New" on the wall: a quiet accent dot instead of a label on every tile. */
+.file-grid.preview-wall .new-status {
+  font-size: 0 !important;
+  width: 7px !important;
+  height: 7px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  background: var(--ui-accent) !important;
+  backdrop-filter: none;
+  box-shadow: 0 0 0 2px rgba(31, 29, 37, 0.6) !important;
+}
+
+/* Inline list buttons next to dropdowns (folder tree, etc.): quiet, not accent-filled. */
+.sidebar .dropdown-with-list .list-button,
+.sidebar .folder-tree-button {
+  background: var(--ui-surface) !important;
+  color: var(--ui-text-2) !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+.sidebar .dropdown-with-list .list-button:hover,
+.sidebar .folder-tree-button:hover {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+
+/* Group strip on the wall: long titles truncate instead of running off the tile. */
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-title-row,
+.file-grid.preview-wall .parent-model-group-preview .parent-model-group-title {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Legacy accent ----------
+   Old rules fill buttons, icons and frames with --primary-accent. Route that to
+   neutral chrome; the theme's colour lives in --ui-accent (set by applyThemeColors). */
+:root {
+  --primary-accent: #4a4b52 !important;
+  --primary-accent-hover: #55565e !important;
+  --primary-gradient: #4a4b52 !important;
+  --primary-gradient-hover: #55565e !important;
+  --primary-shadow: rgba(0, 0, 0, 0.25) !important;
+  --primary-shadow-hover: rgba(0, 0, 0, 0.3) !important;
+  --accent-color: var(--ui-accent) !important;
+}
+
+/* ---------- Model details panel ---------- */
+#model-details > h3,
+#bundle-details > h3,
+#multi-edit-panel > h3 {
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  color: var(--ui-text) !important;
+  letter-spacing: 0 !important;
+  margin: 0 0 12px !important;
+}
+#model-details .form-group,
+#bundle-details .form-group,
+#multi-edit-panel .form-group {
+  margin-bottom: 14px;
+}
+#model-details .form-group > label,
+#bundle-details .form-group > label,
+#multi-edit-panel .form-group > label {
+  color: var(--ui-text-3) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  margin-bottom: 6px !important;
+}
+
+/* Small square helpers next to fields (list, add, reveal, log print, open link). */
+.sidebar .form-group .icon-button,
+.sidebar .designer-input-container .icon-button,
+.sidebar .print-lifecycle-controls .icon-button,
+.sidebar .path-tree-field .icon-button {
+  background: transparent !important;
+  color: var(--ui-text-2) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 6px !important;
+}
+.sidebar .form-group .icon-button:hover,
+.sidebar .designer-input-container .icon-button:hover,
+.sidebar .print-lifecycle-controls .icon-button:hover,
+.sidebar .path-tree-field .icon-button:hover {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+.sidebar .form-group .icon-button img,
+.sidebar .form-group .icon-button svg {
+  filter: none;
+  opacity: 0.85;
+}
+
+/* Secondary full-width buttons (Multi-Edit, etc.). */
+.sidebar .full-width-button,
+.sidebar .secondary-button {
+  background: var(--ui-surface) !important;
+  color: var(--ui-text) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  font-weight: 500;
+}
+.sidebar .full-width-button:hover,
+.sidebar .secondary-button:hover {
+  background: var(--ui-raised) !important;
+}
+
+/* Path tree: plain indented list, grey folder glyphs. */
+.sidebar .path-tree-container {
+  background: var(--ui-surface) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  color: var(--ui-text-2);
+  font-size: 12px;
+}
+.sidebar .path-tree-item {
+  color: var(--ui-text-2) !important;
+}
+.sidebar .path-tree-item:last-child {
+  color: var(--ui-text) !important;
+}
+.sidebar .path-tree-item [class*="icon"],
+.sidebar .path-tree-item::before {
+  filter: grayscale(1) brightness(1.3);
+  opacity: 0.55;
+}
+
+/* Text areas / notes. */
+.sidebar textarea,
+.sidebar .notes-display,
+.sidebar [class*="notes"][class*="container"] {
+  background: var(--ui-surface) !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Selected tile checkmark and selection ring use the one accent. */
+.file-item .selection-check,
+.file-item .selected-check,
+.file-item [class*="select"][class*="check"] {
+  background: var(--ui-accent) !important;
+  color: #1d1e22 !important;
+  border: none !important;
+}
+
+/* The brand row is already compact, so keep it while details are open. */
+.sidebar.details-open #logo {
+  display: block !important;
+}
+.sidebar.details-open .model-stats {
+  display: flex !important;
+}
+
+/* ---------- List view: one table, hairline rows ---------- */
+.file-grid.is-list-view .list-view-header {
+  background: var(--ui-bg) !important;
+  border: none !important;
+  border-bottom: 1px solid var(--ui-line) !important;
+  border-radius: 0 !important;
+  margin-bottom: 0 !important;
+  box-shadow: none !important;
+}
+.list-view-header [data-list-col],
+.list-view-header .sortable-header {
+  color: var(--ui-text-3) !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+.list-view-header .sortable-header:hover,
+.list-view-header .sortable-header.sort-active {
+  color: var(--ui-text) !important;
+}
+
+.file-grid.is-list-view .file-item-list,
+.file-grid.is-list-view .parent-model-group-list {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 1px solid var(--ui-line) !important;
+  border-radius: 0 !important;
+  margin: 0 !important;
+  box-shadow: none !important;
+}
+.file-grid.is-list-view .file-item-list:hover,
+.file-grid.is-list-view .parent-model-group-list:hover {
+  background: var(--ui-surface) !important;
+}
+.file-grid.is-list-view .file-item-list.selected,
+.file-grid.is-list-view .parent-model-group-list.selected {
+  background: var(--ui-surface) !important;
+  outline: none !important;
+  box-shadow: inset 2px 0 0 var(--ui-accent) !important;
+}
+.file-item-list .thumbnail-container,
+.parent-model-group-list .parent-model-group-thumbnail {
+  background: var(--ui-thumb) !important;
+  border: none !important;
+  border-radius: 6px !important;
+  width: 40px !important;
+  height: 40px !important;
+}
+.file-item-list .file-name,
+.parent-model-group-list .file-name {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--ui-text) !important;
+}
+/* Numbers and secondary columns: same font, tabular digits, muted. */
+.file-grid.is-list-view [data-list-col],
+.file-item-list .file-size-column {
+  font-family: inherit !important;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-2);
+  font-size: 12.5px;
+}
+.file-grid.is-list-view .directory-link,
+.file-grid.is-list-view [data-list-col] a {
+  color: var(--ui-text-2) !important;
+  text-decoration: none !important;
+}
+.file-grid.is-list-view .new-status {
+  font-size: 9.5px !important;
+  padding: 2px 5px !important;
+  background: transparent !important;
+  color: var(--ui-accent) !important;
+  backdrop-filter: none;
+}
+.parent-model-group-list .print-status {
+  background: transparent !important;
+  padding-left: 0 !important;
+  color: var(--ui-text-2) !important;
+}
+
+/* Column popover button in the top bar. */
+.grid-view-selector .list-view-columns-toolbar-btn {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--ui-text-2) !important;
+  margin-left: 8px;
+}
+.grid-view-selector .list-view-columns-toolbar-btn:hover {
+  background: var(--ui-surface) !important;
+  color: var(--ui-text) !important;
+}
+.file-grid.is-list-view [data-list-col] span,
+.file-grid.is-list-view [data-list-col] div {
+  font-family: inherit !important;
+}
+.file-grid.is-list-view .directory-info {
+  color: var(--ui-text-2) !important;
+}
+.file-grid.is-list-view .designer-info,
+.file-grid.is-list-view .parent-model-info,
+.file-grid.is-list-view .tags-info {
+  color: var(--ui-text-2) !important;
+}
+.list-view-header [data-list-col] span,
+.list-view-header [data-list-col] .sortable-header {
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  color: var(--ui-text-3) !important;
+}
+.file-grid .file-item-detailed .file-details {
+  align-items: flex-start !important;
+}
+
+/* ---------- Control sizing ----------
+   One control height in the sidebar; helper buttons are squares of that height,
+   and every row ends at the same right edge as the search field. */
+.sidebar {
+  --ui-control-h: 40px;
+}
+.sidebar .form-group > select,
+.sidebar .form-group > input[type="text"],
+.sidebar .form-group > input:not([type]),
+.sidebar .form-group > .input-with-icon {
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+.sidebar select,
+.sidebar .form-group > input[type="text"],
+.sidebar .form-group > input:not([type]),
+.sidebar .input-with-icon {
+  height: var(--ui-control-h) !important;
+  min-height: var(--ui-control-h) !important;
+  box-sizing: border-box !important;
+}
+.sidebar select {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+.sidebar .dropdown-with-list,
+.sidebar .designer-input-container,
+.sidebar .print-lifecycle-controls,
+.sidebar .path-tree-field {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  width: 100% !important;
+}
+.sidebar .dropdown-with-list > select,
+.sidebar .designer-input-container > select,
+.sidebar .print-lifecycle-controls > select,
+.sidebar .dropdown-with-list > .tags-input-container {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  width: auto !important;
+}
+.sidebar .dropdown-with-list > button,
+.sidebar .designer-input-container > button,
+.sidebar .print-lifecycle-controls > button,
+.sidebar .input-with-icon + button {
+  flex: 0 0 var(--ui-control-h) !important;
+  width: var(--ui-control-h) !important;
+  height: var(--ui-control-h) !important;
+  min-width: var(--ui-control-h) !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: var(--ui-surface) !important;
+  border-radius: 8px !important;
+  font-size: 15px !important;
+  line-height: 1 !important;
+}
+.sidebar .dropdown-with-list > button:hover,
+.sidebar .designer-input-container > button:hover,
+.sidebar .print-lifecycle-controls > button:hover {
+  background: var(--ui-raised) !important;
+}
+.sidebar .path-tree-field > button {
+  flex: 0 0 var(--ui-control-h) !important;
+  width: var(--ui-control-h) !important;
+  height: var(--ui-control-h) !important;
+  align-self: flex-start;
+  background: var(--ui-surface) !important;
+}
+
+/* ---------- Dialogs ----------
+   One modal look for every manager: flat surface, hairlines instead of frames,
+   neutral buttons, one light primary. */
+dialog.modal,
+dialog[class*="dialog"],
+.modal-content {
+  background: var(--ui-surface) !important;
+  background-image: none !important;
+  border: 1px solid var(--ui-line) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45) !important;
+  color: var(--ui-text) !important;
+}
+dialog::backdrop {
+  background: rgba(16, 17, 19, 0.55) !important;
+  backdrop-filter: blur(2px);
+}
+dialog.modal h2,
+dialog.modal h3,
+dialog.modal h4 {
+  color: var(--ui-text) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+}
+dialog.modal label {
+  color: var(--ui-text-2) !important;
+}
+dialog.modal .setting-description,
+dialog.modal p {
+  color: var(--ui-text-3) !important;
+}
+
+/* Every decorative frame inside a dialog becomes a hairline or nothing. */
+dialog.modal *:not(input):not(select):not(textarea):not(button) {
+  border-color: var(--ui-line) !important;
+}
+dialog.modal [class*="section"],
+dialog.modal [class*="panel"],
+dialog.modal [class*="list"]:not(ul):not(ol),
+dialog.modal .form-group[class*="-"] {
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+dialog.modal [class*="badge"],
+dialog.modal [class*="count"] {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text-2) !important;
+  border: none !important;
+}
+dialog.modal [class*="status"]:not([class*="print-status"]) {
+  color: var(--ui-text-2) !important;
+}
+
+dialog.modal input,
+dialog.modal select,
+dialog.modal textarea {
+  background-color: var(--ui-bg) !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  color: var(--ui-text) !important;
+}
+dialog.modal input:focus,
+dialog.modal select:focus,
+dialog.modal textarea:focus {
+  border-color: color-mix(in srgb, var(--ui-accent) 60%, transparent) !important;
+  outline: none !important;
+}
+
+dialog.modal button {
+  background: var(--ui-raised) !important;
+  background-image: none !important;
+  color: var(--ui-text) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  font-weight: 500 !important;
+  outline: none;
+}
+dialog.modal button:hover {
+  background: var(--ui-hover) !important;
+}
+dialog.modal button:focus-visible {
+  outline: 2px solid var(--ui-accent) !important;
+  outline-offset: 1px;
+}
+/* Primary action in a dialog: light fill, dark text. */
+dialog.modal button[type="submit"],
+dialog.modal button[class*="primary"],
+dialog.modal button[class*="save"],
+dialog.modal button[id*="save"],
+dialog.modal button[class*="add-btn"],
+dialog.modal button[class*="toggle-add"] {
+  background: var(--ui-text) !important;
+  color: var(--ui-bg) !important;
+}
+dialog.modal button[type="submit"]:hover,
+dialog.modal button[class*="primary"]:hover,
+dialog.modal button[class*="save"]:hover,
+dialog.modal button[id*="save"]:hover,
+dialog.modal button[class*="add-btn"]:hover,
+dialog.modal button[class*="toggle-add"]:hover {
+  background: #ffffff !important;
+}
+/* Destructive stays red, but as text, not a red slab. */
+dialog.modal button[class*="danger"],
+dialog.modal button[class*="delete"],
+dialog.modal button[id*="delete"] {
+  background: transparent !important;
+  color: #f87171 !important;
+}
+dialog.modal button[class*="danger"]:hover,
+dialog.modal button[class*="delete"]:hover,
+dialog.modal button[id*="delete"]:hover {
+  background: rgba(248, 113, 113, 0.12) !important;
+}
+dialog.modal .icon-button {
+  background: transparent !important;
+  color: var(--ui-text-2) !important;
+}
+
+/* Thumbnails inside detailed cards: the image keeps a margin from the frame and
+   its own rounded corners (the img box shrinks to the picture, so photos round too). */
+.file-grid .file-item-detailed .thumbnail-container,
+.file-grid .parent-model-group-detailed .parent-model-group-thumbnail {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.file-grid .file-item-detailed .thumbnail-container > img,
+.file-grid .parent-model-group-detailed .parent-model-group-thumbnail > img {
+  width: auto !important;
+  height: auto !important;
+  max-width: calc(100% - 24px) !important;
+  max-height: calc(100% - 24px) !important;
+  object-fit: contain !important;
+  border-radius: 6px !important;
+}
+/* Auto Detect shares the add-button class but is the secondary action. */
+dialog.modal button#printer-auto-detect-btn {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+dialog.modal button#printer-auto-detect-btn:hover {
+  background: var(--ui-hover) !important;
+}
+/* Group cards line up with single-model cards. */
+.file-grid .parent-model-group.file-item-detailed {
+  padding: 8px 8px 0 !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+}
+.file-grid .parent-model-group.file-item-detailed:hover {
+  background: var(--ui-surface) !important;
+}
+
+/* Group stack glyph is decorative and repeats "1/3", the chevron and "N models". */
+.file-grid .parent-model-group-corner-badge {
+  display: none !important;
+}
+
+/* Thumbnail carousel arrows: small round chevrons on hover, no slab, no big triangles. */
+.thumbnail-nav-left,
+.thumbnail-nav-right {
+  width: 44px !important;
+  max-width: 44px !important;
+}
+.thumbnail-nav-left:hover,
+.thumbnail-nav-right:hover {
+  background: transparent !important;
+}
+.thumbnail-nav-left::before,
+.thumbnail-nav-right::after {
+  content: '' !important;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background-color: rgba(31, 29, 37, 0.72);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px 14px;
+  backdrop-filter: blur(6px);
+  text-shadow: none !important;
+  transition: background-color 0.12s ease;
+}
+.thumbnail-nav-left::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ececef' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 6l-6 6 6 6'/%3E%3C/svg%3E");
+}
+.thumbnail-nav-right::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ececef' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6-6 6'/%3E%3C/svg%3E");
+}
+.thumbnail-nav-left:hover::before,
+.thumbnail-nav-right:hover::after {
+  background-color: rgba(31, 29, 37, 0.9);
+}
+.file-grid .file-item.file-item-detailed:not(.parent-model-group) {
+  padding: 8px 8px 0 !important;
+}
+
+/* ---------- Sidebar gutters ----------
+   One inset for every block; the scrollbar gutter is reserved on both edges so the
+   column stays visually centred. */
+.sidebar {
+  --ui-inset: 16px;
+  scrollbar-gutter: stable both-edges !important;
+}
+.sidebar .sidebar-brand {
+  padding-left: var(--ui-inset) !important;
+  padding-right: var(--ui-inset) !important;
+}
+.sidebar .icon-buttons-container.sidebar-tools {
+  width: calc(100% - 2 * var(--ui-inset)) !important;
+  margin-left: var(--ui-inset) !important;
+  margin-right: var(--ui-inset) !important;
+}
+.sidebar #scan-directory-button,
+.sidebar #view-library-button,
+.sidebar #scan-stl-home-button {
+  width: calc(100% - 2 * var(--ui-inset)) !important;
+  max-width: none !important;
+  margin-left: var(--ui-inset) !important;
+  margin-right: var(--ui-inset) !important;
+  box-sizing: border-box !important;
+}
+.sidebar .filter-section {
+  width: 100% !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  box-sizing: border-box !important;
+}
+.sidebar .filter-section .form-group,
+.sidebar .filter-section .filter-stack-toggle,
+.sidebar #model-details,
+.sidebar #bundle-details,
+.sidebar #multi-edit-panel {
+  width: 100% !important;
+  padding-left: var(--ui-inset) !important;
+  padding-right: var(--ui-inset) !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  box-sizing: border-box !important;
+}
+.sidebar #model-details .form-group,
+.sidebar #bundle-details .form-group,
+.sidebar #multi-edit-panel .form-group {
+  width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* Details panel: heading and Multi-Edit sit on the same inset as the fields. */
+#model-details > h3,
+#bundle-details > h3,
+#multi-edit-panel > h3 {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+#model-details > .full-width-button,
+#bundle-details > .full-width-button,
+#multi-edit-panel > .full-width-button {
+  width: 100% !important;
+  margin: 0 0 14px !important;
+  height: var(--ui-control-h);
+  padding: 0 12px !important;
+}
+/* Tags / filament pickers: same row anatomy as Designer (select + square buttons). */
+.sidebar .tags-input-container {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+.sidebar .tags-input-container > select {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  width: auto !important;
+}
+.sidebar .tags-input-container > button {
+  flex: 0 0 var(--ui-control-h) !important;
+  width: var(--ui-control-h) !important;
+  height: var(--ui-control-h) !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: var(--ui-surface) !important;
+  border-radius: 8px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.sidebar .tags-input-container > button:hover {
+  background: var(--ui-raised) !important;
+}
+.sidebar .tags-list {
+  background: transparent !important;
+  border: none !important;
+  padding: 6px 0 0 !important;
+  min-height: 0 !important;
+}
+.sidebar .tags-list:empty {
+  display: none !important;
+}
+
+/* ---------- Library grid frame ----------
+   Reserve the scrollbar gutter on both edges so content sits symmetrically, and
+   start the view switcher on the same left line as the content. */
+.file-grid {
+  scrollbar-gutter: stable both-edges !important;
+}
+.grid-view-selector {
+  padding-left: 10px !important;
+  padding-right: 10px !important;
+}
+/* List: header and rows share the grid's own edges (JS supplies no horizontal padding). */
+.file-grid.is-list-view {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* ---------- List alignment ----------
+   Every cell is vertically centred in the row; every column has one alignment for
+   header, file rows and group rows alike: size right (numbers), the rest left. */
+.file-grid.is-list-view .file-item-list,
+.file-grid.is-list-view .parent-model-group-list,
+.file-grid.is-list-view .file-item-list .file-info,
+.file-grid.is-list-view .parent-model-group-list .file-info {
+  align-items: center !important;
+}
+.file-grid.is-list-view .file-info > [data-list-col],
+.list-view-header [data-list-col],
+.list-view-header [data-list-col] > .sortable-header,
+.list-view-header [data-list-col] > div {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+  line-height: 1.3 !important;
+}
+.file-grid.is-list-view .file-info > [data-list-col="size"],
+.list-view-header [data-list-col="size"],
+.list-view-header [data-list-col="size"] > .sortable-header {
+  justify-content: flex-end !important;
+  text-align: right !important;
+}
+.list-view-header [data-list-col="size"] .sortable-header {
+  flex-direction: row-reverse;
+}
+
+/* Name cell: thumbnail, title and badge on one centre line. */
+.file-grid.is-list-view .file-info > [data-list-col="name"] {
+  gap: 8px;
+  min-width: 0;
+}
+.file-grid.is-list-view .file-name-label,
+.file-grid.is-list-view .parent-model-group-title {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 1.3 !important;
+  color: var(--ui-text) !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-grid.is-list-view .parent-model-group-chevron {
+  font-size: 10px !important;
+  width: 10px;
+  flex: 0 0 10px;
+  margin: 0 !important;
+  color: var(--ui-text-3) !important;
+}
+.file-grid.is-list-view .new-status {
+  position: static !important;
+  transform: none !important;
+  margin: 0 !important;
+  flex: 0 0 auto;
+}
+
+/* Thumbnail: a 40px square, image centred and contained. */
+.file-grid.is-list-view .thumbnail-container,
+.file-grid.is-list-view .parent-model-group-thumbnail {
+  align-self: center !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: hidden !important;
+}
+.file-grid.is-list-view .thumbnail-container > img,
+.file-grid.is-list-view .parent-model-group-thumbnail > img {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  object-fit: contain !important;
+  margin: 0 !important;
+}
+.file-grid.is-list-view .file-info > [data-list-col="name"] {
+  margin: 0 !important;
+  align-self: center !important;
+}
+/* Keep the 60px thumbnail slot the header and the width math (LIST_ROW_CHROME) expect. */
+.file-grid.is-list-view .thumbnail-container,
+.file-grid.is-list-view .parent-model-group-thumbnail {
+  width: 60px !important;
+  min-width: 60px !important;
+  flex: 0 0 60px !important;
+  height: 44px !important;
+}
+
+/* List spans the whole pane: separators run edge to edge, the content keeps the
+   30px inset through row padding. Only list view; other views keep the JS-measured frame. */
+.file-grid.is-list-view {
+  margin-left: calc(var(--sidebar-width, 350px) + var(--folder-rail-width, 0px)) !important;
+  width: calc(100% - var(--sidebar-width, 350px) - var(--folder-rail-width, 0px)) !important;
+  max-width: none !important;
+  scrollbar-gutter: auto !important;
+  padding-top: 0 !important;
+}
+.file-grid.is-list-view .list-view-header,
+.file-grid.is-list-view .file-item-list,
+.file-grid.is-list-view .parent-model-group-list {
+  padding-left: 30px !important;
+  padding-right: 30px !important;
+}
+.file-grid.is-list-view .list-view-header {
+  background: var(--ui-surface) !important;
+  border-bottom: 1px solid var(--ui-line) !important;
+  top: 0 !important;
+}
+.list-view-header [data-list-col] span,
+.list-view-header [data-list-col] .sortable-header {
+  color: var(--ui-text-2) !important;
+}
+/* Right-aligned size needs air before the left-aligned date column. */
+.file-grid.is-list-view .file-info > [data-list-col="size"],
+.list-view-header [data-list-col="size"] {
+  padding-right: 16px !important;
+  box-sizing: border-box !important;
+}
+
+/* ---------- Active filter block (sidebar) ---------- */
+.sidebar #current-filter.visible,
+.sidebar #current-filter {
+  background: var(--ui-surface) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 10px !important;
+  width: calc(100% - 2 * var(--ui-inset)) !important;
+  margin: 0 var(--ui-inset) 12px !important;
+  padding: 12px !important;
+  box-sizing: border-box !important;
+  color: var(--ui-text) !important;
+}
+.sidebar #current-filter:not(.visible) {
+  display: none !important;
+}
+#current-filter .no-results {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--ui-text-2) !important;
+  margin: 0 0 10px !important;
+  padding: 0 !important;
+  background: transparent !important;
+}
+#current-filter .filter-pills-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px !important;
+}
+#current-filter .filter-pill {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  height: 28px !important;
+  padding: 0 6px 0 10px !important;
+  background: var(--ui-raised) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 6px !important;
+  color: var(--ui-text) !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+}
+#current-filter .filter-remove {
+  width: 18px !important;
+  height: 18px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: transparent !important;
+  color: var(--ui-text-3) !important;
+  border-radius: 4px !important;
+  font-size: 14px !important;
+  cursor: pointer;
+}
+#current-filter .filter-remove:hover {
+  background: var(--ui-hover) !important;
+  color: var(--ui-text) !important;
+}
+
+/* Boolean search: a quiet row of small segment buttons. */
+#current-filter .search-boolean-toolbar,
+.sidebar .search-boolean-toolbar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin: 0 0 10px !important;
+}
+.search-boolean-toolbar .search-boolean-toolbar-label {
+  color: var(--ui-text-3) !important;
+  font-size: 12px !important;
+  margin-right: 4px !important;
+}
+.search-boolean-toolbar .search-boolean-op-sep {
+  display: none !important;
+}
+.search-boolean-toolbar .search-boolean-op-link {
+  display: inline-flex !important;
+  align-items: center !important;
+  height: 24px !important;
+  padding: 0 8px !important;
+  border-radius: 6px !important;
+  background: var(--ui-bg) !important;
+  color: var(--ui-text-2) !important;
+  text-decoration: none !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.03em !important;
+}
+.search-boolean-toolbar .search-boolean-op-link:hover {
+  background: var(--ui-hover) !important;
+  color: var(--ui-text) !important;
+}
+
+/* Clear all: secondary, not a blue slab. */
+#current-filter .clear-filter-button,
+.sidebar #clear-all-filters-button {
+  width: 100% !important;
+  height: 32px !important;
+  margin: 0 !important;
+  padding: 0 12px !important;
+  background: transparent !important;
+  color: var(--ui-text-2) !important;
+  border: 1px solid var(--ui-line) !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+}
+#current-filter .clear-filter-button:hover,
+.sidebar #clear-all-filters-button:hover {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+
+/* Active filters are what the user checks first ("am I searching for the right thing"):
+   the pills carry the accent; Clear All is a visible neutral button. */
+#current-filter .filter-pill {
+  background: color-mix(in srgb, var(--ui-accent) 16%, var(--ui-surface)) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-accent) 38%, transparent) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+}
+#current-filter .filter-pill:hover {
+  background: color-mix(in srgb, var(--ui-accent) 22%, var(--ui-surface)) !important;
+}
+#current-filter .filter-remove {
+  color: color-mix(in srgb, var(--ui-accent) 70%, #ffffff) !important;
+}
+#current-filter .filter-remove:hover {
+  background: color-mix(in srgb, var(--ui-accent) 28%, transparent) !important;
+  color: #ffffff !important;
+}
+#current-filter .clear-filter-button,
+.sidebar #clear-all-filters-button {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+  border: none !important;
+}
+#current-filter .clear-filter-button:hover,
+.sidebar #clear-all-filters-button:hover {
+  background: var(--ui-hover) !important;
+}
+
+/* ---------- Remaining dialogs ---------- */
+#about-dialog .about-header {
+  background: transparent !important;
+  background-image: none !important;
+  border-bottom: 1px solid var(--ui-line) !important;
+}
+dialog.modal a,
+dialog.modal a.about-link {
+  color: var(--ui-accent) !important;
+}
+#about-dialog li::marker {
+  color: var(--ui-text-3);
+}
+#dedup-dialog .dedup-space-saved {
+  background: var(--ui-bg) !important;
+  border: none !important;
+}
+
+/* Welcome: product voice, not a billboard. */
+#welcome-message .welcome-content h1,
+#welcome-message .welcome-content h2,
+#welcome-message h1,
+#welcome-message h2 {
+  font-size: 26px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ui-text) !important;
+}
+#welcome-message button {
+  font-size: 14px !important;
+  height: 40px !important;
+  padding: 0 22px !important;
+  background: var(--ui-text) !important;
+  color: var(--ui-bg) !important;
+}
+#welcome-message button:hover {
+  background: #ffffff !important;
+}
+/* Native controls (checkboxes, date pickers, scrollbars) render in their dark variant. */
+:root {
+  color-scheme: dark;
+}
+dialog.modal h2,
+dialog.modal > h3,
+dialog.modal form > h3,
+#searchable-list-dialog h2,
+#searchable-list-dialog h3 {
+  font-size: 18px !important;
+}
+#searchable-list-dialog input,
+#searchable-list-dialog button {
+  font-size: 14px !important;
+}
+.grid-view-selector .folder-rail-toggle {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  padding: 7px 14px !important;
+  height: auto !important;
+  border-radius: 9px !important;
+}
+
+/* Server/Docker touch shell has its own app bar and tool sheet: keep the desktop
+   brand row and tool tabs out of it (refined rules above use !important display). */
+body.mobile-ui .sidebar .sidebar-brand,
+body.mobile-ui .sidebar #logo,
+body.mobile-ui .sidebar .model-stats,
+body.mobile-ui .sidebar .icon-buttons-container.sidebar-tools {
+  display: none !important;
+}
+/* Touch shell: Scan Directory is the primary action there too (light fill, dark text). */
+body.mobile-ui .mobile-more-actions button:first-child {
+  background: var(--ui-text) !important;
+  color: var(--ui-bg) !important;
+  border: none !important;
+}
+
+/* Thumbnail overflow menu: a compact round button in the top-right corner on hover,
+   instead of an invisible full-width strip across the lower thumbnail. */
+.file-grid .thumbnail-menu-button {
+  top: 8px !important;
+  right: 8px !important;
+  bottom: auto !important;
+  left: auto !important;
+  width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  border-radius: 50% !important;
+  font-size: 14px !important;
+  letter-spacing: 0.05em;
+  z-index: 3;
+}
+.file-grid .thumbnail-menu-button:hover {
+  background: rgba(31, 29, 37, 0.92) !important;
+}
+/* No cyan ring or zoom on thumbnail hover; the card hover already reads. */
+.file-grid .thumbnail-container:hover {
+  outline: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+/* ---------- Search: the main control of the sidebar ----------
+   Taller, lifted surface, leading magnifier, shortcut hint; the visible label is
+   dropped (the placeholder already says it) but kept for screen readers. */
+.sidebar .search-models-field > label[for="search-filter-input"] {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  white-space: nowrap !important;
+}
+.sidebar .search-models-field .input-with-icon {
+  position: relative !important;
+  height: 46px !important;
+  min-height: 46px !important;
+  background-color: var(--ui-raised) !important;
+  border: 1px solid rgba(255, 255, 255, 0.09) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 4px 14px rgba(0, 0, 0, 0.18) !important;
+  display: flex !important;
+  align-items: center !important;
+  padding: 0 6px 0 0 !important;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.sidebar .search-models-field .input-with-icon:focus-within {
+  border-color: color-mix(in srgb, var(--ui-accent) 70%, transparent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-accent) 18%, transparent) !important;
+}
+.sidebar .search-models-field #search-filter-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100% !important;
+  padding: 0 8px 0 40px !important;
+  font-size: 14px !important;
+  font-weight: 500;
+  color: var(--ui-text) !important;
+  background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b5b2c0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M20 20l-3.5-3.5'/%3E%3C/svg%3E") no-repeat 14px center / 17px 17px !important;
+}
+.sidebar .search-models-field #search-filter-input::placeholder {
+  color: var(--ui-text-2);
+  font-weight: 400;
+}
+.sidebar .search-models-field #search-filter-input::-webkit-search-cancel-button {
+  display: none;
+}
+.search-shortcut-hint {
+  flex: 0 0 auto;
+  margin-right: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--ui-bg);
+  color: var(--ui-text-3);
+  font: 500 11px/1.4 inherit;
+  pointer-events: none;
+}
+/* Hint only while idle; the add/clear buttons only once there is text. */
+.input-with-icon:focus-within .search-shortcut-hint,
+.input-with-icon:has(#search-filter-input:not(:placeholder-shown)) .search-shortcut-hint {
+  display: none;
+}
+.sidebar .search-models-field .input-with-icon:has(#search-filter-input:placeholder-shown) #clear-filter-search-button {
+  display: none !important;
+}
+/* Submit stays in place (tests and muscle memory rely on it) but only lights up with text. */
+.sidebar .search-models-field .input-with-icon:has(#search-filter-input:placeholder-shown) #filter-search-button {
+  background-color: transparent !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238c899a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E") !important;
+}
+.sidebar .search-models-field #filter-search-button {
+  font-size: 0 !important;
+  width: 30px !important;
+  height: 30px !important;
+  border-radius: 7px !important;
+  background: var(--ui-text) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2325242c' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E") no-repeat center / 15px 15px !important;
+  opacity: 1 !important;
+  margin-left: 4px;
+}
+.sidebar .search-models-field #clear-filter-search-button {
+  width: 26px !important;
+  height: 26px !important;
+  font-size: 16px !important;
+  color: var(--ui-text-3) !important;
+  opacity: 1 !important;
+}
+.sidebar .search-models-field .search-notes-toggle {
+  margin-top: 8px;
+}
+/* Visual order inside the search field: text, shortcut hint / clear, submit. */
+.sidebar .search-models-field .search-shortcut-hint,
+.sidebar .search-models-field #clear-filter-search-button {
+  order: 1;
+}
+.sidebar .search-models-field #filter-search-button {
+  order: 2;
+}
+.sidebar .search-models-field .input-with-icon #filter-search-button,
+.sidebar .search-models-field .input-with-icon #clear-filter-search-button {
+  position: static !important;
+  transform: none !important;
+  flex: 0 0 auto !important;
+}
+
+/* ---------- Library actions ----------
+   Scan folder / Show all are occasional actions: one compact row of quiet
+   buttons under the tool tabs, so the search field below leads. */
+.sidebar .sidebar-chrome {
+  flex-direction: row !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-start !important;
+  align-items: stretch !important;
+  column-gap: 6px !important;
+  width: 100% !important;
+  padding: 0 var(--ui-inset) !important;
+  box-sizing: border-box !important;
+}
+.sidebar .sidebar-chrome > .sidebar-brand {
+  flex: 0 0 calc(100% + 2 * var(--ui-inset)) !important;
+  margin: 0 calc(-1 * var(--ui-inset)) !important;
+}
+.sidebar .sidebar-chrome > .icon-buttons-container.sidebar-tools {
+  flex: 0 0 100% !important;
+  width: 100% !important;
+  margin: 0 0 12px !important;
+}
+.sidebar .sidebar-chrome > #view-library-message,
+.sidebar .sidebar-chrome > .library-view-banner {
+  flex: 0 0 100% !important;
+}
+.sidebar .sidebar-chrome > #scan-directory-button,
+.sidebar .sidebar-chrome > #view-library-button {
+  flex: 1 1 0 !important;
+  width: auto !important;
+  min-width: 0 !important;
+  height: 34px !important;
+  margin: 0 0 14px !important;
+  padding: 0 10px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 7px !important;
+  background: var(--ui-surface) !important;
+  color: var(--ui-text-2) !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  white-space: nowrap;
+}
+.sidebar .sidebar-chrome > #scan-directory-button:hover,
+.sidebar .sidebar-chrome > #view-library-button:hover {
+  background: var(--ui-raised) !important;
+  color: var(--ui-text) !important;
+}
+.sidebar .sidebar-chrome > #scan-directory-button .tool-icon,
+.sidebar .sidebar-chrome > #view-library-button .tool-icon {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.sidebar .sidebar-chrome > #scan-directory-button:disabled {
+  opacity: 0.55;
+}
+.sidebar .filter-section {
+  padding-top: 0 !important;
+}
+
+/* ---------- Detailed cards: a real container again ----------
+   Each card is one object: light surface, hairline edge, soft depth. The thumbnail
+   sits a step deeper, and the rating row is separated by a hairline so stars and
+   heart clearly belong to the card above them. */
+.file-grid .file-item.file-item-detailed,
+.file-grid .parent-model-group.file-item-detailed {
+  background: var(--ui-surface) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 18px rgba(0, 0, 0, 0.18) !important;
+  transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.file-grid .file-item.file-item-detailed:hover,
+.file-grid .parent-model-group.file-item-detailed:hover {
+  background: color-mix(in srgb, var(--ui-raised) 55%, var(--ui-surface)) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.28), 0 10px 26px rgba(0, 0, 0, 0.24) !important;
+}
+.file-grid .file-item.file-item-detailed.selected,
+.file-grid .parent-model-group.file-item-detailed.selected {
+  border-color: color-mix(in srgb, var(--ui-accent) 70%, transparent) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-accent) 45%, transparent), 0 10px 26px rgba(0, 0, 0, 0.24) !important;
+}
+.file-grid .file-item-detailed .thumbnail-container,
+.file-grid .parent-model-group-detailed .parent-model-group-thumbnail {
+  background: color-mix(in srgb, var(--ui-bg) 55%, var(--ui-surface)) !important;
+}
+.file-grid .file-item-detailed .model-engagement-bar {
+  border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
+  margin: 0 -8px !important;
+  padding: 0 14px !important;
+}

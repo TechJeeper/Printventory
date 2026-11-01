@@ -1290,6 +1290,37 @@ function detailedColumnsForWidth(availableWidth, itemWidth) {
   return Math.max(Math.floor(Math.max(0, availableWidth) / item), 1);
 }
 
+// One-time move to the refined defaults. Saving Settings used to persist the old
+// defaults (Dark Blue thumbnails, Modern Cyan) even when nobody picked them.
+let refinedThemeMigrationPromise = null;
+function migrateRefinedThemeDefaults() {
+  if (!refinedThemeMigrationPromise) {
+    refinedThemeMigrationPromise = (async () => {
+      try {
+        if (await window.electron.getSetting('refinedThemeMigrated') === 'true') return;
+        if (await window.electron.getSetting('modelBackgroundColor') === '#070147') {
+          await window.electron.saveSetting('modelBackgroundColor', '');
+        }
+        if (await window.electron.getSetting('uiTheme') === 'modern-cyan') {
+          await window.electron.saveSetting('uiTheme', 'graphite');
+        }
+        await window.electron.saveSetting('refinedThemeMigrated', 'true');
+      } catch (error) {
+        console.warn('Refined theme migration skipped:', error);
+      }
+    })();
+  }
+  return refinedThemeMigrationPromise;
+}
+
+// Detailed cards share the leftover width instead of leaving centred gutters.
+function detailedStretchedItemWidth(availableWidth, columns, gap) {
+  const cols = Math.max(1, columns | 0);
+  const w = (Math.max(0, availableWidth) - (cols - 1) * Math.max(0, gap)) / cols;
+  // Column count already keeps cards near their base width; never exceed the row.
+  return Math.max(200, Math.floor(w));
+}
+
 function getPreviewTileSizePx() {
   const grid = document.querySelector('.file-grid');
   if (
@@ -8811,6 +8842,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Load background color setting
+  await migrateRefinedThemeDefaults();
   const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
   if (backgroundColor) {
     document.documentElement.style.setProperty('--model-background-color', backgroundColor);
@@ -8854,7 +8886,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const color = document.getElementById('model-background-color').value;
     const renderColor = document.getElementById('render-color').value;
     const renderLighting = document.getElementById('render-lighting').checked;
-    const theme = document.getElementById('ui-theme')?.value || 'modern-cyan';
+    const theme = document.getElementById('ui-theme')?.value || 'graphite';
     
     // Check if render settings changed
     const oldRenderColor = window.currentRenderColor || '#cccccc';
@@ -8862,8 +8894,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     const renderSettingsChanged = (oldRenderColor !== renderColor) || (oldRenderLighting !== renderLighting);
 
-    // Update CSS variable for model background
-    document.documentElement.style.setProperty('--model-background-color', color);
+    // Update CSS variable for model background; empty means follow the interface surface.
+    if (color) {
+      document.documentElement.style.setProperty('--model-background-color', color);
+    } else {
+      document.documentElement.style.removeProperty('--model-background-color');
+    }
     
     // Update UI theme
     document.body.setAttribute('data-theme', theme);
@@ -8977,23 +9013,37 @@ document.addEventListener('DOMContentLoaded', async () => {
         root.style.setProperty('--primary-shadow', 'rgba(75, 85, 99, 0.3)');
         root.style.setProperty('--primary-shadow-hover', 'rgba(75, 85, 99, 0.4)');
         break;
-      default: // modern-cyan
+      case 'modern-cyan':
         root.style.setProperty('--primary-accent', '#00d4ff');
         root.style.setProperty('--primary-accent-hover', '#5b9fff');
         root.style.setProperty('--primary-gradient', 'linear-gradient(135deg, #00d4ff 0%, #5b9fff 100%)');
         root.style.setProperty('--primary-gradient-hover', 'linear-gradient(135deg, #00e5ff 0%, #6ba8ff 100%)');
         root.style.setProperty('--primary-shadow', 'rgba(91, 159, 255, 0.3)');
         root.style.setProperty('--primary-shadow-hover', 'rgba(91, 159, 255, 0.4)');
+        break;
+      default: // graphite
+        root.style.setProperty('--primary-accent', '#8ab4ff');
+        root.style.setProperty('--primary-accent-hover', '#a9c7ff');
+        root.style.setProperty('--primary-shadow', 'rgba(0, 0, 0, 0.28)');
+        root.style.setProperty('--primary-shadow-hover', 'rgba(0, 0, 0, 0.35)');
     }
     const accent = root.style.getPropertyValue('--primary-accent').trim() || '#00d4ff';
     const accentHover = root.style.getPropertyValue('--primary-accent-hover').trim() || accent;
     root.style.setProperty('--accent-color', accent);
     root.style.setProperty('--primary-gradient', accent);
     root.style.setProperty('--primary-gradient-hover', accentHover);
+    // refined.css keeps chrome neutral; the theme only picks the highlight colour.
+    root.style.setProperty('--ui-accent', accent);
+  }
+
+  // Search field hint shows the platform's focus shortcut (Ctrl+/ or Cmd+/).
+  const searchShortcutHint = document.querySelector('.search-shortcut-hint');
+  if (searchShortcutHint && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) {
+    searchShortcutHint.textContent = '⌘ /';
   }
 
   // Load theme on startup
-  const savedTheme = await window.electron.getSetting('uiTheme') || 'modern-cyan';
+  const savedTheme = await window.electron.getSetting('uiTheme') || 'graphite';
   document.body.setAttribute('data-theme', savedTheme);
   const uiThemeSelect = document.getElementById('ui-theme');
   if (uiThemeSelect) {
@@ -11881,7 +11931,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function initializeSettings() {
     try {
       // Initialize other settings as needed
-      const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
+      await migrateRefinedThemeDefaults();
+  const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
       if (backgroundColor) {
         document.documentElement.style.setProperty('--model-background-color', backgroundColor);
         document.getElementById('model-background-color').value = backgroundColor;
@@ -22033,7 +22084,8 @@ async function initializeAppOnce() {
     console.log('2. Loading settings...');
     try {
       // Initialize other settings as needed
-      const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
+      await migrateRefinedThemeDefaults();
+  const backgroundColor = await window.electron.getSetting('modelBackgroundColor');
       if (backgroundColor) {
         document.documentElement.style.setProperty('--model-background-color', backgroundColor);
         const colorPicker = document.getElementById('model-background-color');
@@ -22043,7 +22095,7 @@ async function initializeAppOnce() {
       }
       
       // Load UI theme
-      const savedTheme = await window.electron.getSetting('uiTheme') || 'modern-cyan';
+      const savedTheme = await window.electron.getSetting('uiTheme') || 'graphite';
       document.body.setAttribute('data-theme', savedTheme);
       const uiThemeSelect = document.getElementById('ui-theme');
       if (uiThemeSelect) {
@@ -26401,8 +26453,10 @@ function renderVirtualGrid(models) {
   container.style.maxHeight = `calc(100vh - ${containerTop}px - ${mobileChrome}px)`;
 
   // Assume fixed item size (in pixels) - optimized gaps
-  let paddingVertical = currentGridView === 'preview' ? 8 : 10;
-  let paddingHorizontal = currentGridView === 'preview' ? 0 : 20;
+  // Same inset in every view; the grid's scrollbar gutter is reserved on both edges.
+  // List rows start right under the sticky header.
+  let paddingVertical = currentGridView === 'list' ? 4 : 20;
+  let paddingHorizontal = 0;
   // Different gaps for different views - optimized for better visual spacing
   let verticalGap, horizontalGap;
   const mobileList = currentGridView === 'list' ? mobileListMetrics() : null;
@@ -26464,22 +26518,17 @@ function renderVirtualGrid(models) {
   } else if (mobileDetailed && mobileLibraryColumns()) {
     columns = mobileDetailed.cols;
     container._centeredOffset = 0;
+    container._detailedItemWidth = null;
   } else {
     // For detailed view, calculate columns and center the grid
     const availableWidth = containerWidth - (paddingHorizontal * 2);
     columns = detailedColumnsForWidth(availableWidth, itemWidth);
     
-    // Center the grid if we have fewer columns than would fill the width
-    if (currentGridView === 'detailed') {
-      const totalItemsWidth = columns * itemWidth;
-      const totalGapsWidth = (columns - 1) * horizontalGap;
-      const usedWidth = totalItemsWidth + totalGapsWidth;
-      const leftOffset = (availableWidth - usedWidth) / 2;
-      // Store offset for positioning items
-      container._centeredOffset = leftOffset;
-    } else {
-      container._centeredOffset = 0;
-    }
+    // Stretch cards so the columns fill the width, like the preview wall.
+    container._centeredOffset = 0;
+    container._detailedItemWidth = currentGridView === 'detailed'
+      ? detailedStretchedItemWidth(availableWidth, columns, horizontalGap)
+      : null;
   }
 
   const displayRecords = buildParentModelDisplayRecords(models);
@@ -26607,16 +26656,11 @@ function renderVirtualGrid(models) {
           const currentAvailableWidth = currentContainerWidth - (paddingHorizontal * 2);
           currentColumns = detailedColumnsForWidth(currentAvailableWidth, itemWidth);
           
-          // Center the grid for detailed view
-          if (currentGridView === 'detailed') {
-            const totalItemsWidth = currentColumns * itemWidth;
-            const totalGapsWidth = (currentColumns - 1) * currentHorizontalGap;
-            const usedWidth = totalItemsWidth + totalGapsWidth;
-            const leftOffset = (currentAvailableWidth - usedWidth) / 2;
-            container._centeredOffset = leftOffset;
-          } else {
-            container._centeredOffset = 0;
-          }
+          // Stretch cards so the columns fill the width, like the preview wall.
+          container._centeredOffset = 0;
+          container._detailedItemWidth = currentGridView === 'detailed' && !(mobileDetailed && mobileLibraryColumns())
+            ? detailedStretchedItemWidth(currentAvailableWidth, currentColumns, currentHorizontalGap)
+            : null;
         }
 
         const layoutRowHeight =
@@ -26773,7 +26817,8 @@ function renderVirtualGrid(models) {
           layoutItemsByKey.set(layoutKey, item);
         };
 
-        const listRowWidth = currentGridView === 'list' ? syncListViewHorizontalScroll(container) : 0;
+        // Always sync: outside list view this clears the stale is-list-view class.
+        const listRowWidth = syncListViewHorizontalScroll(container);
 
         const positionModelItem = (item, row, col) => {
           item.style.top = row.top + 'px';
@@ -26792,9 +26837,10 @@ function renderVirtualGrid(models) {
             item.style.maxHeight = w + 'px';
           } else {
             const centeredOffset = container._centeredOffset || 0;
-            const leftPosition = (col * (itemWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
+            const cardWidth = container._detailedItemWidth || itemWidth;
+            const leftPosition = (col * (cardWidth + currentHorizontalGap)) + paddingHorizontal + centeredOffset;
             item.style.left = leftPosition + 'px';
-            item.style.width = typeof itemWidth === 'number' ? itemWidth + 'px' : itemWidth;
+            item.style.width = typeof cardWidth === 'number' ? cardWidth + 'px' : cardWidth;
             if (mobileDetailed && mobileLibraryColumns()) {
               item.style.height = itemHeight + 'px';
               item.style.minHeight = itemHeight + 'px';
