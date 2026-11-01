@@ -1871,3 +1871,23 @@ body.mobile-ui .mobile-more-actions button:first-child {
 .file-grid.preview-wall .thumbnail-menu-button {
   background-size: 13px 13px !important;
 }
+
+/* Top bar keeps one height in every view: everything in it is 36px tall, so the
+   List-only columns button (38px) no longer pushes the grid down. */
+.grid-view-selector {
+  height: 66px !important;
+  min-height: 66px !important;
+  max-height: 66px !important;
+  box-sizing: border-box !important;
+  align-items: center !important;
+}
+.grid-view-selector .folder-rail-toggle,
+.grid-view-selector .list-view-columns-toolbar-btn {
+  height: 36px !important;
+  min-height: 36px !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  box-sizing: border-box !important;
+  display: inline-flex !important;
+  align-items: center !important;
+}
