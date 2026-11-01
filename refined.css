@@ -1752,3 +1752,37 @@ body.mobile-ui .mobile-more-actions button:first-child {
 .sidebar .filter-section {
   padding-top: 0 !important;
 }
+
+/* ---------- Detailed cards: a real container again ----------
+   Each card is one object: light surface, hairline edge, soft depth. The thumbnail
+   sits a step deeper, and the rating row is separated by a hairline so stars and
+   heart clearly belong to the card above them. */
+.file-grid .file-item.file-item-detailed,
+.file-grid .parent-model-group.file-item-detailed {
+  background: var(--ui-surface) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 18px rgba(0, 0, 0, 0.18) !important;
+  transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.file-grid .file-item.file-item-detailed:hover,
+.file-grid .parent-model-group.file-item-detailed:hover {
+  background: color-mix(in srgb, var(--ui-raised) 55%, var(--ui-surface)) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.28), 0 10px 26px rgba(0, 0, 0, 0.24) !important;
+}
+.file-grid .file-item.file-item-detailed.selected,
+.file-grid .parent-model-group.file-item-detailed.selected {
+  border-color: color-mix(in srgb, var(--ui-accent) 70%, transparent) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-accent) 45%, transparent), 0 10px 26px rgba(0, 0, 0, 0.24) !important;
+}
+.file-grid .file-item-detailed .thumbnail-container,
+.file-grid .parent-model-group-detailed .parent-model-group-thumbnail {
+  background: color-mix(in srgb, var(--ui-bg) 55%, var(--ui-surface)) !important;
+}
+.file-grid .file-item-detailed .model-engagement-bar {
+  border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
+  margin: 0 -8px !important;
+  padding: 0 14px !important;
+}

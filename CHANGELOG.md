@@ -10,7 +10,7 @@ All notable changes contributed via pull request are documented in this file.
 - The search field is the lead control of the sidebar: taller, with a magnifier, a ⌘/ (Ctrl+/) hint, and a submit arrow that lights up once you type.
 - Scan Directory and View Entire Library become one compact row of quiet buttons, **Scan folder** and **Show all**, so they no longer compete with search. Both keep their behavior.
 - Sidebar: one-line brand row with the model count, tool tabs with line icons instead of colored round buttons, 40px controls with matching square helper buttons, and the same inset on both edges.
-- Library: Detailed cards fill the width like the Preview wall, photo thumbnails get a margin and rounded corners, and all three views share one inset. "Not printed" is no longer badged on every card, because it is the default state; other print states show a colored dot.
+- Library: Detailed cards are clear containers (surface, hairline edge, soft depth, rating row on its own hairline) and fill the width like the Preview wall, photo thumbnails get a margin and rounded corners, and all three views share one inset. "Not printed" is no longer badged on every card, because it is the default state; other print states show a colored dot.
 - List view is one table: a tinted sticky header, hairline rows edge to edge, centered cells, sizes right-aligned, and group rows in the same type as model rows.
 - Dialogs share one flat style with a single light primary button. The Server/Docker touch layout keeps its own design and was checked for regressions.
 
