@@ -26453,15 +26453,16 @@ function renderVirtualGrid(models) {
   container.style.maxHeight = `calc(100vh - ${containerTop}px - ${mobileChrome}px)`;
 
   // Assume fixed item size (in pixels) - optimized gaps
-  // Same inset in every view; the grid's scrollbar gutter is reserved on both edges.
-  // List rows start right under the sticky header.
+  // The grid box spans to the window edge (scrollbar at the edge); cards keep a
+  // 20px inset inside it. List rows carry their own inset and start under the header.
   let paddingVertical = currentGridView === 'list' ? 4 : 20;
-  let paddingHorizontal = 0;
+  let paddingHorizontal = currentGridView === 'list' ? 0 : 20;
   // Different gaps for different views - optimized for better visual spacing
   let verticalGap, horizontalGap;
   const mobileList = currentGridView === 'list' ? mobileListMetrics() : null;
   if (currentGridView === 'list') {
-    verticalGap = mobileList ? mobileList.gap : 6;
+    // Table rows sit flush; the hairline between them is the separator.
+    verticalGap = mobileList ? mobileList.gap : 0;
     horizontalGap = 0;
   } else if (currentGridView === 'preview') {
     verticalGap = 2;
@@ -26602,7 +26603,8 @@ function renderVirtualGrid(models) {
     // Recalculate values each time to ensure we use current view settings
     let currentVerticalGap, currentHorizontalGap;
     if (currentGridView === 'list') {
-      currentVerticalGap = mobileListMetrics()?.gap || 4;
+      // Desktop table rows sit flush (same as the initial layout); touch list keeps its gap.
+      currentVerticalGap = mobileListMetrics()?.gap ?? 0;
       currentHorizontalGap = 0;
     } else if (currentGridView === 'preview') {
       currentVerticalGap = 2;

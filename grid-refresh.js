@@ -99,14 +99,14 @@
     const view = spec.view || 'detailed';
     const previewColumns = Math.max(1, Math.round(Number(spec.previewColumns) || 6));
     const previewGap = spec.previewGap == null ? 2 : Number(spec.previewGap);
-    // Every view uses the full grid box (no horizontal padding in renderer.js).
-    const contentWidth = Math.max(0, gridWidth);
-    const available = view === 'preview' ? gridWidth : contentWidth;
-    const tile = previewTilePx(gridWidth, previewColumns, previewGap);
+    // Detailed and preview sit inside 20px of padding; list rows pad themselves.
+    const contentWidth = Math.max(0, gridWidth - 40);
+    const available = view === 'list' ? gridWidth : contentWidth;
+    const tile = previewTilePx(contentWidth, previewColumns, previewGap);
     const detailedColumns = detailedColumnCount(contentWidth, spec.itemWidth || 300);
     const columns = view === 'list' ? 1 : (view === 'preview' ? previewColumns : detailedColumns);
     const rowHeight = view === 'preview' ? tile : (view === 'list' ? 56 : (Number(spec.itemHeight) || 520));
-    const verticalGap = view === 'preview' ? previewGap : (view === 'list' ? 6 : 20);
+    const verticalGap = view === 'preview' ? previewGap : (view === 'list' ? 0 : 20);
     const next = {
       width: gridWidth,
       columns: columns,
@@ -124,7 +124,7 @@
       detailedColumns: detailedColumns,
       columns: columns,
       rowHeight: rowHeight,
-      list: listViewScrollWidth(spec.columnWidths || [], contentWidth),
+      list: listViewScrollWidth(spec.columnWidths || [], available),
       reposition: virtualGridGeometryChanged(spec.previous || null, next),
       layout: next
     };

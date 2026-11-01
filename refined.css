@@ -1891,3 +1891,12 @@ body.mobile-ui .mobile-more-actions button:first-child {
   display: inline-flex !important;
   align-items: center !important;
 }
+
+/* Grid box reaches the window edge in every view, so the scrollbar sits at the edge;
+   detailed/preview content keeps its inset through the renderer's 20px padding. */
+.file-grid,
+.file-grid.preview-wall {
+  margin-left: calc(var(--sidebar-width, 350px) + var(--folder-rail-width, 0px)) !important;
+  width: calc(100% - var(--sidebar-width, 350px) - var(--folder-rail-width, 0px)) !important;
+  max-width: none !important;
+}
