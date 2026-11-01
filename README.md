@@ -133,6 +133,18 @@ http://192.168.1.100:5000
 
 Printventory can also be deployed as a Docker container for Linux server mode deployment. See the [Docker Deployment](#docker-deployment-linux-server-mode) section for detailed instructions.
 
+### Proxmox VE (LXC)
+
+On a Proxmox VE host, use [`scripts/proxmox/setup-printventory-lxc.sh`](scripts/proxmox/setup-printventory-lxc.sh) to create an unprivileged Debian LXC (nesting + keyctl for Docker), install Docker, and run the Printventory image from Docker Hub.
+
+```bash
+# From the Proxmox node shell (copy the script up first, or curl it from your clone/release)
+bash setup-printventory-lxc.sh --yes
+bash setup-printventory-lxc.sh --ctid 120 --memory 8192 --models /mnt/pve/data/stl
+```
+
+Defaults are 4 cores / 8 GB RAM / 20 GB disk / port 5000. Use `--install-only --ctid <id>` to deploy into an existing CT, and `--help` for all options.
+
 ### STL Home Setting
 
 The STL Home setting allows automatic scanning of one or more directories on startup and, in server mode, periodic scanning for new files. This is particularly useful for keeping your library up-to-date automatically.
