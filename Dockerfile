@@ -124,9 +124,9 @@ RUN for f in db-repair.js bundle-keys.js zip-extract.js thumbnail-compress.js th
       test -f "$f" || (echo "Missing required app file: $f" >&2; exit 1); \
     done
 
-# Copy entrypoint script
+# Copy entrypoint script (shared runner lives under scripts/, copied earlier)
 COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /app/scripts/run-server.sh
 
 # Set environment variables
 ENV DISPLAY=:99
