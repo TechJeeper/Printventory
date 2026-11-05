@@ -1,0 +1,22 @@
+# systemd unit for the Printventory remote render worker.
+# Install: copy to /etc/systemd/system/, set User, PV_URL and the script path, then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now pv-render-worker
+# Live progress: journalctl -fu pv-render-worker | grep "batch done"
+[Unit]
+Description=Printventory remote thumbnail render worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printventory
+Environment=PV_URL=http://printventory.local:5000
+Environment=PV_WORKERS=2
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/python3 /opt/pv-render-worker/pv_render_worker.py
+Restart=always
+RestartSec=30
+# Rendering is background work: yield to anything interactive on the box.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
