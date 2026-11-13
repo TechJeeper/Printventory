@@ -163,6 +163,7 @@ function loadStreamZip() {
 // vs <1ms for local file systems, so we need more parallel operations to maintain throughput
 function isDockerContainer() {
   return require('fs').existsSync('/.dockerenv') || 
+         require('fs').existsSync('/run/.containerenv') ||
          (require('fs').existsSync('/proc/self/cgroup') && 
           require('fs').readFileSync('/proc/self/cgroup', 'utf8').includes('docker'));
 }
