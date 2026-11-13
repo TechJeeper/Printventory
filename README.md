@@ -58,6 +58,8 @@ Download the latest release for your platform:
 - **macOS**: Universal binary (Intel and Apple Silicon) DMG
 - **Linux/Docker**: `printventory/printventory:latest` on Docker Hub (or `printventory-docker-2.2.9.zip`)
 
+The Windows installer is signed through SignPath. See the [Code signing policy](#code-signing-policy).
+
 ### Data Storage
 
 - **Windows**: `%LOCALAPPDATA%\Printventory`
@@ -1054,6 +1056,24 @@ Contributions are welcome! Please feel free to submit a Pull Request. When contr
 - Follow existing code style and patterns
 - Test your changes thoroughly
 - Update documentation as needed
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+**What gets signed:** the Windows installer (`Printventory-Setup-<version>.exe`), built from this repository's source on [GitLab.com CI](https://gitlab.com/techjeeperdesigns/printventory) (a mirror of this repository) and signed through SignPath. Microsoft Store builds are signed by Microsoft. macOS, Linux and Docker builds are not covered by this program yet. Every release is approved by hand before it is signed.
+
+**Team roles:**
+- Committers and reviewers: [Cody Dean (TechJeeper)](https://github.com/TechJeeper). Pull requests from outside contributors are reviewed by a committer before merging.
+- Approvers: [Cody Dean (TechJeeper)](https://github.com/TechJeeper)
+
+**Privacy policy:** Printventory keeps your library, settings and model files on your own computer or server. It only contacts other systems for:
+- **Update check:** at startup it downloads a small version file from `printventory.com`. No library data is sent.
+- **Usage reporting:** anonymous usage counts go to [GoatCounter](https://www.goatcounter.com/help/privacy): that the app was opened, the app version, your operating system, and how many models are in your library. File names, file contents and personal information are never sent. On by default; turn it off under **About → Enable Usage Reporting**.
+- **AI tagging:** only when you use it, the model details needed for tag suggestions go to the AI service you choose in settings (by default [Puter](https://puter.com)). Their privacy policy applies to that data.
+- **Services you connect:** printers, Spoolman, slicers and other integrations are contacted only at the addresses you configure.
+
+The same policy is published at [printventory.com/code-signing.html](https://printventory.com/code-signing.html).
 
 ## License
 
