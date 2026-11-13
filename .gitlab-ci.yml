@@ -3,7 +3,12 @@
 #
 # Required GitLab CI/CD variables (Settings > CI/CD > Variables, masked):
 #   SIGNPATH_API_TOKEN            - SignPath CI user API token (submitter on the policy)
-#   SIGNPATH_GITLAB_ACCESS_TOKEN  - GitLab project access token with read_api scope
+#   SIGNPATH_GITLAB_ACCESS_TOKEN  - GitLab access token with read_api scope, used by the
+#                                   SignPath connector to verify the build's origin. On a
+#                                   Free namespace use a personal access token (project
+#                                   access tokens need Premium on GitLab.com). Leave the
+#                                   variable unprotected or it is hidden from tag/web runs
+#                                   on unprotected refs.
 #
 # Runs on tags and on manual "Run pipeline" from the GitLab UI.
 # Switch signing_policy_slug to release-signing once the Foundation issues the
@@ -61,3 +66,11 @@ build-windows:
     paths:
       - output/Printventory-windows.zip
     expire_in: 7 days
+
+# Extend the component's job so the signed installer is kept as a downloadable
+# pipeline artifact (the component itself only publishes a dotenv report).
+submit-signing-request:
+  artifacts:
+    paths:
+      - output/Printventory-windows-signed.zip
+    expire_in: 30 days
